@@ -1,0 +1,145 @@
+"use client";
+/**
+ * Console dock: operation log plus a small command router
+ * (help, clear, scan, spider, get, crack, status).
+ */
+import { useState } from "react";
+import { crackWordlistDialog, httpSend, isDesktop, spiderScan, webScan } from "@lib/ipc";
+import { useWorkbench } from "@state/workbench";
+
+export function ConsoleDock() {
+  const wb = useWorkbench();
+  const [input, setInput] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  const log = (line: string) => wb.logConsole(line);
+
+  const runCommand = async (raw: string) => {
+    const line = raw.trim();
+    if (!line) return;
+    log(`> ${line}`);
+    const [cmd, ...args] = line.split(/\s+/);
+    switch (cmd.toLowerCase()) {
+      case "clear":
+        wb.setConsoleLines([]);
+        return;
+      case "help":
+        log("commands: scan <url> · spider <url> [depth] · get <url> · crack <algo> <hash> <wordlist> · status · clear");
+        return;
+      case "status":
+        log(`ipc: ${isDesktop() ? "tauri" : "browser fallback"} · tools stay mounted · console keeps last 500 lines`);
+        return;
+      case "scan": {
+        if (!args[0]) return log("usage: scan <url>");
+        log(`scan ${args[0]}: running native review…`);
+        try {
+          const findings = await webScan(args[0]);
+          log(`scan: ${findings.length} findings`);
+          for (const f of findings.slice(0, 20)) log(`  [${f.severity}] ${f.title}`);
+        } catch (err) {
+          log(`scan failed: ${err instanceof Error ? err.message : String(err)}`);
+        }
+        return;
+      }
+      case "spider": {
+        if (!args[0]) return log("usage: spider <url> [depth]");
+        const depth = Math.max(1, Math.min(4, Number.parseInt(args[1] ?? "2", 10) || 2));
+        log(`spider ${args[0]} depth ${depth}: crawling…`);
+        try {
+          const links = await spiderScan(args[0], depth);
+          log(`spider: ${links.length} urls`);
+          for (const url of links.slice(0, 10)) log(`  ${url}`);
+        } catch (err) {
+          log(`spider failed: ${err instanceof Error ? err.message : String(err)}`);
+        }
+        return;
+      }
+      case "get": {
+        if (!args[0]) return log("usage: get <url>");
+        try {
+          const resp = await httpSend(`GET ${args[0]} HTTP/1.1\nHost: ${args[0].replace(/^https?:\/\//, "").split("/")[0]}\n\n`);
+          log(`get: ${resp.status} · ${resp.size} bytes · ${resp.duration_ms} ms`);
+        } catch (err) {
+          log(`get failed: ${err instanceof Error ? err.message : String(err)}`);
+        }
+        return;
+      }
+      case "crack": {
+        if (args.length < 3) return log("usage: crack <algo> <hash> <wordlist-path>");
+        setBusy(true);
+        log(`crack ${args[0]}: running over ${args[2]}…`);
+        try {
+          const result = await crackWordlistDialog(args[0], args[1], args[2]);
+          log(`crack: ${result.tried} tried in ${result.duration_ms} ms · ${result.matches.length} match(es) · ${result.threads} threads`);
+          for (const m of result.matches.slice(0, 10)) log(`  cracked: ${m.password}`);
+        } catch (err) {
+          log(`crack failed: ${err instanceof Error ? err.message : String(err)}`);
+        } finally {
+          setBusy(false);
+        }
+        return;
+      }
+      default:
+        log(`unknown command: ${cmd} (try help)`);
+    }
+  };
+
+  return (
+    <div className="flex h-full min-h-0 flex-col bg-panel" role="region" aria-label="Console dock">
+      <div className="flex h-8 shrink-0 items-center gap-2 border-b border-line bg-sidebar px-2">
+        <div className="flex items-center gap-1">
+          {(["jobs", "console"] as const).map((t) => (
+            <button
+              key={t}
+              type="button"
+              onClick={() => wb.setDockTab(t)}
+              className={`border px-2 font-mono text-[10px] uppercase ${wb.dockTab === t ? "border-orange/50 text-orange" : "border-transparent text-fg-muted hover:text-fg"}`}
+            >
+              {t}
+            </button>
+          ))}
+        </div>
+        <span className="inline-flex items-center border border-line px-1.5 py-px font-mono text-[10px] uppercase tracking-wide text-fg-muted">
+          {isDesktop() ? "tauri" : "browser fallback"}
+        </span>
+        <div className="ml-auto flex items-center gap-2">
+          <span className="font-mono text-[10px] text-fg-muted">Ctrl+` toggles</span>
+          <button type="button" onClick={() => wb.setDockOpen(false)} aria-label="Close console dock" className="text-fg-muted hover:text-fg">
+            ×
+          </button>
+        </div>
+      </div>
+      <div className="min-h-0 flex-1 overflow-auto p-2 font-mono text-[11px] leading-relaxed">
+        {wb.consoleLines.length === 0 ? (
+          <div className="text-fg-muted">
+            operation log and command line. type help for commands.
+          </div>
+        ) : (
+          wb.consoleLines.map((line, i) => (
+            <div key={i} className={line.startsWith(">") ? "text-fg" : "text-fg-dim"} style={{ whiteSpace: "pre-wrap" }}>
+              {line}
+            </div>
+          ))
+        )}
+      </div>
+      <div className="flex h-7 shrink-0 items-center gap-1 border-t border-line px-2">
+        <span className="font-mono text-[11px] text-orange">$</span>
+        <input
+          value={input}
+          onChange={(e) => setInput(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" && !busy) {
+              const value = input;
+              setInput("");
+              void runCommand(value);
+            }
+          }}
+          aria-label="Console command input"
+          spellCheck={false}
+          className="h-full flex-1 bg-transparent font-mono text-[11px] text-fg focus:outline-none"
+          placeholder={busy ? "running…" : "type a command (help)"}
+        />
+      </div>
+    </div>
+  );
+}

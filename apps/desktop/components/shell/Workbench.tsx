@@ -15,7 +15,7 @@ import { ForensicsWorkspace } from "@features/forensics";
 import { Rail } from "./Rail";
 import { Navigator } from "./Navigator";
 import { Inspector } from "./Inspector";
-import { JobsDock } from "./JobsDock";
+import { BottomDock } from "./BottomDock";
 import { StatusBar } from "./StatusBar";
 import { CommandPalette } from "./CommandPalette";
 import { Resizer } from "@ds/Resizer";
@@ -63,20 +63,26 @@ function ActiveWorkspace() {
 
 function Shell() {
   const wb = useWorkbench();
+  // Web is a full-bleed ZAP-style workspace: its own top tabs replace the navigator.
+  const fullBleed = wb.category === "web";
   return (
     <div className="flex h-screen w-screen flex-col overflow-hidden">
       <TitleBar />
       <div className="flex min-h-0 flex-1">
         <Rail />
-        <Navigator />
-        <Resizer
-          direction="horizontal"
-          ariaLabel="Resize navigator"
-          value={wb.navigatorWidth}
-          onChange={wb.setNavigatorWidth}
-          min={PANEL_LIMITS.navigator.min}
-          max={PANEL_LIMITS.navigator.max}
-        />
+        {!fullBleed && (
+          <>
+            <Navigator />
+            <Resizer
+              direction="horizontal"
+              ariaLabel="Resize navigator"
+              value={wb.navigatorWidth}
+              onChange={wb.setNavigatorWidth}
+              min={PANEL_LIMITS.navigator.min}
+              max={PANEL_LIMITS.navigator.max}
+            />
+          </>
+        )}
         <main className="min-w-0 flex-1 overflow-hidden bg-app" aria-label="Active workspace">
           <ActiveWorkspace />
         </main>
@@ -106,7 +112,7 @@ function Shell() {
             min={PANEL_LIMITS.dock.min}
             max={PANEL_LIMITS.dock.max}
           />
-          <JobsDock />
+          <BottomDock />
         </>
       ) : null}
       <StatusBar />

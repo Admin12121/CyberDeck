@@ -14,6 +14,7 @@ Upstream sources for study and future engine packaging live in `reference/` (nev
 - Shared job pipeline: typed Tauri IPC (`Channel<JobEvent>`), tokio workers, safe cancellation; browser fallback for UI development without the desktop shell.
 - **Native crypto engine (`crates/crypto`)**: MD5, SHA-1/224/256/384/512, HMAC-SHA256, CRC32, Base64/hex, URL encode/decode, XOR, ROT13, gzip, entropy, magic-byte signatures; reference test vectors in tests.
 - **Artifact store (`crates/storage`)**: SQLite (bundled) index of imported evidence; immutable copies under the OS app-data directory, content-addressed by SHA-256.
+- **Console dock**: operation log plus a command line (scan / spider / get / crack / status) under Ctrl+`.
 - **Cracked history**: every recovered pair persists in SQLite until the user deletes it, listed beside the hash input with infinite scroll, click-to-expand details (cracked value, full hash, engine, wordlist, time), per-row delete and clear-all.
 - **Native coverage growth**: NTLM (MD4 over UTF-16LE), MD4, SHA-224/384 recovery; scrypt and pbkdf2 PHC verification/cracking via RustCrypto crates; SHA3-256/512 in Crypto Ops. Native wordlist runs stream live progress (candidates tried / total, percent).
 - **Packet engine (`crates/packet`)**: classic PCAP parsing (both endiannesses, micro/nanosecond) with Ethernet/ARP/IPv4/IPv6/TCP/UDP/ICMP dissection and port-based service naming; guard rails on malformed records; 8 tests.

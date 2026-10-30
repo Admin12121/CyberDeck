@@ -1,9 +1,5 @@
-//! Web security studio backend (Master Plan §5.2): a real HTTP sender for
-//! the Repeater, a native web review scanner (our own checks, nikto-style),
-//! a depth-limited spider, an HTTP-only interception proxy, and sidecar
-//! slots for the GPLv2 tooling the user approved (nikto, sqlmap, XSStrike).
-//! HTTPS MITM needs a generated CA and is a later arc; CONNECT tunnels are
-//! passed through and labeled honestly.
+//! Web studio backend (§5.2): HTTP sender, native review scanner, spider,
+//! HTTP-only proxy, and sidecar slots for nikto/sqlmap/XSStrike.
 
 use std::collections::VecDeque;
 use std::net::SocketAddr;
@@ -12,7 +8,6 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use serde::Serialize;
-use tauri::ipc::Channel;
 use tauri::State;
 
 use crate::engines::which_exists;
@@ -20,11 +15,38 @@ use crate::engines::which_exists;
 const MAX_BODY_BYTES: usize = 512 * 1024;
 const MAX_CAPTURE: usize = 1000;
 
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct MatchReplaceRule {
+    pub find: String,
+    pub replace: String,
+}
+
+/// A request held by the interceptor until forwarded or dropped.
+pub struct PendingRequest {
+    pub stream: TcpStream,
+    pub method: String,
+    pub url: String,
+    pub headers: Vec<(String, String)>,
+    pub body: String,
+    pub info: CapturedRequest,
+}
+
+pub struct ProxyShared {
+    pub running: AtomicBool,
+    pub intercept: AtomicBool,
+    pub port: AtomicU16,
+    pub rules: Mutex<Vec<MatchReplaceRule>>,
+    pub captured: Mutex<Vec<CapturedRequest>>,
+    pub pending: Mutex<HashMap<u64, PendingRequest>>,
+    pub next_id: AtomicU64,
+}
+
 pub struct WebCtx {
     pub proxy_running: AtomicBool,
     pub proxy_port: AtomicU16,
     pub proxy_handle: Mutex<Option<tokio::task::JoinHandle<()>>>,
     pub captured: Mutex<Vec<CapturedRequest>>,
+    pub shared: Arc<ProxyShared>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -424,7 +446,6 @@ pub async fn web_engines_detect() -> Vec<WebEngineStatus> {
         ("sqlmap", "sqlmap", "GPL-2.0-only", vec!["--version"]),
         ("xsstrike", "XSStrike", "GPL-3.0-only", vec!["--help"]),
     ] {
-        let binary = if cfg!(windows) { format!("{id}.exe") } else { id.to_string() };
         let available = which_exists(id);
         let mut version = String::new();
         if available {
@@ -442,7 +463,6 @@ pub async fn web_engines_detect() -> Vec<WebEngineStatus> {
                     .collect();
             }
         }
-        let _ = binary;
         out.push(WebEngineStatus { id: id.to_string(), label: label.to_string(), license: license.to_string(), available, version });
     }
     out

@@ -1,7 +1,5 @@
-//! Capture file access (Master Plan §5.1). The frontend opens captures
-//! through the native dialog; parsed metadata streams to the packet list and
-//! raw bytes are served per selection from the cached copy. Classic PCAP
-//! only this arc; PCAPNG is rejected with a clear message by the parser.
+//! Capture access (§5.1): classic PCAP via native dialog, cached for byte
+//! views. PCAPNG is rejected with a clear message for now.
 
 use std::sync::Mutex;
 
@@ -21,7 +19,10 @@ pub struct PcapCtx {
 
 pub struct CachedCapture {
     pub bytes: Vec<u8>,
+    /// Kept for future protocol-hierarchy stats; unused this arc.
+    #[allow(dead_code)]
     pub linktype: u32,
+    #[allow(dead_code)]
     pub first_ts: u64,
     pub packets: Vec<PacketMeta>,
 }

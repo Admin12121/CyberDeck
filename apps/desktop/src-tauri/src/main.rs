@@ -1,6 +1,4 @@
-//! HackTool desktop entry point. The frontend never spawns processes or
-//! touches the filesystem directly; every native action is a typed command
-//! here (Master Plan §9.2).
+//! Desktop entry point. The frontend only ever talks to typed commands (§9.2).
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 

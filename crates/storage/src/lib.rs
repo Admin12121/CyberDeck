@@ -1,6 +1,4 @@
-//! hacktool-storage: the artifact index. Lightweight metadata lives in
-//! SQLite (Master Plan §8.4); the bytes themselves live in the versioned
-//! artifact directory managed by the desktop shell.
+//! SQLite artifact index (§8.4); artifact bytes live in the case directory.
 
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};

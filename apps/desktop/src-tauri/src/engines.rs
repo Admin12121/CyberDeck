@@ -1,8 +1,5 @@
-//! External password-cracking engines (Master Plan §5.5, §6). hashcat is MIT
-//! and john is GPLv2 shipped as a separate sidecar — both approved for
-//! bundling (docs/engine-licensing.md). The adapter layer owns process
-//! creation, argument construction, timeouts and output parsing; the frontend
-//! only ever receives structured results.
+//! External engine adapters (hashcat MIT, john GPLv2 sidecar): process
+//! creation, timeouts and output parsing live here (docs/engine-licensing.md).
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};

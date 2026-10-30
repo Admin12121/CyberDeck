@@ -1,11 +1,9 @@
-//! Native wordlist recovery (Master Plan §5.5). Runs on every CPU core:
-//! the wordlist is chunked across threads and digest/KDF verification happens
-//! per thread, with an early-stop flag shared through an atomic. KDF targets
-//! (bcrypt/argon2 PHC strings) verify natively, slowly by design, capped.
+//! Native wordlist recovery (§5.5): chunked across all cores with a shared
+//! early-stop flag. KDF targets verify natively, slowly by design, capped.
 
 use std::io::BufRead as _;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -206,11 +204,7 @@ pub fn crack_wordlist_dialog(
                     let done = (base + tried).min(total);
                     let _ = progress.send(CrackProgress { tried: done, total, percent: (done * 100 / total.max(1)) as u32 });
                 }
-                if tried % 50_000 == 0 {
-                let done = (base + tried).min(total);
-                let _ = progress.send(CrackProgress { tried: done, total, percent: (done * 100 / total.max(1)) as u32 });
-            }
-            let candidate = line.strip_suffix('\r').unwrap_or(line);
+                let candidate = line.strip_suffix('\r').unwrap_or(line);
                 if hacktool_crypto::verify_kdf(&target_ref, candidate).unwrap_or(false) {
                     matches.push(CrackMatch { line_no: base + i as u64 + 1, password: candidate.to_string() });
                     stop.store(true, Ordering::Relaxed);
@@ -252,6 +246,10 @@ pub fn crack_wordlist_dialog(
                 break;
             }
             tried += 1;
+            if tried % 50_000 == 0 {
+                let done = (base + tried).min(total);
+                let _ = progress.send(CrackProgress { tried: done, total, percent: (done * 100 / total.max(1)) as u32 });
+            }
             let candidate = line.strip_suffix('\r').unwrap_or(line);
             if let Ok(digest) = hacktool_crypto::apply_op(&algo_ref, candidate.as_bytes(), None) {
                 if hex::encode(digest) == *target_ref {

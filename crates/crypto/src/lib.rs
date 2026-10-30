@@ -1,6 +1,4 @@
-//! hacktool-crypto: native operations for the Recipes pipeline, Crypto Ops
-//! and file analysis. Every result carries deterministic, testable behavior;
-//! reference vectors live in the tests (Master Plan Phase 1 gate).
+//! Native crypto operations with reference test vectors.
 
 use base64::Engine as _;
 use hmac::{Hmac, Mac};
@@ -160,8 +158,8 @@ fn rot_n(input: &[u8], n: u8) -> Vec<u8> {
     input
         .iter()
         .map(|&b| match b {
-            b'A'..=b'Z' => (b'A' + (b - b'A' + n) % 26),
-            b'a'..=b'z' => (b'a' + (b - b'a' + n) % 26),
+            b'A'..=b'Z' => b'A' + (b - b'A' + n) % 26,
+            b'a'..=b'z' => b'a' + (b - b'a' + n) % 26,
             other => other,
         })
         .collect()

@@ -1,7 +1,5 @@
-//! Evidence import and inspection (Master Plan §5.6). Files enter the case
-//! store only through these commands: the frontend never supplies paths.
-//! Originals are copied immutably into the case artifact directory; the
-//! SQLite index keeps metadata with full digests for reproducibility.
+//! Evidence import and inspection (§5.6). Files enter only via these commands;
+//! originals are copied immutably and indexed with full digests.
 
 use std::path::Path;
 use std::sync::Mutex;

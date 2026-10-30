@@ -1,6 +1,4 @@
-//! Native crypto operations exposed over typed IPC. The frontend passes
-//! bytes as Base64; results carry both Base64 and hex plus engine provenance
-//! (Master Plan §6: engine identity travels with every result).
+//! Native crypto ops over IPC; results carry Base64, hex and provenance (§6).
 
 use base64::Engine as _;
 use hacktool_crypto::{apply_op, catalog, OpInfo, ENGINE_ID, ENGINE_VERSION};

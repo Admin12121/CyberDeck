@@ -1,9 +1,5 @@
-//! hacktool-packet: classic PCAP parsing plus a first-pass Ethernet/IPv4/
-//! TCP/UDP/ARP/ICMP/HTTP dissector. Wireshark-compatible display filters and
-//! reassembly arrive in a later arc; this module gives the Packet Studio real
-//! captures now (Master Plan §5.1). Guard rails: packet length fields are
-//! validated before allocation and truncated captures parse until the first
-//! bad record.
+//! Classic PCAP parsing + Ethernet/ARP/IPv4/IPv6/TCP/UDP/ICMP dissection.
+//! Guard rails: length fields validated, malformed tails flagged.
 
 use serde::Serialize;
 

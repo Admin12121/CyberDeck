@@ -1,6 +1,4 @@
-//! Crack history (Master Plan §5.5): recovered pairs persist in the case
-//! store until the user deletes them. Recording happens automatically in the
-//! attack commands; the UI lists, deletes, or clears.
+//! Crack history (§5.5): recovered pairs persist until the user deletes them.
 
 use hacktool_storage::CrackEntry;
 use tauri::State;

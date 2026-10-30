@@ -16,7 +16,18 @@ export function JobsDock() {
       aria-label="Jobs dock"
     >
       <div className="flex h-8 shrink-0 items-center gap-2 border-b border-line bg-sidebar px-2">
-        <span className="text-[10px] font-medium uppercase tracking-wider text-fg-muted">Jobs</span>
+        <div className="flex items-center gap-1">
+          {(["jobs", "console"] as const).map((t) => (
+            <button
+              key={t}
+              type="button"
+              onClick={() => wb.setDockTab(t)}
+              className={`border px-2 font-mono text-[10px] uppercase ${wb.dockTab === t ? "border-orange/50 text-orange" : "border-transparent text-fg-muted hover:text-fg"}`}
+            >
+              {t}
+            </button>
+          ))}
+        </div>
         <Chip>{jobs.length}</Chip>
         <ToolButton onClick={wb.runDemoJob} tone="primary" title="Queue another job through the shared pipeline">
           + run job

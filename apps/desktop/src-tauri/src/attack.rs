@@ -1,8 +1,5 @@
-//! Rule-based and mask attacks (Master Plan §5.5). These are our own Rust
-//! implementations, not bundled john/hashcat code: no license gate applies to
-//! the algorithms themselves. GPU acceleration stays gated on the OpenCL/CUDA
-//! runtime redistribution review (§7.2); device probing reports honestly what
-//! is present.
+//! Rule-based and mask attacks (§5.5), implemented natively. GPU runs through
+//! hashcat when a driver is present; see docs/engine-licensing.md.
 
 use std::time::Instant;
 
@@ -181,17 +178,16 @@ fn mask_charset(kind: char) -> Option<Vec<char>> {
 fn plan_mask(mask: &str) -> Result<MaskPlan, String> {
     let mut sizes = Vec::new();
     let mut chars = mask.chars().peekable();
-    let mut literals = 0u64;
     while let Some(c) = chars.next() {
         if c == '?' {
             let kind = chars.next().ok_or("mask ends with a dangling '?'")?;
             match kind {
                 'l' | 'u' | 'd' | 's' | 'a' => sizes.push(mask_charset(kind).unwrap().len()),
-                '?' => literals += 1, // escaped literal '?'
+                '?' => {}
                 other => return Err(format!("unknown mask class ?{other}")),
             }
         } else {
-            literals += 1;
+            // literal character
         }
     }
     if sizes.is_empty() {

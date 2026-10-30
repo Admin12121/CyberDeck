@@ -18,6 +18,11 @@ import { jobCancel, jobStart } from "@lib/ipc";
 import { applyJobEvent, type JobView } from "@state/jobs-model";
 
 interface WorkbenchApi {
+  dockTab: "jobs" | "console";
+  setDockTab: (tab: "jobs" | "console") => void;
+  consoleLines: string[];
+  logConsole: (line: string) => void;
+  setConsoleLines: (lines: string[]) => void;
   category: CategoryId;
   tool: ToolId;
   jobs: Record<number, JobView>;
@@ -32,6 +37,7 @@ interface WorkbenchApi {
   runDemoJob: () => void;
   cancelJob: (id: number) => void;
   setPaletteOpen: (open: boolean) => void;
+  setDockOpen: (open: boolean) => void;
   toggleDock: () => void;
   toggleInspector: () => void;
   setNavigatorWidth: (px: number) => void;
@@ -87,6 +93,8 @@ export function WorkbenchProvider({ children }: { children: React.ReactNode }) {
   const [jobs, setJobs] = useState<Record<number, JobView>>({});
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [dockOpen, setDockOpen] = useState(false);
+  const [dockTab, setDockTab] = useState<"jobs" | "console">("jobs");
+  const [consoleLines, setConsoleLines] = useState<string[]>([]);
   // Default tool is in Crypto, which carries its own side panes; users toggle
   // the inspector from the title bar and it returns automatically elsewhere.
   const [inspectorOpen, setInspectorOpen] = useState(false);
@@ -129,14 +137,14 @@ export function WorkbenchProvider({ children }: { children: React.ReactNode }) {
     setTool(firstToolOf(id));
     // Crypto studios carry their own side panes; the global inspector only
     // gets in the way there. Users can still toggle it from the title bar.
-    setInspectorOpen(id !== "crypto");
+    setInspectorOpen(id !== "crypto" && id !== "web");
   }, []);
 
   const selectTool = useCallback((id: ToolId) => {
     setTool(id);
     const cat = id.split(".")[0] as CategoryId;
     setCategory(cat);
-    setInspectorOpen(cat !== "crypto");
+    setInspectorOpen(cat !== "crypto" && cat !== "web");
   }, []);
 
   const runDemoJob = useCallback(() => {
@@ -151,6 +159,9 @@ export function WorkbenchProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   const toggleDock = useCallback(() => setDockOpen((v) => !v), []);
+  const logConsole = useCallback((line: string) => {
+    setConsoleLines((prev) => [...prev.slice(-499), line]);
+  }, []);
   const toggleInspector = useCallback(() => setInspectorOpen((v) => !v), []);
 
   // Global shortcuts: Ctrl/Cmd+K palette, Ctrl+J jobs dock (Master Plan §3.5)
@@ -162,7 +173,12 @@ export function WorkbenchProvider({ children }: { children: React.ReactNode }) {
         setPaletteOpen((v) => !v);
       } else if (mod && e.key.toLowerCase() === "j") {
         e.preventDefault();
-        setDockOpen((v) => !v);
+        setDockTab("jobs");
+        setDockOpen(true);
+      } else if (mod && e.key === "`") {
+        e.preventDefault();
+        setDockTab("console");
+        setDockOpen(true);
       } else if (e.key === "Escape") {
         setPaletteOpen(false);
       }
@@ -178,6 +194,8 @@ export function WorkbenchProvider({ children }: { children: React.ReactNode }) {
       jobs,
       paletteOpen,
       dockOpen,
+      dockTab,
+      consoleLines,
       inspectorOpen,
       navigatorWidth: panels.navigator,
       inspectorWidth: panels.inspector,
@@ -187,6 +205,10 @@ export function WorkbenchProvider({ children }: { children: React.ReactNode }) {
       runDemoJob,
       cancelJob,
       setPaletteOpen,
+      setDockTab,
+      setDockOpen,
+      logConsole,
+      setConsoleLines,
       toggleDock,
       toggleInspector,
       setNavigatorWidth,
@@ -199,7 +221,8 @@ export function WorkbenchProvider({ children }: { children: React.ReactNode }) {
       jobs,
       paletteOpen,
       dockOpen,
-      inspectorOpen,
+      dockTab,
+      consoleLines,
       panels.navigator,
       panels.inspector,
       panels.dock,
