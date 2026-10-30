@@ -33,7 +33,7 @@ import {
   toggleStep,
 } from "../controller";
 import { detectHashFormats } from "../model/hash";
-import { b64, crackMask, crackRulesDialog, crackWordlistDialog, cryptoOp, deviceInfo, enginesDetect, engineAttack, digestFileDialog, isDesktop, kdfVerify, type AttackResultWire, type CrackResultWire, type DeviceInfoWire, type EngineAttackResultWire, type EngineStatusWire, type FileDigestsWire, type OpResult } from "@lib/ipc";
+import { b64, crackHistoryClear, crackHistoryDelete, crackHistoryList, crackMask, crackRulesDialog, crackWordlistDialog, cryptoOp, deviceInfo, enginesDetect, engineAttack, digestFileDialog, isDesktop, kdfVerify, pickWordlist, type AttackResultWire, type CrackEntryWire, type CrackProgressWire, type CrackResultWire, type DeviceInfoWire, type EngineAttackResultWire, type EngineStatusWire, type FileDigestsWire, type OpResult, type WordlistInfoWire } from "@lib/ipc";
 import type { ToolId } from "@features/registry";
 
 const CATEGORY_ORDER: OperationCategory[] = ["encoding", "transforms", "parsing", "formatting"];
@@ -42,10 +42,16 @@ const CATEGORY_ORDER: OperationCategory[] = ["encoding", "transforms", "parsing"
 const OP_MIME = "application/x-hacktool-op";
 const STEP_MIME = "application/x-hacktool-step";
 
+/** All crypto tools stay mounted; hidden views keep their state. */
 export function CryptoWorkspace({ tool }: { tool: ToolId }) {
-  if (tool === "crypto.hash") return <HashAnalysisView />;
-  if (tool === "crypto.ops") return <CryptoOpsView />;
-  return <RecipesView />;
+  const show = (id: ToolId) => (tool === id ? "h-full" : "hidden h-full");
+  return (
+    <>
+      <div className={show("crypto.recipes")}><RecipesView /></div>
+      <div className={show("crypto.hash")}><HashAnalysisView /></div>
+      <div className={show("crypto.ops")}><CryptoOpsView /></div>
+    </>
+  );
 }
 
 // ---------------------------------------------------------------- recipes ---
@@ -59,7 +65,6 @@ function RecipesView() {
   const [recipeWidth, setRecipeWidth] = useState(256);
   // null keeps input and output at an even 50/50 split; dragging pins px.
   const [inputHeight, setInputHeight] = useState<number | null>(null);
-  const [magicPath, setMagicPath] = useState<string[] | null>(null);
   const inputPaneRef = useRef<HTMLDivElement>(null);
   const [dropIndex, setDropIndex] = useState<number | null>(null);
   // elapsedMs is real timing, which differs between prerender and hydration,
@@ -102,8 +107,7 @@ function RecipesView() {
     e.dataTransfer.types.includes(OP_MIME) || e.dataTransfer.types.includes(STEP_MIME);
 
   const applyMagic = () => {
-    const { steps, path } = magicRecipe(state.input);
-    setMagicPath(path.length > 0 ? path : null);
+    const { steps } = magicRecipe(state.input);
     setState((s) => ({ ...s, steps }));
   };
 
@@ -222,16 +226,10 @@ function RecipesView() {
           </ToolButton>
           <ToolButton onClick={() => {
             setState((s) => clearRecipe(s));
-            setMagicPath(null);
           }}>
             Clear
           </ToolButton>
         </div>
-        {magicPath ? (
-          <div className="border-t border-line px-2 py-1 font-mono text-[10px] leading-relaxed text-fg-muted">
-            magic: {magicPath.join(" → ") || "no recognizable encoding"}
-          </div>
-        ) : null}
       </Pane>
 
       <Resizer
@@ -288,18 +286,18 @@ function RecipesView() {
           className="min-h-0 flex-1"
           bodyClassName="flex min-h-0 flex-col p-0"
           actions={
-            <>
+            <div className="flex h-6 items-center gap-1">
               <button
                 type="button"
                 onClick={() => setShowHex((v) => !v)}
-                className={`border px-1.5 font-mono text-[10px] uppercase ${showHex ? "border-orange/50 text-orange" : "border-line text-fg-muted"}`}
+                className={`flex h-6 items-center border px-1.5 font-mono text-[10px] uppercase ${showHex ? "border-orange/50 text-orange" : "border-line text-fg-muted"}`}
               >
                 hex
               </button>
               <ToolButton onClick={() => void navigator.clipboard?.writeText(result?.output ?? "")} title="Copy output">
                 <Copy size={11} />
               </ToolButton>
-            </>
+            </div>
           }
         >
           {result?.error ? (
@@ -411,6 +409,38 @@ function StepRow({ step, index, isDropTarget, onToggle, onMoveUp, onMoveDown, on
 
 // ---------------------------------------------------------- hash analysis ---
 
+interface HashFamily {
+  algo: string;
+  label: string;
+  kind: "digest" | "kdf" | "engine-format";
+}
+
+/** Detect the hash family from the pasted string; the UI asks only when this fails. */
+function detectHashFamily(input: string): HashFamily | null {
+  const t = input.trim();
+  if (!t) return null;
+  if (/^\$2[abxy]\$/.test(t)) return { algo: "bcrypt", label: "bcrypt", kind: "kdf" };
+  if (/^\$argon2id\$/.test(t)) return { algo: "argon2", label: "argon2id", kind: "kdf" };
+  if (/^\$argon2(i|d)\$/.test(t)) return { algo: "argon2", label: "argon2i/d", kind: "kdf" };
+  if (/^\$y\$|^@?7\$/.test(t) || /^\$y\$j9T\$/.test(t)) return { algo: "yescrypt", label: "yescrypt", kind: "kdf" };
+  if (/^\$6\$/.test(t)) return { algo: "sha512crypt", label: "sha512crypt", kind: "engine-format" };
+  if (/^\$5\$/.test(t)) return { algo: "sha256crypt", label: "sha256crypt", kind: "engine-format" };
+  if (/^\$1\$/.test(t)) return { algo: "md5crypt", label: "md5crypt", kind: "engine-format" };
+  if (/^\$apr1\$/.test(t)) return { algo: "apr1", label: "APR1 (Apache)", kind: "engine-format" };
+  if (/^\$[PH]\$/.test(t)) return { algo: "phpass", label: "phpass", kind: "engine-format" };
+  if (/^\$S\$/.test(t)) return { algo: "sunmd5", label: "Sun MD5 crypt", kind: "engine-format" };
+  if (/^\$DCC2\$/.test(t)) return { algo: "mscash2", label: "MSCASH2 (DCC2)", kind: "engine-format" };
+  if (/^\$krb5(pa|tgs|5)\$/.test(t)) return { algo: "krb5asrep", label: "Kerberos 5", kind: "engine-format" };
+  if (/^\$NT\$/.test(t)) return { algo: "ntlm", label: "NTLM", kind: "digest" };
+  if (/^[a-f0-9]{56}$/i.test(t)) return { algo: "sha224", label: "SHA-224 length", kind: "digest" };
+  if (/^[a-f0-9]{96}$/i.test(t)) return { algo: "sha384", label: "SHA-384 length", kind: "digest" };
+  if (/^[a-f0-9]{32}$/i.test(t)) return { algo: "md5", label: "MD5 / NTLM length", kind: "digest" };
+  if (/^[a-f0-9]{40}$/i.test(t)) return { algo: "sha1", label: "SHA-1 length", kind: "digest" };
+  if (/^[a-f0-9]{64}$/i.test(t)) return { algo: "sha256", label: "SHA-256 length", kind: "digest" };
+  if (/^[a-f0-9]{128}$/i.test(t)) return { algo: "sha512", label: "SHA-512 length", kind: "digest" };
+  return null;
+}
+
 function HashAnalysisView() {
   const [input, setInput] = useState("5d41402abc4b2a76b9719d911017c592");
   const [plaintext, setPlaintext] = useState("hello");
@@ -427,9 +457,23 @@ function HashAnalysisView() {
   const [devices, setDevices] = useState<DeviceInfoWire | null>(null);
   const [engines, setEngines] = useState<EngineStatusWire[]>([]);
   const [engineChoice, setEngineChoice] = useState("native");
+  const [wordlist, setWordlist] = useState<WordlistInfoWire | null>(null);
+  const [wordlistBusy, setWordlistBusy] = useState(false);
+  const [crackProgress, setCrackProgress] = useState<CrackProgressWire | null>(null);
   const desktop = isDesktop();
   const candidates = useMemo(() => detectHashFormats(input), [input]);
+  // Auto-detection decides the hash family from the pasted string itself; the
+  // dropdown only exists as an override when detection fails.
+  const detected = useMemo(() => detectHashFamily(input), [input]);
+  const effectiveAlgo = crackAlgo === "auto" ? detected?.algo ?? null : crackAlgo;
 
+  const [history, setHistory] = useState<CrackEntryWire[]>([]);
+  const loadHistory = () => {
+    if (!desktop) return;
+    crackHistoryList()
+      .then(setHistory)
+      .catch(() => setHistory([]));
+  };
   useEffect(() => {
     if (!desktop) return;
     deviceInfo()
@@ -438,16 +482,36 @@ function HashAnalysisView() {
     enginesDetect()
       .then(setEngines)
       .catch(() => setEngines([]));
+    crackHistoryList()
+      .then(setHistory)
+      .catch(() => setHistory([]));
   }, [desktop]);
 
-  // engine-only digest families and KDF-native rules
-  const engineOnly = algo === "ntlm";
-  const isKdfAlgo = crackAlgo === "bcrypt" || crackAlgo === "argon2";
+  const chooseWordlist = async () => {
+    setWordlistBusy(true);
+    try {
+      setWordlist(await pickWordlist());
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      if (message !== "cancelled") setCrackError(message);
+    } finally {
+      setWordlistBusy(false);
+    }
+  };
+
+  // engine-only formats: the crypt-family formats native code does not digest
+  const ENGINE_ONLY = new Set(["sha512crypt", "sha256crypt", "md5crypt", "apr1", "phpass", "mscash2", "sunmd5", "krb5asrep"]);
+  const engineOnly = effectiveAlgo !== null && ENGINE_ONLY.has(effectiveAlgo);
+  const isKdfAlgo = effectiveAlgo === "bcrypt" || effectiveAlgo === "argon2" || effectiveAlgo === "scrypt" || effectiveAlgo === "pbkdf2";
+  const needsWordlist = crackMode === "wordlist";
+  const engineMissing = engineChoice !== "native" && !engines.find((e) => e.id === engineChoice)?.available;
   const runDisabled =
     crackBusy || !desktop || input.trim().length === 0 ||
+    effectiveAlgo === null ||
     (engineChoice !== "native" && crackMode === "rules") ||
     (engineChoice === "native" && engineOnly) ||
-    (engineChoice === "native" && isKdfAlgo && crackMode !== "wordlist");
+    (engineChoice === "native" && isKdfAlgo && crackMode !== "wordlist") ||
+    (needsWordlist && !wordlist);
 
   const verify = async () => {
     setVerifying(true);
@@ -455,12 +519,13 @@ function HashAnalysisView() {
     setVerdict(null);
     try {
       const trimmed = input.trim();
-      // KDF hashes (bcrypt/argon2 PHC strings) verify natively without an engine
-      if (/^\$(2[abxy]|argon2)/.test(trimmed)) {
+      // KDF hashes (bcrypt/argon2/yescrypt PHC strings) verify natively without an engine
+      if (/^\$(2[abxy]|argon2|y\$|7\$)/.test(trimmed)) {
         const matched = await kdfVerify(trimmed, plaintext);
         setVerdict(matched ? "match" : "mismatch");
       } else {
-        const result = await cryptoOp(algo, new TextEncoder().encode(plaintext));
+        const verifyAlgo = detected && detected.kind === "digest" ? detected.algo : algo;
+        const result = await cryptoOp(verifyAlgo, new TextEncoder().encode(plaintext));
         setVerdict(result.output_hex === trimmed.toLowerCase() ? "match" : "mismatch");
       }
     } catch (err) {
@@ -474,21 +539,25 @@ function HashAnalysisView() {
     setCrackBusy(true);
     setCrackError(null);
     setAttackResult(null);
+    setCrackProgress(null);
     try {
+      const algoForEngine = effectiveAlgo ?? crackAlgo;
       const result =
         engineChoice !== "native"
-          ? await engineAttack(engineChoice, crackAlgo, input, crackMode, crackMode === "mask" ? mask : undefined)
+          ? await engineAttack(engineChoice, algoForEngine, input, crackMode, crackMode === "mask" ? mask : undefined)
           : crackMode === "mask"
-            ? await crackMask(crackAlgo, input, mask)
+            ? await crackMask(algoForEngine, input, mask)
             : crackMode === "rules"
-              ? await crackRulesDialog(crackAlgo, input)
-              : await crackWordlistDialog(crackAlgo, input);
+              ? await crackRulesDialog(algoForEngine, input)
+              : await crackWordlistDialog(algoForEngine, input, wordlist?.path, (p) => setCrackProgress(p));
       setAttackResult(result);
+      if ("matches" in result && result.matches.length > 0) loadHistory();
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       if (message !== "cancelled") setCrackError(message);
     } finally {
       setCrackBusy(false);
+      setCrackProgress(null);
     }
   };
 
@@ -496,13 +565,12 @@ function HashAnalysisView() {
     const matches = "matches" in r ? r.matches : [];
     const tried = "tried" in r ? r.tried : 0;
     const source = "source" in r ? r.source : (r as CrackResultWire).wordlist;
-    const engineLine = "engine_version" in r && r.engine !== "hacktool-crypto"
-      ? `engine ${r.engine} ${r.engine_version}`
-      : `engine ${r.engine} ${r.engine_version}`;
+    const threads = "threads" in r ? r.threads : null;
     return (
       <div className="mt-2 border border-line bg-app p-2 font-mono text-[10px] leading-relaxed">
         <div className="text-fg-dim">
-          {source}: {tried} tried in {r.duration_ms} ms · {engineLine}
+          {source}: {tried} tried in {r.duration_ms} ms · engine {r.engine} {r.engine_version}
+          {threads ? ` · ${threads} threads` : ""}
           {"cap_reached" in r && r.cap_reached ? " · candidate cap reached" : ""}
         </div>
         {"raw_tail" in r && r.raw_tail ? (
@@ -544,7 +612,7 @@ function HashAnalysisView() {
             <span className="ml-auto font-mono text-[10px] text-fg-muted">{input.trim().length} chars</span>
           </div>
         </Pane>
-        <Pane title="Identified formats (candidates, never asserted as fact)" className="flex-1">
+        <Pane title="Identified formats (candidates, never asserted as fact)" className="max-h-44 shrink-0">
           <table className="data-table">
             <thead>
               <tr>
@@ -570,6 +638,11 @@ function HashAnalysisView() {
             </tbody>
           </table>
         </Pane>
+        <CrackedHistory
+          history={history}
+          desktop={desktop}
+          onReload={loadHistory}
+        />
       </div>
       <Pane title="Operations" className="w-96 shrink-0" bodyClassName="overflow-auto">
         <div className="border-b border-line p-2">
@@ -608,7 +681,50 @@ function HashAnalysisView() {
             <span className="text-[10px] uppercase tracking-wider text-fg-muted">Recovery</span>
             <Chip tone={desktop ? "ok" : "muted"}>{desktop ? "live" : "desktop"}</Chip>
           </div>
-          <div className="flex items-center gap-1">
+          <div className="mb-1 flex items-center gap-1">
+            <span className="text-[10px] uppercase tracking-wider text-fg-muted">detected</span>
+            {detected ? (
+              <Chip tone="ok">{detected.label} ({detected.kind})</Chip>
+            ) : (
+              <Chip tone="muted">unrecognized: choose below</Chip>
+            )}
+          </div>
+          <div className="flex items-center gap-2">
+            <Select
+              value={crackAlgo}
+              onChange={(v) => {
+                setCrackAlgo(v);
+                setAttackResult(null);
+              }}
+              options={[
+                { value: "auto", label: detected ? `auto (${detected.algo})` : "auto (detect)" },
+                { value: "md5", label: "MD5" },
+                { value: "sha1", label: "SHA-1" },
+                { value: "sha224", label: "SHA-224" },
+                { value: "sha256", label: "SHA-256" },
+                { value: "sha384", label: "SHA-384" },
+                { value: "sha512", label: "SHA-512" },
+                { value: "ntlm", label: "NTLM (native)" },
+                { value: "md4", label: "MD4" },
+                { value: "bcrypt", label: "bcrypt (native KDF)" },
+                { value: "argon2", label: "argon2 (native KDF)" },
+                { value: "scrypt", label: "scrypt (native KDF)" },
+                { value: "pbkdf2", label: "pbkdf2 (native KDF)" },
+                { value: "yescrypt", label: "yescrypt (engine)" },
+                { value: "sha512crypt", label: "sha512crypt (engine)" },
+                { value: "sha256crypt", label: "sha256crypt (engine)" },
+                { value: "md5crypt", label: "md5crypt (engine)" },
+                { value: "apr1", label: "APR1 (engine)" },
+                { value: "phpass", label: "phpass (engine)" },
+                { value: "mscash2", label: "MSCASH2 (engine)" },
+                { value: "sunmd5", label: "Sun MD5 (engine)" },
+                { value: "krb5asrep", label: "Kerberos 5 (engine)" },
+              ]}
+              ariaLabel="Recovery algorithm"
+              className="min-w-0 flex-1"
+            />
+          </div>
+          <div className="flex items-center gap-2">
             <Select
               value={engineChoice}
               onChange={(v) => {
@@ -623,6 +739,7 @@ function HashAnalysisView() {
                 })),
               ]}
               ariaLabel="Recovery engine"
+              className="min-w-0 flex-1"
             />
             <Select
               value={crackMode}
@@ -636,29 +753,41 @@ function HashAnalysisView() {
                 { value: "mask", label: "Mask" },
               ]}
               ariaLabel="Attack mode"
-            />
-            <Select
-              value={crackAlgo}
-              onChange={(v) => {
-                setCrackAlgo(v);
-                setAttackResult(null);
-              }}
-              options={[
-                { value: "md5", label: "MD5" },
-                { value: "sha1", label: "SHA-1" },
-                { value: "sha256", label: "SHA-256" },
-                { value: "sha512", label: "SHA-512" },
-                { value: "ntlm", label: "NTLM (engine)" },
-                { value: "bcrypt", label: "bcrypt (native KDF)" },
-                { value: "argon2", label: "argon2 (native KDF)" },
-              ]}
-              ariaLabel="Recovery algorithm"
+              className="shrink-0"
             />
           </div>
           {crackMode === "mask" ? (
             <div className="mt-1 flex items-center gap-1">
               <TextInput value={mask} onChange={setMask} placeholder="?d?d?d?d" ariaLabel="Mask pattern" className="min-w-0 flex-1" />
               <span className="font-mono text-[10px] text-fg-muted">?l ?u ?d ?s ?a</span>
+            </div>
+          ) : null}
+          {crackMode !== "mask" ? (
+            <div className="mt-1 flex items-center gap-1">
+              <ToolButton onClick={() => void chooseWordlist()} disabled={wordlistBusy || !desktop} title={desktop ? "Pick the wordlist file once; it is reused for every run" : "Wordlist picking requires the desktop runtime"}>
+                {wordlistBusy ? "reading…" : "Choose wordlist…"}
+              </ToolButton>
+              {wordlist ? (
+                <>
+                  <span className="min-w-0 flex-1 truncate font-mono text-[10px] text-fg-dim" title={wordlist.path}>
+                    {wordlist.name} ({Math.round(wordlist.size / 1024)} KB)
+                  </span>
+                  <button type="button" onClick={() => setWordlist(null)} aria-label="Clear wordlist" className="text-fg-muted hover:text-fg">×</button>
+                </>
+              ) : (
+                <span className="font-mono text-[10px] text-fg-muted">none selected</span>
+              )}
+            </div>
+          ) : null}
+          {crackBusy && crackProgress ? (
+            <div className="mt-1">
+              <div className="mb-0.5 flex items-center justify-between font-mono text-[10px] text-fg-muted">
+                <span>{crackProgress.tried} / {crackProgress.total} candidates</span>
+                <span>{crackProgress.percent}%</span>
+              </div>
+              <div className="h-1.5 w-full border border-line bg-app">
+                <div className="h-full bg-orange" style={{ width: `${crackProgress.percent}%` }} />
+              </div>
             </div>
           ) : null}
           <div className="mt-1 flex items-center gap-1">
@@ -669,25 +798,30 @@ function HashAnalysisView() {
               title={
                 !desktop
                   ? "Recovery sessions require the desktop runtime"
-                  : engineChoice === "native" && engineOnly
-                    ? "NTLM runs through hashcat or john; pick an external engine"
-                    : engineChoice === "native" && isKdfAlgo && crackMode !== "wordlist"
-                      ? "KDF hashes: wordlist mode only (they verify at password-hashing speed)"
-                      : engineChoice !== "native" && crackMode === "rules"
-                        ? "External engines: use wordlist or mask this arc"
-                        : engineChoice !== "native" && !engines.find((e) => e.id === engineChoice)?.available
-                          ? "Engine not detected; bundled binaries arrive with the installer"
-                          : "Runs in the selected engine"
+                  : effectiveAlgo === null
+                    ? "Hash not recognized: pick the algorithm manually"
+                    : engineChoice === "native" && engineOnly
+                      ? "NTLM runs through hashcat or john; pick an external engine"
+                      : engineChoice === "native" && isKdfAlgo && crackMode !== "wordlist"
+                        ? "KDF hashes: wordlist mode only (they verify at password-hashing speed)"
+                        : engineChoice !== "native" && crackMode === "rules"
+                          ? "External engines: use wordlist or mask this arc"
+                          : engineChoice !== "native" && engineMissing
+                            ? "Engine not detected; bundled binaries arrive with the installer"
+                            : needsWordlist && !wordlist
+                              ? "Choose a wordlist first"
+                              : "Runs in the selected engine"
               }
             >
-              {crackBusy ? "cracking…" : crackMode === "wordlist" ? "Pick wordlist…" : "Run attack"}
+              {crackBusy ? "cracking…" : "Run attack"}
             </ToolButton>
             {engineOnly ? <Chip tone="blue">engine format</Chip> : null}
+            {isKdfAlgo && engineChoice === "native" ? <Chip tone="orange">KDF slow by design</Chip> : null}
           </div>
           {crackError ? <div className="mt-1 font-mono text-[10px] text-err">{crackError}</div> : null}
           {attackResult ? resultView(attackResult) : null}
         </div>
-        <div className="border-b border-line p-2">
+                <div className="border-b border-line p-2">
           <div className="mb-1 flex items-center justify-between">
             <span className="text-[10px] uppercase tracking-wider text-fg-muted">Devices & engines</span>
             <Chip tone={desktop ? "ok" : "muted"}>{desktop ? "probed" : "desktop"}</Chip>
@@ -698,9 +832,13 @@ function HashAnalysisView() {
                 cpu: {devices ? `${devices.cpu_cores}× ${devices.cpu_arch}` : "…"} · hacktool-crypto <span className="text-ok">active</span>
               </div>
               {devices?.gpu_devices.map((gpu) => (
-                <div key={gpu.name}>gpu: {gpu.name} · {gpu.backend} <span className="text-warn">gated</span></div>
+                <div key={gpu.name} className="border border-line bg-app px-2 py-1">
+                  <div className="text-fg">{gpu.name} <span className="text-ok">ready via hashcat</span></div>
+                  <div className="text-fg-muted">driver {gpu.driver_version} · vram {gpu.memory_total} · compute cap {gpu.compute_cap}</div>
+                  <div className="text-fg-muted">{gpu.backend}</div>
+                </div>
               ))}
-              {devices && devices.gpu_devices.length === 0 ? <div>gpu: none detected <span className="text-warn">reported honestly</span></div> : null}
+              {devices && devices.gpu_devices.length === 0 ? <div>gpu: no driver detected <span className="text-warn">activates when installed</span></div> : null}
               {engines.map((engine) => (
                 <div key={engine.id}>
                   engine: {engine.label} {engine.version || "—"} · {engine.license} · {engine.available ? `available (${engine.source})` : "not detected"}{" "}
@@ -713,21 +851,119 @@ function HashAnalysisView() {
             <div className="font-mono text-[10px] text-fg-muted">device and engine probing run in the desktop runtime</div>
           )}
         </div>
-        <div className="p-2">
-          <div className="mb-1 text-[10px] uppercase tracking-wider text-fg-muted">Engine planner</div>
-          <ol className="space-y-1 font-mono text-[11px] text-fg-dim">
-            <li>1. normalize format + parameters <Chip tone="ok">live</Chip></li>
-            <li>2. digest verification <Chip tone="ok">live</Chip></li>
-            <li>3. wordlist / rules / mask attacks (cpu) <Chip tone="ok">live</Chip></li>
-            <li>4. device probe + planner report <Chip tone="ok">live</Chip></li>
-            <li className="opacity-60">5. GPU compute engines <Chip>license gate</Chip></li>
-          </ol>
-          <p className="mt-2 font-mono text-[10px] leading-relaxed text-fg-muted">
-            Sessions persist engine version, work units and recovery evidence; audit logs never expose password material.
-          </p>
-        </div>
-      </Pane>
+        </Pane>
     </div>
+  );
+}
+
+
+
+// --------------------------------------------------------- cracked history ---
+
+const HISTORY_PAGE = 20;
+
+function CrackedHistory({
+  history,
+  desktop,
+  onReload,
+}: {
+  history: CrackEntryWire[];
+  desktop: boolean;
+  onReload: () => void;
+}) {
+  const [visible, setVisible] = useState(HISTORY_PAGE);
+  const [expandedId, setExpandedId] = useState<number | null>(null);
+  const listRef = useRef<HTMLDivElement>(null);
+
+  const onScroll = () => {
+    const el = listRef.current;
+    if (!el) return;
+    if (el.scrollTop + el.clientHeight >= el.scrollHeight - 24) {
+      setVisible((v) => Math.min(v + HISTORY_PAGE, history.length));
+    }
+  };
+
+  return (
+    <Pane
+      title={`Cracked history (${history.length})`}
+      className="min-h-0 flex-1"
+      actions={
+        history.length > 0 ? (
+          <ToolButton
+            onClick={() => {
+              void crackHistoryClear().then(onReload);
+            }}
+            title="Delete every recovered pair"
+          >
+            Clear all
+          </ToolButton>
+        ) : undefined
+      }
+    >
+      {!desktop ? (
+        <div className="p-3 font-mono text-[10px] leading-relaxed text-fg-muted">
+          recovered pairs persist here until you delete them; cracking runs in the desktop runtime
+        </div>
+      ) : history.length === 0 ? (
+        <div className="p-3 font-mono text-[10px] leading-relaxed text-fg-muted">
+          recovered pairs persist here until you delete them
+        </div>
+      ) : (
+        <div ref={listRef} onScroll={onScroll} className="h-full overflow-auto p-1">
+          {history.slice(0, visible).map((entry) => {
+            const expanded = expandedId === entry.id;
+            return (
+              <div key={entry.id} className="mb-px border border-line bg-app">
+                <button
+                  type="button"
+                  onClick={() => setExpandedId(expanded ? null : entry.id)}
+                  className="flex w-full items-center gap-2 px-2 py-1 text-left hover:bg-raised"
+                >
+                  <span className="min-w-0 flex-1 truncate font-mono text-[11px]">
+                    <span className="text-ok">{entry.password}</span>
+                    <span className="text-fg-muted"> · {entry.algo} · {entry.hash.slice(0, 16)}…</span>
+                  </span>
+                  <button
+                    type="button"
+                    aria-label="Delete entry"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      void crackHistoryDelete(entry.id).then(() => {
+                        onReload();
+                        setVisible((v) => Math.max(HISTORY_PAGE, v - 1));
+                      });
+                    }}
+                    className="shrink-0 text-fg-muted opacity-0 hover:text-err group-hover:opacity-100"
+                  >
+                    ×
+                  </button>
+                </button>
+                {expanded ? (
+                  <div className="border-t border-line px-2 py-1.5 font-mono text-[10px] leading-relaxed">
+                    <div className="text-[11px] text-ok">cracked value: {entry.password}</div>
+                    <div className="mt-1 break-all text-fg-dim">hash: {entry.hash}</div>
+                    <div className="mt-1 text-fg-muted">
+                      algo: {entry.algo} · engine: {entry.engine}
+                      {entry.wordlist ? ` · wordlist: ${entry.wordlist}` : ""}
+                    </div>
+                    <div className="text-fg-muted">recovered: {new Date(Number(entry.recovered_at)).toLocaleString()}</div>
+                  </div>
+                ) : null}
+              </div>
+            );
+          })}
+          {visible < history.length ? (
+            <button
+              type="button"
+              onClick={() => setVisible((v) => Math.min(v + HISTORY_PAGE, history.length))}
+              className="block w-full px-2 py-1 text-left font-mono text-[10px] text-fg-muted hover:text-fg"
+            >
+              load more ({history.length - visible} remaining)
+            </button>
+          ) : null}
+        </div>
+      )}
+    </Pane>
   );
 }
 
@@ -741,8 +977,12 @@ interface AlgoDescriptor {
 }
 
 const DIGEST_ALGOS: AlgoDescriptor[] = [
+  { id: "md4", label: "MD4", nativeOnly: true },
+  { id: "ntlm", label: "NTLM", nativeOnly: true },
   { id: "md5", label: "MD5", nativeOnly: true },
   { id: "sha1", label: "SHA-1" },
+  { id: "sha3_256", label: "SHA3-256", nativeOnly: true },
+  { id: "sha3_512", label: "SHA3-512", nativeOnly: true },
   { id: "sha224", label: "SHA-224", nativeOnly: true },
   { id: "sha256", label: "SHA-256" },
   { id: "sha384", label: "SHA-384" },

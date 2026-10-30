@@ -8,6 +8,7 @@ mod attack;
 mod crack;
 mod engines;
 mod evidence;
+mod history;
 mod jobs;
 mod ops;
 mod pcap;
@@ -49,6 +50,10 @@ fn main() {
             pcap::pcap_open_dialog,
             pcap::pcap_packet_bytes,
             crack::crack_wordlist_dialog,
+            crack::pick_wordlist,
+            history::crack_history_list,
+            history::crack_history_delete,
+            history::crack_history_clear,
             attack::crack_rules_dialog,
             attack::crack_mask,
             attack::device_info,

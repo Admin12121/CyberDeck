@@ -24,10 +24,16 @@ import type { ToolId } from "@features/registry";
 import { extractStrings, formatEntropy, shannonEntropy } from "../controller";
 import { SAMPLE_EVIDENCE, sampleContent, sampleMetadata } from "../model";
 
+/** All forensics tools stay mounted; hidden views keep their state. */
 export function ForensicsWorkspace({ tool }: { tool: ToolId }) {
-  if (tool === "forensics.metadata") return <MetadataView />;
-  if (tool === "forensics.strings") return <StringsView />;
-  return <FileAnalysisView />;
+  const show = (id: ToolId) => (tool === id ? "h-full" : "hidden h-full");
+  return (
+    <>
+      <div className={show("forensics.files")}><FileAnalysisView /></div>
+      <div className={show("forensics.metadata")}><MetadataView /></div>
+      <div className={show("forensics.strings")}><StringsView /></div>
+    </>
+  );
 }
 
 interface Selected {

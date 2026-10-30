@@ -130,7 +130,7 @@ pub fn engines_detect(app: AppHandle) -> Vec<EngineStatus> {
     ]
 }
 
-/// hashcat -m mode for a digest family; bcrypt and yescrypt included so KDF
+/// hashcat -m mode for a digest family; KDF and crypt formats included so
 /// cracking is reachable through the engine.
 pub fn hashcat_mode(algo: &str) -> Option<u32> {
     match algo {
@@ -139,8 +139,16 @@ pub fn hashcat_mode(algo: &str) -> Option<u32> {
         "sha256" => Some(1400),
         "sha512" => Some(1700),
         "ntlm" => Some(1000),
+        "md4" => Some(900),
+        "lm" => Some(3000),
         "bcrypt" => Some(3200),
         "sha512crypt" => Some(1800),
+        "sha256crypt" => Some(17400),
+        "md5crypt" => Some(500),
+        "apr1" => Some(1600),
+        "phpass" => Some(400),
+        "mscash2" => Some(2100),
+        "sunmd5" => Some(7400),
         "yescrypt" => Some(22700),
         _ => None,
     }
@@ -154,7 +162,14 @@ pub fn john_format(algo: &str) -> Option<&'static str> {
         "sha512" => Some("raw-sha512"),
         "bcrypt" => Some("bcrypt"),
         "sha512crypt" => Some("sha512crypt"),
+        "sha256crypt" => Some("sha256crypt"),
+        "md5crypt" => Some("md5crypt"),
+        "apr1" => Some("apr1"),
+        "phpass" => Some("phpass"),
+        "mscash2" => Some("mscash2"),
+        "sunmd5" => Some("sunmd5"),
         "yescrypt" => Some("yescrypt"),
+        "lm" => Some("LM"),
         _ => None,
     }
 }
@@ -217,7 +232,7 @@ pub fn engine_attack(
     target_hash: String,
     mode: String,
     mask: Option<String>,
-    _ctx: State<'_, crate::evidence::EvidenceCtx>,
+    ctx: State<'_, crate::evidence::EvidenceCtx>,
 ) -> Result<EngineAttackResult, String> {
     let target = target_hash.trim().to_lowercase();
     if target.is_empty() {
@@ -262,6 +277,7 @@ pub fn engine_attack(
             let outfile_text = std::fs::read_to_string(&out_file).unwrap_or_default();
             let mut matches = parse_hashcat_outfile(&outfile_text);
             matches.truncate(MAX_REPORTED_MATCHES);
+            crate::attack::record_history(&ctx, &algo, &target, "hashcat", &matches);
             let mut raw = format!("{}{}", String::from_utf8_lossy(&stdout), String::from_utf8_lossy(&stderr));
             raw.truncate(4000);
             let engine_version = version_of(&app, "hashcat", &["--version"], parse_hashcat_version)
@@ -303,6 +319,7 @@ pub fn engine_attack(
             let (_, show_out, _) = run_with_timeout(show, Duration::from_secs(30))?;
             let mut matches = parse_john_show(&String::from_utf8_lossy(&show_out));
             matches.truncate(MAX_REPORTED_MATCHES);
+            crate::attack::record_history(&ctx, &algo, &target, "john", &matches);
             let mut raw = format!("{}{}", String::from_utf8_lossy(&stdout), String::from_utf8_lossy(&stderr));
             raw.truncate(4000);
             let engine_version = version_of(&app, "john", &["--version"], parse_john_version)

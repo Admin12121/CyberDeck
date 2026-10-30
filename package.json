@@ -11,7 +11,13 @@
     "tauri": "bun run --filter '@hacktool/desktop' tauri",
     "rust:check": "cargo check --workspace",
     "rust:fmt": "cargo fmt --all",
-    "icons": "node scripts/gen-icons.mjs"
+    "icons": "node scripts/gen-icons.mjs",
+    "test:core": "cargo test -p hacktool-core",
+    "test:crypto": "cargo test -p hacktool-crypto",
+    "test:storage": "cargo test -p hacktool-storage",
+    "test:packet": "cargo test -p hacktool-packet",
+    "test:app": "cargo test -p hacktool-desktop",
+    "test:rust": "cargo test --workspace"
   },
   "devDependencies": {
     "sharp": "^0.35.5"

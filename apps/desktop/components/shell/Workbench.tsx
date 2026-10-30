@@ -42,20 +42,23 @@ function TitleBar() {
   );
 }
 
+/**
+ * Every category stays mounted; hidden ones keep their state so users can
+ * hop between tools without losing work (Master Plan §3.5: no data loss on
+ * workspace switching).
+ */
 function ActiveWorkspace() {
   const wb = useWorkbench();
-  switch (wb.category) {
-    case "crypto":
-      return <CryptoWorkspace tool={wb.tool} />;
-    case "network":
-      return <NetworkWorkspace tool={wb.tool} />;
-    case "web":
-      return <WebWorkspace tool={wb.tool} />;
-    case "reverse":
-      return <ReverseWorkspace />;
-    case "forensics":
-      return <ForensicsWorkspace tool={wb.tool} />;
-  }
+  const show = (id: string) => (wb.category === id ? "h-full" : "hidden h-full");
+  return (
+    <>
+      <div className={show("crypto")}><CryptoWorkspace tool={wb.tool} /></div>
+      <div className={show("network")}><NetworkWorkspace tool={wb.tool} /></div>
+      <div className={show("web")}><WebWorkspace tool={wb.tool} /></div>
+      <div className={show("reverse")}><ReverseWorkspace /></div>
+      <div className={show("forensics")}><ForensicsWorkspace tool={wb.tool} /></div>
+    </>
+  );
 }
 
 function Shell() {

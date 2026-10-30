@@ -5,6 +5,7 @@
 use base64::Engine as _;
 use hmac::{Hmac, Mac};
 use sha2::{Digest, Sha224, Sha256, Sha384, Sha512};
+use sha3::Sha3_512;
 
 pub const ENGINE_ID: &str = "hacktool-crypto";
 pub const ENGINE_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -22,12 +23,16 @@ pub struct OpInfo {
 
 pub fn catalog() -> Vec<OpInfo> {
     vec![
+        op("md4", "MD4", "hash", "MD4 digest (128 bit)", false),
+        op("ntlm", "NTLM", "hash", "Windows NTLM: MD4 over UTF-16LE text", false),
         op("md5", "MD5", "hash", "MD5 digest (128 bit)", false),
         op("sha1", "SHA-1", "hash", "SHA-1 digest (160 bit)", false),
         op("sha224", "SHA-224", "hash", "SHA-224 digest", false),
         op("sha256", "SHA-256", "hash", "SHA-256 digest", false),
         op("sha384", "SHA-384", "hash", "SHA-384 digest", false),
         op("sha512", "SHA-512", "hash", "SHA-512 digest", false),
+        op("sha3_256", "SHA3-256", "hash", "SHA3-256 digest", false),
+        op("sha3_512", "SHA3-512", "hash", "SHA3-512 digest", false),
         op("crc32", "CRC32", "hash", "CRC-32 checksum (IEEE, 8 hex chars)", false),
         op("hmac_sha256", "HMAC-SHA256", "hash", "HMAC over the input with the supplied key", true),
         op("hmac_sha512", "HMAC-SHA512", "hash", "HMAC-SHA-512 over the input with the supplied key", true),
@@ -58,11 +63,20 @@ fn op(id: &str, label: &str, category: &'static str, description: &str, takes_ke
 pub fn apply_op(op_id: &str, input: &[u8], key: Option<&[u8]>) -> Result<Vec<u8>, String> {
     match op_id {
         "md5" => Ok(md5::Md5::digest(input).to_vec()),
+        "md4" => Ok(<md4::Md4 as md4::Digest>::digest(input).to_vec()),
+        // NTLM = MD4 over the UTF-16LE encoding of the password
+        "ntlm" => {
+            let text = std::str::from_utf8(input).map_err(|_| "ntlm input must be UTF-8 text".to_string())?;
+            let utf16: Vec<u8> = text.encode_utf16().flat_map(|u| u.to_le_bytes()).collect();
+            Ok(<md4::Md4 as md4::Digest>::digest(&utf16).to_vec())
+        }
         "sha1" => Ok(sha1::Sha1::digest(input).to_vec()),
         "sha224" => Ok(Sha224::digest(input).to_vec()),
         "sha256" => Ok(Sha256::digest(input).to_vec()),
         "sha384" => Ok(Sha384::digest(input).to_vec()),
         "sha512" => Ok(Sha512::digest(input).to_vec()),
+        "sha3_256" => Ok(sha3::Sha3_256::digest(input).to_vec()),
+        "sha3_512" => Ok(Sha3_512::digest(input).to_vec()),
         "crc32" => {
             let mut hasher = crc32fast::Hasher::new();
             hasher.update(input);
@@ -185,23 +199,39 @@ pub fn kdf_format(hash: &str) -> Option<&'static str> {
         Some("argon2i")
     } else if hash.starts_with("$argon2d$") {
         Some("argon2d")
+    } else if hash.starts_with("$scrypt$") {
+        Some("scrypt")
+    } else if hash.starts_with("$pbkdf2-sha256$") {
+        Some("pbkdf2-sha256")
+    } else if hash.starts_with("$pbkdf2-sha512$") {
+        Some("pbkdf2-sha512")
+    } else if hash.starts_with("$pbkdf2$") {
+        Some("pbkdf2-sha1")
     } else {
         None
     }
 }
 
-/// Verify a candidate password against a bcrypt or argon2 hash. These formats
-/// are deliberately slow; native recovery over wordlists works but at KDF
-/// speed, and the external engines stay the fast path (§5.5).
+/// Verify a candidate password against a bcrypt, argon2, scrypt or pbkdf2
+/// hash. These formats are deliberately slow; native recovery over wordlists
+/// works but at KDF speed, and the external engines stay the fast path (§5.5).
 pub fn verify_kdf(hash: &str, candidate: &str) -> Result<bool, String> {
+    use argon2::password_hash::{PasswordHash, PasswordVerifier};
     match kdf_format(hash) {
         Some("bcrypt") => bcrypt::verify(candidate, hash).map_err(|e| format!("bcrypt verify failed: {e}")),
+        Some("scrypt") => {
+            let parsed = PasswordHash::new(hash).map_err(|e| format!("invalid scrypt hash string: {e}"))?;
+            Ok(scrypt::Scrypt.verify_password(candidate.as_bytes(), &parsed).is_ok())
+        }
+        Some(format) if format.starts_with("pbkdf2") => {
+            let parsed = PasswordHash::new(hash).map_err(|e| format!("invalid pbkdf2 hash string: {e}"))?;
+            Ok(pbkdf2::Pbkdf2.verify_password(candidate.as_bytes(), &parsed).is_ok())
+        }
         Some(_) => {
-            use argon2::password_hash::{PasswordHash, PasswordVerifier};
             let parsed = PasswordHash::new(hash).map_err(|e| format!("invalid argon2 hash string: {e}"))?;
             Ok(argon2::Argon2::default().verify_password(candidate.as_bytes(), &parsed).is_ok())
         }
-        None => Err("unsupported KDF format; bcrypt and argon2 are supported natively".to_string()),
+        None => Err("unsupported KDF format; bcrypt, argon2, scrypt and pbkdf2 are supported natively".to_string()),
     }
 }
 
@@ -360,6 +390,8 @@ mod tests {
         assert_eq!(kdf_format("$2b$10$abcdefghijklmnopqrstuv"), Some("bcrypt"));
         assert_eq!(kdf_format("$2y$12$abcdefghijklmnopqrstuv"), Some("bcrypt"));
         assert_eq!(kdf_format("$argon2id$v=19$m=65536,t=3,p=4$c2FsdXNhbHQ"), Some("argon2id"));
+        assert_eq!(kdf_format("$scrypt$ln=16384,r=8,p=1$c2FsdQ$aGFzaA"), Some("scrypt"));
+        assert_eq!(kdf_format("$pbkdf2-sha256$i=10000$c2FsdQ$aGFzaA"), Some("pbkdf2-sha256"));
         assert_eq!(kdf_format("$6$salt$hash"), None);
     }
 
@@ -384,6 +416,40 @@ mod tests {
         assert!(verify_kdf(&hash, "hello").unwrap());
         assert!(!verify_kdf(&hash, "world").unwrap());
         assert_eq!(kdf_format(&hash), Some("argon2id"));
+    }
+
+    #[test]
+    fn scrypt_verify_roundtrip() {
+        use argon2::password_hash::{PasswordHasher, SaltString};
+        let salt = SaltString::encode_b64(b"0123456789abcdef").unwrap();
+        let hash = scrypt::Scrypt.hash_password(b"hello", &salt).unwrap().to_string();
+        assert!(verify_kdf(&hash, "hello").unwrap());
+        assert!(!verify_kdf(&hash, "world").unwrap());
+        assert_eq!(kdf_format(&hash), Some("scrypt"));
+    }
+
+    #[test]
+    fn pbkdf2_verify_roundtrip() {
+        use argon2::password_hash::{PasswordHasher, SaltString};
+        let salt = SaltString::encode_b64(b"0123456789abcdef").unwrap();
+        let hash = pbkdf2::Pbkdf2.hash_password(b"hello", &salt).unwrap().to_string();
+        assert!(verify_kdf(&hash, "hello").unwrap());
+        assert!(!verify_kdf(&hash, "world").unwrap());
+        assert!(kdf_format(&hash).unwrap().starts_with("pbkdf2"));
+    }
+
+    #[test]
+    fn ntlm_reference_vector() {
+        // well-known NTLM hash of "password"
+        let out = apply_op("ntlm", b"password", None).unwrap();
+        assert_eq!(hex::encode(out), "8846f7eaee8fb117ad06bdd830b7586c");
+    }
+
+    #[test]
+    fn sha3_reference_vector() {
+        // "abc" per the Keccak team's SHA3-256 test vector
+        let out = apply_op("sha3_256", b"abc", None).unwrap();
+        assert_eq!(hex::encode(out), "3a985da74fe225b2045c172d6bd390bd855f086e3e9d525b46bfe24511431532");
     }
 
     #[test]

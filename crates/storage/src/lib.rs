@@ -55,7 +55,17 @@ impl ArtifactStore {
                  entropy       REAL NOT NULL,
                  imported_at   TEXT NOT NULL
              );
-             CREATE INDEX IF NOT EXISTS idx_artifacts_case ON artifacts(case_id);",
+             CREATE INDEX IF NOT EXISTS idx_artifacts_case ON artifacts(case_id);
+             CREATE TABLE IF NOT EXISTS crack_history (
+                 id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                 algo         TEXT NOT NULL,
+                 hash         TEXT NOT NULL,
+                 password     TEXT NOT NULL,
+                 engine       TEXT NOT NULL,
+                 wordlist     TEXT,
+                 recovered_at TEXT NOT NULL,
+                 UNIQUE(hash, password)
+             );",
         )
         .map_err(|e| format!("cannot initialize artifact index: {e}"))?;
         Ok(Self { conn })
@@ -161,6 +171,81 @@ impl ArtifactStore {
             .map_err(|e| e.to_string())?;
         rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
     }
+
+    // --- crack history: recovered pairs persist until the user deletes them ---
+
+    /// Insert a recovered pair; duplicates (same hash + password) are ignored.
+    pub fn add_crack_entry(
+        &self,
+        algo: &str,
+        hash: &str,
+        password: &str,
+        engine: &str,
+        wordlist: Option<&str>,
+    ) -> Result<(), String> {
+        let recovered_at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis().to_string())
+            .unwrap_or_else(|_| "0".to_string());
+        self.conn
+            .execute(
+                "INSERT OR IGNORE INTO crack_history (algo, hash, password, engine, wordlist, recovered_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![algo, hash, password, engine, wordlist, recovered_at],
+            )
+            .map_err(|e| format!("cannot persist crack history entry: {e}"))?;
+        Ok(())
+    }
+
+    pub fn list_crack_entries(&self) -> Result<Vec<CrackEntry>, String> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT id, algo, hash, password, engine, wordlist, recovered_at
+                 FROM crack_history ORDER BY id DESC",
+            )
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok(CrackEntry {
+                    id: row.get(0)?,
+                    algo: row.get(1)?,
+                    hash: row.get(2)?,
+                    password: row.get(3)?,
+                    engine: row.get(4)?,
+                    wordlist: row.get(5)?,
+                    recovered_at: row.get(6)?,
+                })
+            })
+            .map_err(|e| e.to_string())?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
+    }
+
+    pub fn delete_crack_entry(&self, id: i64) -> Result<(), String> {
+        self.conn
+            .execute("DELETE FROM crack_history WHERE id = ?1", params![id])
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    pub fn clear_crack_entries(&self) -> Result<(), String> {
+        self.conn
+            .execute("DELETE FROM crack_history", [])
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+}
+
+/// One successfully recovered pair, kept until the user deletes it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CrackEntry {
+    pub id: i64,
+    pub algo: String,
+    pub hash: String,
+    pub password: String,
+    pub engine: String,
+    pub wordlist: Option<String>,
+    pub recovered_at: String,
 }
 
 #[cfg(test)]
@@ -228,5 +313,31 @@ mod tests {
         }
         let reopened = ArtifactStore::open(&path).unwrap();
         assert_eq!(reopened.list_artifacts(DEFAULT_CASE).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn crack_history_roundtrip_and_dedup() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ArtifactStore::open(&dir.path().join("index.db")).unwrap();
+        store.add_crack_entry("md5", "aaa", "hello", "native", Some("rockyou.txt")).unwrap();
+        store.add_crack_entry("md5", "aaa", "hello", "native", Some("rockyou.txt")).unwrap();
+        store.add_crack_entry("sha256", "bbb", "world", "hashcat", None).unwrap();
+        let list = store.list_crack_entries().unwrap();
+        assert_eq!(list.len(), 2);
+        assert_eq!(list[0].password, "world"); // newest first
+        assert!(list[1].wordlist.as_deref() == Some("rockyou.txt"));
+    }
+
+    #[test]
+    fn crack_history_delete_and_clear() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ArtifactStore::open(&dir.path().join("index.db")).unwrap();
+        store.add_crack_entry("md5", "a", "x", "native", None).unwrap();
+        store.add_crack_entry("md5", "b", "y", "native", None).unwrap();
+        let id = store.list_crack_entries().unwrap()[0].id;
+        store.delete_crack_entry(id).unwrap();
+        assert_eq!(store.list_crack_entries().unwrap().len(), 1);
+        store.clear_crack_entries().unwrap();
+        assert!(store.list_crack_entries().unwrap().is_empty());
     }
 }

@@ -31,6 +31,7 @@ pub struct AttackResultWire {
     pub cap_reached: bool,
     pub matches: Vec<AttackMatch>,
     pub duration_ms: u64,
+    pub threads: usize,
     pub engine: String,
     pub engine_version: String,
 }
@@ -100,23 +101,64 @@ fn rule_variants(word: &str) -> Vec<String> {
     out
 }
 
-/// Apply built-in rules over a wordlist body; candidates stream from the
-/// caller so giant wordlists never allocate twice.
+/// Apply built-in rules over a wordlist body, chunked across CPU cores.
+/// Each worker owns a slice of words; partials merge in order so hits keep
+/// their source line identity.
 fn run_rules(algo: &str, target: &str, words: impl Iterator<Item = String>) -> AttackSession {
-    let mut session = AttackSession::new(target);
-    'outer: for (line_no, word) in words.enumerate() {
-        let word = word.trim_end_matches('\r').to_string();
-        if word.is_empty() {
-            continue;
+    let words: Vec<String> = words
+        .map(|w| w.trim_end_matches('\r').to_string())
+        .filter(|w| !w.is_empty())
+        .collect();
+    let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1).clamp(1, 32);
+    let chunk_size = (words.len() + threads - 1) / threads.max(1);
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let generated = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let mut partials: Vec<AttackSession> = Vec::new();
+    std::thread::scope(|scope| {
+        let mut handles = Vec::new();
+        for (chunk_index, chunk) in words.chunks(chunk_size.max(1)).enumerate() {
+            let stop = std::sync::Arc::clone(&stop);
+            let generated = std::sync::Arc::clone(&generated);
+            let target = target.to_string();
+            handles.push(scope.spawn(move || {
+                let mut session = AttackSession::new(&target);
+                'outer: for (i, word) in chunk.iter().enumerate() {
+                    for (variant_no, candidate) in rule_variants(word).into_iter().enumerate() {
+                        let id = ((chunk_index * chunk_size.max(1) + i) as u64) * 1000 + variant_no as u64;
+                        let total = generated.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                        if total > MAX_CANDIDATES {
+                            session.cap_reached = true;
+                            stop.store(true, std::sync::atomic::Ordering::Relaxed);
+                            break 'outer;
+                        }
+                        if !session.test(algo, &candidate, id) {
+                            stop.store(true, std::sync::atomic::Ordering::Relaxed);
+                            break 'outer;
+                        }
+                        if stop.load(std::sync::atomic::Ordering::Relaxed) {
+                            break 'outer;
+                        }
+                    }
+                }
+                session
+            }));
         }
-        for (variant_no, candidate) in rule_variants(&word).into_iter().enumerate() {
-            let id = (line_no as u64) * 1000 + variant_no as u64;
-            if !session.test(algo, &candidate, id) {
-                break 'outer;
-            }
-        }
+        partials = handles.into_iter().map(|h| h.join().unwrap_or_else(|_| AttackSession::new(target))).collect();
+    });
+    merge_sessions(partials)
+}
+
+fn merge_sessions(partials: Vec<AttackSession>) -> AttackSession {
+    let mut merged = AttackSession::new("");
+    for partial in partials {
+        merged.tried += partial.tried;
+        merged.generated += partial.generated;
+        merged.cap_reached |= partial.cap_reached;
+        let room = MAX_REPORTED_MATCHES.saturating_sub(merged.matches.len());
+        merged.matches.extend(partial.matches.into_iter().take(room));
     }
-    session
+    merged.target = String::new();
+    merged
 }
 
 #[derive(Debug, Serialize)]
@@ -162,6 +204,12 @@ fn plan_mask(mask: &str) -> Result<MaskPlan, String> {
     Ok(MaskPlan { candidate_count: count, charset_sizes: sizes })
 }
 
+#[derive(Clone)]
+enum Slot {
+    Class(Vec<char>),
+    Literal(char),
+}
+
 fn run_mask(algo: &str, target: &str, mask: &str) -> Result<AttackSession, String> {
     let plan = plan_mask(mask)?;
     if plan.candidate_count > MAX_CANDIDATES {
@@ -169,12 +217,6 @@ fn run_mask(algo: &str, target: &str, mask: &str) -> Result<AttackSession, Strin
             "mask generates {} candidates; the cap this arc is {}",
             plan.candidate_count, MAX_CANDIDATES
         ));
-    }
-    // Build the odometer: classes in order, literals fixed.
-    #[derive(Clone)]
-    enum Slot {
-        Class(Vec<char>),
-        Literal(char),
     }
     let mut slots: Vec<Slot> = Vec::new();
     let mut chars = mask.chars().peekable();
@@ -190,14 +232,73 @@ fn run_mask(algo: &str, target: &str, mask: &str) -> Result<AttackSession, Strin
             slots.push(Slot::Literal(c));
         }
     }
-    let class_count = slots.iter().filter(|s| matches!(s, Slot::Class(_))).count();
+    // Parallelize by slicing the FIRST class's charset across threads; each
+    // worker runs a full odometer over the remaining classes with its slice
+    // of leading characters.
+    let first_class_index = slots.iter().position(|s| matches!(s, Slot::Class(_)));
+    let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1).clamp(1, 32);
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let mut partials: Vec<AttackSession> = Vec::new();
+    std::thread::scope(|scope| {
+        let mut handles = Vec::new();
+        match first_class_index {
+            Some(index) => {
+                let first_len = match &slots[index] {
+                    Slot::Class(set) => set.len(),
+                    Slot::Literal(_) => unreachable!(),
+                };
+                let slice_size = (first_len + threads - 1) / threads;
+                for slice_start in (0..first_len).step_by(slice_size.max(1)) {
+                    let slice_end = (slice_start + slice_size.max(1)).min(first_len);
+                    let slots = slots.clone();
+                    let target = target.to_string();
+                    let stop = std::sync::Arc::clone(&stop);
+                    handles.push(scope.spawn(move || {
+                        let mut session = AttackSession::new(&target);
+                        for first_value in slice_start..slice_end {
+                            if stop.load(std::sync::atomic::Ordering::Relaxed) {
+                                break;
+                            }
+                            run_mask_odometer(algo, &mut session, slots.as_slice(), index, first_value, &stop);
+                        }
+                        session
+                    }));
+                }
+            }
+            None => {
+                // no classes: validated earlier, but stay defensive
+                let slots = slots.clone();
+                let target = target.to_string();
+                let stop = std::sync::Arc::clone(&stop);
+                handles.push(scope.spawn(move || {
+                    let mut session = AttackSession::new(&target);
+                    run_mask_odometer(algo, &mut session, slots.as_slice(), usize::MAX, 0, &stop);
+                    session
+                }));
+            }
+        }
+        partials = handles.into_iter().map(|h| h.join().unwrap_or_else(|_| AttackSession::new(target))).collect();
+    });
+    Ok(merge_sessions(partials))
+}
+
+/// One odometer pass. `pinned_class` fixes the given class to `pinned_value`
+/// (the parallel slice); usize::MAX means run free.
+fn run_mask_odometer(algo: &str, session: &mut AttackSession, slots: &[Slot], pinned_class: usize, pinned_value: usize, stop: &std::sync::atomic::AtomicBool) {
+    let class_sets: Vec<&Vec<char>> = slots.iter().filter_map(|s| match s { Slot::Class(set) => Some(set), Slot::Literal(_) => None }).collect();
+    let class_count = class_sets.len();
     let mut counters = vec![0usize; class_count];
-    let mut session = AttackSession::new(target);
-    let total = plan.candidate_count;
-    for i in 0..total {
+    if pinned_class != usize::MAX {
+        counters[pinned_class] = pinned_value;
+    }
+    let total: u64 = class_sets.iter().enumerate().map(|(i, set)| if i == pinned_class { 1 } else { set.len() as u64 }).product();
+    for _ in 0..total {
+        if stop.load(std::sync::atomic::Ordering::Relaxed) {
+            break;
+        }
         let mut candidate = String::with_capacity(slots.len());
         let mut class_index = 0usize;
-        for slot in &slots {
+        for slot in slots {
             match slot {
                 Slot::Literal(ch) => candidate.push(*ch),
                 Slot::Class(set) => {
@@ -206,25 +307,25 @@ fn run_mask(algo: &str, target: &str, mask: &str) -> Result<AttackSession, Strin
                 }
             }
         }
-        // line_no doubles as the candidate ordinal for mask mode
-        if !session.test(algo, &candidate, i + 1) {
+        let ordinal = session.generated + 1;
+        if !session.test(algo, &candidate, ordinal) {
+            stop.store(true, std::sync::atomic::Ordering::Relaxed);
             break;
         }
-        // increment odometer (last class is the fast digit)
         for pos in (0..class_count).rev() {
-            if let Some(slot) = slots.iter().filter(|s| matches!(s, Slot::Class(_))).nth(pos) {
-                if let Slot::Class(set) = slot {
-                    counters[pos] += 1;
-                    if counters[pos] < set.len() {
-                        break;
-                    }
-                    counters[pos] = 0;
-                }
+            if pos == pinned_class {
+                continue;
             }
+            counters[pos] += 1;
+            if counters[pos] < class_sets[pos].len() {
+                break;
+            }
+            counters[pos] = 0;
         }
     }
-    Ok(session)
 }
+
+
 
 fn guard(algo: &str, target: &str) -> Result<String, String> {
     if hacktool_crypto::kdf_format(target).is_some() {
@@ -251,6 +352,7 @@ fn wire(mode: &str, algo: String, target: String, source: String, session: Attac
         cap_reached: session.cap_reached,
         matches: session.matches,
         duration_ms,
+        threads: std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1).clamp(1, 32),
         engine: "hacktool-crypto".to_string(),
         engine_version: hacktool_crypto::ENGINE_VERSION.to_string(),
     }
@@ -271,6 +373,7 @@ pub fn crack_rules_dialog(
     app: tauri::AppHandle,
     algo: String,
     target_hash: String,
+    ctx: tauri::State<'_, crate::evidence::EvidenceCtx>,
 ) -> Result<AttackResultWire, String> {
     use tauri_plugin_dialog::DialogExt;
     let target = guard(&algo, &target_hash)?;
@@ -287,21 +390,53 @@ pub fn crack_rules_dialog(
     let body = std::fs::read(&path).map_err(|e| format!("cannot read wordlist: {e}"))?;
     let mut result = rules_over_bytes(&algo, &target, &body)?;
     result.source = format!("{} + built-in rules", path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default());
+    record_history(&ctx, &algo, &target, &result.source, &result.matches);
     Ok(result)
 }
 
 /// Mask attack: pattern like ?l?l?l?d?d?d?d with classes l/u/d/s/a.
 #[tauri::command]
-pub fn crack_mask(algo: String, target_hash: String, mask: String) -> Result<AttackResultWire, String> {
-    let target = guard(&algo, &target_hash)?;
+pub fn crack_mask(
+    algo: String,
+    target_hash: String,
+    mask: String,
+    ctx: tauri::State<'_, crate::evidence::EvidenceCtx>,
+) -> Result<AttackResultWire, String> {
+    let result = mask_attack(&algo, &target_hash, &mask)?;
+    record_history(&ctx, &result.algo, &result.target_hash, &format!("native mask ({})", result.source), &result.matches);
+    Ok(result)
+}
+
+fn mask_attack(algo: &str, target_hash: &str, mask: &str) -> Result<AttackResultWire, String> {
+    let target = guard(algo, target_hash)?;
     let started = Instant::now();
-    let session = run_mask(&algo, &target, &mask)?;
-    Ok(wire("mask", algo, target, mask, session, started.elapsed().as_millis() as u64))
+    let session = run_mask(algo, &target, mask)?;
+    Ok(wire("mask", algo.to_string(), target, mask.to_string(), session, started.elapsed().as_millis() as u64))
+}
+
+/// Persist recovered pairs into the crack history (deduped by the store).
+pub fn record_history(
+    ctx: &crate::evidence::EvidenceCtx,
+    algo: &str,
+    target: &str,
+    engine: &str,
+    matches: &[AttackMatch],
+) {
+    if matches.is_empty() {
+        return;
+    }
+    let store = ctx.store.lock().expect("artifact store poisoned");
+    for m in matches {
+        let _ = store.add_crack_entry(algo, target, &m.password, engine, None);
+    }
 }
 
 #[derive(Debug, Serialize)]
 pub struct GpuDevice {
     pub name: String,
+    pub driver_version: String,
+    pub memory_total: String,
+    pub compute_cap: String,
     pub backend: String,
     pub usable: bool,
 }
@@ -319,16 +454,25 @@ fn detect_gpus() -> Vec<GpuDevice> {
     // Query the NVIDIA SMI tool when present; it is a read-only system query
     // executed by the native core, never by the frontend (§2.4).
     let output = std::process::Command::new("nvidia-smi")
-        .args(["--query-gpu=name", "--format=csv,noheader"])
+        .args([
+            "--query-gpu=name,driver_version,memory.total,compute_cap",
+            "--format=csv,noheader",
+        ])
         .output();
     match output {
         Ok(out) if out.status.success() => String::from_utf8_lossy(&out.stdout)
             .lines()
             .filter(|l| !l.trim().is_empty())
-            .map(|name| GpuDevice {
-                name: name.trim().to_string(),
-                backend: "cuda (driver present; engine gated on license review)".to_string(),
-                usable: false,
+            .map(|line| {
+                let fields: Vec<String> = line.split(',').map(|f| f.trim().to_string()).collect();
+                GpuDevice {
+                    name: fields.first().cloned().unwrap_or_default(),
+                    driver_version: fields.get(1).cloned().unwrap_or_else(|| "n/a".to_string()),
+                    memory_total: fields.get(2).cloned().unwrap_or_else(|| "n/a".to_string()),
+                    compute_cap: fields.get(3).cloned().unwrap_or_else(|| "n/a".to_string()),
+                    backend: "opencl/cuda via installed driver; hashcat (MIT) runs its own kernels on it".to_string(),
+                    usable: true,
+                }
             })
             .collect(),
         _ => Vec::new(),
@@ -340,9 +484,9 @@ pub fn device_info() -> DeviceInfoWire {
     let cpu_cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
     let gpu_devices = detect_gpus();
     let planner_note = if gpu_devices.is_empty() {
-        "no GPU runtime detected; CPU engine is active and this is reported honestly (§7.2)"
+        "no GPU driver detected: GPU engines activate automatically when one is installed; CPU engine is active now"
     } else {
-        "GPU hardware present; GPU compute waits on the OpenCL/CUDA bundling review"
+        "GPU driver present: hashcat (MIT, own kernels) is cleared to run on it; no vendor bundling involved"
     };
     DeviceInfoWire {
         cpu_arch: std::env::consts::ARCH.to_string(),
@@ -390,7 +534,7 @@ mod tests {
     fn mask_finds_the_needle() {
         // sha256("42")
         let target = hacktool_crypto::apply_op("sha256", b"42", None).unwrap();
-        let result = crack_mask("sha256".to_string(), hex::encode(target), "?d?d".to_string()).unwrap();
+        let result = mask_attack("sha256", &hex::encode(target), "?d?d").unwrap();
         assert_eq!(result.matches.len(), 1);
         assert_eq!(result.matches[0].password, "42");
         // the odometer completes the space; hits are collected, not early-exited
@@ -400,7 +544,7 @@ mod tests {
     #[test]
     fn mask_respects_candidate_cap() {
         // 6 lowercase letters = 308M candidates, over the 20M cap
-        let err = crack_mask("md5".to_string(), SHA256_HELLO.to_string(), "?l?l?l?l?l?l".to_string()).unwrap_err();
+        let err = mask_attack("md5", SHA256_HELLO, "?l?l?l?l?l?l").unwrap_err();
         assert!(err.contains("cap"));
     }
 
@@ -417,7 +561,7 @@ mod tests {
         let info = device_info();
         assert!(info.cpu_cores >= 1);
         assert!(!info.cpu_arch.is_empty());
-        // every reported GPU is explicitly marked not-yet-usable
-        assert!(info.gpu_devices.iter().all(|g| !g.usable));
+        // GPU devices report as usable through hashcat when a driver is present
+        assert!(info.gpu_devices.iter().all(|g| g.usable));
     }
 }

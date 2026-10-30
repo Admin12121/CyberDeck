@@ -196,13 +196,43 @@ export interface CrackResultWire {
   tried: number;
   matches: CrackMatchWire[];
   duration_ms: number;
+  threads: number;
   engine: string;
   engine_version: string;
 }
 
-export async function crackWordlistDialog(algo: string, targetHash: string): Promise<CrackResultWire> {
+export interface WordlistInfoWire {
+  name: string;
+  path: string;
+  size: number;
+}
+
+export async function pickWordlist(): Promise<WordlistInfoWire> {
+  if (!inTauri) throw new Error("wordlist picking requires the desktop runtime");
+  return invoke<WordlistInfoWire>("pick_wordlist", {});
+}
+
+export interface CrackProgressWire {
+  tried: number;
+  total: number;
+  percent: number;
+}
+
+export async function crackWordlistDialog(
+  algo: string,
+  targetHash: string,
+  wordlistPath?: string,
+  onProgress?: (progress: CrackProgressWire) => void,
+): Promise<CrackResultWire> {
   if (!inTauri) throw new Error("recovery sessions require the desktop runtime");
-  return invoke<CrackResultWire>("crack_wordlist_dialog", { algo, targetHash });
+  const channel = new Channel<CrackProgressWire>();
+  if (onProgress) channel.onmessage = onProgress;
+  return invoke<CrackResultWire>("crack_wordlist_dialog", {
+    algo,
+    targetHash,
+    wordlistPath: wordlistPath ?? null,
+    onProgress: channel,
+  });
 }
 
 export interface FileDigestsWire {
@@ -234,6 +264,7 @@ export interface AttackResultWire {
   cap_reached: boolean;
   matches: AttackMatchWire[];
   duration_ms: number;
+  threads: number;
   engine: string;
   engine_version: string;
 }
@@ -250,6 +281,9 @@ export async function crackMask(algo: string, targetHash: string, mask: string):
 
 export interface GpuDeviceWire {
   name: string;
+  driver_version: string;
+  memory_total: string;
+  compute_cap: string;
   backend: string;
   usable: boolean;
 }
@@ -310,6 +344,33 @@ export async function engineAttack(
 export async function kdfVerify(hash: string, candidate: string): Promise<boolean> {
   if (!inTauri) throw new Error("KDF verification requires the desktop runtime");
   return invoke<boolean>("kdf_verify", { hash, candidate });
+}
+
+// --- crack history -------------------------------------------------------------
+
+export interface CrackEntryWire {
+  id: number;
+  algo: string;
+  hash: string;
+  password: string;
+  engine: string;
+  wordlist: string | null;
+  recovered_at: string;
+}
+
+export async function crackHistoryList(): Promise<CrackEntryWire[]> {
+  if (!inTauri) return [];
+  return invoke<CrackEntryWire[]>("crack_history_list", {});
+}
+
+export async function crackHistoryDelete(id: number): Promise<void> {
+  if (!inTauri) throw new Error("history requires the desktop runtime");
+  return invoke<void>("crack_history_delete", { id });
+}
+
+export async function crackHistoryClear(): Promise<void> {
+  if (!inTauri) throw new Error("history requires the desktop runtime");
+  return invoke<void>("crack_history_clear", {});
 }
 
 // --- browser fallback (demo jobs) --------------------------------------------

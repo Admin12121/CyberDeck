@@ -23,10 +23,16 @@ import {
   type DetailNode,
 } from "../model";
 
+/** All network tools stay mounted; hidden views keep their state. */
 export function NetworkWorkspace({ tool }: { tool: ToolId }) {
-  if (tool === "network.lab") return <NetworkLabView />;
-  if (tool === "network.scan") return <ScanView />;
-  return <PacketStudioView />;
+  const show = (id: ToolId) => (tool === id ? "h-full" : "hidden h-full");
+  return (
+    <>
+      <div className={show("network.packet")}><PacketStudioView /></div>
+      <div className={show("network.lab")}><NetworkLabView /></div>
+      <div className={show("network.scan")}><ScanView /></div>
+    </>
+  );
 }
 
 // --------------------------------------------------------- packet studio ---

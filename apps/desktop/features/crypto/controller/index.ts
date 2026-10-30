@@ -64,11 +64,8 @@ export function clearRecipe(state: RecipeState): RecipeState {
 
 export function initialRecipeState(): RecipeState {
   return {
-    steps: [
-      { opId: "to_base64", enabled: true },
-      { opId: "to_hex", enabled: false },
-    ],
-    input: "HackTool workbench: transformation pipeline seed input",
+    steps: [],
+    input: "",
     autoBake: true,
   };
 }

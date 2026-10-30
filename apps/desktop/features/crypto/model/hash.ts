@@ -36,10 +36,19 @@ export function detectHashFormats(input: string): HashFormatCandidate[] {
     candidates.push({ format: "bcrypt", confidence: "high", note: "$2*$ modular crypt format", gpuCapable: false });
   }
   if (/^\$argon2(id|i|d)\$/.test(value)) {
-    candidates.push({ format: "argon2 (id/i/d)", confidence: "high", note: "memory-hard KDF, CPU implementations only", gpuCapable: false });
+    candidates.push({ format: "argon2 (id/i/d)", confidence: "high", note: "memory-hard KDF, verifies and cracks natively (slow)", gpuCapable: false });
   }
-  if (/^\$y\$j9T\$/.test(value) || /^\$6\$/.test(value)) {
-    candidates.push({ format: "yescrypt / sha512crypt", confidence: "high", note: "memory-hard unix crypt format", gpuCapable: false });
+  if (/^\$y\$/.test(value)) {
+    candidates.push({ format: "yescrypt", confidence: "high", note: "yescrypt PHC string (current /etc/shadow default); cracks via john or hashcat 22700", gpuCapable: true });
+  }
+  if (/^\$7\$/.test(value)) {
+    candidates.push({ format: "yescrypt (scrypt field)", confidence: "medium", note: "libxcrypt scrypt-style prefix, often yescrypt in modern shadows", gpuCapable: true });
+  }
+  if (/^\$6\$/.test(value)) {
+    candidates.push({ format: "sha512crypt", confidence: "high", note: "$6$ unix crypt; cracks via john or hashcat 1800", gpuCapable: true });
+  }
+  if (/^\$5\$/.test(value)) {
+    candidates.push({ format: "sha256crypt", confidence: "high", note: "$5$ unix crypt; cracks via john or hashcat 17400", gpuCapable: true });
   }
   if (/^\$NT\$/.test(value)) {
     candidates.push({ format: "NTLM (pass-the-hash form)", confidence: "high", note: "$NT$ prefix", gpuCapable: true });
