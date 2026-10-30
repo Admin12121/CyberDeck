@@ -31,14 +31,19 @@ function SiteTree() {
       return next;
     });
 
-  const renderNode = (node: { name: string; children?: { name: string; children?: unknown[] }[] }, depth: number): React.ReactNode[] => {
+  const renderNode = (
+    node: { name: string; children?: { name: string; children?: unknown[] }[] },
+    depth: number,
+    pathKey: string,
+  ): React.ReactNode[] => {
     const lines: React.ReactNode[] = [];
-    const isCollapsed = collapsed.has(node.name);
+    const isCollapsed = collapsed.has(pathKey);
+    const key = pathKey;
     lines.push(
       <button
-        key={`${depth}-${node.name}`}
+        key={key}
         type="button"
-        onClick={() => node.children && toggle(node.name)}
+        onClick={() => node.children && toggle(pathKey)}
         className="block w-full truncate text-left font-mono text-[11px] text-fg-dim hover:text-fg"
         style={{ paddingLeft: depth * 12 }}
       >
@@ -48,13 +53,13 @@ function SiteTree() {
     );
     if (node.children && !isCollapsed) {
       for (const child of node.children) {
-        lines.push(...renderNode(child as never, depth + 1));
+        lines.push(...renderNode(child as never, depth + 1, `${key}/${child.name}`));
       }
     }
     return lines;
   };
 
-  return <div className="p-1">{renderNode(SAMPLE_SITES as never, 0)}</div>;
+  return <div className="p-1">{renderNode(SAMPLE_SITES as never, 0, SAMPLE_SITES.name)}</div>;
 }
 
 function ProxyHistoryView({ mode }: { mode: "proxy" | "history" }) {

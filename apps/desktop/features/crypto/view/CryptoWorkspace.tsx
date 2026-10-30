@@ -6,7 +6,7 @@
  * real format identification; recovery sessions gate on the engine planner
  * (arc 2). Crypto Ops: real digests via WebCrypto.
  */
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { ArrowDown, ArrowUp, Copy, Play, X } from "lucide-react";
 import { Chip, EmptyState, Field, Pane, Select, TextInput, ToolButton } from "@ds/panes";
 import {
@@ -45,6 +45,10 @@ function RecipesView() {
   const [search, setSearch] = useState("");
   const [committed, setCommitted] = useState<ReturnType<typeof runRecipe> | null>(null);
   const [showHex, setShowHex] = useState(false);
+  // elapsedMs is real timing, which differs between prerender and hydration —
+  // display it only after mount so the tree matches on first paint.
+  const [mounted, setMounted] = useState(false);
+  useEffect(() => setMounted(true), []);
 
   const live = useMemo(() => runRecipe(state.input, state.steps), [state.input, state.steps]);
   const result = state.autoBake ? live : committed;
@@ -196,7 +200,7 @@ function RecipesView() {
           <EmptyState title="No result yet" detail="Enable auto-bake or press Bake to evaluate the recipe." badge="recipes" />
         )}
         <div className="border-t border-line px-2 py-0.5 font-mono text-[10px] text-fg-muted">
-          {result ? `${result.byteLength} bytes out · ${result.elapsedMs.toFixed(1)} ms` : "—"}
+          {result ? `${result.byteLength} bytes out${mounted ? ` · ${result.elapsedMs.toFixed(1)} ms` : ""}` : "—"}
         </div>
       </Pane>
     </div>

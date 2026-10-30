@@ -4,7 +4,7 @@
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
 use tauri::ipc::Channel;
@@ -51,7 +51,8 @@ struct JobHandle {
 pub struct JobManager {
     next_id: AtomicU64,
     // Tauri commands run on arbitrary threads; synchronous Mutex is correct here.
-    jobs: Mutex<HashMap<u64, JobHandle>>,
+    // Shared with spawned workers via Arc so cancellation survives the command return.
+    jobs: Arc<Mutex<HashMap<u64, JobHandle>>>,
 }
 
 impl JobManager {

@@ -34,7 +34,12 @@ export async function jobCancel(id: number): Promise<boolean> {
 
 // --- browser fallback -------------------------------------------------------
 
-const simTimers = new Map<number, ReturnType<typeof setInterval>>();
+interface Simulation {
+  timer: ReturnType<typeof setInterval>;
+  onEvent: (event: JobEvent) => void;
+}
+
+const simJobs = new Map<number, Simulation>();
 
 function simulateJob(kind: JobKindWire, onEvent: (event: JobEvent) => void): Promise<number> {
   const id = Math.floor(Math.random() * 1_000_000) + 1;
@@ -42,7 +47,7 @@ function simulateJob(kind: JobKindWire, onEvent: (event: JobEvent) => void): Pro
   let step = 0;
   onEvent({ type: "started", job_id: id, total_steps: total });
   const timer = setInterval(() => {
-    if (!simTimers.has(id)) return;
+    if (!simJobs.has(id)) return;
     step += 1;
     onEvent({
       type: "progress",
@@ -53,18 +58,19 @@ function simulateJob(kind: JobKindWire, onEvent: (event: JobEvent) => void): Pro
     });
     if (step >= total) {
       clearInterval(timer);
-      simTimers.delete(id);
+      simJobs.delete(id);
       onEvent({ type: "completed", job_id: id, message: `demo job finished (${total} units)` });
     }
   }, 100);
-  simTimers.set(id, timer);
+  simJobs.set(id, { timer, onEvent });
   return Promise.resolve(id);
 }
 
 function cancelSimulated(id: number): Promise<boolean> {
-  const timer = simTimers.get(id);
-  if (!timer) return Promise.resolve(false);
-  clearInterval(timer);
-  simTimers.delete(id);
+  const sim = simJobs.get(id);
+  if (!sim) return Promise.resolve(false);
+  clearInterval(sim.timer);
+  simJobs.delete(id);
+  sim.onEvent({ type: "cancelled", job_id: id });
   return Promise.resolve(true);
 }
