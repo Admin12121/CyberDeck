@@ -1,5 +1,5 @@
 /**
- * Web feature — controller layer.
+ * Web feature controller layer.
  * Pure filter/selection transitions. Proxy control (listener state,
  * interception, certificate lifecycle) arrives arc 4 through lib/ipc.
  */

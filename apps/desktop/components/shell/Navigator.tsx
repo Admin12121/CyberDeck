@@ -1,6 +1,6 @@
 "use client";
-/** Section navigator — category label + tool list with disabled reasons. */
-import { toolById, CATEGORIES } from "@features/registry";
+/** Section navigator: category label, tool list, and user-controlled width. */
+import { CATEGORIES, toolById } from "@features/registry";
 import { useWorkbench } from "@state/workbench";
 
 export function Navigator() {
@@ -9,7 +9,11 @@ export function Navigator() {
   if (!category) return null;
 
   return (
-    <aside className="flex w-56 shrink-0 flex-col border-r border-line bg-sidebar" aria-label="Tools">
+    <aside
+      className="flex shrink-0 flex-col border-r border-line bg-sidebar"
+      style={{ width: wb.navigatorWidth }}
+      aria-label="Tools"
+    >
       <div className="flex h-8 shrink-0 items-center border-b border-line px-3 text-[10px] font-medium uppercase tracking-wider text-fg-muted">
         {category.label}
       </div>
@@ -20,7 +24,7 @@ export function Navigator() {
             <button
               key={tool.id}
               type="button"
-              title={tool.disabled ? `${tool.label} — ${tool.disabledReason ?? "unavailable"}` : tool.hint}
+              title={tool.disabled ? `${tool.label} (${tool.disabledReason ?? "unavailable"})` : tool.hint}
               disabled={tool.disabled}
               onClick={() => wb.selectTool(tool.id)}
               className={`mb-px block w-full truncate border-l-2 px-2 py-1.5 text-left text-xs ${

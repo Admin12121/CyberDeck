@@ -1,6 +1,6 @@
 "use client";
 /**
- * Forensics feature — view layer.
+ * Forensics feature view layer.
  * Evidence tree → hex/preview/strings/metadata with inspector (Master Plan
  * §5.6). Arc 1 runs on deterministic sample evidence; import, real hashing,
  * signature scan, YARA-X and extraction move to the Rust core in arc 2.
@@ -70,7 +70,7 @@ function EvidenceTree({
         );
       })}
       <div className="mt-2 border-t border-line p-2">
-        <ToolButton disabled title="Import preserves originals + records SHA-256 (§5.6) — arc 2">Import evidence…</ToolButton>
+        <ToolButton disabled title="Import preserves originals + records SHA-256 (§5.6), arc 2">Import evidence…</ToolButton>
       </div>
     </Pane>
   );
@@ -85,7 +85,7 @@ function FileAnalysisView() {
   return (
     <div className="flex h-full min-h-0">
       <EvidenceTree {...evidence} onSelect={evidence.setSelected} />
-      <Pane title={`Hex — ${selected.name}`} className="min-w-0 flex-1">
+      <Pane title={`Hex: ${selected.name}`} className="min-w-0 flex-1">
         <pre className="p-1 font-mono text-[11px] leading-relaxed text-fg-dim">
           {rows.map((row) => (
             <div key={row.offset}>
@@ -105,14 +105,14 @@ function FileAnalysisView() {
         <div className="px-3 py-1.5">
           <div className="text-[10px] uppercase tracking-wider text-fg-muted">computed live</div>
           <div className="font-mono text-xs text-fg-dim">{formatEntropy(entropy)}</div>
-          {entropy > 7.5 ? <Chip tone="orange">high entropy — compressed/encrypted?</Chip> : null}
+          {entropy > 7.5 ? <Chip tone="orange">high entropy; compressed or encrypted?</Chip> : null}
         </div>
         <div className="border-t border-line p-2">
-          <ToolButton disabled title="Signature scan — arc 2">Scan signatures</ToolButton>
+          <ToolButton disabled title="Signature scan, arc 2">Scan signatures</ToolButton>
           <div className="mt-1" />
-          <ToolButton disabled title="Extraction with path safety + decompression-bomb guards — arc 2">Extract…</ToolButton>
+          <ToolButton disabled title="Extraction with path safety + decompression-bomb guards, arc 2">Extract…</ToolButton>
           <div className="mt-1" />
-          <ToolButton disabled title="YARA-X rules — arc 2">YARA scan</ToolButton>
+          <ToolButton disabled title="YARA-X rules, arc 2">YARA scan</ToolButton>
         </div>
       </Pane>
     </div>
@@ -124,7 +124,7 @@ function MetadataView() {
   return (
     <div className="flex h-full min-h-0">
       <EvidenceTree {...evidence} onSelect={evidence.setSelected} />
-      <Pane title={`Metadata — ${evidence.selected.name}`} className="min-w-0 flex-1">
+      <Pane title={`Metadata: ${evidence.selected.name}`} className="min-w-0 flex-1">
         <table className="data-table">
           <thead>
             <tr>
@@ -156,7 +156,7 @@ function StringsView() {
     <div className="flex h-full min-h-0">
       <EvidenceTree {...evidence} onSelect={evidence.setSelected} />
       <Pane
-        title={`Strings — ${evidence.selected.name}`}
+        title={`Strings: ${evidence.selected.name}`}
         className="min-w-0 flex-1"
         actions={
           <>

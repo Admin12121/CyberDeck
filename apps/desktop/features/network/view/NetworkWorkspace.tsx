@@ -1,6 +1,6 @@
 "use client";
 /**
- * Network feature — view layer.
+ * Network feature view layer.
  * Packet Analysis: three linked panes over the sample capture (list → details
  * → bytes with selection sync). Network Lab: gated active-operations mode.
  * Scanning: Zenmap-style target/profile studio wired to the shared job
@@ -43,18 +43,18 @@ function PacketStudioView() {
   return (
     <div className="flex h-full min-h-0 flex-col">
       <div className="flex h-8 shrink-0 items-center gap-2 border-b border-line bg-sidebar px-2">
-        <ToolButton disabled title="Open capture — PCAP/PCAPNG engine lands arc 2">Open…</ToolButton>
+        <ToolButton disabled title="Open capture, PCAP-PCAPNG engine lands arc 2">Open…</ToolButton>
         <ToolButton disabled title="Live capture requires platform driver clearance (§7.2)">
           <Play size={11} /> Capture
         </ToolButton>
-        <Select value="" onChange={() => {}} options={[{ value: "", label: "interface: — arc 2" }]} ariaLabel="Capture interface" />
+        <Select value="" onChange={() => {}} options={[{ value: "", label: "interface: arc 2" }]} ariaLabel="Capture interface" />
         <span className="mx-1 h-4 w-px bg-line" />
         <div className="flex min-w-0 flex-1 items-center gap-1">
           <span className="font-mono text-[10px] uppercase text-fg-muted">display filter</span>
           <TextInput
             value={filter}
             onChange={setFilter}
-            placeholder="tcp · dns · 10.0.0.42 — column match (arc 2: filter syntax)"
+            placeholder="tcp · dns · 10.0.0.42 (column match; arc 2 adds filter syntax)"
             ariaLabel="Display filter"
             className="min-w-0 flex-1"
           />
@@ -106,7 +106,7 @@ function PacketStudioView() {
 
         <div className="flex min-h-0 flex-[3] flex-col overflow-hidden border-b border-line bg-panel">
           <div className="flex h-7 shrink-0 items-center border-b border-line bg-sidebar px-2 text-[10px] font-medium uppercase tracking-wider text-fg-muted">
-            Packet details — {packet ? `frame ${packet.no}` : "no selection"}
+            Packet details: {packet ? `frame ${packet.no}` : "no selection"}
           </div>
           <div className="min-h-0 flex-1 overflow-auto p-1">
             {packet ? detailTree(packet).map((node, i) => <DetailBranch key={i} node={node} depth={0} />) : null}
@@ -115,7 +115,7 @@ function PacketStudioView() {
 
         <div className="flex min-h-0 flex-[3] flex-col overflow-hidden bg-panel">
           <div className="flex h-7 shrink-0 items-center border-b border-line bg-sidebar px-2 text-[10px] font-medium uppercase tracking-wider text-fg-muted">
-            Packet bytes — offset · hex · ascii
+            Packet bytes (offset · hex · ascii)
           </div>
           <div className="min-h-0 flex-1 overflow-auto">
             <pre className="p-1 font-mono text-[11px] leading-relaxed text-fg-dim">
@@ -168,7 +168,7 @@ function DetailBranch({ node, depth }: { node: DetailNode; depth: number }) {
           <span className="w-[11px] shrink-0" />
         )}
         <span className="text-fg">{node.label}</span>
-        {node.value ? <span className="truncate text-fg-muted">— {node.value}</span> : null}
+        {node.value ? <span className="truncate text-fg-muted">: {node.value}</span> : null}
       </button>
       {open && hasChildren ? node.children!.map((child, i) => <DetailBranch key={i} node={child} depth={depth + 1} />) : null}
     </div>
@@ -183,7 +183,7 @@ function NetworkLabView() {
       <div className="max-w-xl border border-orange/40 bg-panel">
         <div className="flex items-center gap-2 border-b border-line bg-orange-dim px-3 py-2">
           <ShieldAlert size={16} className="text-orange" />
-          <span className="text-xs font-medium uppercase tracking-wide text-orange">Active network operations — gated</span>
+          <span className="text-xs font-medium uppercase tracking-wide text-orange">Active network operations (gated)</span>
         </div>
         <div className="space-y-3 p-4 text-xs leading-relaxed text-fg-dim">
           <p>
@@ -192,13 +192,13 @@ function NetworkLabView() {
             passive evidence without labels (Master Plan §5.1).
           </p>
           <ul className="space-y-1 font-mono text-[11px] text-fg-muted">
-            <li>— requires a configured authorized scope (CIDR / host set)</li>
-            <li>— requires a statement of authorization per session</li>
-            <li>— requires compatible privileges per OS (gate shown before enabling)</li>
-            <li>— emergency stop visible whenever any operation is armed</li>
+            <li>requires a configured authorized scope (CIDR / host set)</li>
+            <li>requires a statement of authorization per session</li>
+            <li>requires compatible privileges per OS (gate shown before enabling)</li>
+            <li>emergency stop visible whenever any operation is armed</li>
           </ul>
           <div className="flex items-center gap-2 pt-1">
-            <ToolButton disabled title="Scope configuration — engine integration arc 2">Configure scope</ToolButton>
+            <ToolButton disabled title="Scope configuration, engine integration arc 2">Configure scope</ToolButton>
             <ToolButton disabled title="Ettercap capability vetting arc 2">Enable lab mode</ToolButton>
             <Chip>arc 2</Chip>
           </div>
@@ -232,14 +232,14 @@ function ScanView() {
           ]}
           ariaLabel="Scan profile"
         />
-        <ToolButton tone="primary" onClick={wb.runDemoJob} title="Runs the shared job pipeline demo — scan engines arrive arc 3">
+        <ToolButton tone="primary" onClick={wb.runDemoJob} title="Runs the shared job pipeline demo; scan engines arrive arc 3">
           <Play size={11} /> Run
         </ToolButton>
         <ToolButton onClick={wb.toggleDock} title="Open the jobs dock (Ctrl+J)">
           <Square size={11} /> Jobs
         </ToolButton>
         <span className="ml-auto font-mono text-[10px] text-fg-muted">
-          engines: nmap-family vetting in progress (NPSL review) — jobs are live
+          engines: nmap-family vetting in progress (NPSL review); jobs are live
         </span>
       </div>
       <div className="flex min-h-0 flex-1">
@@ -269,10 +269,10 @@ function ScanView() {
             </tbody>
           </table>
         </Pane>
-        <Pane title="Run output — raw + provenance" className="w-80 shrink-0">
+        <Pane title="Run output (raw + provenance)" className="w-80 shrink-0">
           <div className="p-2 font-mono text-[11px] leading-relaxed text-fg-muted">
             <div className="text-fg-dim">$ profile={profile} target={target}</div>
-            <div className="mt-1">raw engine output, scan diff and export land arc 3 —</div>
+            <div className="mt-1">raw engine output, scan diff and export land arc 3;</div>
             <div>every finding keeps engine id/version and policy in</div>
             <div>provenance (Master Plan §5.3).</div>
           </div>

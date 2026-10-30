@@ -1,5 +1,5 @@
 /**
- * Forensics feature — controller layer.
+ * Forensics feature controller layer.
  * Real string extraction and Shannon entropy over bytes. These run in the
  * webview for arc 1 sample sizes; the same contracts move to Rust streaming
  * workers for large evidence (§12: heavy parsing off the UI thread).

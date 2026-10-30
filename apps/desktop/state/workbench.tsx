@@ -1,9 +1,9 @@
 "use client";
 /**
- * Workbench context — navigation + live job table for the shell.
+ * Workbench context: navigation, panel sizing, and the live job table.
  * Feature views read navigation state from here and dispatch intents
- * (select tool, run job) back through it; persistence and per-tab state
- * arrive in later arcs.
+ * (select tool, run job) back through it. Panel sizes persist locally so
+ * the layout survives restarts (Master Plan §3.5).
  */
 import {
   createContext,
@@ -24,6 +24,9 @@ interface WorkbenchApi {
   paletteOpen: boolean;
   dockOpen: boolean;
   inspectorOpen: boolean;
+  navigatorWidth: number;
+  inspectorWidth: number;
+  dockHeight: number;
   selectCategory: (id: CategoryId) => void;
   selectTool: (id: ToolId) => void;
   runDemoJob: () => void;
@@ -31,9 +34,47 @@ interface WorkbenchApi {
   setPaletteOpen: (open: boolean) => void;
   toggleDock: () => void;
   toggleInspector: () => void;
+  setNavigatorWidth: (px: number) => void;
+  setInspectorWidth: (px: number) => void;
+  setDockHeight: (px: number) => void;
 }
 
 const WorkbenchContext = createContext<WorkbenchApi | null>(null);
+
+export const PANEL_LIMITS = {
+  navigator: { min: 180, max: 340, fallback: 224 },
+  inspector: { min: 240, max: 420, fallback: 288 },
+  dock: { min: 96, max: 280, fallback: 160 },
+} as const;
+
+type PanelSizes = { navigator: number; inspector: number; dock: number };
+
+const STORAGE_KEY = "hacktool.panel-sizes";
+
+function clamp(value: number, min: number, max: number): number {
+  return Math.min(max, Math.max(min, value));
+}
+
+function loadPanelSizes(): PanelSizes {
+  const fallback: PanelSizes = {
+    navigator: PANEL_LIMITS.navigator.fallback,
+    inspector: PANEL_LIMITS.inspector.fallback,
+    dock: PANEL_LIMITS.dock.fallback,
+  };
+  if (typeof window === "undefined") return fallback;
+  try {
+    const raw = window.localStorage.getItem(STORAGE_KEY);
+    if (!raw) return fallback;
+    const parsed = JSON.parse(raw) as Partial<PanelSizes>;
+    return {
+      navigator: clamp(Number(parsed.navigator) || fallback.navigator, PANEL_LIMITS.navigator.min, PANEL_LIMITS.navigator.max),
+      inspector: clamp(Number(parsed.inspector) || fallback.inspector, PANEL_LIMITS.inspector.min, PANEL_LIMITS.inspector.max),
+      dock: clamp(Number(parsed.dock) || fallback.dock, PANEL_LIMITS.dock.min, PANEL_LIMITS.dock.max),
+    };
+  } catch {
+    return fallback;
+  }
+}
 
 function firstToolOf(category: CategoryId): ToolId {
   const cat = CATEGORIES.find((c) => c.id === category);
@@ -47,6 +88,26 @@ export function WorkbenchProvider({ children }: { children: React.ReactNode }) {
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [dockOpen, setDockOpen] = useState(false);
   const [inspectorOpen, setInspectorOpen] = useState(true);
+  const [panels, setPanels] = useState<PanelSizes>(loadPanelSizes);
+
+  // Persist panel sizes; write after hydration so SSR output stays stable.
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(STORAGE_KEY, JSON.stringify(panels));
+    } catch {
+      // private-mode or quota failure: sizing still works in-memory
+    }
+  }, [panels]);
+
+  const setNavigatorWidth = useCallback((px: number) => {
+    setPanels((p) => ({ ...p, navigator: clamp(px, PANEL_LIMITS.navigator.min, PANEL_LIMITS.navigator.max) }));
+  }, []);
+  const setInspectorWidth = useCallback((px: number) => {
+    setPanels((p) => ({ ...p, inspector: clamp(px, PANEL_LIMITS.inspector.min, PANEL_LIMITS.inspector.max) }));
+  }, []);
+  const setDockHeight = useCallback((px: number) => {
+    setPanels((p) => ({ ...p, dock: clamp(px, PANEL_LIMITS.dock.min, PANEL_LIMITS.dock.max) }));
+  }, []);
 
   const selectCategory = useCallback((id: CategoryId) => {
     setCategory(id);
@@ -99,6 +160,9 @@ export function WorkbenchProvider({ children }: { children: React.ReactNode }) {
       paletteOpen,
       dockOpen,
       inspectorOpen,
+      navigatorWidth: panels.navigator,
+      inspectorWidth: panels.inspector,
+      dockHeight: panels.dock,
       selectCategory,
       selectTool,
       runDemoJob,
@@ -106,6 +170,9 @@ export function WorkbenchProvider({ children }: { children: React.ReactNode }) {
       setPaletteOpen,
       toggleDock,
       toggleInspector,
+      setNavigatorWidth,
+      setInspectorWidth,
+      setDockHeight,
     }),
     [
       category,
@@ -114,12 +181,18 @@ export function WorkbenchProvider({ children }: { children: React.ReactNode }) {
       paletteOpen,
       dockOpen,
       inspectorOpen,
+      panels.navigator,
+      panels.inspector,
+      panels.dock,
       selectCategory,
       selectTool,
       runDemoJob,
       cancelJob,
       toggleDock,
       toggleInspector,
+      setNavigatorWidth,
+      setInspectorWidth,
+      setDockHeight,
     ],
   );
 

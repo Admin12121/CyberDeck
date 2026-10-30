@@ -1,5 +1,5 @@
 "use client";
-/** Contextual inspector — selected tool metadata + live job summary (§3.4). */
+/** Contextual inspector: selected tool metadata and a live job summary (§3.4). */
 import { toolById } from "@features/registry";
 import { useWorkbench } from "@state/workbench";
 import { Chip, Field } from "@ds/panes";
@@ -11,7 +11,11 @@ export function Inspector() {
   const recentJobs = Object.values(wb.jobs).sort((a, b) => b.startedAt - a.startedAt).slice(0, 5);
 
   return (
-    <aside className="flex w-72 shrink-0 flex-col border-l border-line bg-sidebar" aria-label="Inspector">
+    <aside
+      className="flex shrink-0 flex-col border-l border-line bg-sidebar"
+      style={{ width: wb.inspectorWidth }}
+      aria-label="Inspector"
+    >
       <div className="flex h-8 shrink-0 items-center justify-between border-b border-line px-3">
         <span className="text-[10px] font-medium uppercase tracking-wider text-fg-muted">Inspector</span>
         <button type="button" onClick={wb.toggleInspector} aria-label="Close inspector" className="text-fg-muted hover:text-fg">
@@ -20,11 +24,11 @@ export function Inspector() {
       </div>
       <div className="flex-1 overflow-auto">
         <Field label="Workspace" value={tool ? `${tool.category} / ${tool.label}` : wb.tool} />
-        <Field label="Purpose" value={<span className="whitespace-normal">{tool?.hint ?? "—"}</span>} />
+        <Field label="Purpose" value={<span className="whitespace-normal">{tool?.hint ?? "none"}</span>} />
         <div className="border-b border-line/50 px-3 py-1.5">
           <div className="text-[10px] uppercase tracking-wider text-fg-muted">Engine provenance</div>
           <div className="font-mono text-[11px] leading-relaxed text-fg-dim">
-            engines are named in results and diagnostics, never in navigation — capability-first UI (§6)
+            engines are named in results and diagnostics, never in navigation. Capability-first UI (§6).
           </div>
         </div>
         <div className="px-3 py-2">

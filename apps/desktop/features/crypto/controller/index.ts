@@ -1,5 +1,5 @@
 /**
- * Crypto feature — controller layer.
+ * Crypto feature controller layer.
  * Pure state transitions for the recipe builder. The view dispatches intents
  * here; IPC-backed actions (native hashing, engine jobs) join this layer in
  * arc 2 through lib/ipc.
@@ -30,6 +30,16 @@ export function moveStep(state: RecipeState, index: number, delta: -1 | 1): Reci
   return { ...state, steps };
 }
 
+/** Move a step to an absolute drop position (drag-and-drop reorder). */
+export function moveStepTo(state: RecipeState, from: number, to: number): RecipeState {
+  const target = Math.max(0, Math.min(state.steps.length, to));
+  if (target === from || target === from + 1) return state;
+  const steps = state.steps.slice();
+  const [step] = steps.splice(from, 1);
+  steps.splice(from < target ? target - 1 : target, 0, step);
+  return { ...state, steps };
+}
+
 export function setInput(state: RecipeState, input: string): RecipeState {
   return { ...state, input };
 }
@@ -48,7 +58,7 @@ export function initialRecipeState(): RecipeState {
       { opId: "to_base64", enabled: true },
       { opId: "to_hex", enabled: false },
     ],
-    input: "HackTool workbench — transformation pipeline seed input",
+    input: "HackTool workbench: transformation pipeline seed input",
     autoBake: true,
   };
 }

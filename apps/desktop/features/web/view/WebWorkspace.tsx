@@ -1,6 +1,6 @@
 "use client";
 /**
- * Web feature — view layer.
+ * Web feature view layer.
  * Burp/ZAP-style workflow: Proxy, History, Repeater, Scanner tabs with site
  * tree and request/response editors (Master Plan §5.2). Live interception and
  * the bundled scan engine arrive arc 4; the layout and editors land now so the
@@ -75,13 +75,13 @@ function ProxyHistoryView({ mode }: { mode: "proxy" | "history" }) {
       </Pane>
       <div className="flex min-w-0 flex-1 flex-col gap-px bg-line">
         <Pane
-          title={mode === "proxy" ? "Intercept — listener offline (arc 4)" : "HTTP history"}
+          title={mode === "proxy" ? "Intercept: listener offline (arc 4)" : "HTTP history"}
           className="min-h-0 flex-1"
           actions={
             mode === "proxy" ? (
               <>
                 <Chip tone="muted">proxy off</Chip>
-                <ToolButton disabled title="Local loopback listener — arc 4">Start proxy</ToolButton>
+                <ToolButton disabled title="Local loopback listener, arc 4">Start proxy</ToolButton>
               </>
             ) : (
               <TextInput value={query} onChange={setQuery} placeholder="filter: method, host, path, status" ariaLabel="History filter" className="w-56" />
@@ -118,7 +118,7 @@ function ProxyHistoryView({ mode }: { mode: "proxy" | "history" }) {
           </table>
         </Pane>
         <div className="flex min-h-0 flex-1 gap-px">
-          <Pane title={selected ? `Request — #${selected.id} ${selected.method} ${selected.path}` : "Request"} className="min-w-0 flex-1">
+          <Pane title={selected ? `Request: #${selected.id} ${selected.method} ${selected.path}` : "Request"} className="min-w-0 flex-1">
             <pre className="whitespace-pre-wrap break-all p-2 font-mono text-[11px] leading-relaxed text-fg-dim">{SAMPLE_REQUEST}</pre>
           </Pane>
           <Pane title="Response" className="min-w-0 flex-1">
@@ -139,11 +139,11 @@ function RepeaterView() {
     <div className="flex h-full min-h-0 flex-col">
       <div className="flex h-8 shrink-0 items-center gap-2 border-b border-line bg-sidebar px-2">
         <Chip tone="blue">{tabName}</Chip>
-        <ToolButton onClick={() => setTabName(tabName === "R1" ? "R2" : "R1")} title="Multiple replay tabs — state per tab (§3.5)">+ Tab</ToolButton>
+        <ToolButton onClick={() => setTabName(tabName === "R1" ? "R2" : "R1")} title="Multiple replay tabs, state per tab (§3.5)">+ Tab</ToolButton>
         <ToolButton
           tone="primary"
           onClick={() => setResponse(SAMPLE_RESPONSE.replace("200 OK", "200 OK (replayed)"))}
-          title="Replay through the local engine — arc 4 sends this through the proxy session"
+          title="Replay through the local engine; arc 4 sends this through the proxy session"
         >
           Send
         </ToolButton>
@@ -181,7 +181,7 @@ function ScannerView() {
       <Pane title="Scan queue" className="w-64 shrink-0">
         <EmptyState title="No active scan" detail="Crawl and active scan run on the bundled engine (arc 4). Queue, cancellation and findings provenance ship with it." badge="scanner" />
       </Pane>
-      <Pane title="Findings — evidence-backed" className="min-w-0 flex-1">
+      <Pane title="Findings (evidence-backed)" className="min-w-0 flex-1">
         <table className="data-table">
           <thead>
             <tr>

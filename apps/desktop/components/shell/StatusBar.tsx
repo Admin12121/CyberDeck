@@ -1,5 +1,5 @@
 "use client";
-/** Status bar — transport, workspace, job state, engine status (§3.5). */
+/** Status bar: transport, workspace, job state, engine status (§3.5). */
 import { isDesktop } from "@lib/ipc";
 import { useWorkbench } from "@state/workbench";
 import { toolById } from "@features/registry";

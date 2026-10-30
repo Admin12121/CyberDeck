@@ -1,5 +1,5 @@
 /**
- * Forensics feature — model layer.
+ * Forensics feature model layer.
  * Sample evidence set for the evidence-first layout (§5.6): file tree, hex/
  * preview, metadata, signatures, entropy. Real parsers (signature scanning,
  * metadata extraction, YARA-X) arrive arc 2 through the Rust core; originals
@@ -60,7 +60,7 @@ export const SAMPLE_EVIDENCE: EvidenceFile[] = [
   },
 ];
 
-/** Deterministic sample content per evidence id — stands in for arc-2 parsers. */
+/** Deterministic sample content per evidence id, standing in for arc 2 parsers./ */
 export function sampleContent(id: string): Uint8Array {
   const texts: Record<string, string> = {
     note:

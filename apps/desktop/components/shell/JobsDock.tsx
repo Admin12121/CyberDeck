@@ -1,5 +1,5 @@
 "use client";
-/** Bottom dock — live job execution, progress and cancel (§8.3 via §3.4). */
+/** Bottom dock: live job execution, progress and cancel (§8.3 via §3.4). */
 import { useWorkbench } from "@state/workbench";
 import { Chip, EmptyState, ToolButton } from "@ds/panes";
 
@@ -9,7 +9,12 @@ export function JobsDock() {
   const jobs = Object.values(wb.jobs).sort((a, b) => b.startedAt - a.startedAt);
 
   return (
-    <div className="flex h-40 shrink-0 flex-col border-t border-line bg-panel" role="region" aria-label="Jobs dock">
+    <div
+      className="flex shrink-0 flex-col border-t border-line bg-panel"
+      style={{ height: wb.dockHeight }}
+      role="region"
+      aria-label="Jobs dock"
+    >
       <div className="flex h-7 shrink-0 items-center gap-2 border-b border-line bg-sidebar px-2">
         <span className="text-[10px] font-medium uppercase tracking-wider text-fg-muted">Jobs</span>
         <Chip>{jobs.length}</Chip>
@@ -61,7 +66,7 @@ export function JobsDock() {
                     {job.status === "running" ? (
                       <ToolButton tone="danger" onClick={() => wb.cancelJob(job.id)}>cancel</ToolButton>
                     ) : (
-                      <span className="font-mono text-[10px] text-fg-muted">—</span>
+                      <span className="font-mono text-[10px] text-fg-muted">n/a</span>
                     )}
                   </td>
                 </tr>

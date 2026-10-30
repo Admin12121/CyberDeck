@@ -1,5 +1,5 @@
 /**
- * Job model — the frontend mirror of the Rust `JobEvent` wire type
+ * Job model: the frontend mirror of the Rust `JobEvent` wire type
  * (apps/desktop/src-tauri/src/jobs.rs). Keep both sides in sync; these
  * contracts belong to the shared job model in Master Plan §8.3.
  */

@@ -4,6 +4,9 @@
   "workspaces": {
     "": {
       "name": "hacktool",
+      "devDependencies": {
+        "sharp": "^0.35.5",
+      },
     },
     "apps/desktop": {
       "name": "@hacktool/desktop",

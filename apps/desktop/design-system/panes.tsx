@@ -1,11 +1,13 @@
 "use client";
 /**
  * Dark Matter pane primitives shared by every studio: bordered panels with
- * compact headers, empty states, inspector fields and status chips.
- * Density is Zed-style compact; no decorative color (Master Plan §3).
+ * compact headers, empty states, inspector fields, status chips, and the
+ * drag resizer. Density is Zed-style compact; no decorative color (§3).
  */
 import type { LucideIcon } from "lucide-react";
-import type { ReactNode } from "react";
+import type { CSSProperties, ReactNode } from "react";
+
+export { Resizer } from "./Resizer";
 
 export function Pane({
   title,
@@ -13,15 +15,17 @@ export function Pane({
   children,
   className = "",
   bodyClassName = "",
+  style,
 }: {
   title: ReactNode;
   actions?: ReactNode;
   children: ReactNode;
   className?: string;
   bodyClassName?: string;
+  style?: CSSProperties;
 }) {
   return (
-    <section className={`flex min-h-0 min-w-0 flex-col border border-line bg-panel ${className}`}>
+    <section style={style} className={`flex min-h-0 min-w-0 flex-col border border-line bg-panel ${className}`}>
       <header className="flex h-7 shrink-0 items-center justify-between gap-2 border-b border-line bg-sidebar px-2">
         <span className="truncate text-[10px] font-medium uppercase tracking-wider text-fg-muted">
           {title}

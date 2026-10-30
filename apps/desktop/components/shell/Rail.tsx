@@ -1,5 +1,5 @@
 "use client";
-/** Global category rail — fixed icons, tooltips via title (§3.4). */
+/** Global category rail: fixed icons, tooltips via title (§3.4). */
 import { CATEGORIES } from "@features/registry";
 import { useWorkbench } from "@state/workbench";
 

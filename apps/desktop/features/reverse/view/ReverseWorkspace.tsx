@@ -1,6 +1,6 @@
 "use client";
 /**
- * Reverse feature — placeholder for Phase 6 (Master Plan §5.7).
+ * Reverse feature placeholder for Phase 6 (Master Plan §5.7).
  * The decompiler-centric multi-pane layout is deliberately NOT built here;
  * this screen records the decision and links the future RFC so the category
  * rail can still show the reserved workspace.
@@ -11,7 +11,7 @@ export function ReverseWorkspace() {
   return (
     <div className="flex h-full min-h-0 gap-px bg-line">
       <Pane title="Modules / symbols" className="w-64 shrink-0">
-        <EmptyState title="Reserved — Phase 6" detail="Full decompiler workspace: functions tree, symbols, segments." badge="future" />
+        <EmptyState title="Reserved (Phase 6)" detail="Full decompiler workspace: functions tree, symbols, segments." badge="future" />
       </Pane>
       <div className="flex min-w-0 flex-1 flex-col gap-px">
         <Pane title="Decompiler / assembly / hex" className="min-h-0 flex-1">

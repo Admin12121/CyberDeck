@@ -1,5 +1,5 @@
 /**
- * Feature registry — the single source of truth for the category rail and the
+ * Feature registry: the single source of truth for the category rail and the
  * navigator (Master Plan §3.4). Tools are named by user-facing operation, never
  * by upstream engine: engines appear only in results provenance (§5.5, §6).
  */
@@ -56,7 +56,7 @@ export const CATEGORIES: CategoryDescriptor[] = [
         id: "crypto.hash",
         category: "crypto",
         label: "Hash Analysis",
-        hint: "Identify, verify, benchmark and run authorized recovery sessions — engine planner picks CPU/GPU implementation",
+        hint: "Identify, verify, benchmark and run authorized recovery sessions; engine planner picks CPU/GPU implementation",
       },
       {
         id: "crypto.ops",
@@ -81,7 +81,7 @@ export const CATEGORIES: CategoryDescriptor[] = [
         id: "network.lab",
         category: "network",
         label: "Network Lab",
-        hint: "Authorized-scope active network mode (Ettercap-inspired) — gated, labeled, never mixed into passive evidence",
+        hint: "Authorized-scope active network mode (Ettercap-inspired): gated, labeled, never mixed into passive evidence",
       },
       {
         id: "network.scan",

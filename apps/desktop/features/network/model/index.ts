@@ -1,9 +1,9 @@
 /**
- * Network feature — model layer.
+ * Network feature model layer.
  * Arc 1 ships a deterministic sample capture derived from a synthetic DNS +
  * TCP + HTTP exchange so the three-pane layout runs on representative data.
  * PCAP/PCAPNG parsing and live capture move to the Rust core in arc 2
- * (Master Plan §5.1) — this model's interfaces are written to survive that swap.
+ * (Master Plan §5.1); this model's interfaces are written to survive that swap.
  */
 
 export interface PacketRow {
@@ -95,7 +95,7 @@ export function detailTree(packet: PacketRow): DetailNode[] {
   if (packet.protocol === "HTTP") {
     base.push({ label: "Hypertext Transfer Protocol", value: packet.info, children: [{ label: "line-based text", value: packet.info }] });
   }
-  base.push({ label: "Payload / reassembled bytes", value: "arc 2 — dissector engine" });
+  base.push({ label: "Payload / reassembled bytes", value: "arc 2: dissector engine" });
   return base;
 }
 

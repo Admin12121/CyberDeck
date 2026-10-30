@@ -1,18 +1,18 @@
-# HackTool — Cybersecurity Workbench
+# HackTool: Cybersecurity Workbench
 
 Integrated desktop security workbench: **Tauri 2 + Rust** native core, **Next.js (static export) + TypeScript** interface, **Dark Matter** theme (Zed-style near-black, blue = selection/analysis, orange = active operations).
 
 Full product and engineering specification: [Master Plan.md](./Master Plan.md).
 Upstream sources for study and future engine packaging live in `reference/` (never committed, never shipped as-is).
 
-## Status — Arc 1 (workbench shell)
+## Status: Arc 1 (workbench shell)
 
 - Monorepo: bun workspace (frontend) + Cargo workspace (native).
 - Desktop shell: title bar, category rail (Crypto / Network / Web / Reverse / Forensics), navigator, workspace host, inspector, jobs dock (Ctrl+J), status bar, command palette (Ctrl+K).
 - Feature-MVC structure under `apps/desktop/features/<feature>/{model,controller,view}`.
 - Shared job pipeline: typed Tauri IPC (`Channel<JobEvent>`), tokio workers, safe cancellation; browser fallback for UI development without the desktop shell.
 - Working capability slices: Recipes (four-column pipeline, real operations), hash format identification (conservative heuristics), digests (WebCrypto), strings extraction + Shannon entropy, sample packet three-pane studio, Burp-style web layout with editors.
-- Engines (john/hashcat, nmap-family, ZAP, Wireshark dissectors, Ettercap) are **not** integrated yet — planned per the Master Plan phase gates with license review first.
+- Engines (john/hashcat, nmap-family, ZAP, Wireshark dissectors, Ettercap) are **not** integrated yet; planned per the Master Plan phase gates with license review first.
 
 ## Commands
 
@@ -49,7 +49,7 @@ reference/               # upstream study sources (git-ignored)
 
 ## Rules baked into this scaffold
 
-- The frontend never spawns processes or touches the filesystem — every native action is a typed command in `src-tauri` (Master Plan §9.2).
+- The frontend never spawns processes or touches the filesystem; every native action is a typed command in `src-tauri` (Master Plan §9.2).
 - Tools are named by user-facing operation, never by upstream engine; engine identity appears in results provenance (§5.5, §6).
 - Production builds must work offline with no server; no Next.js server features (§2.2).
 - Capabilities are gated by status (`planned` → `integrated` → `verified` → `shipping`); UI never claims more (§6).

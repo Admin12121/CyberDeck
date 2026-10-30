@@ -1,5 +1,5 @@
 "use client";
-/** Command palette (Ctrl/Cmd+K) — searchable tools + actions (§3.5). */
+/** Command palette (Ctrl/Cmd+K): searchable tools and actions (§3.5). */
 import { useMemo, useState } from "react";
 import { CATEGORIES, toolById } from "@features/registry";
 import { useWorkbench } from "@state/workbench";

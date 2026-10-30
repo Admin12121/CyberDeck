@@ -1,5 +1,5 @@
 /**
- * Crypto feature — model layer.
+ * Crypto feature model layer.
  * Pure types, catalog and pipeline evaluation for the Recipes workspace.
  * Operations run deterministically over bytes; heavier crypto (hashes, HMAC)
  * moves to the Rust core in arc 2 (Master Plan §5.4).

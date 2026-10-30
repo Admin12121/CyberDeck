@@ -1,5 +1,5 @@
 /**
- * Web feature — model layer.
+ * Web feature model layer.
  * Sample site tree + proxy history for the Burp/ZAP-style workspace (§5.2).
  * The live proxy listener, interception queue and ZAP engine arrive arc 4.
  */
@@ -40,7 +40,7 @@ export const SAMPLE_HISTORY: HistoryRow[] = [
   { id: 2, method: "GET", host: "lab.example.test", path: "/assets/app.js", status: 200, length: 88012, timeMs: 12 },
   { id: 3, method: "GET", host: "lab.example.test", path: "/api/products", status: 200, length: 4096, timeMs: 18, note: "session cookie echoed" },
   { id: 4, method: "POST", host: "lab.example.test", path: "/api/auth", status: 200, length: 132, timeMs: 64 },
-  { id: 5, method: "POST", host: "lab.example.test", path: "/api/auth", status: 401, length: 89, timeMs: 58, note: "invalid credentials — lab fixture" },
+  { id: 5, method: "POST", host: "lab.example.test", path: "/api/auth", status: 401, length: 89, timeMs: 58, note: "invalid credentials, lab fixture" },
   { id: 6, method: "GET", host: "lab.example.test", path: "/api/products?page=2", status: 200, length: 4018, timeMs: 16 },
 ];
 

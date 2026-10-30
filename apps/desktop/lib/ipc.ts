@@ -1,5 +1,5 @@
 /**
- * Typed IPC client. The frontend never invokes raw paths or shell commands —
+ * Typed IPC client. The frontend never invokes raw paths or shell commands;
  * every native action goes through a named wrapper here (Master Plan §9.2).
  *
  * When running in a plain browser (next dev without Tauri) the wrappers fall

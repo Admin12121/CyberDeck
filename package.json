@@ -12,5 +12,8 @@
     "rust:check": "cargo check --workspace",
     "rust:fmt": "cargo fmt --all",
     "icons": "node scripts/gen-icons.mjs"
+  },
+  "devDependencies": {
+    "sharp": "^0.35.5"
   }
 }

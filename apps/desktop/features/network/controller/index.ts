@@ -1,5 +1,5 @@
 /**
- * Network feature — controller layer.
+ * Network feature controller layer.
  * Pure selection/filter transitions for the packet studio. Display-filter
  * compilation and capture control move to the Rust core in arc 2.
  */

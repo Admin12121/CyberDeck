@@ -1,5 +1,5 @@
 /**
- * Crypto feature — digest controller action.
+ * Crypto feature digest controller action.
  * Runs real hashing through the platform WebCrypto in the webview; native Rust
  * hashing with streaming/large-input support lands in arc 2 (Master Plan §5.4).
  */
