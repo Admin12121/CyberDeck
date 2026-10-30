@@ -27,12 +27,12 @@ export function Navigator() {
               title={tool.disabled ? `${tool.label} (${tool.disabledReason ?? "unavailable"})` : tool.hint}
               disabled={tool.disabled}
               onClick={() => wb.selectTool(tool.id)}
-              className={`mb-px block w-full truncate border-l-2 px-2 py-1.5 text-left text-xs ${
+              className={`mb-px block w-full truncate px-2 py-1.5 text-left text-xs ${
                 tool.disabled
-                  ? "cursor-not-allowed border-transparent text-fg-muted opacity-50"
+                  ? "cursor-not-allowed text-fg-muted opacity-50"
                   : active
-                    ? "border-orange bg-orange-dim text-fg"
-                    : "border-transparent text-fg-dim hover:bg-raised hover:text-fg"
+                    ? "bg-orange-dim text-fg"
+                    : "text-fg-dim hover:bg-raised hover:text-fg"
               }`}
             >
               {tool.label}

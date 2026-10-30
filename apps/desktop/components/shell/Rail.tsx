@@ -22,8 +22,7 @@ export function Rail() {
               active ? "text-orange" : "text-fg-muted hover:text-fg"
             }`}
           >
-            {active ? <span className="absolute left-0 top-1/2 h-5 w-0.5 -translate-y-1/2 bg-orange" /> : null}
-            <Icon size={18} strokeWidth={1.5} />
+            <Icon size={18} strokeWidth={active ? 2 : 1.5} />
           </button>
         );
       })}

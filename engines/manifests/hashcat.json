@@ -1,0 +1,33 @@
+{
+  "engine_id": "hashcat",
+  "upstream": "https://github.com/hashcat/hashcat",
+  "license": {
+    "spdx": "MIT",
+    "verified_from": "reference/hashcat/docs/license.txt (vendored commit, 2026-10-31)",
+    "copyright": "Copyright (c) 2015-2026 Jens Steube",
+    "notes": "MIT permits bundling, modification and redistribution with attribution. Third-party libraries inside hashcat carry their own terms; review docs/license_libs/ before shipping the installer.",
+    "status": "approved-for-bundling"
+  },
+  "binary": {
+    "windows": "hashcat.exe",
+    "linux": "hashcat",
+    "macos": "hashcat"
+  },
+  "version_command": ["--version"],
+  "version_parse": "first line matching /^v?[0-9]+\\.[0-9]+/",
+  "mode_map": {
+    "md5": 0,
+    "sha1": 100,
+    "sha256": 1400,
+    "sha512": 1700,
+    "ntlm": 1000,
+    "bcrypt": 3200
+  },
+  "attack_modes": { "wordlist": "-a 0", "mask": "-a 3" },
+  "output": "outfile lines of hash:plain via -o; stdout tail kept as raw evidence",
+  "platform_matrix": { "windows": "supported", "linux": "supported", "macos": "supported (CPU/Metal)" },
+  "gpu": {
+    "backend": "OpenCL/CUDA via vendor drivers",
+    "redistribution": "vendor driver runtimes are NOT bundled; detected via nvidia-smi and reported honestly (Master Plan 7.2)"
+  }
+}

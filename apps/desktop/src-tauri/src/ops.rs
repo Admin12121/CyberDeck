@@ -41,6 +41,12 @@ pub fn crypto_catalog() -> Vec<OpInfo> {
     catalog()
 }
 
+/// Verify a candidate password against a bcrypt/argon2 PHC string.
+#[tauri::command]
+pub fn kdf_verify(hash: String, candidate: String) -> Result<bool, String> {
+    hacktool_crypto::verify_kdf(hash.trim(), &candidate)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

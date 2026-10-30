@@ -18,19 +18,29 @@ interface ResizerProps {
   /** Which side the panel sits on relative to the drag direction. */
   flip?: boolean;
   ariaLabel: string;
+  /**
+   * Called on drag start; may return the synced starting size. Use when the
+   * panel is in a flexible (unset) state and must be measured before the
+   * first move applies a pixel delta.
+   */
+  onDragStart?: () => number | void;
 }
 
-export function Resizer({ direction, value, onChange, min, max, flip = false, ariaLabel }: ResizerProps) {
+export function Resizer({ direction, value, onChange, min, max, flip = false, ariaLabel, onDragStart }: ResizerProps) {
   const [dragging, setDragging] = useState(false);
   const startRef = useRef<{ pointer: number; value: number } | null>(null);
 
   const onPointerDown = useCallback(
     (e: React.PointerEvent<HTMLDivElement>) => {
       e.preventDefault();
-      startRef.current = { pointer: direction === "horizontal" ? e.clientX : e.clientY, value };
+      const synced = onDragStart ? onDragStart() : undefined;
+      startRef.current = {
+        pointer: direction === "horizontal" ? e.clientX : e.clientY,
+        value: typeof synced === "number" ? synced : value,
+      };
       setDragging(true);
     },
-    [direction, value],
+    [direction, value, onDragStart],
   );
 
   useEffect(() => {

@@ -14,7 +14,7 @@ use tauri_plugin_dialog::DialogExt;
 
 /// Import size guard: hashing and hex views operate on in-memory bytes this
 /// arc; streaming for multi-hundred-MB files arrives with the storage upgrade.
-const MAX_IMPORT_BYTES: u64 = 256 * 1024 * 1024;
+pub(crate) const MAX_IMPORT_BYTES: u64 = 256 * 1024 * 1024;
 const MAX_HEX_REQUEST: i64 = 4096;
 const MAX_STRINGS_SCAN: usize = 8 * 1024 * 1024;
 const MAX_STRINGS_HITS: usize = 2000;
@@ -185,6 +185,43 @@ fn hex_view(ctx: &EvidenceCtx, id: &str, offset: i64, len: i64) -> Result<HexRes
 #[tauri::command]
 pub fn file_strings(ctx: State<'_, EvidenceCtx>, id: String, min_len: i32, max_hits: i32) -> Result<Vec<StringHit>, String> {
     strings(&ctx, &id, min_len, max_hits)
+}
+
+#[derive(Debug, Serialize)]
+pub struct FileDigestsWire {
+    pub name: String,
+    pub size: u64,
+    pub sha256: String,
+    pub sha1: String,
+    pub md5: String,
+    pub crc32: String,
+}
+
+/// Digest a picked file without importing it into the case store.
+#[tauri::command]
+pub fn digest_file_dialog(app: AppHandle) -> Result<FileDigestsWire, String> {
+    let picked = app.dialog().file().blocking_pick_file().ok_or("cancelled")?;
+    let path = picked.as_path().ok_or("unsupported file location")?.to_path_buf();
+    let meta = std::fs::metadata(&path).map_err(|e| format!("cannot read file metadata: {e}"))?;
+    if meta.len() > MAX_IMPORT_BYTES {
+        return Err(format!(
+            "file is {} MB; the limit this arc is {} MB",
+            meta.len() / (1024 * 1024),
+            MAX_IMPORT_BYTES / (1024 * 1024)
+        ));
+    }
+    let bytes = std::fs::read(&path).map_err(|e| format!("cannot read file: {e}"))?;
+    Ok(FileDigestsWire {
+        name: path
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| "file".to_string()),
+        size: bytes.len() as u64,
+        sha256: digest_of("sha256", &bytes)?,
+        sha1: digest_of("sha1", &bytes)?,
+        md5: digest_of("md5", &bytes)?,
+        crc32: digest_of("crc32", &bytes)?,
+    })
 }
 
 fn strings(ctx: &EvidenceCtx, id: &str, min_len: i32, max_hits: i32) -> Result<Vec<StringHit>, String> {

@@ -30,6 +30,7 @@ pub fn catalog() -> Vec<OpInfo> {
         op("sha512", "SHA-512", "hash", "SHA-512 digest", false),
         op("crc32", "CRC32", "hash", "CRC-32 checksum (IEEE, 8 hex chars)", false),
         op("hmac_sha256", "HMAC-SHA256", "hash", "HMAC over the input with the supplied key", true),
+        op("hmac_sha512", "HMAC-SHA512", "hash", "HMAC-SHA-512 over the input with the supplied key", true),
         op("to_base64", "To Base64", "encoding", "Encode bytes to Base64", false),
         op("from_base64", "From Base64", "encoding", "Decode Base64 to bytes", false),
         op("to_hex", "To Hex", "encoding", "Encode bytes to hexadecimal", false),
@@ -70,6 +71,12 @@ pub fn apply_op(op_id: &str, input: &[u8], key: Option<&[u8]>) -> Result<Vec<u8>
         "hmac_sha256" => {
             let key = key.ok_or_else(|| "hmac_sha256 requires a key".to_string())?;
             let mut mac = Hmac::<Sha256>::new_from_slice(key).map_err(|e| e.to_string())?;
+            mac.update(input);
+            Ok(mac.finalize().into_bytes().to_vec())
+        }
+        "hmac_sha512" => {
+            let key = key.ok_or_else(|| "hmac_sha512 requires a key".to_string())?;
+            let mut mac = Hmac::<Sha512>::new_from_slice(key).map_err(|e| e.to_string())?;
             mac.update(input);
             Ok(mac.finalize().into_bytes().to_vec())
         }
@@ -166,6 +173,38 @@ pub fn entropy(bytes: &[u8]) -> f64 {
         .sum()
 }
 
+// --- KDF verification (our own engine, via MIT/Apache RustCrypto crates) -----
+
+/// Identify a password-hashing format from the PHC/modular-crypt string.
+pub fn kdf_format(hash: &str) -> Option<&'static str> {
+    if hash.starts_with("$2a$") || hash.starts_with("$2b$") || hash.starts_with("$2x$") || hash.starts_with("$2y$") {
+        Some("bcrypt")
+    } else if hash.starts_with("$argon2id$") {
+        Some("argon2id")
+    } else if hash.starts_with("$argon2i$") {
+        Some("argon2i")
+    } else if hash.starts_with("$argon2d$") {
+        Some("argon2d")
+    } else {
+        None
+    }
+}
+
+/// Verify a candidate password against a bcrypt or argon2 hash. These formats
+/// are deliberately slow; native recovery over wordlists works but at KDF
+/// speed, and the external engines stay the fast path (§5.5).
+pub fn verify_kdf(hash: &str, candidate: &str) -> Result<bool, String> {
+    match kdf_format(hash) {
+        Some("bcrypt") => bcrypt::verify(candidate, hash).map_err(|e| format!("bcrypt verify failed: {e}")),
+        Some(_) => {
+            use argon2::password_hash::{PasswordHash, PasswordVerifier};
+            let parsed = PasswordHash::new(hash).map_err(|e| format!("invalid argon2 hash string: {e}"))?;
+            Ok(argon2::Argon2::default().verify_password(candidate.as_bytes(), &parsed).is_ok())
+        }
+        None => Err("unsupported KDF format; bcrypt and argon2 are supported natively".to_string()),
+    }
+}
+
 /// Detect a file format from magic bytes; returns a human-readable signature.
 pub fn detect_signature(bytes: &[u8]) -> Option<&'static str> {
     const MAGIC: &[(&[u8], &str)] = &[
@@ -237,6 +276,17 @@ mod tests {
     }
 
     #[test]
+    fn hmac_sha512_rfc4231_case1() {
+        // RFC 4231 test case 1, SHA-512 variant
+        let key = [0x0b; 20];
+        let out = apply_op("hmac_sha512", b"Hi There", Some(&key)).unwrap();
+        assert_eq!(
+            hex::encode(out),
+            "87aa7cdea5ef619d4ff0b4241a1d6cb02379f4e2ce4ec2787ad0b30545e17cdedaa833b7d6b8a702038b274eaea3f4e4be9d914eeb61f1702e696c203a126854"
+        );
+    }
+
+    #[test]
     fn crc32_known_value() {
         let out = apply_op("crc32", b"123456789", None).unwrap();
         assert_eq!(s(out), "cbf43926");
@@ -303,6 +353,42 @@ mod tests {
         assert_eq!(detect_signature(b"\x89PNG\r\n\x1a\nrest"), Some("PNG image"));
         assert_eq!(detect_signature(b"PK\x03\x04..."), Some("ZIP archive"));
         assert_eq!(detect_signature(b"plain text"), None);
+    }
+
+    #[test]
+    fn kdf_format_identification() {
+        assert_eq!(kdf_format("$2b$10$abcdefghijklmnopqrstuv"), Some("bcrypt"));
+        assert_eq!(kdf_format("$2y$12$abcdefghijklmnopqrstuv"), Some("bcrypt"));
+        assert_eq!(kdf_format("$argon2id$v=19$m=65536,t=3,p=4$c2FsdXNhbHQ"), Some("argon2id"));
+        assert_eq!(kdf_format("$6$salt$hash"), None);
+    }
+
+    #[test]
+    fn bcrypt_verify_roundtrip() {
+        let hash = bcrypt::hash("hello", 4).unwrap();
+        assert!(verify_kdf(&hash, "hello").unwrap());
+        assert!(!verify_kdf(&hash, "world").unwrap());
+        assert_eq!(kdf_format(&hash), Some("bcrypt"));
+    }
+
+    #[test]
+    fn argon2_verify_roundtrip() {
+        use argon2::password_hash::{PasswordHasher, SaltString};
+        let salt = SaltString::encode_b64(b"0123456789abcdef").unwrap();
+        let argon = argon2::Argon2::new(
+            argon2::Algorithm::Argon2id,
+            argon2::Version::V0x13,
+            argon2::Params::new(19456, 2, 1, None).unwrap(),
+        );
+        let hash = argon.hash_password(b"hello", &salt).unwrap().to_string();
+        assert!(verify_kdf(&hash, "hello").unwrap());
+        assert!(!verify_kdf(&hash, "world").unwrap());
+        assert_eq!(kdf_format(&hash), Some("argon2id"));
+    }
+
+    #[test]
+    fn verify_kdf_rejects_unknown_format() {
+        assert!(verify_kdf("$6$salt$hash", "hello").is_err());
     }
 
     #[test]

@@ -4,6 +4,9 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod attack;
+mod crack;
+mod engines;
 mod evidence;
 mod jobs;
 mod ops;
@@ -37,12 +40,20 @@ fn main() {
             jobs::job_cancel,
             ops::crypto_op,
             ops::crypto_catalog,
+            ops::kdf_verify,
             evidence::file_import_dialog,
             evidence::file_list,
             evidence::file_hex,
             evidence::file_strings,
+            evidence::digest_file_dialog,
             pcap::pcap_open_dialog,
             pcap::pcap_packet_bytes,
+            crack::crack_wordlist_dialog,
+            attack::crack_rules_dialog,
+            attack::crack_mask,
+            attack::device_info,
+            engines::engines_detect,
+            engines::engine_attack,
         ])
         .run(tauri::generate_context!())
         .expect("HackTool desktop runtime failed to start");

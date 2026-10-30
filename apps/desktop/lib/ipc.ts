@@ -182,6 +182,136 @@ export async function pcapPacketBytes(index: number, offset: number, len: number
   return invoke<HexResponseWire>("pcap_packet_bytes", { index, offset, len });
 }
 
+// --- recovery + file digests --------------------------------------------------
+
+export interface CrackMatchWire {
+  line_no: number;
+  password: string;
+}
+
+export interface CrackResultWire {
+  algo: string;
+  target_hash: string;
+  wordlist: string;
+  tried: number;
+  matches: CrackMatchWire[];
+  duration_ms: number;
+  engine: string;
+  engine_version: string;
+}
+
+export async function crackWordlistDialog(algo: string, targetHash: string): Promise<CrackResultWire> {
+  if (!inTauri) throw new Error("recovery sessions require the desktop runtime");
+  return invoke<CrackResultWire>("crack_wordlist_dialog", { algo, targetHash });
+}
+
+export interface FileDigestsWire {
+  name: string;
+  size: number;
+  sha256: string;
+  sha1: string;
+  md5: string;
+  crc32: string;
+}
+
+export async function digestFileDialog(): Promise<FileDigestsWire> {
+  if (!inTauri) throw new Error("file hashing requires the desktop runtime");
+  return invoke<FileDigestsWire>("digest_file_dialog", {});
+}
+
+export interface AttackMatchWire {
+  line_no: number;
+  password: string;
+}
+
+export interface AttackResultWire {
+  mode: string;
+  algo: string;
+  target_hash: string;
+  source: string;
+  tried: number;
+  generated: number;
+  cap_reached: boolean;
+  matches: AttackMatchWire[];
+  duration_ms: number;
+  engine: string;
+  engine_version: string;
+}
+
+export async function crackRulesDialog(algo: string, targetHash: string): Promise<AttackResultWire> {
+  if (!inTauri) throw new Error("rule-based attacks require the desktop runtime");
+  return invoke<AttackResultWire>("crack_rules_dialog", { algo, targetHash });
+}
+
+export async function crackMask(algo: string, targetHash: string, mask: string): Promise<AttackResultWire> {
+  if (!inTauri) throw new Error("mask attacks require the desktop runtime");
+  return invoke<AttackResultWire>("crack_mask", { algo, targetHash, mask });
+}
+
+export interface GpuDeviceWire {
+  name: string;
+  backend: string;
+  usable: boolean;
+}
+
+export interface DeviceInfoWire {
+  cpu_arch: string;
+  cpu_cores: number;
+  cpu_engine: string;
+  gpu_devices: GpuDeviceWire[];
+  planner_note: string;
+}
+
+export async function deviceInfo(): Promise<DeviceInfoWire> {
+  if (!inTauri) throw new Error("device probing requires the desktop runtime");
+  return invoke<DeviceInfoWire>("device_info", {});
+}
+
+// --- external engines (hashcat MIT, john GPLv2 sidecar) -----------------------
+
+export interface EngineStatusWire {
+  id: string;
+  label: string;
+  license: string;
+  available: boolean;
+  version: string;
+  source: string;
+  note: string;
+}
+
+export interface EngineAttackResultWire {
+  engine: string;
+  engine_version: string;
+  algo: string;
+  mode: string;
+  tried_note: string;
+  matches: AttackMatchWire[];
+  duration_ms: number;
+  raw_tail: string;
+}
+
+export async function enginesDetect(): Promise<EngineStatusWire[]> {
+  if (!inTauri) throw new Error("engine detection requires the desktop runtime");
+  return invoke<EngineStatusWire[]>("engines_detect", {});
+}
+
+export async function engineAttack(
+  engine: string,
+  algo: string,
+  targetHash: string,
+  mode: string,
+  mask?: string,
+): Promise<EngineAttackResultWire> {
+  if (!inTauri) throw new Error("external engines require the desktop runtime");
+  return invoke<EngineAttackResultWire>("engine_attack", { engine, algo, targetHash, mode, mask: mask ?? null });
+}
+
+/** Verify a candidate against a bcrypt/argon2 PHC string (native engine). */
+export async function kdfVerify(hash: string, candidate: string): Promise<boolean> {
+  if (!inTauri) throw new Error("KDF verification requires the desktop runtime");
+  return invoke<boolean>("kdf_verify", { hash, candidate });
+}
+
 // --- browser fallback (demo jobs) --------------------------------------------
 
 interface Simulation {

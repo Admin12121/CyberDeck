@@ -87,7 +87,9 @@ export function WorkbenchProvider({ children }: { children: React.ReactNode }) {
   const [jobs, setJobs] = useState<Record<number, JobView>>({});
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [dockOpen, setDockOpen] = useState(false);
-  const [inspectorOpen, setInspectorOpen] = useState(true);
+  // Default tool is in Crypto, which carries its own side panes; users toggle
+  // the inspector from the title bar and it returns automatically elsewhere.
+  const [inspectorOpen, setInspectorOpen] = useState(false);
   // First paint uses the fallback sizes so SSR and hydration match; persisted
   // sizes apply right after mount, and persistence stays off until then.
   const [panels, setPanels] = useState<PanelSizes>(() => ({
@@ -125,12 +127,16 @@ export function WorkbenchProvider({ children }: { children: React.ReactNode }) {
   const selectCategory = useCallback((id: CategoryId) => {
     setCategory(id);
     setTool(firstToolOf(id));
+    // Crypto studios carry their own side panes; the global inspector only
+    // gets in the way there. Users can still toggle it from the title bar.
+    setInspectorOpen(id !== "crypto");
   }, []);
 
   const selectTool = useCallback((id: ToolId) => {
     setTool(id);
     const cat = id.split(".")[0] as CategoryId;
     setCategory(cat);
+    setInspectorOpen(cat !== "crypto");
   }, []);
 
   const runDemoJob = useCallback(() => {

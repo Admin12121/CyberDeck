@@ -1,0 +1,32 @@
+{
+  "engine_id": "john",
+  "upstream": "https://github.com/openwall/john",
+  "license": {
+    "spdx": "GPL-2.0-only",
+    "verified_from": "reference/john/doc/COPYING + reference/john/john/LICENSE (vendored commit, 2026-10-31)",
+    "copyright": "John the Ripper copyright Openwall and contributors",
+    "notes": "GPLv2 code ships as a SEPARATE sidecar binary with license text and corresponding source reference in the installer; it is never statically linked into the Rust core. Project is opensource, so this satisfies the license review for redistribution.",
+    "status": "approved-for-bundling-as-sidecar"
+  },
+  "binary": {
+    "windows": "john.exe",
+    "linux": "john",
+    "macos": "john"
+  },
+  "version_command": ["--version"],
+  "version_parse": "first line containing 'John the Ripper'",
+  "format_map": {
+    "md5": "raw-md5",
+    "sha1": "raw-sha1",
+    "sha256": "raw-sha256",
+    "sha512": "raw-sha512",
+    "bcrypt": "bcrypt"
+  },
+  "attack_modes": { "wordlist": "--wordlist=<file>", "rules": "--rules=All" },
+  "output": "cracked secrets via 'john --show <file>' lines of hash:plain",
+  "platform_matrix": { "windows": "supported (jumbo)", "linux": "supported", "macos": "supported" },
+  "gpu": {
+    "backend": "CPU in this configuration; OpenCL jumbo build possible later",
+    "redistribution": "no vendor runtime required for CPU; OpenCL stays gated like hashcat"
+  }
+}
