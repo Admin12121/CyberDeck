@@ -1,0 +1,16 @@
+{
+  "name": "hacktool",
+  "private": true,
+  "version": "0.1.0",
+  "description": "HackTool — integrated cybersecurity workbench (Tauri 2 + Next.js + Rust)",
+  "workspaces": ["apps/*"],
+  "scripts": {
+    "dev": "bun run --filter '@hacktool/desktop' dev",
+    "build": "bun run --filter '@hacktool/desktop' build",
+    "typecheck": "bun run --filter '@hacktool/desktop' typecheck",
+    "tauri": "bun run --filter '@hacktool/desktop' tauri",
+    "rust:check": "cargo check --workspace",
+    "rust:fmt": "cargo fmt --all",
+    "icons": "node scripts/gen-icons.mjs"
+  }
+}

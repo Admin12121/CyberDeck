@@ -1,0 +1,10 @@
+[package]
+name = "hacktool-core"
+description = "Shared domain types: capabilities, artifacts, jobs (Master Plan section 8)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }

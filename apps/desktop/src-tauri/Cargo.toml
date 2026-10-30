@@ -1,0 +1,20 @@
+[package]
+name = "hacktool-desktop"
+description = "HackTool desktop shell (Tauri 2) — typed IPC, job manager, packaging"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[build-dependencies]
+tauri-build = { workspace = true }
+
+[dependencies]
+hacktool-core = { path = "../../../crates/core" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tauri = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+
+[features]
+custom-protocol = ["tauri/custom-protocol"]

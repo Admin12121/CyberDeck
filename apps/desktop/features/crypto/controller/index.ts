@@ -1,0 +1,58 @@
+/**
+ * Crypto feature — controller layer.
+ * Pure state transitions for the recipe builder. The view dispatches intents
+ * here; IPC-backed actions (native hashing, engine jobs) join this layer in
+ * arc 2 through lib/ipc.
+ */
+import type { RecipeState, RecipeStep } from "../model";
+
+export function addStep(state: RecipeState, opId: string): RecipeState {
+  return { ...state, steps: [...state.steps, { opId, enabled: true }] };
+}
+
+export function removeStep(state: RecipeState, index: number): RecipeState {
+  return { ...state, steps: state.steps.filter((_, i) => i !== index) };
+}
+
+export function toggleStep(state: RecipeState, index: number): RecipeState {
+  return {
+    ...state,
+    steps: state.steps.map((step, i) => (i === index ? { ...step, enabled: !step.enabled } : step)),
+  };
+}
+
+export function moveStep(state: RecipeState, index: number, delta: -1 | 1): RecipeState {
+  const target = index + delta;
+  if (target < 0 || target >= state.steps.length) return state;
+  const steps = state.steps.slice();
+  const [step] = steps.splice(index, 1);
+  steps.splice(target, 0, step);
+  return { ...state, steps };
+}
+
+export function setInput(state: RecipeState, input: string): RecipeState {
+  return { ...state, input };
+}
+
+export function setAutoBake(state: RecipeState, autoBake: boolean): RecipeState {
+  return { ...state, autoBake };
+}
+
+export function clearRecipe(state: RecipeState): RecipeState {
+  return { ...state, steps: [] };
+}
+
+export function initialRecipeState(): RecipeState {
+  return {
+    steps: [
+      { opId: "to_base64", enabled: true },
+      { opId: "to_hex", enabled: false },
+    ],
+    input: "HackTool workbench — transformation pipeline seed input",
+    autoBake: true,
+  };
+}
+
+export function stepLabel(step: RecipeStep, index: number): string {
+  return `${index + 1}. ${step.opId}`;
+}

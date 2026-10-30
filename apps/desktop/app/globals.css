@@ -1,0 +1,114 @@
+@import "tailwindcss";
+
+/*
+ * Dark Matter theme — near-black cool neutrals, blue = selection/analysis,
+ * orange = active operations, green only for verified success, red only for
+ * real errors (Master Plan §3). Values calibrated against a Zed dark reference
+ * capture; do not introduce decorative color.
+ */
+@theme {
+  --color-app: #0d0d0e;          /* main background */
+  --color-sidebar: #131316;      /* rail + navigator */
+  --color-panel: #1b1b1f;        /* workspace panels */
+  --color-raised: #232329;       /* hover / elevated surface */
+  --color-selected: #2a2a30;     /* active tab / selected row */
+  --color-line: #3b3b44;         /* subtle 1px separators */
+  --color-line-strong: #55555e;  /* strong separators / drag handles */
+  --color-fg: #d6d6e0;           /* primary text */
+  --color-fg-dim: #8787a0;       /* secondary text / icons */
+  --color-fg-muted: #5c5c66;     /* muted text */
+  --color-blue: #3fc1ff;         /* selection + analysis accent */
+  --color-blue-selection: #2d9bff;
+  --color-blue-dim: #14344a;
+  --color-orange: #ff7b00;       /* active operations / running jobs */
+  --color-orange-dim: #432a1f;
+  --color-ok: #5dc8a0;           /* verified success only */
+  --color-warn: #e7b66c;
+  --color-err: #e87578;          /* actual errors only */
+
+  --font-sans: Inter, "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
+  --font-mono: "Geist Mono", "JetBrains Mono", "Cascadia Mono", Consolas, monospace;
+
+  --default-font-family: var(--font-sans);
+}
+
+:root {
+  color-scheme: dark;
+}
+
+html,
+body {
+  height: 100%;
+  overflow: hidden;
+}
+
+body {
+  background-color: var(--color-app);
+  color: var(--color-fg);
+  font-size: 13px;
+  line-height: 1.45;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Zed-style thin dark scrollbars */
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--color-selected);
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--color-line);
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+::selection {
+  background: color-mix(in srgb, var(--color-blue-selection) 30%, transparent);
+}
+
+:focus-visible {
+  outline: 1px solid var(--color-blue);
+  outline-offset: -1px;
+}
+
+/* dense data tables shared across studios */
+.data-table {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  width: 100%;
+  border-collapse: collapse;
+}
+.data-table th {
+  color: var(--color-fg-muted);
+  font-weight: 500;
+  text-align: left;
+  padding: 3px 8px;
+  border-bottom: 1px solid var(--color-line);
+  position: sticky;
+  top: 0;
+  background: var(--color-panel);
+  user-select: none;
+}
+.data-table td {
+  padding: 2px 8px;
+  border-bottom: 1px solid color-mix(in srgb, var(--color-line) 40%, transparent);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.data-table tbody tr:hover {
+  background: var(--color-raised);
+}
+.data-table tbody tr.selected {
+  background: var(--color-blue-dim);
+}

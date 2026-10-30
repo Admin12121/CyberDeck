@@ -1,0 +1,26 @@
+# dependencies / build output
+node_modules/
+out/
+.next/
+dist/
+*.local
+
+# rust
+target/
+
+# next generated
+next-env.d.ts
+*.tsbuildinfo
+
+# tauri generated
+apps/desktop/src-tauri/gen/
+
+# os / editor
+.DS_Store
+Thumbs.db
+
+# upstream reference sources — study/packaging material only, never part of the product
+reference/
+
+# local scratch
+tmp/

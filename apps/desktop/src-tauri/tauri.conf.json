@@ -1,0 +1,33 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "HackTool",
+  "version": "0.1.0",
+  "identifier": "dev.hacktool.workbench",
+  "build": {
+    "beforeDevCommand": "bun run dev",
+    "beforeBuildCommand": "bun run build",
+    "devUrl": "http://localhost:3000",
+    "frontendDist": "../out"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "HackTool — Cybersecurity Workbench",
+        "width": 1440,
+        "height": 900,
+        "minWidth": 1100,
+        "minHeight": 650,
+        "theme": "Dark",
+        "backgroundColor": "#0d0d0e"
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["nsis", "msi"],
+    "icon": ["icons/32x32.png", "icons/128x128.png", "icons/256x256.png", "icons/icon.png", "icons/icon.ico"]
+  }
+}
