@@ -15,6 +15,7 @@ hacktool-packet = { path = "../../../crates/packet" }
 hacktool-storage = { path = "../../../crates/storage" }
 base64 = "0.22"
 hex = "0.4"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tauri = { workspace = true }

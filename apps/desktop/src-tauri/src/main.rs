@@ -12,6 +12,7 @@ mod history;
 mod jobs;
 mod ops;
 mod pcap;
+mod web;
 
 use std::sync::Mutex;
 
@@ -24,6 +25,12 @@ fn main() {
         .plugin(tauri_plugin_dialog::init())
         .manage(jobs::JobManager::new())
         .manage(pcap::PcapCtx { current: std::sync::Mutex::new(None) })
+        .manage(web::WebCtx {
+            proxy_running: std::sync::atomic::AtomicBool::new(false),
+            proxy_port: std::sync::atomic::AtomicU16::new(8080),
+            proxy_handle: std::sync::Mutex::new(None),
+            captured: std::sync::Mutex::new(Vec::new()),
+        })
         .setup(|app| {
             // Case store lives under the OS app-data directory; the SQLite
             // index and artifact copies are created on first launch (§8.4).
@@ -59,6 +66,15 @@ fn main() {
             attack::device_info,
             engines::engines_detect,
             engines::engine_attack,
+            web::http_send,
+            web::web_scan,
+            web::spider_scan,
+            web::proxy_start,
+            web::proxy_stop,
+            web::proxy_status,
+            web::proxy_history,
+            web::web_engines_detect,
+            web::engine_scan,
         ])
         .run(tauri::generate_context!())
         .expect("HackTool desktop runtime failed to start");

@@ -341,7 +341,7 @@ pub fn engine_attack(
     }
 }
 
-fn which_exists(binary: &str) -> bool {
+pub fn which_exists(binary: &str) -> bool {
     if cfg!(windows) {
         std::process::Command::new("where").arg(binary).output().map(|o| o.status.success()).unwrap_or(false)
     } else {

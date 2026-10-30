@@ -54,7 +54,7 @@ function ActiveWorkspace() {
     <>
       <div className={show("crypto")}><CryptoWorkspace tool={wb.tool} /></div>
       <div className={show("network")}><NetworkWorkspace tool={wb.tool} /></div>
-      <div className={show("web")}><WebWorkspace tool={wb.tool} /></div>
+      <div className={show("web")}><WebWorkspace /></div>
       <div className={show("reverse")}><ReverseWorkspace /></div>
       <div className={show("forensics")}><ForensicsWorkspace tool={wb.tool} /></div>
     </>

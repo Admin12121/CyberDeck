@@ -15,10 +15,7 @@ export type ToolId =
   | "network.packet"
   | "network.lab"
   | "network.scan"
-  | "web.proxy"
-  | "web.history"
-  | "web.repeater"
-  | "web.scanner"
+  | "web.studio"
   | "reverse.workbench"
   | "forensics.files"
   | "forensics.metadata"
@@ -96,10 +93,12 @@ export const CATEGORIES: CategoryDescriptor[] = [
     label: "Web",
     icon: Globe,
     tools: [
-      { id: "web.proxy", category: "web", label: "Proxy", hint: "HTTP/S interception with user-controlled local listener" },
-      { id: "web.history", category: "web", label: "History", hint: "Full proxy history with filters and evidence links" },
-      { id: "web.repeater", category: "web", label: "Repeater", hint: "Request replay and response comparison" },
-      { id: "web.scanner", category: "web", label: "Scanner", hint: "Crawl and active scan with findings provenance" },
+      {
+        id: "web.studio",
+        category: "web",
+        label: "Web Studio",
+        hint: "Proxy, history, repeater, scanner, spider and engine bay in one workspace (ZAP-model tabs)",
+      },
     ],
   },
   {

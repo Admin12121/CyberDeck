@@ -373,6 +373,100 @@ export async function crackHistoryClear(): Promise<void> {
   return invoke<void>("crack_history_clear", {});
 }
 
+// --- web studio ---------------------------------------------------------------
+
+export interface HttpResponseWire {
+  status: number;
+  headers: [string, string][];
+  body: string;
+  body_truncated: boolean;
+  size: number;
+  duration_ms: number;
+  url: string;
+}
+
+export async function httpSend(requestRaw: string): Promise<HttpResponseWire> {
+  if (!inTauri) throw new Error("sending requests requires the desktop runtime");
+  return invoke<HttpResponseWire>("http_send", { requestRaw });
+}
+
+export interface WebFindingWire {
+  severity: string;
+  title: string;
+  detail: string;
+  evidence: string;
+}
+
+export async function webScan(targetUrl: string): Promise<WebFindingWire[]> {
+  if (!inTauri) throw new Error("scanning requires the desktop runtime");
+  return invoke<WebFindingWire[]>("web_scan", { targetUrl });
+}
+
+export async function spiderScan(targetUrl: string, maxDepth: number): Promise<string[]> {
+  if (!inTauri) throw new Error("spidering requires the desktop runtime");
+  return invoke<string[]>("spider_scan", { targetUrl, maxDepth });
+}
+
+export interface CapturedRequestWire {
+  id: number;
+  method: string;
+  host: string;
+  path: string;
+  status: number;
+  size: number;
+  at_ms: number;
+}
+
+export interface ProxyStatusWire {
+  running: boolean;
+  port: number;
+  captured: number;
+}
+
+export async function proxyStart(port: number): Promise<ProxyStatusWire> {
+  if (!inTauri) throw new Error("the proxy requires the desktop runtime");
+  return invoke<ProxyStatusWire>("proxy_start", { port });
+}
+
+export async function proxyStop(): Promise<ProxyStatusWire> {
+  if (!inTauri) throw new Error("the proxy requires the desktop runtime");
+  return invoke<ProxyStatusWire>("proxy_stop", {});
+}
+
+export async function proxyStatus(): Promise<ProxyStatusWire> {
+  if (!inTauri) return { running: false, port: 8080, captured: 0 };
+  return invoke<ProxyStatusWire>("proxy_status", {});
+}
+
+export async function proxyHistory(): Promise<CapturedRequestWire[]> {
+  if (!inTauri) return [];
+  return invoke<CapturedRequestWire[]>("proxy_history", {});
+}
+
+export interface WebEngineStatusWire {
+  id: string;
+  label: string;
+  license: string;
+  available: boolean;
+  version: string;
+}
+
+export async function webEnginesDetect(): Promise<WebEngineStatusWire[]> {
+  if (!inTauri) return [];
+  return invoke<WebEngineStatusWire[]>("web_engines_detect", {});
+}
+
+export interface EngineScanResultWire {
+  tool: string;
+  raw: string;
+  duration_ms: number;
+}
+
+export async function engineScan(tool: string, target: string): Promise<EngineScanResultWire> {
+  if (!inTauri) throw new Error("external engines require the desktop runtime");
+  return invoke<EngineScanResultWire>("engine_scan", { tool, target });
+}
+
 // --- browser fallback (demo jobs) --------------------------------------------
 
 interface Simulation {
