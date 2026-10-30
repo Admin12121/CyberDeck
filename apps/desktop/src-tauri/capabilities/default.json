@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Least-privilege baseline: core events and IPC only. No fs, shell, http or opener access from the frontend (Master Plan section 9.2).",
+  "description": "Least-privilege baseline: core events, IPC, and the file picker used for evidence import. No fs, shell, http or opener access from the frontend (Master Plan section 9.2).",
   "windows": ["main"],
-  "permissions": ["core:default"]
+  "permissions": ["core:default", "dialog:default"]
 }

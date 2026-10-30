@@ -1,0 +1,20 @@
+[package]
+name = "hacktool-crypto"
+description = "Native crypto and transformation operations (Master Plan section 5.4/5.5)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+base64 = "0.22"
+crc32fast = "1"
+flate2 = "1"
+hex = "0.4"
+hmac = "0.12"
+md-5 = "0.10"
+serde = { workspace = true }
+sha1 = "0.10"
+sha2 = "0.10"
+
+[dev-dependencies]
+serde_json = { workspace = true }

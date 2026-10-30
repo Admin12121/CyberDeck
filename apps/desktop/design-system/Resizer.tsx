@@ -79,8 +79,8 @@ export function Resizer({ direction, value, onChange, min, max, flip = false, ar
       }}
       className={`group relative z-10 shrink-0 ${
         direction === "horizontal" ? "w-px cursor-col-resize" : "h-px cursor-row-resize"
-      } bg-line transition-colors hover:bg-blue focus-visible:bg-blue focus-visible:outline-none ${
-        dragging ? "bg-blue" : ""
+      } bg-line transition-colors hover:bg-orange focus-visible:bg-orange focus-visible:outline-none ${
+        dragging ? "bg-orange" : ""
       }`}
       data-dragging={dragging || undefined}
     >

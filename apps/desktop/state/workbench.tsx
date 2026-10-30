@@ -88,16 +88,29 @@ export function WorkbenchProvider({ children }: { children: React.ReactNode }) {
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [dockOpen, setDockOpen] = useState(false);
   const [inspectorOpen, setInspectorOpen] = useState(true);
-  const [panels, setPanels] = useState<PanelSizes>(loadPanelSizes);
+  // First paint uses the fallback sizes so SSR and hydration match; persisted
+  // sizes apply right after mount, and persistence stays off until then.
+  const [panels, setPanels] = useState<PanelSizes>(() => ({
+    navigator: PANEL_LIMITS.navigator.fallback,
+    inspector: PANEL_LIMITS.inspector.fallback,
+    dock: PANEL_LIMITS.dock.fallback,
+  }));
+  const [panelsLoaded, setPanelsLoaded] = useState(false);
 
-  // Persist panel sizes; write after hydration so SSR output stays stable.
   useEffect(() => {
+    setPanels(loadPanelSizes());
+    setPanelsLoaded(true);
+  }, []);
+
+  // Persist panel sizes after every user-driven change.
+  useEffect(() => {
+    if (!panelsLoaded) return;
     try {
       window.localStorage.setItem(STORAGE_KEY, JSON.stringify(panels));
     } catch {
       // private-mode or quota failure: sizing still works in-memory
     }
-  }, [panels]);
+  }, [panels, panelsLoaded]);
 
   const setNavigatorWidth = useCallback((px: number) => {
     setPanels((p) => ({ ...p, navigator: clamp(px, PANEL_LIMITS.navigator.min, PANEL_LIMITS.navigator.max) }));

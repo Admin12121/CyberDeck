@@ -31,7 +31,7 @@ export function Navigator() {
                 tool.disabled
                   ? "cursor-not-allowed border-transparent text-fg-muted opacity-50"
                   : active
-                    ? "border-blue bg-selected text-fg"
+                    ? "border-orange bg-orange-dim text-fg"
                     : "border-transparent text-fg-dim hover:bg-raised hover:text-fg"
               }`}
             >

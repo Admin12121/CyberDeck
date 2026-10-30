@@ -73,7 +73,7 @@ export function CommandPalette() {
                     command.run();
                     wb.setPaletteOpen(false);
                   }}
-                  className={`block w-full px-2 py-1.5 text-left ${index === 0 ? "bg-blue-dim" : "hover:bg-raised"}`}
+                  className={`block w-full px-2 py-1.5 text-left ${index === 0 ? "bg-orange-dim" : "hover:bg-raised"}`}
                 >
                   <div className="text-xs text-fg">{command.label}</div>
                   <div className="truncate font-mono text-[10px] text-fg-muted">{command.hint}</div>

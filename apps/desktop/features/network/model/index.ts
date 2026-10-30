@@ -14,7 +14,7 @@ export interface PacketRow {
   protocol: string;
   length: number;
   info: string;
-  colorHint: "dns" | "tcp" | "tls" | "http" | "arp";
+  colorHint: "dns" | "tcp" | "tls" | "http" | "arp" | "udp" | "icmp" | "ipv6" | "other";
 }
 
 export interface DetailNode {
@@ -47,12 +47,16 @@ export const SAMPLE_PACKETS: PacketRow[] = [
   { no: 10, timeOffsetMs: 438, source: "10.0.0.80", destination: "192.168.1.24", protocol: "HTTP", length: 1440, info: "HTTP/1.1 200 OK (application/json)", colorHint: "http" },
 ];
 
-export const PROTOCOL_COLORS: Record<PacketRow["colorHint"], string> = {
+export const PROTOCOL_COLORS: Record<string, string> = {
   arp: "text-fg-muted",
   dns: "text-warn",
   tcp: "text-fg-dim",
   tls: "text-orange",
   http: "text-blue",
+  udp: "text-fg-muted",
+  icmp: "text-warn",
+  ipv6: "text-orange",
+  other: "text-fg-muted",
 };
 
 export function detailTree(packet: PacketRow): DetailNode[] {

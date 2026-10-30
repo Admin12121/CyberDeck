@@ -32,7 +32,157 @@ export async function jobCancel(id: number): Promise<boolean> {
   return invoke<boolean>("job_cancel", { id });
 }
 
-// --- browser fallback -------------------------------------------------------
+// --- base64 helpers ----------------------------------------------------------
+
+export const b64 = {
+  encode(bytes: Uint8Array): string {
+    let bin = "";
+    for (const b of bytes) bin += String.fromCharCode(b);
+    return btoa(bin);
+  },
+  decode(text: string): Uint8Array {
+    const bin = atob(text);
+    const out = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+    return out;
+  },
+};
+
+// --- native crypto -----------------------------------------------------------
+
+export interface OpResult {
+  output_b64: string;
+  output_hex: string;
+  engine: string;
+  engine_version: string;
+}
+
+/** The SHA family also runs in the browser via WebCrypto; all else is native. */
+const WEB_CRYPTO_ALGOS = new Set(["sha1", "sha256", "sha384", "sha512"]);
+
+export async function cryptoOp(op: string, data: Uint8Array, key?: Uint8Array): Promise<OpResult> {
+  if (!inTauri) {
+    if (!WEB_CRYPTO_ALGOS.has(op)) {
+      throw new Error(`${op} runs in the native engine; it requires the desktop runtime`);
+    }
+    const digest = await crypto.subtle.digest(op.replace("sha", "SHA-").toUpperCase(), data as Uint8Array<ArrayBuffer>);
+    const hexOut = Array.from(new Uint8Array(digest), (b) => b.toString(16).padStart(2, "0")).join("");
+    return {
+      output_b64: b64.encode(b64.decode(hexToB64(hexOut))),
+      output_hex: hexOut,
+      engine: "webcrypto (platform)",
+      engine_version: "browser fallback",
+    };
+  }
+  return invoke<OpResult>("crypto_op", {
+    op,
+    dataB64: b64.encode(data),
+    keyB64: key ? b64.encode(key) : null,
+  });
+}
+
+function hexToB64(hexText: string): string {
+  const bytes = new Uint8Array(hexText.length / 2);
+  for (let i = 0; i < bytes.length; i++) bytes[i] = Number.parseInt(hexText.slice(i * 2, i * 2 + 2), 16);
+  return b64.encode(bytes);
+}
+
+// --- evidence ----------------------------------------------------------------
+
+export interface ArtifactRecord {
+  id: string;
+  case_id: string;
+  name: string;
+  stored_path: string;
+  original_path: string | null;
+  size: number;
+  sha256: string;
+  md5: string;
+  sha1: string;
+  crc32: string;
+  signature: string | null;
+  entropy: number;
+  /** Epoch milliseconds as a string; format on display. */
+  imported_at: string;
+}
+
+export interface HexRowWire {
+  offset: number;
+  hex: string;
+  ascii: string;
+}
+
+export interface HexResponseWire {
+  rows: HexRowWire[];
+  offset: number;
+  total_size: number;
+  complete: boolean;
+}
+
+export interface StringHitWire {
+  offset: number;
+  text: string;
+}
+
+export async function fileList(): Promise<ArtifactRecord[]> {
+  if (!inTauri) return [];
+  return invoke<ArtifactRecord[]>("file_list", { case: null });
+}
+
+export async function fileImportDialog(): Promise<ArtifactRecord> {
+  if (!inTauri) throw new Error("evidence import requires the desktop runtime");
+  return invoke<ArtifactRecord>("file_import_dialog", {});
+}
+
+export async function fileHex(id: string, offset: number, len: number): Promise<HexResponseWire> {
+  if (!inTauri) throw new Error("evidence inspection requires the desktop runtime");
+  return invoke<HexResponseWire>("file_hex", { id, offset, len });
+}
+
+export async function fileStrings(id: string, minLen: number, maxHits: number): Promise<StringHitWire[]> {
+  if (!inTauri) throw new Error("evidence inspection requires the desktop runtime");
+  return invoke<StringHitWire[]>("file_strings", { id, minLen, maxHits });
+}
+
+// --- captures ----------------------------------------------------------------
+
+export interface PcapLayerWire {
+  label: string;
+  value: string;
+}
+
+export interface PcapPacketWire {
+  index: number;
+  time_ms: number;
+  source: string;
+  destination: string;
+  protocol: string;
+  length: number;
+  info: string;
+  color_hint: string;
+  layers: PcapLayerWire[];
+}
+
+export interface PcapOpenWire {
+  linktype: number;
+  packet_count: number;
+  shown: number;
+  malformed_tail: boolean;
+  file_name: string;
+  packets: PcapPacketWire[];
+}
+
+export async function pcapOpenDialog(): Promise<PcapOpenWire> {
+  if (!inTauri) throw new Error("capture opening requires the desktop runtime");
+  return invoke<PcapOpenWire>("pcap_open_dialog", {});
+}
+
+export async function pcapPacketBytes(index: number, offset: number, len: number): Promise<HexResponseWire> {
+  if (!inTauri) throw new Error("capture inspection requires the desktop runtime");
+  return invoke<HexResponseWire>("pcap_packet_bytes", { index, offset, len });
+}
+
+// --- browser fallback (demo jobs) --------------------------------------------
 
 interface Simulation {
   timer: ReturnType<typeof setInterval>;

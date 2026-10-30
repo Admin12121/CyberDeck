@@ -26,7 +26,7 @@ export function Pane({
 }) {
   return (
     <section style={style} className={`flex min-h-0 min-w-0 flex-col border border-line bg-panel ${className}`}>
-      <header className="flex h-7 shrink-0 items-center justify-between gap-2 border-b border-line bg-sidebar px-2">
+      <header className="flex h-8 shrink-0 items-center justify-between gap-2 border-b border-line bg-sidebar px-2">
         <span className="truncate text-[10px] font-medium uppercase tracking-wider text-fg-muted">
           {title}
         </span>
@@ -109,7 +109,7 @@ export function ToolButton({
 }) {
   const tones: Record<string, string> = {
     default: "border-line text-fg-dim hover:border-line-strong hover:text-fg",
-    primary: "border-blue/50 text-blue hover:bg-blue-dim",
+    primary: "border-orange/50 text-orange hover:bg-orange-dim",
     danger: "border-err/40 text-err hover:bg-err/10",
   };
   return (
@@ -149,7 +149,7 @@ export function TextInput({
       onKeyDown={onKeyDown}
       placeholder={placeholder}
       aria-label={ariaLabel}
-      className={`h-6 border border-line bg-app px-2 text-xs text-fg placeholder:text-fg-muted focus:border-blue focus:outline-none ${mono ? "font-mono" : ""} ${className}`}
+      className={`h-6 border border-line bg-app px-2 text-xs text-fg placeholder:text-fg-muted focus:border-orange focus:outline-none ${mono ? "font-mono" : ""} ${className}`}
     />
   );
 }
@@ -172,7 +172,7 @@ export function Select({
       value={value}
       onChange={(e) => onChange(e.target.value)}
       aria-label={ariaLabel}
-      className={`h-6 border border-line bg-app px-1 font-mono text-[11px] text-fg-dim focus:border-blue focus:outline-none ${className}`}
+      className={`h-6 border border-line bg-app px-1 font-mono text-[11px] text-fg-dim focus:border-orange focus:outline-none ${className}`}
     >
       {options.map((opt) => (
         <option key={opt.value} value={opt.value}>

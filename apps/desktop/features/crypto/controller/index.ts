@@ -1,13 +1,16 @@
 /**
  * Crypto feature controller layer.
  * Pure state transitions for the recipe builder. The view dispatches intents
- * here; IPC-backed actions (native hashing, engine jobs) join this layer in
- * arc 2 through lib/ipc.
+ * here; IPC-backed actions (native hashing, engine jobs) join through lib/ipc.
  */
-import type { RecipeState, RecipeStep } from "../model";
+import { operationById, type RecipeState } from "../model";
 
 export function addStep(state: RecipeState, opId: string): RecipeState {
-  return { ...state, steps: [...state.steps, { opId, enabled: true }] };
+  const op = operationById(opId);
+  return {
+    ...state,
+    steps: [...state.steps, { opId, enabled: true, param: op?.paramDefault }],
+  };
 }
 
 export function removeStep(state: RecipeState, index: number): RecipeState {
@@ -18,6 +21,13 @@ export function toggleStep(state: RecipeState, index: number): RecipeState {
   return {
     ...state,
     steps: state.steps.map((step, i) => (i === index ? { ...step, enabled: !step.enabled } : step)),
+  };
+}
+
+export function setStepParam(state: RecipeState, index: number, param: string): RecipeState {
+  return {
+    ...state,
+    steps: state.steps.map((step, i) => (i === index ? { ...step, param } : step)),
   };
 }
 
@@ -61,8 +71,4 @@ export function initialRecipeState(): RecipeState {
     input: "HackTool workbench: transformation pipeline seed input",
     autoBake: true,
   };
-}
-
-export function stepLabel(step: RecipeStep, index: number): string {
-  return `${index + 1}. ${step.opId}`;
 }

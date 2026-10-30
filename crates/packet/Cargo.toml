@@ -1,0 +1,15 @@
+[package]
+name = "hacktool-packet"
+description = "PCAP file parsing and protocol dissection (Master Plan section 5.1)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
+
+[lints.rust]
+unused = "allow"

@@ -19,10 +19,10 @@ export function Rail() {
             aria-current={active ? "page" : undefined}
             onClick={() => wb.selectCategory(category.id)}
             className={`relative flex h-9 w-9 items-center justify-center ${
-              active ? "text-blue" : "text-fg-muted hover:text-fg"
+              active ? "text-orange" : "text-fg-muted hover:text-fg"
             }`}
           >
-            {active ? <span className="absolute left-0 top-1/2 h-5 w-0.5 -translate-y-1/2 bg-blue" /> : null}
+            {active ? <span className="absolute left-0 top-1/2 h-5 w-0.5 -translate-y-1/2 bg-orange" /> : null}
             <Icon size={18} strokeWidth={1.5} />
           </button>
         );
