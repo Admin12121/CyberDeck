@@ -5,6 +5,7 @@ import { hexDump } from "@lib/hex";
 import {
   fileHex,
   fileSignatureScan,
+  fileExtractGzip,
   type SignatureScanWire,
   fileImportDialog,
   fileList,
@@ -27,7 +28,22 @@ export function FileAnalysisView() {
   const [scan, setScan] = useState<SignatureScanWire | null>(null);
   const [scanBusy, setScanBusy] = useState(false);
   const [scanError, setScanError] = useState<string | null>(null);
-  useEffect(() => { setScan(null); setScanError(null); }, [ctx.selectedArtifact?.id, wb.caseId]);
+  const [extracting, setExtracting] = useState<number | null>(null);
+  const [extractNote, setExtractNote] = useState<string | null>(null);
+  useEffect(() => { setScan(null); setScanError(null); setExtractNote(null); }, [ctx.selectedArtifact?.id, wb.caseId]);
+  const extract = async (offset: number) => {
+    const artifact = ctx.selectedArtifact;
+    if (!artifact || extracting !== null) return;
+    setExtracting(offset);
+    setScanError(null);
+    setExtractNote(null);
+    try {
+      const output = await fileExtractGzip(wb.caseId, artifact.id, offset);
+      setExtractNote("Extracted into this case: " + output.name);
+      await ctx.refresh();
+    } catch (cause) { setScanError(String(cause)); }
+    finally { setExtracting(null); }
+  };
   const runScan = async () => {
     const artifact = ctx.selectedArtifact;
     if (!artifact) return;
@@ -80,6 +96,7 @@ export function FileAnalysisView() {
             {scanBusy ? "Scanning…" : "Scan Embedded Formats"}
           </ToolButton>
           {scanError ? <div className="text-xs text-err">{scanError}</div> : null}
+          {extractNote ? <div className="text-xs text-fg">{extractNote}</div> : null}
           {scan ? (
             <div className="space-y-1 font-mono text-[10px] text-fg-dim">
               <div>{scan.hits.length} signatures · {scan.scanned_bytes} bytes scanned
@@ -89,13 +106,22 @@ export function FileAnalysisView() {
               {scan.hits.map((hit, index) => (
                 <div key={index} className="flex gap-2 border-t border-line py-1">
                   <span className="shrink-0 text-orange">0x{hit.offset.toString(16)}</span>
-                  <span>{hit.format}: {hit.description}</span>
+                  <span className="flex-1">{hit.format}: {hit.description}</span>
+                  {hit.format === "gzip" && (
+                    <ToolButton
+                      onClick={() => void extract(hit.offset)}
+                      disabled={extracting !== null || !ctx.desktop}
+                      title="Safely decompress one Gzip member (16 MiB input/output limits) into this case"
+                    >
+                      {extracting === hit.offset ? "Extracting…" : "Extract Gzip"}
+                    </ToolButton>
+                  )}
                 </div>
               ))}
               {scan.hits.length === 0 ? <div>No known signatures detected.</div> : null}
             </div>
           ) : null}
-          <ToolButton disabled title="Extraction with path safety and decompression-bomb guards, arc 3">Extract…</ToolButton>
+          <ToolButton disabled title="Other archive extractors require size, integrity and traversal guards">Other extraction pending</ToolButton>
           <div className="mt-1" />
           <ToolButton disabled title="YARA-X rules, arc 3">YARA scan</ToolButton>
         </div>

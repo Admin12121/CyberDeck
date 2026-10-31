@@ -139,6 +139,42 @@ pub fn tls_client() -> Result<TlsConnector, String> {
     Ok(TlsConnector::from(Arc::new(config)))
 }
 
+/// Never accept ambiguous request framing that an upstream HTTP parser could
+/// interpret differently. Unsupported transfer encodings fail closed.
+fn request_body_length(head: &str, max_body: usize) -> std::io::Result<usize> {
+    use std::io::{Error, ErrorKind};
+    let invalid = |s| Error::new(ErrorKind::InvalidData, s);
+    let mut length = None;
+    for line in head.split("\r\n").skip(1) {
+        if line.is_empty() { break; }
+        if line.starts_with(' ') || line.starts_with('\t') {
+            return Err(invalid("ambiguous transfer framing: folded header"));
+        }
+        let Some((name, value)) = line.split_once(':') else {
+            return Err(invalid("malformed HTTP header"));
+        };
+        if name.is_empty() || !name.bytes().all(|b| b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&b)) {
+            return Err(invalid("invalid HTTP header name"));
+        }
+        if name.eq_ignore_ascii_case("transfer-encoding") {
+            return Err(invalid("ambiguous transfer framing: transfer-encoding unsupported"));
+        }
+        if name.eq_ignore_ascii_case("content-length") {
+            if length.is_some() {
+                return Err(invalid("ambiguous transfer framing: repeated content-length"));
+            }
+            let v = value.trim();
+            if v.is_empty() || !v.bytes().all(|b| b.is_ascii_digit()) {
+                return Err(invalid("invalid content-length"));
+            }
+            length = Some(v.parse::<usize>().map_err(|_| invalid("invalid content-length"))?);
+        }
+    }
+    let n = length.unwrap_or(0);
+    if n > max_body { return Err(invalid("HTTP body limit exceeded")); }
+    Ok(n)
+}
+
 /// Read a bounded HTTP/1.1 message. Unsupported request transfer encodings
 /// fail closed rather than forwarding a truncated or incorrectly framed body.
 pub async fn read_http_message<R>(reader: &mut R) -> std::io::Result<(String, Vec<u8>)>
@@ -164,25 +200,7 @@ where
     }
     let head_text = String::from_utf8(head)
         .map_err(|_| Error::new(ErrorKind::InvalidData, "non-UTF8 HTTP headers"))?;
-    let mut length: Option<usize> = None;
-    for line in head_text.split("\r\n").skip(1) {
-        let Some((name, value)) = line.split_once(':') else { continue };
-        if name.eq_ignore_ascii_case("transfer-encoding") && !value.trim().eq_ignore_ascii_case("identity") {
-            return Err(Error::new(ErrorKind::InvalidData, "unsupported request transfer encoding"));
-        }
-        if name.eq_ignore_ascii_case("content-length") {
-            let parsed: usize = value.trim().parse()
-                .map_err(|_| Error::new(ErrorKind::InvalidData, "invalid content-length"))?;
-            if length.is_some_and(|previous| previous != parsed) {
-                return Err(Error::new(ErrorKind::InvalidData, "conflicting content-length values"));
-            }
-            length = Some(parsed);
-        }
-    }
-    let content_length = length.unwrap_or(0);
-    if content_length > MAX_BODY {
-        return Err(Error::new(ErrorKind::InvalidData, "HTTP body limit exceeded"));
-    }
+    let content_length = request_body_length(&head_text, MAX_BODY)?;
     let mut body = vec![0u8; content_length];
     reader.read_exact(&mut body).await?;
     Ok((head_text, body))
@@ -202,6 +220,24 @@ mod framing_tests {
         assert_eq!(body, b"test");
     }
 
+    #[test]
+    fn rejects_ambiguous_framing() {
+        use super::request_body_length;
+        for header in [
+            "Content-Length: 4\r\nContent-Length: 4",
+            "Transfer-Encoding: identity",
+            "Transfer-Encoding: chunked\r\nContent-Length: 4",
+            "Content-Length: +4",
+            "Content-Length: 1, 1",
+            "X-Header: ok\r\n continued",
+            "BrokenHeader",
+        ] {
+            let head = format!("POST / HTTP/1.1\r\nHost: local\r\n{header}\r\n\r\n");
+            assert!(request_body_length(&head, 1024).is_err(), "{header}");
+        }
+        assert_eq!(request_body_length("POST / HTTP/1.1\r\nHost: local\r\nContent-Length: 4\r\n\r\n", 1024).unwrap(), 4);
+    }
+
     #[tokio::test]
     async fn rejects_oversized_or_chunked_requests() {
         for header in [
@@ -219,6 +255,8 @@ mod framing_tests {
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct WsConnection {
     pub host: String,
+    pub bytes_client_to_server: u64,
+    pub bytes_server_to_client: u64,
     pub at_ms: u64,
 }
 

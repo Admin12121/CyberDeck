@@ -339,6 +339,76 @@ fn signature_scan(
     })
 }
 
+/// Extract one embedded Gzip member without executing external programs,
+/// using the selected case's immutable evidence copy as input.
+#[tauri::command]
+pub fn file_extract_gzip(
+    ctx: State<'_, EvidenceCtx>,
+    case_id: String,
+    id: String,
+    offset: usize,
+) -> Result<ArtifactRecord, String> {
+    extract_gzip_from_evidence(&ctx, &case_id, &id, offset)
+}
+
+fn extract_gzip_from_evidence(
+    ctx: &EvidenceCtx,
+    case_id: &str,
+    id: &str,
+    offset: usize,
+) -> Result<ArtifactRecord, String> {
+    use cyberdeck_crypto::extraction::{
+        extract_gzip_limited, MAX_GZIP_INPUT_BYTES, MAX_GZIP_OUTPUT_BYTES,
+    };
+    validate_case_id(case_id)?;
+    let record = ctx
+        .store
+        .lock()
+        .map_err(|_| "case store unavailable")?
+        .get_artifact(id)?
+        .filter(|item| item.case_id == case_id)
+        .ok_or_else(|| "source artifact not found in selected case".to_string())?;
+    if record.size > MAX_GZIP_INPUT_BYTES as u64 {
+        return Err("gzip extraction limited to stored files of at most 16 MiB".into());
+    }
+    let data = std::fs::read(&record.stored_path)
+        .map_err(|e| format!("cannot read stored source: {e}"))?;
+    if data.len() as u64 != record.size || digest_of("sha256", &data)? != record.sha256 {
+        return Err("source evidence integrity failure".into());
+    }
+    let output = extract_gzip_limited(&data, offset, MAX_GZIP_OUTPUT_BYTES)?;
+    let name = format!("gzip-offset-{offset:x}.bin");
+    let extracted = import_bytes(ctx, Path::new(&name), &output, case_id, false)?;
+    let description = format!("Source artifact {} gzip offset 0x{offset:x}", record.id);
+    ctx.store
+        .lock()
+        .map_err(|_| "case store unavailable")?
+        .record_event(
+            case_id,
+            "forensics.gzip",
+            "extract",
+            Some(&extracted.id),
+            &description,
+        )?;
+    ctx.store
+        .lock()
+        .map_err(|_| "case store unavailable")?
+        .add_findings(
+            case_id,
+            "forensics.gzip",
+            Some(&extracted.id),
+            &[NewFinding {
+                title: format!("Extracted Gzip member at 0x{offset:x}"),
+                severity: "info".into(),
+                details: format!(
+                    "Source: {} (sha256 {})\nDerived: {} (sha256 {})\nUncompressed length: {}",
+                    record.id, record.sha256, extracted.id, extracted.sha256, extracted.size,
+                ),
+            }],
+        )?;
+    Ok(extracted)
+}
+
 #[tauri::command]
 pub fn file_hex(
     ctx: State<'_, EvidenceCtx>,
@@ -537,6 +607,40 @@ mod tests {
                 .len(),
             2
         );
+    }
+
+    #[test]
+    fn embedded_gzip_is_bounded_and_linked_to_case() {
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = test_ctx(dir.path());
+        let case = ctx
+            .store
+            .lock()
+            .unwrap()
+            .create_case("Gzip lab", "")
+            .unwrap();
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        encoder.write_all(b"decompressed sample").unwrap();
+        let gz = encoder.finish().unwrap();
+        let mut fixture = b"prefix".to_vec();
+        fixture.extend(gz);
+        let src = import_bytes(&ctx, Path::new("firmware.bin"), &fixture, &case.id, true).unwrap();
+        assert!(extract_gzip_from_evidence(&ctx, DEFAULT_CASE, &src.id, 6).is_err());
+        assert!(extract_gzip_from_evidence(&ctx, &case.id, &src.id, 0).is_err());
+        let out = extract_gzip_from_evidence(&ctx, &case.id, &src.id, 6).unwrap();
+        assert_eq!(
+            std::fs::read(&out.stored_path).unwrap(),
+            b"decompressed sample"
+        );
+        assert!(ctx
+            .store
+            .lock()
+            .unwrap()
+            .list_events(&case.id)
+            .unwrap()
+            .iter()
+            .any(|event| event.source_description.contains(&src.id)));
     }
 
     #[test]

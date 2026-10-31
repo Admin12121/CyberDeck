@@ -3,7 +3,25 @@
 
 use serde::Serialize;
 
+pub mod application;
+pub mod dns;
+pub mod pcapng;
+pub mod streams;
+
+/// Detect either classic PCAP or PCAPNG without invoking external tools.
+pub fn parse_capture(data: &[u8]) -> Result<PcapFile, String> {
+    let mut capture = if data.starts_with(&[0x0a, 0x0d, 0x0d, 0x0a]) {
+        pcapng::parse_pcapng(data)?
+    } else {
+        parse_pcap(data)?
+    };
+    streams::assign_tcp_sessions(&mut capture.packets);
+    Ok(capture)
+}
+
 pub const MAX_PACKET_BYTES: usize = 262_144;
+/// Avoid unbounded metadata allocation for captures full of tiny/empty records.
+pub const MAX_CAPTURE_PACKETS: usize = 200_000;
 pub const PCAP_MAGIC_LE_USEC: u32 = 0xa1b2_c3d4;
 pub const PCAP_MAGIC_BE_USEC: u32 = 0xd4c3_b2a1;
 pub const PCAP_MAGIC_LE_NSEC: u32 = 0xa1b2_3c4d;
@@ -22,6 +40,14 @@ pub struct Layer {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct TcpMeta {
+    pub source_port: u16,
+    pub destination_port: u16,
+    pub sequence: u32,
+    pub flags: u8,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct Dissected {
     pub source: String,
     pub destination: String,
@@ -31,6 +57,7 @@ pub struct Dissected {
     pub layers: Vec<Layer>,
     /// Canonical "endpointA|endpointB" for TCP/UDP streams.
     pub stream_id: Option<String>,
+    pub tcp: Option<TcpMeta>,
     /// Transport payload bytes for TCP/UDP (bounded).
     pub payload: Vec<u8>,
 }
@@ -66,7 +93,11 @@ impl<'a> Reader<'a> {
     fn u16(&mut self) -> Option<u16> {
         let b = self.data.get(self.pos..self.pos + 2)?;
         self.pos += 2;
-        Some(if self.big_endian { u16::from_be_bytes([b[0], b[1]]) } else { u16::from_le_bytes([b[0], b[1]]) })
+        Some(if self.big_endian {
+            u16::from_be_bytes([b[0], b[1]])
+        } else {
+            u16::from_le_bytes([b[0], b[1]])
+        })
     }
     fn u32(&mut self) -> Option<u32> {
         let b = self.data.get(self.pos..self.pos + 4)?;
@@ -95,21 +126,57 @@ pub fn parse_pcap(data: &[u8]) -> Result<PcapFile, String> {
         return Err("pcapng captures arrive in a later arc; save as classic pcap".to_string());
     }
     let (big_endian, nanosecond, linktype) = match magic {
-        PCAP_MAGIC_LE_USEC => (false, false, u32::from_le_bytes([data[20], data[21], data[22], data[23]])),
-        PCAP_MAGIC_BE_USEC => (true, false, u32::from_be_bytes([data[20], data[21], data[22], data[23]])),
-        PCAP_MAGIC_LE_NSEC => (false, true, u32::from_le_bytes([data[20], data[21], data[22], data[23]])),
-        PCAP_MAGIC_BE_NSEC => (true, true, u32::from_be_bytes([data[20], data[21], data[22], data[23]])),
+        PCAP_MAGIC_LE_USEC => (
+            false,
+            false,
+            u32::from_le_bytes([data[20], data[21], data[22], data[23]]),
+        ),
+        PCAP_MAGIC_BE_USEC => (
+            true,
+            false,
+            u32::from_be_bytes([data[20], data[21], data[22], data[23]]),
+        ),
+        PCAP_MAGIC_LE_NSEC => (
+            false,
+            true,
+            u32::from_le_bytes([data[20], data[21], data[22], data[23]]),
+        ),
+        PCAP_MAGIC_BE_NSEC => (
+            true,
+            true,
+            u32::from_be_bytes([data[20], data[21], data[22], data[23]]),
+        ),
         other => return Err(format!("not a pcap capture (magic 0x{other:08x})")),
     };
 
-    let mut reader = Reader { data, pos: 24, big_endian };
+    let mut reader = Reader {
+        data,
+        pos: 24,
+        big_endian,
+    };
     let mut packets = Vec::new();
     let mut malformed_tail = false;
     while reader.pos < data.len() {
-        let Some(ts_sec) = reader.u32() else { malformed_tail = true; break };
-        let Some(ts_subsec) = reader.u32() else { malformed_tail = true; break };
-        let Some(incl_len) = reader.u32() else { malformed_tail = true; break };
-        let Some(orig_len) = reader.u32() else { malformed_tail = true; break };
+        if packets.len() >= MAX_CAPTURE_PACKETS {
+            malformed_tail = true;
+            break;
+        }
+        let Some(ts_sec) = reader.u32() else {
+            malformed_tail = true;
+            break;
+        };
+        let Some(ts_subsec) = reader.u32() else {
+            malformed_tail = true;
+            break;
+        };
+        let Some(incl_len) = reader.u32() else {
+            malformed_tail = true;
+            break;
+        };
+        let Some(orig_len) = reader.u32() else {
+            malformed_tail = true;
+            break;
+        };
         if incl_len as usize > MAX_PACKET_BYTES || reader.pos + incl_len as usize > data.len() {
             malformed_tail = true;
             break;
@@ -126,11 +193,25 @@ pub fn parse_pcap(data: &[u8]) -> Result<PcapFile, String> {
             dissected,
         });
     }
-    Ok(PcapFile { linktype, endianness: if big_endian { Endianness::Big } else { Endianness::Little }, nanosecond, packets, malformed_tail })
+    Ok(PcapFile {
+        linktype,
+        endianness: if big_endian {
+            Endianness::Big
+        } else {
+            Endianness::Little
+        },
+        nanosecond,
+        packets,
+        malformed_tail,
+    })
 }
 
 fn mac_to_string(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(":")
+    bytes
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect::<Vec<_>>()
+        .join(":")
 }
 
 fn ipv4_to_string(bytes: &[u8]) -> String {
@@ -157,19 +238,48 @@ fn color_for(protocol: &str) -> String {
 pub fn dissect(linktype: u32, frame: &[u8]) -> Dissected {
     match linktype {
         1 => dissect_ethernet(frame),
-        101 => dissect_raw_ip(frame), // LINKTYPE_RAW
-        113 => dissect_ethernet(frame), // LINKTYPE_LINUX_SLL is close enough for arc 3
+        101 => dissect_raw_ip(frame),    // LINKTYPE_RAW
+        113 => dissect_linux_sll(frame), // Linux cooked capture v1: 16-byte header
         _ => Dissected {
             source: String::new(),
             destination: String::new(),
             protocol: "LINK".to_string(),
             info: format!("linktype {linktype} frame, {} bytes", frame.len()),
             color_hint: "other".to_string(),
-            layers: vec![Layer { label: "Frame".to_string(), value: format!("{} bytes", frame.len()) }],
+            layers: vec![Layer {
+                label: "Frame".to_string(),
+                value: format!("{} bytes", frame.len()),
+            }],
             stream_id: None,
+            tcp: None,
             payload: Vec::new(),
         },
     }
+}
+
+/// Linux cooked capture v1 has a 16-byte header, not an Ethernet header.
+fn dissect_linux_sll(frame: &[u8]) -> Dissected {
+    if frame.len() < 16 {
+        return empty_frame();
+    }
+    let protocol = u16::from_be_bytes([frame[14], frame[15]]);
+    let layer = Layer {
+        label: "Linux cooked capture".to_string(),
+        value: format!("protocol 0x{protocol:04x}"),
+    };
+    let mut d = match protocol {
+        0x0800 => dissect_ipv4(&frame[16..], &[]),
+        0x86dd => dissect_ipv6(&frame[16..], &[]),
+        0x0806 => dissect_arp(&frame[16..]),
+        _ => {
+            let mut d = empty_frame();
+            d.protocol = "SLL".to_string();
+            d.info = format!("Linux cooked protocol 0x{protocol:04x}");
+            d
+        }
+    };
+    d.layers.insert(0, layer);
+    d
 }
 
 fn dissect_raw_ip(frame: &[u8]) -> Dissected {
@@ -190,8 +300,12 @@ fn empty_frame() -> Dissected {
         protocol: "MALFORMED".to_string(),
         info: "truncated frame".to_string(),
         color_hint: "other".to_string(),
-        layers: vec![Layer { label: "Frame".to_string(), value: "truncated".to_string() }],
+        layers: vec![Layer {
+            label: "Frame".to_string(),
+            value: "truncated".to_string(),
+        }],
         stream_id: None,
+        tcp: None,
         payload: Vec::new(),
     }
 }
@@ -205,8 +319,14 @@ fn dissect_ethernet(frame: &[u8]) -> Dissected {
     let ethertype = u16::from_be_bytes([frame[12], frame[13]]);
     let payload = &frame[14..];
     let mut layers = vec![
-        Layer { label: "Ethernet II".to_string(), value: format!("{src_mac} → {dst_mac}") },
-        Layer { label: "EtherType".to_string(), value: format!("0x{ethertype:04x}") },
+        Layer {
+            label: "Ethernet II".to_string(),
+            value: format!("{src_mac} → {dst_mac}"),
+        },
+        Layer {
+            label: "EtherType".to_string(),
+            value: format!("0x{ethertype:04x}"),
+        },
     ];
     let mut d = match ethertype {
         0x0800 => dissect_ipv4(payload, &layers),
@@ -235,7 +355,10 @@ fn dissect_arp(payload: &[u8]) -> Dissected {
     let target_ip = ipv4_to_string(&payload[24..28]);
     let info = match operation {
         1 => format!("Who has {target_ip}? Tell {sender_ip}"),
-        2 => format!("{sender_ip} is at {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}", payload[8], payload[9], payload[10], payload[11], payload[12], payload[13]),
+        2 => format!(
+            "{sender_ip} is at {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+            payload[8], payload[9], payload[10], payload[11], payload[12], payload[13]
+        ),
         _ => format!("ARP operation {operation}"),
     };
     Dissected {
@@ -245,11 +368,21 @@ fn dissect_arp(payload: &[u8]) -> Dissected {
         info: info.clone(),
         color_hint: color_for("ARP"),
         stream_id: None,
+        tcp: None,
         payload: Vec::new(),
         layers: vec![
-            Layer { label: "Address Resolution Protocol".to_string(), value: info },
-            Layer { label: "sender IP".to_string(), value: sender_ip },
-            Layer { label: "target IP".to_string(), value: target_ip },
+            Layer {
+                label: "Address Resolution Protocol".to_string(),
+                value: info,
+            },
+            Layer {
+                label: "sender IP".to_string(),
+                value: sender_ip,
+            },
+            Layer {
+                label: "target IP".to_string(),
+                value: target_ip,
+            },
         ],
     }
 }
@@ -284,16 +417,53 @@ fn dissect_ipv4(payload: &[u8], parent_layers: &[Layer]) -> Dissected {
     let source = ipv4_to_string(&payload[12..16]);
     let destination = ipv4_to_string(&payload[16..20]);
     let mut layers = parent_layers.to_vec();
-    layers.push(Layer { label: "Internet Protocol Version 4".to_string(), value: format!("{source} → {destination}") });
-    layers.push(Layer { label: "ttl".to_string(), value: ttl.to_string() });
-    layers.push(Layer { label: "total length".to_string(), value: total_length.to_string() });
+    layers.push(Layer {
+        label: "Internet Protocol Version 4".to_string(),
+        value: format!("{source} → {destination}"),
+    });
+    layers.push(Layer {
+        label: "ttl".to_string(),
+        value: ttl.to_string(),
+    });
+    layers.push(Layer {
+        label: "total length".to_string(),
+        value: total_length.to_string(),
+    });
 
-    let transport = &payload[ihl..];
+    if total_length < ihl {
+        return empty_frame();
+    }
+    let effective_end = total_length.min(payload.len());
+    let transport = &payload[ihl..effective_end];
+    let fragment_offset = u16::from_be_bytes([payload[6], payload[7]]) & 0x1fff;
+    if fragment_offset != 0 {
+        return Dissected {
+            source,
+            destination,
+            protocol: "IPv4-fragment".into(),
+            info: format!("noninitial IP fragment offset {}", fragment_offset * 8),
+            color_hint: color_for("other"),
+            layers,
+            stream_id: None,
+            tcp: None,
+            payload: Vec::new(),
+        };
+    }
     match proto {
-        6 => dissect_tcp(transport, &source, &destination, total_length.saturating_sub(ihl), layers),
+        6 => dissect_tcp(
+            transport,
+            &source,
+            &destination,
+            total_length.saturating_sub(ihl),
+            layers,
+        ),
         17 => dissect_udp(transport, &source, &destination, layers),
         1 => {
-            let info = format!("ICMP type={} code={}", transport.first().copied().unwrap_or(0), transport.get(1).copied().unwrap_or(0));
+            let info = format!(
+                "ICMP type={} code={}",
+                transport.first().copied().unwrap_or(0),
+                transport.get(1).copied().unwrap_or(0)
+            );
             Dissected {
                 source,
                 destination,
@@ -302,6 +472,7 @@ fn dissect_ipv4(payload: &[u8], parent_layers: &[Layer]) -> Dissected {
                 color_hint: color_for("ICMP"),
                 layers,
                 stream_id: None,
+                tcp: None,
                 payload: transport.to_vec(),
             }
         }
@@ -315,25 +486,131 @@ fn dissect_ipv4(payload: &[u8], parent_layers: &[Layer]) -> Dissected {
                 color_hint: color_for("other"),
                 layers,
                 stream_id: None,
+                tcp: None,
                 payload: transport.to_vec(),
             }
         }
     }
 }
 
+/// IPv6 headers are walked with a strict bound on extension count and bytes.
+/// Fragment reassembly and jumbograms are not supported: never attempt to
+/// decode a noninitial fragment as an ordinary TCP/UDP header.
 fn dissect_ipv6(payload: &[u8], parent_layers: &[Layer]) -> Dissected {
-    if payload.len() < 40 {
+    if payload.len() < 40 || payload[0] >> 4 != 6 {
         return empty_frame();
     }
     let source = format_ipv6(&payload[8..24]);
     let destination = format_ipv6(&payload[24..40]);
-    let next_header = payload[6];
+    let mut next = payload[6];
+    let payload_len = u16::from_be_bytes([payload[4], payload[5]]) as usize;
     let mut layers = parent_layers.to_vec();
-    layers.push(Layer { label: "Internet Protocol Version 6".to_string(), value: format!("{source} → {destination}") });
-    let transport = &payload[40..];
-    match next_header {
+    layers.push(Layer {
+        label: "Internet Protocol Version 6".to_string(),
+        value: format!("{source} → {destination}"),
+    });
+    // A zero payload length with bytes after the IPv6 header may be a
+    // jumbogram. Do not guess its upper-layer bounds or transport protocol.
+    if payload_len == 0 && payload.len() > 40 {
+        return Dissected {
+            source,
+            destination,
+            protocol: "IPv6".into(),
+            info: "IPv6 jumbogram or unspecified payload length (not decoded)".into(),
+            color_hint: color_for("IPv6"),
+            layers,
+            stream_id: None,
+            tcp: None,
+            payload: Vec::new(),
+        };
+    }
+    let end = (40usize.saturating_add(payload_len)).min(payload.len());
+    let mut cursor = 40usize;
+    for _ in 0..8 {
+        let extension = next;
+        match extension {
+            0 | 43 | 60 => {
+                let Some(header) = payload.get(cursor..cursor.saturating_add(2)) else {
+                    return empty_frame();
+                };
+                let header_len = (header[1] as usize + 1) * 8;
+                if cursor.checked_add(header_len).is_none_or(|e| e > end) {
+                    return empty_frame();
+                }
+                next = header[0];
+                cursor += header_len;
+            }
+            51 => {
+                let Some(header) = payload.get(cursor..cursor.saturating_add(2)) else {
+                    return empty_frame();
+                };
+                let header_len = (header[1] as usize + 2) * 4;
+                if cursor.checked_add(header_len).is_none_or(|e| e > end) {
+                    return empty_frame();
+                }
+                next = header[0];
+                cursor += header_len;
+            }
+            44 => {
+                let Some(fragment) = payload.get(cursor..cursor.saturating_add(8)) else {
+                    return empty_frame();
+                };
+                if cursor + 8 > end {
+                    return empty_frame();
+                }
+                let raw = u16::from_be_bytes([fragment[2], fragment[3]]);
+                let offset = (raw & 0xfff8) as usize;
+                layers.push(Layer {
+                    label: "IPv6 fragment".into(),
+                    value: format!("offset {offset} byte(s), more={}", raw & 1 == 1),
+                });
+                if offset != 0 {
+                    return Dissected {
+                        source,
+                        destination,
+                        protocol: "IPv6-fragment".into(),
+                        info: format!("noninitial IPv6 fragment offset {offset}"),
+                        color_hint: color_for("IPv6"),
+                        layers,
+                        stream_id: None,
+                        tcp: None,
+                        payload: Vec::new(),
+                    };
+                }
+                next = fragment[0];
+                cursor += 8;
+            }
+            _ => break,
+        }
+    }
+    // A chain with more than eight extensions is deliberately not decoded.
+    if matches!(next, 0 | 43 | 44 | 51 | 60) {
+        return empty_frame();
+    }
+    let Some(transport) = payload.get(cursor..end) else {
+        return empty_frame();
+    };
+    match next {
         6 => dissect_tcp(transport, &source, &destination, transport.len(), layers),
         17 => dissect_udp(transport, &source, &destination, layers),
+        58 => {
+            let info = format!(
+                "ICMPv6 type={} code={}",
+                transport.first().copied().unwrap_or(0),
+                transport.get(1).copied().unwrap_or(0),
+            );
+            Dissected {
+                source,
+                destination,
+                protocol: "ICMPv6".into(),
+                info,
+                color_hint: color_for("ICMP"),
+                layers,
+                stream_id: None,
+                tcp: None,
+                payload: transport.to_vec(),
+            }
+        }
         other => Dissected {
             source,
             destination,
@@ -342,19 +619,26 @@ fn dissect_ipv6(payload: &[u8], parent_layers: &[Layer]) -> Dissected {
             color_hint: color_for("IPv6"),
             layers,
             stream_id: None,
+            tcp: None,
             payload: Vec::new(),
         },
     }
 }
 
 fn format_ipv6(bytes: &[u8]) -> String {
-    (0..8)
-        .map(|i| u16::from_be_bytes([bytes[i * 2], bytes[i * 2 + 1]]).to_string())
-        .collect::<Vec<_>>()
-        .join(":")
+    let Some(addr) = <[u8; 16]>::try_from(bytes).ok() else {
+        return String::new();
+    };
+    std::net::Ipv6Addr::from(addr).to_string()
 }
 
-fn dissect_tcp(transport: &[u8], source: &str, destination: &str, ip_payload_len: usize, mut layers: Vec<Layer>) -> Dissected {
+fn dissect_tcp(
+    transport: &[u8],
+    source: &str,
+    destination: &str,
+    ip_payload_len: usize,
+    mut layers: Vec<Layer>,
+) -> Dissected {
     if transport.len() < 20 {
         return empty_frame();
     }
@@ -362,6 +646,9 @@ fn dissect_tcp(transport: &[u8], source: &str, destination: &str, ip_payload_len
     let dst_port = u16::from_be_bytes([transport[2], transport[3]]);
     let seq = u32::from_be_bytes([transport[4], transport[5], transport[6], transport[7]]);
     let data_offset = (transport[12] >> 4) as usize * 4;
+    if data_offset < 20 || data_offset > transport.len() {
+        return empty_frame();
+    }
     let flags_byte = transport[13];
     let mut flags = String::new();
     for (mask, name) in [
@@ -379,60 +666,175 @@ fn dissect_tcp(transport: &[u8], source: &str, destination: &str, ip_payload_len
             flags.push_str(name);
         }
     }
-    let payload_len = ip_payload_len.saturating_sub(data_offset);
+    let payload_len = ip_payload_len
+        .saturating_sub(data_offset)
+        .min(transport.len().saturating_sub(data_offset));
     let info = format!("{src_port} → {dst_port} [{flags}] Seq={seq} Len={payload_len}");
     let service = well_known_name(6, src_port, dst_port);
     let protocol = if service.is_empty() { "TCP" } else { service };
     let payload_end = (data_offset + payload_len).min(transport.len());
-    let payload = transport.get(data_offset..payload_end).unwrap_or(&[]).to_vec();
-    let mut endpoints = [format!("{source}:{src_port}"), format!("{destination}:{dst_port}")];
+    let payload = transport
+        .get(data_offset..payload_end)
+        .unwrap_or(&[])
+        .to_vec();
+    let mut endpoints = [
+        format!("{source}:{src_port}"),
+        format!("{destination}:{dst_port}"),
+    ];
     endpoints.sort();
-    let stream_id = Some(endpoints.join("|"));
-    // HTTP piggybacks on the well-known port plus a recognizable payload
-    let protocol = if payload_len > 0 && matches!(src_port, 80 | 8080) || matches!(dst_port, 80 | 8080) {
-        let http_start = transport.get(data_offset..data_offset + 5);
-        if let Some(head) = http_start {
-            if head.starts_with(b"HTTP/") || head.starts_with(b"GET ") || head.starts_with(b"POST ") || head.starts_with(b"PUT ") || head.starts_with(b"HEAD ") || head.starts_with(b"DELETE ") {
-                "HTTP"
-            } else {
-                protocol
-            }
-        } else {
-            protocol
-        }
+    let stream_id = Some(format!("tcp|{}", endpoints.join("|")));
+    // Passive application parsing looks only at bytes in the captured frame.
+    // A split TCP segment cannot be claimed as a complete HTTP/TLS message.
+    let http = application::http_start_line(&payload);
+    let tls = application::tls_hello(&payload);
+    let protocol = if http.is_some() {
+        "HTTP"
+    } else if tls.is_some() {
+        "TLS"
     } else {
         protocol
     };
+    if let Some(line) = &http {
+        layers.push(Layer {
+            label: "HTTP/1.x start line".into(),
+            value: line.clone(),
+        });
+    }
+    if let Some(hello) = &tls {
+        layers.push(Layer {
+            label: "TLS handshake".into(),
+            value: application::tls_description(hello),
+        });
+        if let Some(host) = &hello.sni {
+            layers.push(Layer {
+                label: "TLS Server Name Indication".into(),
+                value: host.clone(),
+            });
+        }
+        if !hello.alpn.is_empty() {
+            layers.push(Layer {
+                label: "TLS ALPN".into(),
+                value: hello.alpn.join(", "),
+            });
+        }
+    }
+    let info = if let Some(line) = http {
+        format!("{src_port} → {dst_port} {line}")
+    } else if let Some(hello) = tls {
+        format!(
+            "{src_port} → {dst_port} {}",
+            application::tls_description(&hello)
+        )
+    } else {
+        info
+    };
     let color = color_for(protocol);
-    layers.push(Layer { label: "Transmission Control Protocol".to_string(), value: info.clone() });
-    layers.push(Layer { label: "source port".to_string(), value: src_port.to_string() });
-    layers.push(Layer { label: "destination port".to_string(), value: dst_port.to_string() });
-    layers.push(Layer { label: "flags".to_string(), value: flags });
-    Dissected { source: source.to_string(), destination: destination.to_string(), protocol: protocol.to_string(), info, color_hint: color, layers, stream_id, payload }
+    layers.push(Layer {
+        label: "Transmission Control Protocol".to_string(),
+        value: info.clone(),
+    });
+    layers.push(Layer {
+        label: "source port".to_string(),
+        value: src_port.to_string(),
+    });
+    layers.push(Layer {
+        label: "destination port".to_string(),
+        value: dst_port.to_string(),
+    });
+    layers.push(Layer {
+        label: "flags".to_string(),
+        value: flags,
+    });
+    Dissected {
+        source: source.to_string(),
+        destination: destination.to_string(),
+        protocol: protocol.to_string(),
+        info,
+        color_hint: color,
+        layers,
+        stream_id,
+        tcp: Some(TcpMeta {
+            source_port: src_port,
+            destination_port: dst_port,
+            sequence: seq,
+            flags: flags_byte,
+        }),
+        payload,
+    }
 }
 
-fn dissect_udp(transport: &[u8], source: &str, destination: &str, mut layers: Vec<Layer>) -> Dissected {
+fn dissect_udp(
+    transport: &[u8],
+    source: &str,
+    destination: &str,
+    mut layers: Vec<Layer>,
+) -> Dissected {
     if transport.len() < 8 {
         return empty_frame();
     }
     let src_port = u16::from_be_bytes([transport[0], transport[1]]);
     let dst_port = u16::from_be_bytes([transport[2], transport[3]]);
     let length = u16::from_be_bytes([transport[4], transport[5]]);
-    let payload = transport.get(8..).unwrap_or(&[]).to_vec();
-    let mut endpoints = [format!("{source}:{src_port}"), format!("{destination}:{dst_port}")];
+    if length < 8 {
+        return empty_frame();
+    }
+    let end = (length as usize).min(transport.len());
+    let payload = transport.get(8..end).unwrap_or(&[]).to_vec();
+    let mut endpoints = [
+        format!("{source}:{src_port}"),
+        format!("{destination}:{dst_port}"),
+    ];
     endpoints.sort();
-    let stream_id = Some(endpoints.join("|"));
+    let stream_id = Some(format!("udp|{}", endpoints.join("|")));
     let service = well_known_name(17, src_port, dst_port);
     let protocol = if service.is_empty() { "UDP" } else { service };
     let mut info = format!("{src_port} → {dst_port} Len={}", length.saturating_sub(8));
-    if protocol == "DNS" && transport.len() > 12 {
-        let questions = u16::from_be_bytes([transport[10], transport[11]]);
-        info = format!("Standard query, {questions} question(s)");
+    if protocol == "DNS" {
+        if let Some(summary) = dns::parse_dns(&payload) {
+            info = dns::describe_dns(&summary);
+            layers.push(Layer {
+                label: "Domain Name System".into(),
+                value: info.clone(),
+            });
+            for (index, answer) in summary.answer_records.iter().enumerate() {
+                layers.push(Layer {
+                    label: format!("DNS answer {}", index + 1),
+                    value: format!(
+                        "{} {} = {} (TTL {}s)",
+                        answer.name,
+                        dns::record_type_label(answer.record_type),
+                        answer.value,
+                        answer.ttl_seconds,
+                    ),
+                });
+            }
+        } else {
+            info = "DNS query/response (incomplete or malformed header)".into();
+        }
     }
-    layers.push(Layer { label: "User Datagram Protocol".to_string(), value: info.clone() });
-    layers.push(Layer { label: "source port".to_string(), value: src_port.to_string() });
-    layers.push(Layer { label: "destination port".to_string(), value: dst_port.to_string() });
-    Dissected { source: source.to_string(), destination: destination.to_string(), protocol: protocol.to_string(), info, color_hint: color_for(protocol), layers, stream_id, payload }
+    layers.push(Layer {
+        label: "User Datagram Protocol".to_string(),
+        value: info.clone(),
+    });
+    layers.push(Layer {
+        label: "source port".to_string(),
+        value: src_port.to_string(),
+    });
+    layers.push(Layer {
+        label: "destination port".to_string(),
+        value: dst_port.to_string(),
+    });
+    Dissected {
+        source: source.to_string(),
+        destination: destination.to_string(),
+        protocol: protocol.to_string(),
+        info,
+        color_hint: color_for(protocol),
+        layers,
+        stream_id,
+        tcp: None,
+        payload,
+    }
 }
 
 #[cfg(test)]
@@ -520,6 +922,23 @@ mod tests {
     }
 
     #[test]
+    fn linux_cooked_linktype_uses_16_byte_header() {
+        let mut bytes = vec![0u8; 14];
+        bytes.extend_from_slice(&0x0800u16.to_be_bytes());
+        bytes.extend_from_slice(&[
+            0x45, 0, 0, 20, 0, 0, 0, 0, 64, 1, 0, 0, 192, 0, 2, 10, 192, 0, 2, 11,
+        ]);
+        let packet = dissect(113, &bytes);
+        assert_eq!(packet.source, "192.0.2.10");
+        assert_eq!(packet.destination, "192.0.2.11");
+        assert_eq!(packet.protocol, "ICMP");
+        assert!(packet
+            .layers
+            .iter()
+            .any(|layer| layer.label.contains("cooked")));
+    }
+
+    #[test]
     fn dissects_arp_request() {
         let bytes = build_pcap(&[(1000, arp_frame())]);
         let parsed = parse_pcap(&bytes).unwrap();
@@ -541,7 +960,10 @@ mod tests {
         assert_eq!(d.source, "192.168.1.24");
         assert_eq!(d.destination, "10.0.0.42");
         assert!(d.info.contains("49812 → 443 [SYN] Seq=0 Len=0"));
-        assert!(d.layers.iter().any(|l| l.label == "flags" && l.value == "SYN"));
+        assert!(d
+            .layers
+            .iter()
+            .any(|l| l.label == "flags" && l.value == "SYN"));
     }
 
     #[test]
@@ -585,7 +1007,7 @@ mod tests {
         frame.extend_from_slice(&0x0800u16.to_be_bytes());
         frame.push(0x45);
         frame.push(0);
-        frame.extend_from_slice(&34u16.to_be_bytes());
+        frame.extend_from_slice(&57u16.to_be_bytes());
         frame.extend_from_slice(&[0, 0, 0, 0]);
         frame.push(64);
         frame.push(17);
@@ -594,15 +1016,221 @@ mod tests {
         frame.extend_from_slice(&[1, 1, 1, 1]);
         frame.extend_from_slice(&5353u16.to_be_bytes()); // src 53 for naming
         frame.extend_from_slice(&53u16.to_be_bytes());
-        frame.extend_from_slice(&14u16.to_be_bytes());
+        frame.extend_from_slice(&37u16.to_be_bytes());
         frame.extend_from_slice(&[0, 0]);
         frame.extend_from_slice(&[0xab, 0xcd]); // dns id
         frame.extend_from_slice(&[0x01, 0x00]); // flags
         frame.extend_from_slice(&[0x00, 0x01]); // one question
+        frame.extend_from_slice(&[0x00, 0x00]); // zero answers
+        frame.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]); // authority + additional
+        frame.extend_from_slice(b"\x07example\x03com\x00\x00\x01\x00\x01");
         let parsed = parse_pcap(&build_pcap(&[(1, frame)])).unwrap();
         let d = &parsed.packets[0].dissected;
         assert_eq!(d.protocol, "DNS");
         assert_eq!(d.color_hint, "dns");
-        assert!(d.info.contains("question"));
+        assert!(d.info.contains("example.com A"));
+    }
+
+    #[test]
+    fn packet_parser_to_tcp_reassembly_end_to_end() {
+        fn tcp_frame(seq: u32, data: &[u8]) -> Vec<u8> {
+            let mut frame = vec![0xff; 6];
+            frame.extend_from_slice(&[2, 0, 0, 0, 0, 1]);
+            frame.extend_from_slice(&0x0800u16.to_be_bytes());
+            frame.extend_from_slice(&[0x45, 0]);
+            frame.extend_from_slice(&((40 + data.len()) as u16).to_be_bytes());
+            frame.extend_from_slice(&[0; 4]);
+            frame.extend_from_slice(&[64, 6, 0, 0]);
+            frame.extend_from_slice(&[192, 0, 2, 1]);
+            frame.extend_from_slice(&[192, 0, 2, 2]);
+            frame.extend_from_slice(&1234u16.to_be_bytes());
+            frame.extend_from_slice(&80u16.to_be_bytes());
+            frame.extend_from_slice(&seq.to_be_bytes());
+            frame.extend_from_slice(&0u32.to_be_bytes());
+            frame.extend_from_slice(&[0x50, 0x18]);
+            frame.extend_from_slice(&[0; 6]);
+            frame.extend_from_slice(data);
+            frame
+        }
+        let mut out_of_order = tcp_frame(108, b"rld");
+        let mut fragment = tcp_frame(110, b"ignored");
+        fragment[20..22].copy_from_slice(&1u16.to_be_bytes());
+        let capture = build_pcap(&[
+            (1, tcp_frame(100, b"hell")),
+            (2, std::mem::take(&mut out_of_order)),
+            (3, tcp_frame(104, b"o wo")),
+            (4, tcp_frame(104, b"o wo")),
+            (5, fragment),
+        ]);
+        let parsed = parse_capture(&capture).unwrap();
+        assert_eq!(parsed.packets[4].dissected.protocol, "IPv4-fragment");
+        assert!(parsed.packets[4].dissected.stream_id.is_none());
+        let id = parsed.packets[0].dissected.stream_id.as_ref().unwrap();
+        assert!(id.starts_with("tcp|"));
+        let result = streams::follow_stream(&parsed.packets, id).unwrap();
+        let text = result
+            .chunks
+            .iter()
+            .filter(|c| c.kind == "data")
+            .map(|c| c.text.as_str())
+            .collect::<String>();
+        assert_eq!(text, "hello world");
+        assert_eq!(result.gaps, 0);
+        assert_eq!(result.retransmissions, 1);
+    }
+
+    #[test]
+    fn ipv6_hop_by_hop_udp_dns_is_decoded_with_canonical_addresses() {
+        let mut dns = vec![0x12, 0x34, 0x01, 0x00, 0, 1, 0, 0, 0, 0, 0, 0];
+        dns.extend_from_slice(b"\x07example\x03com\x00\x00\x01\x00\x01");
+        let udp_len = 8 + dns.len();
+        let mut ip = vec![0x60, 0, 0, 0];
+        ip.extend_from_slice(&((8 + udp_len) as u16).to_be_bytes());
+        ip.extend_from_slice(&[0, 64]); // next header hop-by-hop
+        ip.extend_from_slice(&[0; 15]);
+        ip.push(1);
+        ip.extend_from_slice(&[0; 15]);
+        ip.push(2);
+        ip.extend_from_slice(&[17, 0, 0, 0, 0, 0, 0, 0]);
+        ip.extend_from_slice(&5353u16.to_be_bytes());
+        ip.extend_from_slice(&53u16.to_be_bytes());
+        ip.extend_from_slice(&(udp_len as u16).to_be_bytes());
+        ip.extend_from_slice(&[0, 0]);
+        ip.extend_from_slice(&dns);
+        let parsed = dissect(101, &ip);
+        assert_eq!(parsed.source, "::1");
+        assert_eq!(parsed.destination, "::2");
+        assert_eq!(parsed.protocol, "DNS");
+        assert!(parsed.info.contains("example.com A"));
+    }
+
+    #[test]
+    fn ipv6_noninitial_fragment_is_not_mistaken_for_udp() {
+        let mut ip = vec![0x60, 0, 0, 0, 0, 16, 44, 64];
+        ip.extend_from_slice(&[0; 32]);
+        ip.extend_from_slice(&[17, 0, 0, 8, 0, 0, 0, 1]);
+        ip.extend_from_slice(&[0; 8]);
+        let parsed = dissect(101, &ip);
+        assert_eq!(parsed.protocol, "IPv6-fragment");
+        assert!(parsed.stream_id.is_none());
+        assert!(parsed.payload.is_empty());
+        ip[40] = 0; // malformed extension chain
+        assert_eq!(dissect(101, &ip).protocol, "IPv6-fragment");
+    }
+
+    #[test]
+    fn passive_http_and_tls_metadata_reach_packet_layers() {
+        fn ip_tcp(body: &[u8], port: u16) -> Vec<u8> {
+            let mut ip = vec![0x45, 0];
+            ip.extend_from_slice(&((40 + body.len()) as u16).to_be_bytes());
+            ip.extend_from_slice(&[0, 0, 0, 0, 64, 6, 0, 0]);
+            ip.extend_from_slice(&[192, 0, 2, 1, 192, 0, 2, 2]);
+            ip.extend_from_slice(&12345u16.to_be_bytes());
+            ip.extend_from_slice(&port.to_be_bytes());
+            ip.extend_from_slice(&1u32.to_be_bytes());
+            ip.extend_from_slice(&0u32.to_be_bytes());
+            ip.extend_from_slice(&[0x50, 0x18, 0, 0, 0, 0, 0, 0]);
+            ip.extend_from_slice(body);
+            ip
+        }
+        let http = dissect(
+            101,
+            &ip_tcp(b"GET /lab HTTP/1.1\r\nHost: example.com\r\n\r\n", 80),
+        );
+        assert_eq!(http.protocol, "HTTP");
+        assert!(http.info.contains("GET /lab HTTP/1.1"));
+        assert!(http.layers.iter().any(|l| l.label == "HTTP/1.x start line"));
+        let mut hello = vec![3, 3];
+        hello.extend([7; 32]);
+        hello.extend([0, 0, 2, 0x13, 0x01, 1, 0]);
+        let mut handshake = vec![1, 0, 0, hello.len() as u8];
+        handshake.extend(hello);
+        let mut tls = vec![22, 3, 3];
+        tls.extend_from_slice(&(handshake.len() as u16).to_be_bytes());
+        tls.extend(handshake);
+        let parsed = dissect(101, &ip_tcp(&tls, 443));
+        assert_eq!(parsed.protocol, "TLS");
+        assert!(parsed.info.contains("ClientHello"));
+        assert!(parsed.layers.iter().any(|l| l.label == "TLS handshake"));
+    }
+
+    #[test]
+    fn classic_pcap_packet_count_has_a_fixed_upper_bound() {
+        // A short file containing many zero-length records must not cause
+        // millions of metadata allocations.
+        let mut capture = build_pcap(&[]);
+        for _ in 0..(MAX_CAPTURE_PACKETS + 1) {
+            capture.extend_from_slice(&[0u8; 16]);
+        }
+        let parsed = parse_pcap(&capture).unwrap();
+        assert_eq!(parsed.packets.len(), MAX_CAPTURE_PACKETS);
+        assert!(parsed.malformed_tail);
+    }
+
+    #[test]
+    fn hostile_small_buffers_do_not_panic_application_parsers() {
+        let mut seed = 0x9e37_79b9u32;
+        for len in 0..512 {
+            let mut input = Vec::with_capacity(len);
+            for _ in 0..len {
+                seed ^= seed << 13;
+                seed ^= seed >> 17;
+                seed ^= seed << 5;
+                input.push((seed & 0xff) as u8);
+            }
+            let _ = application::tls_hello(&input);
+            let _ = application::http_start_line(&input);
+            let _ = dns::parse_dns(&input);
+            let _ = dissect(101, &input);
+        }
+    }
+
+    #[test]
+    fn pcap_tcp_session_reuse_and_split_http_are_detected_end_to_end() {
+        fn tcp_frame(seq: u32, flags: u8, payload: &[u8]) -> Vec<u8> {
+            let mut frame = vec![0x02; 12];
+            frame.extend_from_slice(&0x0800u16.to_be_bytes());
+            frame.extend_from_slice(&[0x45, 0]);
+            frame.extend_from_slice(&((40 + payload.len()) as u16).to_be_bytes());
+            frame.extend_from_slice(&[0, 0, 0, 0, 64, 6, 0, 0]);
+            frame.extend_from_slice(&[192, 0, 2, 1, 192, 0, 2, 2]);
+            frame.extend_from_slice(&1234u16.to_be_bytes());
+            frame.extend_from_slice(&80u16.to_be_bytes());
+            frame.extend_from_slice(&seq.to_be_bytes());
+            frame.extend_from_slice(&0u32.to_be_bytes());
+            frame.extend_from_slice(&[0x50, flags, 0, 0, 0, 0, 0, 0]);
+            frame.extend_from_slice(payload);
+            frame
+        }
+
+        let first = b"GET /first HTTP/1.1\r\nHost: example.test\r\n\r\n";
+        let second = b"POST /second HTTP/1.1\r\nContent-Length: 0\r\n\r\n";
+        let capture = build_pcap(&[
+            (1, tcp_frame(1000, 0x02, b"")),
+            (2, tcp_frame(1001, 0x18, &first[..8])),
+            (3, tcp_frame(1009, 0x18, &first[8..])),
+            (4, tcp_frame(1100, 0x04, b"")), // RST closes the first epoch
+            (5, tcp_frame(2000, 0x02, b"")),
+            (6, tcp_frame(2001, 0x18, &second[..7])),
+            (7, tcp_frame(2008, 0x18, &second[7..])),
+        ]);
+        let parsed = parse_capture(&capture).unwrap();
+        let first_id = parsed.packets[1].dissected.stream_id.as_ref().unwrap();
+        let second_id = parsed.packets[5].dissected.stream_id.as_ref().unwrap();
+        assert_ne!(first_id, second_id);
+        assert!(first_id.ends_with("#1"));
+        assert!(second_id.ends_with("#2"));
+        let first_transcript = streams::follow_stream(&parsed.packets, first_id).unwrap();
+        let second_transcript = streams::follow_stream(&parsed.packets, second_id).unwrap();
+        assert_eq!(
+            first_transcript.application_hints[0].summary,
+            "GET /first HTTP/1.1"
+        );
+        assert_eq!(
+            second_transcript.application_hints[0].summary,
+            "POST /second HTTP/1.1"
+        );
+        assert_eq!(first_transcript.conflicts, 0);
+        assert_eq!(second_transcript.conflicts, 0);
     }
 }

@@ -11,7 +11,7 @@ import {
   type HexResponseWire,
   type PcapOpenWire,
   type PcapPacketWire,
-  type StreamChunkWire,
+  type StreamTranscriptWire,
 } from "@lib/ipc";
 import { useWorkbench } from "@state/workbench";
 import type { ToolId } from "@features/registry";
@@ -110,7 +110,7 @@ export function PacketStudioView() {
         <ToolButton
           onClick={() => void openCapture()}
           disabled={!desktop || opening}
-          title={desktop ? "Open a classic pcap capture, dissected by the native engine" : "Opening captures requires the desktop runtime"}
+          title={desktop ? "Open a PCAP or PCAPNG capture using the native Rust parser" : "Opening captures requires the desktop runtime"}
         >
           <FolderOpen size={11} /> {opening ? "opening…" : "Open…"}
         </ToolButton>
@@ -125,7 +125,7 @@ export function PacketStudioView() {
           className="min-w-0 flex-1"
         />
         {capture ? (
-          <Chip tone="ok">{capture.file_name}: {capture.packet_count} packets</Chip>
+          <Chip tone="ok">{capture.file_name} · {capture.format.toUpperCase()} · {capture.packet_count} packets</Chip>
         ) : (
           <Chip>sample capture</Chip>
         )}
@@ -357,11 +357,29 @@ function DetailBranch({ node, depth }: { node: DetailNode; depth: number }) {
 // ---------------------------------------------------------- follow stream ---
 
 function FollowStreamView({ packets }: { packets: DisplayPacket[] }) {
+  const wb = useWorkbench();
   const desktop = isDesktop();
   const withStream = packets.filter((p) => p.stream_id);
   const [selected, setSelected] = useState<string | null>(null);
-  const [chunks, setChunks] = useState<StreamChunkWire[] | null>(null);
+  const [transcript, setTranscript] = useState<StreamTranscriptWire | null>(null);
+  const [streamError, setStreamError] = useState<string | null>(null);
 
+  const sideHex = (dir: "A" | "B"): string => (transcript?.chunks ?? [])
+    .filter((chunk) => chunk.dir === dir && (chunk.kind === "data" || chunk.kind === "datagram"))
+    .map((chunk) => chunk.hex_data ?? "").join("");
+  const canSend = (dir: "A" | "B"): boolean => {
+    if (!transcript || transcript.gaps > 0 || transcript.truncated) return false;
+    const hex = sideHex(dir);
+    return hex.length > 0 && hex.length <= 256 * 1024;
+  };
+  const sendSide = (dir: "A" | "B") => {
+    if (!canSend(dir) || !transcript || !selected) return;
+    wb.sendToRecipes(
+      sideHex(dir),
+      "Captured packet stream " + selected + ", side " + dir + " (" + transcript.protocol + "; sequence ordered)",
+      [{ opId: "from_hex", enabled: true }],
+    );
+  };
   const streams = useMemo(() => {
     const map = new Map<string, { id: string; label: string; packets: number }>();
     for (const p of withStream) {
@@ -373,20 +391,21 @@ function FollowStreamView({ packets }: { packets: DisplayPacket[] }) {
   }, [withStream]);
 
   useEffect(() => {
-    setChunks(null);
+    setTranscript(null);
+    setStreamError(null);
     if (!selected) return;
     let cancelled = false;
     pcapFollowStream(selected)
       .then((data) => {
-        if (!cancelled) setChunks(data);
+        if (!cancelled) setTranscript(data);
       })
       .catch((err) => {
-        if (!cancelled) console.error("pcap_follow_stream failed:", err);
+        if (!cancelled) setStreamError(String(err));
       });
     return () => {
       cancelled = true;
     };
-  }, [selected]);
+  }, [selected, packets]);
 
   if (!desktop) {
     return (
@@ -415,17 +434,36 @@ function FollowStreamView({ packets }: { packets: DisplayPacket[] }) {
         ))}
       </div>
       <div className="min-h-0 flex-1 overflow-auto p-2 font-mono text-[11px] leading-relaxed">
-        {chunks === null ? (
+        {streamError ? (
+          <div className="text-err">{streamError}</div>
+        ) : transcript === null ? (
           <div className="text-fg-muted">select a stream…</div>
-        ) : chunks.length === 0 ? (
-          <div className="text-fg-muted">no payload bytes in this stream</div>
         ) : (
-          chunks.map((chunk, i) => (
-            <div key={i} className="whitespace-pre-wrap break-all">
-              <span className={chunk.dir === "A" ? "text-blue" : "text-orange"}>[{chunk.dir}] </span>
-              <span className="text-fg">{chunk.text}</span>
+          <>
+            <div className="mb-2 flex flex-wrap items-center gap-2 border-b border-line pb-2 text-fg-muted">
+              <ToolButton onClick={() => sendSide("A")} disabled={!canSend("A")}
+                title="Send side A into Recipes only if the capture has no missing sequences or truncation">
+                A → Recipes
+              </ToolButton>
+              <ToolButton onClick={() => sendSide("B")} disabled={!canSend("B")}
+                title="Send side B into Recipes only if the capture has no missing sequences or truncation">
+                B → Recipes
+              </ToolButton>
+              {transcript.protocol} · {transcript.gaps} gap(s) · {transcript.retransmissions} retransmission(s)
+              {transcript.truncated ? " · truncated at safe limits" : ""}
+              {transcript.protocol === "TCP" ? " · sequence ordered per direction; not full TCP session tracking" : " · datagrams in capture order"}
             </div>
-          ))
+            {transcript.chunks.length === 0 ? (
+              <div className="text-fg-muted">no payload bytes in this stream</div>
+            ) : transcript.chunks.map((chunk, i) => (
+              <div key={i} className={`whitespace-pre-wrap break-all ${chunk.kind === "gap" || chunk.kind === "notice" ? "my-1 text-warn" : ""}`}>
+                <span className={chunk.dir === "A" ? "text-blue" : "text-orange"}>[{chunk.dir}] </span>
+                <span className={chunk.kind === "data" || chunk.kind === "datagram" ? "text-fg" : "text-warn"}>
+                  {chunk.kind === "gap" ? "⚠ " : ""}{chunk.text}
+                </span>
+              </div>
+            ))}
+          </>
         )}
       </div>
     </div>

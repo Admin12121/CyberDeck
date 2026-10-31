@@ -247,6 +247,12 @@ export interface SignatureScanWire {
   integrity_checked: boolean;
 }
 
+/** Extract a bounded embedded Gzip member to the currently selected case. */
+export async function fileExtractGzip(caseId: string, id: string, offset: number): Promise<ArtifactRecord> {
+  if (!inTauri) throw new Error("Gzip extraction requires the desktop runtime");
+  return invoke<ArtifactRecord>("file_extract_gzip", { caseId, id, offset });
+}
+
 export async function fileSignatureScan(caseId: string, id: string): Promise<SignatureScanWire> {
   if (!inTauri) throw new Error("Binary scanning requires the native desktop runtime");
   return invoke<SignatureScanWire>("file_signature_scan", { caseId, id });
@@ -283,6 +289,7 @@ export interface PcapPacketWire {
 }
 
 export interface PcapOpenWire {
+  format: "pcap" | "pcapng";
   linktype: number;
   packet_count: number;
   shown: number;
@@ -299,11 +306,21 @@ export async function pcapOpenDialog(): Promise<PcapOpenWire> {
 export interface StreamChunkWire {
   dir: string;
   text: string;
+  kind: "data" | "gap" | "notice" | "datagram";
+  hex_data: string | null;
 }
 
-export async function pcapFollowStream(streamId: string): Promise<StreamChunkWire[]> {
+export interface StreamTranscriptWire {
+  protocol: "TCP" | "UDP";
+  chunks: StreamChunkWire[];
+  gaps: number;
+  retransmissions: number;
+  truncated: boolean;
+}
+
+export async function pcapFollowStream(streamId: string): Promise<StreamTranscriptWire> {
   if (!inTauri) throw new Error("stream following requires the desktop runtime");
-  return invoke<StreamChunkWire[]>("pcap_follow_stream", { streamId });
+  return invoke<StreamTranscriptWire>("pcap_follow_stream", { streamId });
 }
 
 export async function pcapPacketBytes(index: number, offset: number, len: number): Promise<HexResponseWire> {

@@ -1,7 +1,11 @@
 //! Native crypto operations with reference test vectors.
 
 pub mod recipes;
+pub mod recovery;
+pub mod candidates;
+pub mod gpu;
 pub mod formats;
+pub mod extraction;
 
 use base64::Engine as _;
 use hmac::{Hmac, Mac};

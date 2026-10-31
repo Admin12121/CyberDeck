@@ -26,12 +26,29 @@ pub struct MatchReplaceRule {
 
 /// A request held by the interceptor until forwarded or dropped.
 pub struct PendingRequest {
-    pub stream: TcpStream,
+    pub stream: ProxyStream,
     pub method: String,
     pub url: String,
     pub headers: Vec<(String, String)>,
-    pub body: String,
+    pub body: Vec<u8>,
     pub info: CapturedRequest,
+}
+
+/// A waiting browser connection may be plaintext HTTP or an intercepted TLS
+/// session. Both must be able to receive Forward/Drop decisions.
+pub enum ProxyStream {
+    Plain(TcpStream),
+    Tls(tokio_rustls::server::TlsStream<TcpStream>),
+}
+
+impl ProxyStream {
+    async fn write_all(&mut self, bytes: &[u8]) -> std::io::Result<()> {
+        use tokio::io::AsyncWriteExt;
+        match self {
+            Self::Plain(stream) => stream.write_all(bytes).await,
+            Self::Tls(stream) => stream.write_all(bytes).await,
+        }
+    }
 }
 
 pub struct ProxyShared {
@@ -96,7 +113,10 @@ fn http_client() -> reqwest::Client {
 
 /// Parse a raw HTTP request into (method, url, headers, body). The Host or
 /// absolute-URI supplies the target; scheme defaults to http.
-pub fn parse_raw_request(raw: &str, scheme: &str) -> Result<(String, String, Vec<(String, String)>, String), String> {
+pub fn parse_raw_request(
+    raw: &str,
+    scheme: &str,
+) -> Result<(String, String, Vec<(String, String)>, String), String> {
     let (head, body) = match raw.split_once("\r\n\r\n") {
         Some((h, b)) => (h, b.to_string()),
         None if raw.contains("\n\n") => {
@@ -137,7 +157,8 @@ pub fn parse_raw_request(raw: &str, scheme: &str) -> Result<(String, String, Vec
 pub async fn http_send(request_raw: String) -> Result<HttpResponseWire, String> {
     let (method, url, headers, body) = parse_raw_request(&request_raw, "http")?;
     let client = http_client();
-    let method_req = reqwest::Method::from_bytes(method.as_bytes()).map_err(|e| format!("bad method: {e}"))?;
+    let method_req =
+        reqwest::Method::from_bytes(method.as_bytes()).map_err(|e| format!("bad method: {e}"))?;
     let mut request = client.request(method_req, &url);
     for (name, value) in &headers {
         if name.eq_ignore_ascii_case("host") || name.eq_ignore_ascii_case("content-length") {
@@ -149,17 +170,27 @@ pub async fn http_send(request_raw: String) -> Result<HttpResponseWire, String> 
         request = request.body(body.clone());
     }
     let started = Instant::now();
-    let mut response = request.send().await.map_err(|e| format!("request failed: {e}"))?;
+    let mut response = request
+        .send()
+        .await
+        .map_err(|e| format!("request failed: {e}"))?;
     let status = response.status().as_u16();
     let resp_headers: Vec<(String, String)> = response
         .headers()
         .iter()
         .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or("<binary>").to_string()))
         .collect();
-    let size_hint = response.content_length().unwrap_or(0).min(usize::MAX as u64) as usize;
+    let size_hint = response
+        .content_length()
+        .unwrap_or(0)
+        .min(usize::MAX as u64) as usize;
     let mut body_bytes = Vec::new();
     let mut truncated = false;
-    while let Some(chunk) = response.chunk().await.map_err(|e| format!("body read failed: {e}"))? {
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|e| format!("body read failed: {e}"))?
+    {
         let space = MAX_BODY_BYTES.saturating_sub(body_bytes.len());
         if chunk.len() > space {
             body_bytes.extend_from_slice(&chunk[..space]);
@@ -168,7 +199,11 @@ pub async fn http_send(request_raw: String) -> Result<HttpResponseWire, String> 
         }
         body_bytes.extend_from_slice(&chunk);
     }
-    let size = if truncated { size_hint.max(body_bytes.len()) } else { body_bytes.len() };
+    let size = if truncated {
+        size_hint.max(body_bytes.len())
+    } else {
+        body_bytes.len()
+    };
     let body_text = String::from_utf8_lossy(&body_bytes).to_string();
     Ok(HttpResponseWire {
         status,
@@ -192,7 +227,10 @@ pub struct Finding {
 }
 
 const INTERESTING_PATHS: &[(&str, &str)] = &[
-    ("/robots.txt", "robots.txt present; review disallowed entries for hidden paths"),
+    (
+        "/robots.txt",
+        "robots.txt present; review disallowed entries for hidden paths",
+    ),
     ("/sitemap.xml", "sitemap.xml present"),
     ("/.env", ".env file exposed: secrets leak"),
     ("/.git/HEAD", ".git directory exposed: source leak"),
@@ -216,10 +254,19 @@ const SECURITY_HEADERS: &[(&str, &str)] = &[
 #[tauri::command]
 pub async fn web_scan(target_url: String, authorized: bool) -> Result<Vec<Finding>, String> {
     require_authorization(authorized)?;
-    let base = target_url.trim().trim_end_matches('/').to_string();
-    if !base.starts_with("http://") && !base.starts_with("https://") {
-        return Err("target must start with http:// or https://".to_string());
+    let mut origin = reqwest::Url::parse(target_url.trim())
+        .map_err(|e| format!("invalid scan target URL: {e}"))?;
+    if !matches!(origin.scheme(), "http" | "https")
+        || origin.host_str().is_none()
+        || !origin.username().is_empty()
+        || origin.password().is_some()
+    {
+        return Err("target must be HTTP(S) without URL credentials".to_string());
     }
+    origin.set_path("/");
+    origin.set_query(None);
+    origin.set_fragment(None);
+    let base = origin.as_str().trim_end_matches('/').to_string();
     let client = http_client();
     let mut findings: Vec<Finding> = Vec::new();
 
@@ -227,7 +274,10 @@ pub async fn web_scan(target_url: String, authorized: bool) -> Result<Vec<Findin
     let root_headers = if let Ok(resp) = &root {
         let mut map = Vec::new();
         for (k, v) in resp.headers() {
-            map.push((k.to_string().to_lowercase(), v.to_str().unwrap_or("").to_string()));
+            map.push((
+                k.to_string().to_lowercase(),
+                v.to_str().unwrap_or("").to_string(),
+            ));
         }
         Some(map)
     } else {
@@ -236,6 +286,14 @@ pub async fn web_scan(target_url: String, authorized: bool) -> Result<Vec<Findin
 
     if let Some(headers) = &root_headers {
         for (header, title) in SECURITY_HEADERS {
+            if *header == "strict-transport-security" && origin.scheme() != "https" {
+                continue;
+            }
+            if *header == "x-frame-options" && headers.iter().any(|(k, v)| {
+                k == "content-security-policy" && v.to_ascii_lowercase().contains("frame-ancestors")
+            }) {
+                continue;
+            }
             if !headers.iter().any(|(k, _)| k == header) {
                 findings.push(Finding {
                     severity: "low".to_string(),
@@ -260,7 +318,21 @@ pub async fn web_scan(target_url: String, authorized: bool) -> Result<Vec<Findin
         if let Ok(resp) = client.get(&url).send().await {
             let status = resp.status().as_u16();
             if status == 200 {
-                let severity = if path.contains(".env") || path.contains(".git") || path.contains("backup") { "high" } else { "info" };
+                let sensitive = matches!(*path, "/.env" | "/.git/HEAD");
+                if sensitive {
+                    let mut response = resp;
+                    let mut preview = Vec::new();
+                    while let Ok(Some(chunk)) = response.chunk().await {
+                        if preview.len().saturating_add(chunk.len()) > 4096 {
+                            break;
+                        }
+                        preview.extend_from_slice(&chunk);
+                    }
+                    if !confirmed_exposure(path, &preview) {
+                        continue;
+                    }
+                }
+                let severity = if sensitive { "high" } else { "info" };
                 findings.push(Finding {
                     severity: severity.to_string(),
                     title: format!("found {path}"),
@@ -273,9 +345,36 @@ pub async fn web_scan(target_url: String, authorized: bool) -> Result<Vec<Findin
     Ok(findings)
 }
 
+/// A generic HTTP 200 response is frequently an SPA fallback.
+/// Recognize actual sensitive-file contents before reporting high severity.
+fn confirmed_exposure(path: &str, body: &[u8]) -> bool {
+    let Ok(text) = std::str::from_utf8(body) else { return false; };
+    match path {
+        "/.git/HEAD" => {
+            let value = text.trim();
+            (value.starts_with("ref: refs/heads/") && value.len() < 200)
+                || (value.len() == 40 && value.bytes().all(|b| b.is_ascii_hexdigit()))
+        }
+        "/.env" => {
+            if text.to_ascii_lowercase().contains("<html") { return false; }
+            text.lines().any(|line| {
+                let Some((name, _)) = line.trim().split_once('=') else { return false };
+                matches!(name, "APP_KEY" | "APP_SECRET" | "DB_PASSWORD" |
+                    "DATABASE_URL" | "AWS_SECRET_ACCESS_KEY" | "SECRET_KEY" |
+                    "DB_HOST" | "DB_DATABASE" | "APP_ENV")
+            })
+        }
+        _ => false,
+    }
+}
+
 /// Resolve a link only if its parsed origin matches the authorized origin.
 /// Substring hostname comparisons and automatic redirects are not safe scope checks.
-fn resolve_scoped_link(origin: &reqwest::Url, page: &reqwest::Url, href: &str) -> Option<reqwest::Url> {
+fn resolve_scoped_link(
+    origin: &reqwest::Url,
+    page: &reqwest::Url,
+    href: &str,
+) -> Option<reqwest::Url> {
     let mut url = page.join(href).ok()?;
     if !matches!(url.scheme(), "http" | "https")
         || url.origin() != origin.origin()
@@ -289,7 +388,11 @@ fn resolve_scoped_link(origin: &reqwest::Url, page: &reqwest::Url, href: &str) -
 }
 
 fn require_authorization(authorized: bool) -> Result<(), String> {
-    if authorized { Ok(()) } else { Err("explicit authorization acknowledgment required".to_string()) }
+    if authorized {
+        Ok(())
+    } else {
+        Err("explicit authorization acknowledgment required".to_string())
+    }
 }
 
 /// Limit each crawled response; do not buffer an unbounded remote page.
@@ -301,7 +404,9 @@ async fn fetch_crawl_page(client: &reqwest::Client, url: &reqwest::Url) -> Optio
     }
     let mut body = Vec::new();
     while let Some(chunk) = resp.chunk().await.ok()? {
-        if body.len().saturating_add(chunk.len()) > MAX_PAGE { return None; }
+        if body.len().saturating_add(chunk.len()) > MAX_PAGE {
+            return None;
+        }
         body.extend_from_slice(&chunk);
     }
     Some(String::from_utf8_lossy(&body).into_owned())
@@ -309,12 +414,18 @@ async fn fetch_crawl_page(client: &reqwest::Client, url: &reqwest::Url) -> Optio
 
 /// A bounded same-origin crawler; redirects are disabled in http_client().
 #[tauri::command]
-pub async fn spider_scan(target_url: String, max_depth: u8, authorized: bool) -> Result<Vec<String>, String> {
+pub async fn spider_scan(
+    target_url: String,
+    max_depth: u8,
+    authorized: bool,
+) -> Result<Vec<String>, String> {
     require_authorization(authorized)?;
-    let base = reqwest::Url::parse(target_url.trim())
-        .map_err(|e| format!("invalid target URL: {e}"))?;
-    if !matches!(base.scheme(), "http" | "https") || base.host_str().is_none()
-        || !base.username().is_empty() || base.password().is_some()
+    let base =
+        reqwest::Url::parse(target_url.trim()).map_err(|e| format!("invalid target URL: {e}"))?;
+    if !matches!(base.scheme(), "http" | "https")
+        || base.host_str().is_none()
+        || !base.username().is_empty()
+        || base.password().is_some()
     {
         return Err("target must be HTTP(S) without URL credentials".to_string());
     }
@@ -324,17 +435,27 @@ pub async fn spider_scan(target_url: String, max_depth: u8, authorized: bool) ->
     let mut queue = VecDeque::from([(base.clone(), 0_u8)]);
     let mut links = vec![base.to_string()];
     while let Some((url, depth)) = queue.pop_front() {
-        if depth >= max_depth.min(4) || links.len() >= 60 { continue; }
-        let Some(html) = fetch_crawl_page(&client, &url).await else { continue };
+        if depth >= max_depth.min(4) || links.len() >= 60 {
+            continue;
+        }
+        let Some(html) = fetch_crawl_page(&client, &url).await else {
+            continue;
+        };
         // A deliberate first-stage parser: full HTML tokenization is a later native port.
         for chunk in html.split("href=\"").skip(1) {
             let Some(end) = chunk.find('"') else { continue };
-            let Some(absolute) = resolve_scoped_link(&base, &url, &chunk[..end]) else { continue };
-            if absolute.query().is_some() { continue; }
+            let Some(absolute) = resolve_scoped_link(&base, &url, &chunk[..end]) else {
+                continue;
+            };
+            if absolute.query().is_some() {
+                continue;
+            }
             let key = absolute.to_string();
             if seen.insert(key.clone()) {
                 links.push(key);
-                if links.len() >= 60 { break; }
+                if links.len() >= 60 {
+                    break;
+                }
                 queue.push_back((absolute, depth + 1));
             }
         }
@@ -354,7 +475,47 @@ mod scope_tests {
         assert!(resolve_scoped_link(&base, &base, "https://evil.test/example.com").is_none());
         assert!(resolve_scoped_link(&base, &base, "http://example.com/path").is_none());
         assert!(resolve_scoped_link(&base, &base, "javascript:alert(1)").is_none());
-        assert_eq!(resolve_scoped_link(&base, &base, "../next").unwrap().as_str(), "https://example.com/next");
+        assert_eq!(
+            resolve_scoped_link(&base, &base, "../next")
+                .unwrap()
+                .as_str(),
+            "https://example.com/next"
+        );
+    }
+
+    #[test]
+    fn connect_target_requires_unambiguous_authority() {
+        assert_eq!(parse_connect_target("example.com:443").unwrap(), ("example.com".to_string(), 443));
+        assert_eq!(parse_connect_target("[::1]:8443").unwrap(), ("::1".to_string(), 8443));
+        for bad in ["example.com", "example.com:0", "example.com:abc", "::1:443",
+                    "user@example.com:443", "https://example.com:443", "example.com:65536"] {
+            assert!(parse_connect_target(bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn tls_tunnel_rejects_host_confusion() {
+        let headers = vec![("Host".into(), "example.com:8443".into())];
+        assert!(tls_host_matches(&headers, "example.com", 8443));
+        assert!(!tls_host_matches(&headers, "example.com", 443));
+        assert!(!tls_host_matches(&headers, "other.example", 8443));
+        assert!(!tls_host_matches(&[("Host".into(), "example.com".into()),
+                ("host".into(), "evil.invalid".into())], "example.com", 443));
+    }
+
+    #[test]
+    fn rules_preserve_non_utf8_payloads() {
+        let source = vec![0xff, 0x00, b'A', b'B', 0xfe];
+        assert_eq!(replace_bytes_limited(source, b"AB", b"XYZ"),
+                   vec![0xff, 0x00, b'X', b'Y', b'Z', 0xfe]);
+    }
+
+    #[test]
+    fn generic_spa_fallbacks_are_not_sensitive_exposures() {
+        assert!(!confirmed_exposure("/.env", b"<html>index.html</html>"));
+        assert!(!confirmed_exposure("/.git/HEAD", b"<html>index.html</html>"));
+        assert!(confirmed_exposure("/.env", b"APP_KEY=sample-value\n"));
+        assert!(confirmed_exposure("/.git/HEAD", b"ref: refs/heads/main\n"));
     }
 
     #[test]
@@ -383,7 +544,9 @@ pub async fn proxy_start(
     if ctx.shared.running.load(Ordering::Relaxed) {
         return Err("proxy already running; stop it first".to_string());
     }
-    let addr: SocketAddr = format!("127.0.0.1:{port}").parse().map_err(|e| format!("bad port: {e}"))?;
+    let addr: SocketAddr = format!("127.0.0.1:{port}")
+        .parse()
+        .map_err(|e| format!("bad port: {e}"))?;
     let listener = tokio::net::TcpListener::bind(addr)
         .await
         .map_err(|e| format!("cannot bind 127.0.0.1:{port}: {e}"))?;
@@ -397,7 +560,9 @@ pub async fn proxy_start(
             if !shared.running.load(Ordering::Relaxed) {
                 break;
             }
-            let Ok((stream, _)) = listener.accept().await else { continue };
+            let Ok((stream, _)) = listener.accept().await else {
+                continue;
+            };
             let shared = Arc::clone(&shared);
             tokio::spawn(async move {
                 let _ = handle_conn(stream, shared).await;
@@ -405,21 +570,37 @@ pub async fn proxy_start(
         }
     });
     *ctx.proxy_handle.lock().expect("proxy handle poisoned") = Some(handle);
-    Ok(ProxyStatusWire { running: true, port, captured: ctx.shared.captured.lock().expect("captured poisoned").len() })
+    Ok(ProxyStatusWire {
+        running: true,
+        port,
+        captured: ctx.shared.captured.lock().expect("captured poisoned").len(),
+    })
 }
 
 async fn handle_conn(mut stream: TcpStream, shared: Arc<ProxyShared>) -> std::io::Result<()> {
     use tokio::io::AsyncWriteExt;
     let (head, body_bytes) = tokio::time::timeout(
-        Duration::from_secs(15), crate::webtls::read_http_message(&mut stream),
-    ).await.map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "HTTP request timed out"))??;
-    let text = format!("{head}{}", String::from_utf8_lossy(&body_bytes));
-    if text.starts_with("CONNECT") {
-        return connect_tunnel(stream, shared, &text).await;
+        Duration::from_secs(15),
+        crate::webtls::read_http_message(&mut stream),
+    )
+    .await
+    .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "HTTP request timed out"))??;
+    if head.starts_with("CONNECT ") {
+        return connect_tunnel(stream, shared, &head).await;
     }
-    let Ok((method, url, headers, body)) = parse_raw_request(&text, "http") else { return Ok(()) };
-    let host = url.split('/').nth(2).unwrap_or_default().to_string();
-    let path = format!("/{}", url.splitn(4, '/').nth(3).unwrap_or(""));
+    // Headers are textual; bodies are arbitrary bytes and must never undergo
+    // lossy UTF-8 decoding when forwarded or intercepted.
+    let Ok((method, url, headers, _)) = parse_raw_request(&head, "http") else {
+        return Ok(());
+    };
+    let Ok(parsed) = reqwest::Url::parse(&url) else { return Ok(()); };
+    if !matches!(parsed.scheme(), "http" | "https") { return Ok(()); }
+    let host = parsed.host_str().unwrap_or_default().to_string();
+    let path = match parsed.query() {
+        Some(query) => format!("{}?{query}", parsed.path()),
+        None => parsed.path().to_string(),
+    };
+    let body = body_bytes;
 
     // interceptor holds the request (and the browser connection) until the
     // user forwards or drops it
@@ -434,7 +615,14 @@ async fn handle_conn(mut stream: TcpStream, shared: Arc<ProxyShared>) -> std::io
             size: body.len(),
             at_ms: now_ms(),
         };
-        let request = PendingRequest { stream, method, url, headers, body, info };
+        let request = PendingRequest {
+            stream: ProxyStream::Plain(stream),
+            method,
+            url,
+            headers,
+            body,
+            info,
+        };
         let rejected = {
             let mut pending = shared.pending.lock().expect("pending poisoned");
             if pending.len() >= MAX_PENDING_REQUESTS {
@@ -454,29 +642,37 @@ async fn handle_conn(mut stream: TcpStream, shared: Arc<ProxyShared>) -> std::io
     let (method, url, headers, body) = apply_rules(method, url, headers, body, &rules);
     let (status, resp_headers, resp_body) = execute_request(&method, &url, &headers, &body).await;
     let id = shared.next_id.fetch_add(1, Ordering::Relaxed);
-    push_capture(&shared, CapturedRequest {
-        id,
-        method,
-        host,
-        path,
-        status,
-        size: resp_body.len(),
-        at_ms: now_ms(),
-    });
+    push_capture(
+        &shared,
+        CapturedRequest {
+            id,
+            method,
+            host,
+            path,
+            status,
+            size: resp_body.len(),
+            at_ms: now_ms(),
+        },
+    );
 
-    let mut response = format!("HTTP/1.1 {status} {reason}\r\n", reason = reason_phrase(status));
+    let mut response = format!(
+        "HTTP/1.1 {status} {reason}\r\n",
+        reason = reason_phrase(status)
+    );
     for (name, value) in &resp_headers {
-        if name.eq_ignore_ascii_case("transfer-encoding") || name.eq_ignore_ascii_case("content-length") {
+        if name.eq_ignore_ascii_case("content-length") || is_hop_header(name) {
             continue;
         }
         response.push_str(&format!("{name}: {value}\r\n"));
     }
-    response.push_str(&format!("content-length: {}\r\nconnection: close\r\n\r\n", resp_body.len()));
+    response.push_str(&format!(
+        "content-length: {}\r\nconnection: close\r\n\r\n",
+        resp_body.len()
+    ));
     stream.write_all(response.as_bytes()).await?;
     stream.write_all(&resp_body).await?;
     Ok(())
 }
-
 
 /// CONNECT tunnel: raw TCP passthrough when interception is off; full TLS
 /// MITM (per-host leaf certs, rules, history, WS relay) when on.
@@ -486,39 +682,42 @@ async fn connect_tunnel(
     head_text: &str,
 ) -> std::io::Result<()> {
     use tokio::io::AsyncWriteExt;
-    let target = head_text
-        .split_whitespace()
-        .nth(1)
-        .unwrap_or_default()
-        .to_string();
+    let target = head_text.split_whitespace().nth(1).unwrap_or_default();
+    let (host, port) = parse_connect_target(target)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
     let intercepting = shared.intercept.load(Ordering::Relaxed);
     let ca = shared.ca.lock().expect("ca poisoned").clone();
 
     if !intercepting || ca.is_none() {
         // honest passthrough: relay raw bytes to the upstream host
-        let upstream = TcpStream::connect(&target).await?;
-        stream.write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n").await?;
-        let (mut s_read, mut s_write) = tokio::io::split(stream);
-        let (mut u_read, mut u_write) = tokio::io::split(upstream);
-        tokio::select! {
-            _ = tokio::io::copy(&mut s_read, &mut u_write) => {},
-            _ = tokio::io::copy(&mut u_read, &mut s_write) => {},
-        }
+        let mut upstream = tokio::time::timeout(
+            Duration::from_secs(15), TcpStream::connect((host.as_str(), port)),
+        )
+        .await
+        .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "upstream CONNECT timed out"))??;
+        stream
+            .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+            .await?;
+        // Preserve half-closes; select! previously discarded the other direction.
+        tokio::io::copy_bidirectional(&mut stream, &mut upstream).await?;
         return Ok(());
     }
 
-    let host = target.split(':').next().unwrap_or_default().to_string();
     let _ = stream
         .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
         .await;
     let ca = ca.expect("ca checked");
     let acceptor = crate::webtls::tls_acceptor(&ca, &host).map_err(|e| std::io::Error::other(e))?;
-    let mut tls_stream = acceptor.accept(stream).await.map_err(|e| {
-        std::io::Error::other(format!("tls handshake with client failed: {e}"))
-    })?;
+    let mut tls_stream = acceptor
+        .accept(stream)
+        .await
+        .map_err(|e| std::io::Error::other(format!("tls handshake with client failed: {e}")))?;
     let (head_text, body_bytes) = tokio::time::timeout(
-        Duration::from_secs(15), crate::webtls::read_http_message(&mut tls_stream),
-    ).await.map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "HTTPS request timed out"))??;
+        Duration::from_secs(15),
+        crate::webtls::read_http_message(&mut tls_stream),
+    )
+    .await
+    .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "HTTPS request timed out"))??;
     let request_line = head_text.lines().next().unwrap_or_default().to_string();
     let mut parts = request_line.split_whitespace();
     let method = parts.next().unwrap_or_default().to_string();
@@ -529,11 +728,24 @@ async fn connect_tunnel(
         .filter_map(|l| l.split_once(':'))
         .map(|(k, v)| (k.trim().to_string(), v.trim().to_string()))
         .collect();
-    let body = String::from_utf8_lossy(&body_bytes).to_string();
+    let body = body_bytes;
 
-    // WebSocket upgrade: relay frames both ways and list the connection
-    if head_text.to_lowercase().contains("upgrade: websocket") {
-        let tcp = TcpStream::connect((host.as_str(), 443))
+    // Refuse authority mismatches inside an authenticated CONNECT tunnel.
+    if !path.starts_with('/') || path.starts_with("//")
+        || !tls_host_matches(&headers, &host, port)
+    {
+        tls_stream.write_all(b"HTTP/1.1 400 Bad Request\r\ncontent-length: 0\r\nconnection: close\r\n\r\n").await?;
+        return Ok(());
+    }
+
+    // Only treat a properly declared WebSocket upgrade as a raw duplex stream.
+    if headers.iter().any(|(k, v)| {
+        k.eq_ignore_ascii_case("upgrade") && v.eq_ignore_ascii_case("websocket")
+    }) && headers.iter().any(|(k, v)| {
+        k.eq_ignore_ascii_case("connection") &&
+            v.split(',').any(|token| token.trim().eq_ignore_ascii_case("upgrade"))
+    }) {
+        let tcp = TcpStream::connect((host.as_str(), port))
             .await
             .map_err(|e| std::io::Error::other(format!("ws upstream connect failed: {e}")))?;
         let connector = crate::webtls::tls_client().map_err(|e| std::io::Error::other(e))?;
@@ -544,47 +756,171 @@ async fn connect_tunnel(
             .await
             .map_err(|e| std::io::Error::other(format!("ws upstream tls failed: {e}")))?;
         upstream.write_all(head_text.as_bytes()).await?;
-        upstream.write_all(body.as_bytes()).await?;
+        upstream.write_all(&body).await?;
         let (mut c_read, mut c_write) = tokio::io::split(tls_stream);
         let (mut u_read, mut u_write) = tokio::io::split(upstream);
-        let c2u = tokio::io::copy(&mut c_read, &mut u_write);
-        let u2c = tokio::io::copy(&mut u_read, &mut c_write);
-        let (a, b) = tokio::join!(c2u, u2c);
-        shared.ws.lock().expect("ws poisoned").push(crate::webtls::WsConnection {
-            host: host.clone(),
-            at_ms: now_ms(),
-        });
-        let _ = (a, b);
+        let started = now_ms();
+        {
+            let mut ws = shared.ws.lock().expect("ws poisoned");
+            if ws.len() >= 1000 { ws.remove(0); }
+            ws.push(crate::webtls::WsConnection {
+                host: host.clone(),
+                bytes_client_to_server: 0,
+                bytes_server_to_client: 0,
+                at_ms: started,
+            });
+        }
+        let (c2u, u2c) = tokio::join!(
+            tokio::io::copy(&mut c_read, &mut u_write),
+            tokio::io::copy(&mut u_read, &mut c_write)
+        );
+        let mut ws = shared.ws.lock().expect("ws poisoned");
+        if let Some(record) = ws.iter_mut().rev().find(|w| w.at_ms == started && w.host == host) {
+            record.bytes_client_to_server = c2u.unwrap_or(0);
+            record.bytes_server_to_client = u2c.unwrap_or(0);
+        }
+        return Ok(());
+    }
+
+    // CONNECT interception must share the same Forward/Drop queue as HTTP.
+    // Retain the authenticated TLS stream until the operator decides.
+    let url = format!("https://{target}{path}");
+    if shared.intercept.load(Ordering::Relaxed) {
+        let id = shared.next_id.fetch_add(1, Ordering::Relaxed);
+        let info = CapturedRequest {
+            id, method: method.clone(), host: host.clone(), path: path.clone(),
+            status: 0, size: body.len(), at_ms: now_ms(),
+        };
+        let request = PendingRequest {
+            stream: ProxyStream::Tls(tls_stream),
+            method, url, headers, body, info,
+        };
+        let rejected = {
+            let mut pending = shared.pending.lock().expect("pending poisoned");
+            if pending.len() >= MAX_PENDING_REQUESTS {
+                Some(request)
+            } else {
+                pending.insert(id, request);
+                None
+            }
+        };
+        if let Some(mut rejected) = rejected {
+            rejected.stream.write_all(b"HTTP/1.1 503 Service Unavailable\r\ncontent-length: 0\r\nconnection: close\r\n\r\n").await?;
+        }
         return Ok(());
     }
 
     // plain HTTP inside TLS: same rules + capture path as plain proxying
     let rules = shared.rules.lock().expect("rules poisoned").clone();
-    let (r_method, r_url, r_headers, r_body) =
-        apply_rules(method.clone(), format!("https://{host}{path}"), headers, body, &rules);
+    let (r_method, r_url, r_headers, r_body) = apply_rules(
+        method.clone(),
+        url,
+        headers,
+        body,
+        &rules,
+    );
     let (status, resp_headers, resp_body) =
         execute_request(&r_method, &r_url, &r_headers, &r_body).await;
     let id = shared.next_id.fetch_add(1, Ordering::Relaxed);
-    push_capture(&shared, CapturedRequest {
-        id,
-        method: r_method,
-        host: host.clone(),
-        path: path.clone(),
-        status,
-        size: resp_body.len(),
-        at_ms: now_ms(),
-    });
-    let mut response = format!("HTTP/1.1 {status} {reason}\r\n", reason = reason_phrase(status));
+    push_capture(
+        &shared,
+        CapturedRequest {
+            id,
+            method: r_method,
+            host: host.clone(),
+            path: path.clone(),
+            status,
+            size: resp_body.len(),
+            at_ms: now_ms(),
+        },
+    );
+    let mut response = format!(
+        "HTTP/1.1 {status} {reason}\r\n",
+        reason = reason_phrase(status)
+    );
     for (name, value) in &resp_headers {
-        if name.eq_ignore_ascii_case("transfer-encoding") || name.eq_ignore_ascii_case("content-length") {
+        if name.eq_ignore_ascii_case("content-length") || is_hop_header(name) {
             continue;
         }
         response.push_str(&format!("{name}: {value}\r\n"));
     }
-    response.push_str(&format!("content-length: {}\r\nconnection: close\r\n\r\n", resp_body.len()));
+    response.push_str(&format!(
+        "content-length: {}\r\nconnection: close\r\n\r\n",
+        resp_body.len()
+    ));
     tls_stream.write_all(response.as_bytes()).await?;
     tls_stream.write_all(&resp_body).await?;
     Ok(())
+}
+
+/// CONNECT authority must contain an explicit valid TCP port. Splitting on
+/// the first colon is incorrect for bracketed IPv6 literals.
+fn parse_connect_target(authority: &str) -> Result<(String, u16), String> {
+    let (raw_host, raw_port) = authority.rsplit_once(':')
+        .ok_or("CONNECT target must include host:port")?;
+    let port = raw_port.parse::<u16>()
+        .map_err(|_| "invalid CONNECT port")?;
+    if port == 0 { return Err("CONNECT port must not be zero".to_string()); }
+    let host = if raw_host.starts_with('[') && raw_host.ends_with(']') {
+        let inner = &raw_host[1..raw_host.len()-1];
+        inner.parse::<std::net::Ipv6Addr>()
+            .map_err(|_| "invalid CONNECT IPv6 literal")?;
+        inner.to_string()
+    } else {
+        if raw_host.contains(':') { return Err("IPv6 CONNECT host must be bracketed".to_string()); }
+        raw_host.to_string()
+    };
+    if host.is_empty() || host.chars().any(|c| matches!(c, '/' | '@' | '#' | '?')) {
+        return Err("invalid CONNECT hostname".to_string());
+    }
+    let url = reqwest::Url::parse(&format!("https://{authority}/"))
+        .map_err(|_| "invalid CONNECT authority")?;
+    if !url.username().is_empty() || url.password().is_some() || url.host_str().is_none() {
+        return Err("invalid CONNECT authority".to_string());
+    }
+    Ok((host, port))
+}
+
+/// Match the inner Host authority against the CONNECT destination. Without
+/// this guard a TLS tunnel for one hostname could proxy an unrelated origin.
+fn tls_host_matches(headers: &[(String, String)], host: &str, port: u16) -> bool {
+    let hosts: Vec<&str> = headers.iter()
+        .filter(|(name, _)| name.eq_ignore_ascii_case("host"))
+        .map(|(_, value)| value.as_str()).collect();
+    if hosts.len() != 1 { return false; }
+    let authority = hosts[0].trim();
+    if authority.contains(['/', '@', '#', '?', ' ', '\t', '\r', '\n']) {
+        return false;
+    }
+    let Ok(url) = reqwest::Url::parse(&format!("https://{authority}/")) else { return false; };
+    let Some(actual_host) = url.host_str() else { return false; };
+    actual_host.eq_ignore_ascii_case(host) && url.port_or_known_default() == Some(port)
+}
+
+fn is_hop_header(name: &str) -> bool {
+    ["connection", "proxy-connection", "keep-alive", "transfer-encoding",
+     "te", "trailer", "upgrade", "proxy-authorization", "proxy-authenticate"]
+    .iter().any(|header| name.eq_ignore_ascii_case(header))
+}
+
+/// Text match-and-replace must preserve bytes outside the matched byte ranges.
+/// If a rule would expand a body beyond the bounded proxy limit, do not apply it.
+fn replace_bytes_limited(source: Vec<u8>, find: &[u8], replace: &[u8]) -> Vec<u8> {
+    if find.is_empty() || find == replace { return source; }
+    let mut output = Vec::with_capacity(source.len().min(MAX_PROXY_BODY));
+    let mut cursor = 0;
+    while let Some(pos) = source[cursor..].windows(find.len()).position(|slice| slice == find) {
+        let start = cursor + pos;
+        if output.len().saturating_add(start - cursor).saturating_add(replace.len()) > MAX_PROXY_BODY {
+            return source;
+        }
+        output.extend_from_slice(&source[cursor..start]);
+        output.extend_from_slice(replace);
+        cursor = start + find.len();
+    }
+    if output.len().saturating_add(source.len() - cursor) > MAX_PROXY_BODY { return source; }
+    output.extend_from_slice(&source[cursor..]);
+    output
 }
 
 fn push_capture(shared: &ProxyShared, request: CapturedRequest) {
@@ -604,19 +940,10 @@ fn now_ms() -> u64 {
 }
 
 fn reason_phrase(status: u16) -> &'static str {
-    match status {
-        200 => "OK",
-        301 | 308 => "Moved Permanently",
-        302 | 307 => "Found",
-        304 => "Not Modified",
-        400 => "Bad Request",
-        401 => "Unauthorized",
-        403 => "Forbidden",
-        404 => "Not Found",
-        500 => "Internal Server Error",
-        502 => "Bad Gateway",
-        _ => "OK",
-    }
+    reqwest::StatusCode::from_u16(status)
+        .ok()
+        .and_then(|status| status.canonical_reason())
+        .unwrap_or("Unknown")
 }
 
 /// Apply match-and-replace rules to path, headers and body.
@@ -624,15 +951,15 @@ fn apply_rules(
     mut method: String,
     mut url: String,
     mut headers: Vec<(String, String)>,
-    mut body: String,
+    mut body: Vec<u8>,
     rules: &[MatchReplaceRule],
-) -> (String, String, Vec<(String, String)>, String) {
+) -> (String, String, Vec<(String, String)>, Vec<u8>) {
     for rule in rules {
         if rule.find.is_empty() {
             continue;
         }
         url = url.replace(&rule.find, &rule.replace);
-        body = body.replace(&rule.find, &rule.replace);
+        body = replace_bytes_limited(body, rule.find.as_bytes(), rule.replace.as_bytes());
         for (name, value) in &mut headers {
             *value = value.replace(&rule.find, &rule.replace);
             *name = name.replace(&rule.find, &rule.replace);
@@ -647,7 +974,7 @@ async fn execute_request(
     method: &str,
     url: &str,
     headers: &[(String, String)],
-    body: &str,
+    body: &[u8],
 ) -> (u16, Vec<(String, String)>, Vec<u8>) {
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(15))
@@ -662,14 +989,14 @@ async fn execute_request(
     for (name, value) in headers {
         if name.eq_ignore_ascii_case("host")
             || name.eq_ignore_ascii_case("content-length")
-            || name.eq_ignore_ascii_case("connection")
+            || is_hop_header(name)
         {
             continue;
         }
         request = request.header(name, value);
     }
-    if !body.is_empty() && !matches!(method, "GET" | "HEAD") {
-        request = request.body(body.to_string());
+    if !body.is_empty() {
+        request = request.body(body.to_vec());
     }
     let Ok(resp) = request.send().await else {
         return (502, vec![], b"CyberDeck: upstream request failed".to_vec());
@@ -686,12 +1013,22 @@ async fn execute_request(
         match response.chunk().await {
             Ok(Some(chunk)) => {
                 if bytes.len().saturating_add(chunk.len()) > MAX_PROXY_BODY {
-                    return (502, vec![], b"CyberDeck: upstream response exceeds proxy body limit".to_vec());
+                    return (
+                        502,
+                        vec![],
+                        b"CyberDeck: upstream response exceeds proxy body limit".to_vec(),
+                    );
                 }
                 bytes.extend_from_slice(&chunk);
             }
             Ok(None) => break,
-            Err(_) => return (502, vec![], b"CyberDeck: upstream body read failed".to_vec()),
+            Err(_) => {
+                return (
+                    502,
+                    vec![],
+                    b"CyberDeck: upstream body read failed".to_vec(),
+                )
+            }
         }
     }
     (status, resp_headers, bytes)
@@ -702,7 +1039,12 @@ pub async fn proxy_stop(ctx: State<'_, WebCtx>) -> Result<ProxyStatusWire, Strin
     ctx.shared.running.store(false, Ordering::Relaxed);
     ctx.proxy_running.store(false, Ordering::Relaxed);
     ctx.shared.pending.lock().expect("pending poisoned").clear();
-    if let Some(handle) = ctx.proxy_handle.lock().expect("proxy handle poisoned").take() {
+    if let Some(handle) = ctx
+        .proxy_handle
+        .lock()
+        .expect("proxy handle poisoned")
+        .take()
+    {
         handle.abort();
     }
     Ok(proxy_status_inner(&ctx))
@@ -723,48 +1065,15 @@ pub fn proxy_status(ctx: State<'_, WebCtx>) -> ProxyStatusWire {
 
 #[tauri::command]
 pub fn proxy_history(ctx: State<'_, WebCtx>) -> Vec<CapturedRequest> {
-    ctx.shared.captured.lock().expect("captured poisoned").clone()
+    ctx.shared
+        .captured
+        .lock()
+        .expect("captured poisoned")
+        .clone()
 }
 
 /// Toggle request interception. When on, requests are held in the pending
 /// queue until forwarded or dropped; the browser waits for the decision.
-#[derive(Debug, Serialize)]
-pub struct StreamChunkWire {
-    pub dir: String,
-    pub text: String,
-}
-
-/// Reassemble one TCP/UDP stream into a printable transcript (A|B sides).
-#[tauri::command]
-pub fn pcap_follow_stream(
-    pcap: State<'_, crate::pcap::PcapCtx>,
-    stream_id: String,
-) -> Result<Vec<StreamChunkWire>, String> {
-    let guard = pcap.current.lock().expect("pcap cache poisoned");
-    let capture = guard.as_ref().ok_or("no capture is open")?;
-    let mut chunks: Vec<StreamChunkWire> = Vec::new();
-    for meta in &capture.packets {
-        if meta.dissected.stream_id.as_deref() != Some(stream_id.as_str()) || meta.dissected.payload.is_empty() {
-            continue;
-        }
-        let frame = capture
-            .bytes
-            .get(meta.offset..meta.offset + meta.incl_len)
-            .ok_or("capture bytes truncated")?;
-        let end = frame.len();
-        let start = end - meta.dissected.payload.len();
-        let text: String = frame[start..end]
-            .iter()
-            .map(|&b| if (0x20..=0x7e).contains(&b) { b as char } else { '.' })
-            .collect();
-        chunks.push(StreamChunkWire {
-            dir: if meta.dissected.source <= meta.dissected.destination { "A".to_string() } else { "B".to_string() },
-            text,
-        });
-    }
-    Ok(chunks)
-}
-
 #[tauri::command]
 pub fn proxy_intercept(on: bool, ctx: State<'_, WebCtx>) -> bool {
     ctx.shared.intercept.store(on, Ordering::Relaxed);
@@ -803,41 +1112,66 @@ pub fn proxy_pending(ctx: State<'_, WebCtx>) -> Vec<PendingWire> {
 /// real response back to the waiting browser, and records it in history.
 #[tauri::command]
 pub async fn proxy_forward(id: u64, ctx: State<'_, WebCtx>) -> Result<u16, String> {
-    let pending = ctx.shared.pending.lock().expect("pending poisoned").remove(&id);
+    let pending = ctx
+        .shared
+        .pending
+        .lock()
+        .expect("pending poisoned")
+        .remove(&id);
     let Some(pending) = pending else {
         return Err("request no longer pending (browser timeout)".to_string());
     };
     let rules = ctx.shared.rules.lock().expect("rules poisoned").clone();
-    let (method, url, headers, body) = apply_rules(pending.method, pending.url, pending.headers, pending.body, &rules);
+    let (method, url, headers, body) = apply_rules(
+        pending.method,
+        pending.url,
+        pending.headers,
+        pending.body,
+        &rules,
+    );
     let mut stream = pending.stream;
     use tokio::io::AsyncWriteExt;
     let (status, resp_headers, resp_body) = execute_request(&method, &url, &headers, &body).await;
-    let mut response = format!("HTTP/1.1 {status} {reason}\r\n", reason = reason_phrase(status));
+    let mut response = format!(
+        "HTTP/1.1 {status} {reason}\r\n",
+        reason = reason_phrase(status)
+    );
     for (name, value) in &resp_headers {
-        if name.eq_ignore_ascii_case("transfer-encoding") || name.eq_ignore_ascii_case("content-length") {
+        if name.eq_ignore_ascii_case("content-length") || is_hop_header(name) {
             continue;
         }
         response.push_str(&format!("{name}: {value}\r\n"));
     }
-    response.push_str(&format!("content-length: {}\r\nconnection: close\r\n\r\n", resp_body.len()));
+    response.push_str(&format!(
+        "content-length: {}\r\nconnection: close\r\n\r\n",
+        resp_body.len()
+    ));
     let _ = stream.write_all(response.as_bytes()).await;
     let _ = stream.write_all(&resp_body).await;
-    push_capture(&ctx.shared, CapturedRequest {
-        id,
-        method,
-        host: pending.info.host,
-        path: pending.info.path,
-        status,
-        size: resp_body.len(),
-        at_ms: now_ms(),
-    });
+    push_capture(
+        &ctx.shared,
+        CapturedRequest {
+            id,
+            method,
+            host: pending.info.host,
+            path: pending.info.path,
+            status,
+            size: resp_body.len(),
+            at_ms: now_ms(),
+        },
+    );
     Ok(status)
 }
 
 /// Drop a held request; the browser receives a 502.
 #[tauri::command]
 pub async fn proxy_drop(id: u64, ctx: State<'_, WebCtx>) -> Result<(), String> {
-    let pending = ctx.shared.pending.lock().expect("pending poisoned").remove(&id);
+    let pending = ctx
+        .shared
+        .pending
+        .lock()
+        .expect("pending poisoned")
+        .remove(&id);
     if let Some(mut pending) = pending {
         use tokio::io::AsyncWriteExt;
         let _ = pending
@@ -884,8 +1218,8 @@ pub fn ws_list(ctx: State<'_, WebCtx>) -> Vec<WsConnectionWire> {
         .iter()
         .map(|w| WsConnectionWire {
             host: w.host.clone(),
-            bytes_client_to_server: 0,
-            bytes_server_to_client: 0,
+            bytes_client_to_server: w.bytes_client_to_server,
+            bytes_server_to_client: w.bytes_server_to_client,
             at_ms: w.at_ms,
         })
         .collect()
@@ -927,7 +1261,13 @@ pub async fn web_engines_detect() -> Vec<WebEngineStatus> {
                     .collect();
             }
         }
-        out.push(WebEngineStatus { id: id.to_string(), label: label.to_string(), license: license.to_string(), available, version });
+        out.push(WebEngineStatus {
+            id: id.to_string(),
+            label: label.to_string(),
+            license: license.to_string(),
+            available,
+            version,
+        });
     }
     out
 }
@@ -941,7 +1281,11 @@ pub struct EngineScanResult {
 
 /// Run an approved external web engine against the target when it is on PATH.
 #[tauri::command]
-pub async fn engine_scan(tool: String, target: String, authorized: bool) -> Result<EngineScanResult, String> {
+pub async fn engine_scan(
+    tool: String,
+    target: String,
+    authorized: bool,
+) -> Result<EngineScanResult, String> {
     require_authorization(authorized)?;
     let target = target.trim().to_string();
     if !target.starts_with("http") {
@@ -961,11 +1305,18 @@ pub async fn engine_scan(tool: String, target: String, authorized: bool) -> Resu
         other => return Err(format!("unknown engine: {other}")),
     }
     let started = Instant::now();
-    let output = command
-        .output()
-        .await
-        .map_err(|e| format!("{tool} is not available on PATH ({e}); bundled sidecars arrive with the installer"))?;
-    let mut raw = format!("{}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+    let output = command.output().await.map_err(|e| {
+        format!("{tool} is not available on PATH ({e}); bundled sidecars arrive with the installer")
+    })?;
+    let mut raw = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
     raw.truncate(20_000);
-    Ok(EngineScanResult { tool, raw, duration_ms: started.elapsed().as_millis() as u64 })
+    Ok(EngineScanResult {
+        tool,
+        raw,
+        duration_ms: started.elapsed().as_millis() as u64,
+    })
 }

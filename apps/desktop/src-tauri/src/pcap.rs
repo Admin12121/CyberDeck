@@ -1,9 +1,8 @@
-//! Capture access (§5.1): classic PCAP via native dialog, cached for byte
-//! views. PCAPNG is rejected with a clear message for now.
+//! Capture access: native PCAP/PCAPNG parsing with bounded packet byte views.
 
 use std::sync::Mutex;
 
-use cyberdeck_packet::{parse_pcap, PacketMeta};
+use cyberdeck_packet::{parse_capture, PacketMeta};
 use serde::Serialize;
 use tauri::{AppHandle, State};
 use tauri_plugin_dialog::DialogExt;
@@ -43,11 +42,13 @@ pub struct PcapPacketWire {
     pub length: usize,
     pub info: String,
     pub color_hint: String,
+    pub stream_id: Option<String>,
     pub layers: Vec<LayerWire>,
 }
 
 #[derive(Debug, Serialize)]
 pub struct PcapOpenWire {
+    pub format: String,
     pub linktype: u32,
     pub packet_count: usize,
     pub shown: usize,
@@ -56,8 +57,22 @@ pub struct PcapOpenWire {
     pub packets: Vec<PcapPacketWire>,
 }
 
-fn wire_packet(index: usize, meta: &PacketMeta, first_ts: u64) -> PcapPacketWire {
-    let ts_ms = (meta.ts_sec.saturating_sub(first_ts)) as f64 * 1000.0 + meta.ts_subsec as f64 / 1000.0;
+fn wire_packet(
+    index: usize,
+    meta: &PacketMeta,
+    first: Option<&PacketMeta>,
+    nanosecond: bool,
+) -> PcapPacketWire {
+    let scale = if nanosecond {
+        1_000_000_000i128
+    } else {
+        1_000_000i128
+    };
+    let current = meta.ts_sec as i128 * scale + meta.ts_subsec as i128;
+    let base = first
+        .map(|p| p.ts_sec as i128 * scale + p.ts_subsec as i128)
+        .unwrap_or(0);
+    let ts_ms = (current - base) as f64 / (scale as f64 / 1000.0);
     PcapPacketWire {
         index,
         time_ms: ts_ms,
@@ -67,20 +82,32 @@ fn wire_packet(index: usize, meta: &PacketMeta, first_ts: u64) -> PcapPacketWire
         length: meta.orig_len,
         info: meta.dissected.info.clone(),
         color_hint: meta.dissected.color_hint.clone(),
+        stream_id: meta.dissected.stream_id.clone(),
         layers: meta
             .dissected
             .layers
             .iter()
-            .map(|l| LayerWire { label: l.label.clone(), value: l.value.clone() })
+            .map(|l| LayerWire {
+                label: l.label.clone(),
+                value: l.value.clone(),
+            })
             .collect(),
     }
 }
 
 #[tauri::command]
 pub fn pcap_open_dialog(app: AppHandle, ctx: State<'_, PcapCtx>) -> Result<PcapOpenWire, String> {
-    let picked = app.dialog().file().blocking_pick_file().ok_or("cancelled")?;
-    let path = picked.as_path().ok_or("unsupported file location")?.to_path_buf();
-    let meta = std::fs::metadata(&path).map_err(|e| format!("cannot read capture metadata: {e}"))?;
+    let picked = app
+        .dialog()
+        .file()
+        .blocking_pick_file()
+        .ok_or("cancelled")?;
+    let path = picked
+        .as_path()
+        .ok_or("unsupported file location")?
+        .to_path_buf();
+    let meta =
+        std::fs::metadata(&path).map_err(|e| format!("cannot read capture metadata: {e}"))?;
     if meta.len() > MAX_PCAP_FILE {
         return Err(format!(
             "capture is {} MB; the open limit this arc is {} MB",
@@ -89,7 +116,12 @@ pub fn pcap_open_dialog(app: AppHandle, ctx: State<'_, PcapCtx>) -> Result<PcapO
         ));
     }
     let bytes = std::fs::read(&path).map_err(|e| format!("cannot read capture: {e}"))?;
-    let parsed = parse_pcap(&bytes)?;
+    let parsed = parse_capture(&bytes)?;
+    let format = if bytes.starts_with(&[0x0a, 0x0d, 0x0d, 0x0a]) {
+        "pcapng"
+    } else {
+        "pcap"
+    };
     let file_name = path
         .file_name()
         .map(|n| n.to_string_lossy().to_string())
@@ -97,12 +129,22 @@ pub fn pcap_open_dialog(app: AppHandle, ctx: State<'_, PcapCtx>) -> Result<PcapO
     let first_ts = parsed.packets.first().map(|p| p.ts_sec).unwrap_or(0);
     let shown = parsed.packets.len().min(MAX_UI_PACKETS);
     let wire = PcapOpenWire {
+        format: format.to_string(),
         linktype: parsed.linktype,
         packet_count: parsed.packets.len(),
         shown,
         malformed_tail: parsed.malformed_tail,
         file_name,
-        packets: (0..shown).map(|i| wire_packet(i, &parsed.packets[i], first_ts)).collect(),
+        packets: (0..shown)
+            .map(|i| {
+                wire_packet(
+                    i,
+                    &parsed.packets[i],
+                    parsed.packets.first(),
+                    parsed.nanosecond,
+                )
+            })
+            .collect(),
     };
     *ctx.current.lock().expect("pcap cache poisoned") = Some(CachedCapture {
         bytes,
@@ -114,10 +156,31 @@ pub fn pcap_open_dialog(app: AppHandle, ctx: State<'_, PcapCtx>) -> Result<PcapO
 }
 
 #[tauri::command]
-pub fn pcap_packet_bytes(ctx: State<'_, PcapCtx>, index: usize, offset: i64, len: i64) -> Result<HexResponse, String> {
+pub fn pcap_follow_stream(
+    ctx: State<'_, PcapCtx>,
+    stream_id: String,
+) -> Result<cyberdeck_packet::streams::StreamTranscript, String> {
+    let guard = ctx
+        .current
+        .lock()
+        .map_err(|_| "capture cache unavailable".to_string())?;
+    let capture = guard.as_ref().ok_or("no capture is open")?;
+    cyberdeck_packet::streams::follow_stream(&capture.packets, &stream_id)
+}
+
+#[tauri::command]
+pub fn pcap_packet_bytes(
+    ctx: State<'_, PcapCtx>,
+    index: usize,
+    offset: i64,
+    len: i64,
+) -> Result<HexResponse, String> {
     let guard = ctx.current.lock().expect("pcap cache poisoned");
     let capture = guard.as_ref().ok_or("no capture is open")?;
-    let meta = capture.packets.get(index).ok_or("packet index out of range")?;
+    let meta = capture
+        .packets
+        .get(index)
+        .ok_or("packet index out of range")?;
     let frame = capture
         .bytes
         .get(meta.offset..meta.offset + meta.incl_len)
@@ -132,7 +195,13 @@ pub fn pcap_packet_bytes(ctx: State<'_, PcapCtx>, index: usize, offset: i64, len
         let hex_str: String = chunk.iter().map(|b| format!("{b:02x} ")).collect();
         let ascii: String = chunk
             .iter()
-            .map(|&b| if (0x20..=0x7e).contains(&b) { b as char } else { '.' })
+            .map(|&b| {
+                if (0x20..=0x7e).contains(&b) {
+                    b as char
+                } else {
+                    '.'
+                }
+            })
             .collect();
         rows.push(HexRow {
             offset: start + i * 16,
@@ -173,9 +242,13 @@ mod tests {
         file.extend_from_slice(&(frame.len() as u32).to_le_bytes());
         file.extend_from_slice(&(frame.len() as u32).to_le_bytes());
         file.extend_from_slice(&frame);
-        let parsed = parse_pcap(&file).unwrap();
-        let first_ts = parsed.packets[0].ts_sec;
-        let wire = wire_packet(0, &parsed.packets[0], first_ts);
+        let parsed = parse_capture(&file).unwrap();
+        let wire = wire_packet(
+            0,
+            &parsed.packets[0],
+            parsed.packets.first(),
+            parsed.nanosecond,
+        );
         assert_eq!(wire.index, 0);
         assert!((wire.time_ms - 0.0).abs() < f64::EPSILON);
         assert_eq!(wire.protocol, "ARP");
@@ -183,8 +256,43 @@ mod tests {
     }
 
     #[test]
+    fn timestamp_precision_and_stream_identifiers_reach_the_ui() {
+        let frame = [
+            0x45, 0, 0, 20, 0, 0, 0, 0, 64, 1, 0, 0, 192, 0, 2, 1, 192, 0, 2, 2,
+        ];
+        let first = PacketMeta {
+            offset: 0,
+            incl_len: frame.len(),
+            orig_len: frame.len(),
+            ts_sec: 10,
+            ts_subsec: 900_000_000,
+            dissected: cyberdeck_packet::dissect(101, &frame),
+        };
+        let second = PacketMeta {
+            ts_sec: 11,
+            ts_subsec: 100_000_000,
+            ..first.clone()
+        };
+        let wire = wire_packet(1, &second, Some(&first), true);
+        assert!((wire.time_ms - 200.0).abs() < 0.0001);
+        let first_micro = PacketMeta {
+            ts_subsec: 900_000,
+            ..first
+        };
+        let second_micro = PacketMeta {
+            ts_sec: 11,
+            ts_subsec: 100_000,
+            ..second
+        };
+        let wire = wire_packet(1, &second_micro, Some(&first_micro), false);
+        assert!((wire.time_ms - 200.0).abs() < 0.0001);
+    }
+
+    #[test]
     fn ctx_defaults_to_empty() {
-        let ctx = PcapCtx { current: Mutex::new(None) };
+        let ctx = PcapCtx {
+            current: Mutex::new(None),
+        };
         assert!(ctx.current.lock().unwrap().is_none());
     }
 }

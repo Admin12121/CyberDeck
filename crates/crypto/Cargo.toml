@@ -5,6 +5,10 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+default = ["gpu"]
+gpu = ["dep:libloading"]
+
 [dependencies]
 argon2 = "0.5"
 base64 = "0.22"
@@ -12,6 +16,7 @@ bcrypt = "0.15"
 crc32fast = "1"
 flate2 = "1"
 hex = "0.4"
+libloading = { version = "0.8", optional = true }
 hmac = "0.12"
 md4 = "0.11"
 md-5 = "0.10"
