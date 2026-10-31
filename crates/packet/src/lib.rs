@@ -29,6 +29,10 @@ pub struct Dissected {
     pub info: String,
     pub color_hint: String,
     pub layers: Vec<Layer>,
+    /// Canonical "endpointA|endpointB" for TCP/UDP streams.
+    pub stream_id: Option<String>,
+    /// Transport payload bytes for TCP/UDP (bounded).
+    pub payload: Vec<u8>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -162,6 +166,8 @@ pub fn dissect(linktype: u32, frame: &[u8]) -> Dissected {
             info: format!("linktype {linktype} frame, {} bytes", frame.len()),
             color_hint: "other".to_string(),
             layers: vec![Layer { label: "Frame".to_string(), value: format!("{} bytes", frame.len()) }],
+            stream_id: None,
+            payload: Vec::new(),
         },
     }
 }
@@ -185,6 +191,8 @@ fn empty_frame() -> Dissected {
         info: "truncated frame".to_string(),
         color_hint: "other".to_string(),
         layers: vec![Layer { label: "Frame".to_string(), value: "truncated".to_string() }],
+        stream_id: None,
+        payload: Vec::new(),
     }
 }
 
@@ -236,6 +244,8 @@ fn dissect_arp(payload: &[u8]) -> Dissected {
         protocol: "ARP".to_string(),
         info: info.clone(),
         color_hint: color_for("ARP"),
+        stream_id: None,
+        payload: Vec::new(),
         layers: vec![
             Layer { label: "Address Resolution Protocol".to_string(), value: info },
             Layer { label: "sender IP".to_string(), value: sender_ip },
@@ -291,6 +301,8 @@ fn dissect_ipv4(payload: &[u8], parent_layers: &[Layer]) -> Dissected {
                 info,
                 color_hint: color_for("ICMP"),
                 layers,
+                stream_id: None,
+                payload: transport.to_vec(),
             }
         }
         other => {
@@ -302,6 +314,8 @@ fn dissect_ipv4(payload: &[u8], parent_layers: &[Layer]) -> Dissected {
                 info,
                 color_hint: color_for("other"),
                 layers,
+                stream_id: None,
+                payload: transport.to_vec(),
             }
         }
     }
@@ -327,6 +341,8 @@ fn dissect_ipv6(payload: &[u8], parent_layers: &[Layer]) -> Dissected {
             info: format!("next header {other}"),
             color_hint: color_for("IPv6"),
             layers,
+            stream_id: None,
+            payload: Vec::new(),
         },
     }
 }
@@ -367,6 +383,11 @@ fn dissect_tcp(transport: &[u8], source: &str, destination: &str, ip_payload_len
     let info = format!("{src_port} → {dst_port} [{flags}] Seq={seq} Len={payload_len}");
     let service = well_known_name(6, src_port, dst_port);
     let protocol = if service.is_empty() { "TCP" } else { service };
+    let payload_end = (data_offset + payload_len).min(transport.len());
+    let payload = transport.get(data_offset..payload_end).unwrap_or(&[]).to_vec();
+    let mut endpoints = [format!("{source}:{src_port}"), format!("{destination}:{dst_port}")];
+    endpoints.sort();
+    let stream_id = Some(endpoints.join("|"));
     // HTTP piggybacks on the well-known port plus a recognizable payload
     let protocol = if payload_len > 0 && matches!(src_port, 80 | 8080) || matches!(dst_port, 80 | 8080) {
         let http_start = transport.get(data_offset..data_offset + 5);
@@ -387,7 +408,7 @@ fn dissect_tcp(transport: &[u8], source: &str, destination: &str, ip_payload_len
     layers.push(Layer { label: "source port".to_string(), value: src_port.to_string() });
     layers.push(Layer { label: "destination port".to_string(), value: dst_port.to_string() });
     layers.push(Layer { label: "flags".to_string(), value: flags });
-    Dissected { source: source.to_string(), destination: destination.to_string(), protocol: protocol.to_string(), info, color_hint: color, layers }
+    Dissected { source: source.to_string(), destination: destination.to_string(), protocol: protocol.to_string(), info, color_hint: color, layers, stream_id, payload }
 }
 
 fn dissect_udp(transport: &[u8], source: &str, destination: &str, mut layers: Vec<Layer>) -> Dissected {
@@ -397,6 +418,10 @@ fn dissect_udp(transport: &[u8], source: &str, destination: &str, mut layers: Ve
     let src_port = u16::from_be_bytes([transport[0], transport[1]]);
     let dst_port = u16::from_be_bytes([transport[2], transport[3]]);
     let length = u16::from_be_bytes([transport[4], transport[5]]);
+    let payload = transport.get(8..).unwrap_or(&[]).to_vec();
+    let mut endpoints = [format!("{source}:{src_port}"), format!("{destination}:{dst_port}")];
+    endpoints.sort();
+    let stream_id = Some(endpoints.join("|"));
     let service = well_known_name(17, src_port, dst_port);
     let protocol = if service.is_empty() { "UDP" } else { service };
     let mut info = format!("{src_port} → {dst_port} Len={}", length.saturating_sub(8));
@@ -407,7 +432,7 @@ fn dissect_udp(transport: &[u8], source: &str, destination: &str, mut layers: Ve
     layers.push(Layer { label: "User Datagram Protocol".to_string(), value: info.clone() });
     layers.push(Layer { label: "source port".to_string(), value: src_port.to_string() });
     layers.push(Layer { label: "destination port".to_string(), value: dst_port.to_string() });
-    Dissected { source: source.to_string(), destination: destination.to_string(), protocol: protocol.to_string(), info, color_hint: color_for(protocol), layers }
+    Dissected { source: source.to_string(), destination: destination.to_string(), protocol: protocol.to_string(), info, color_hint: color_for(protocol), layers, stream_id, payload }
 }
 
 #[cfg(test)]

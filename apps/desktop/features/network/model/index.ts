@@ -116,3 +116,94 @@ export const SAMPLE_HOSTS: HostRow[] = [
   { host: "10.0.0.80", ports: "80/tcp, 8080/tcp", service: "http (lab demo)", source: "discovery profile A", status: "up" },
   { host: "10.0.0.90", ports: "22/tcp", service: "ssh (filtered)", source: "discovery profile A", status: "filtered" },
 ];
+
+
+// --- display filter + analysis helpers (pure, testable) -----------------------
+
+export interface FilterPacket {
+  source: string;
+  destination: string;
+  protocol: string;
+  length: number;
+  info: string;
+  layers: { label: string; value: string }[];
+}
+
+/**
+ * Minimal display-filter language, evaluated over dissected layers:
+ *   protocol names (tcp, udp, dns, http, tls, arp, icmp)
+ *   ip.addr == 10.0.0.1 · tcp.port == 443 · udp.port == 53
+ *   frame.len == N
+ * Conditions combine with `and`.
+ */
+export function matchesFilter(p: FilterPacket, filter: string): boolean {
+  const conditions = filter
+    .toLowerCase()
+    .split(/\s+and\s+/)
+    .map((c) => c.trim())
+    .filter(Boolean);
+  if (conditions.length === 0) return true;
+  const proto = p.protocol.toLowerCase();
+  const layerValue = (label: string) =>
+    p.layers.find((l) => l.label.toLowerCase() === label)?.value ?? "";
+
+  return conditions.every((cond) => {
+    const eq = cond.match(/^(ip\.addr|tcp\.port|udp\.port|frame\.len)\s*==\s*(\S+)$/);
+    if (eq) {
+      const [, field, value] = eq;
+      switch (field) {
+        case "ip.addr":
+          return p.source === value || p.destination === value;
+        case "tcp.port":
+          return proto === "tcp" || proto === "http" || proto === "tls"
+            ? layerValue("source port") === value || layerValue("destination port") === value
+            : false;
+        case "udp.port":
+          return proto === "udp" || proto === "dns"
+            ? layerValue("source port") === value || layerValue("destination port") === value
+            : false;
+        case "frame.len":
+          return String(p.length) === value;
+      }
+    }
+    if (cond === "ip") return p.source.includes(".") && !p.source.includes(":");
+    return proto.includes(cond) || p.info.toLowerCase().includes(cond);
+  });
+}
+
+export interface Conversation {
+  endpoints: [string, string];
+  packets: number;
+  bytes: number;
+  protocols: string[];
+}
+
+export function conversationsOf(packets: FilterPacket[]): Conversation[] {
+  const map = new Map<string, Conversation>();
+  for (const p of packets) {
+    const key = [p.source, p.destination].sort().join(" ↔ ");
+    const entry = map.get(key) ?? { endpoints: [p.source, p.destination], packets: 0, bytes: 0, protocols: [] };
+    entry.packets += 1;
+    entry.bytes += p.length;
+    if (!entry.protocols.includes(p.protocol)) entry.protocols.push(p.protocol);
+    map.set(key, entry);
+  }
+  return [...map.values()].sort((a, b) => b.packets - a.packets);
+}
+
+export interface ProtocolStat {
+  protocol: string;
+  packets: number;
+  bytes: number;
+}
+
+export function protocolStats(packets: FilterPacket[]): ProtocolStat[] {
+  const map = new Map<string, ProtocolStat>();
+  for (const p of packets) {
+    const entry = map.get(p.protocol) ?? { protocol: p.protocol, packets: 0, bytes: 0 };
+    entry.packets += 1;
+    entry.bytes += p.length;
+    map.set(p.protocol, entry);
+  }
+  return [...map.values()].sort((a, b) => b.packets - a.packets);
+}

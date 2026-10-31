@@ -160,6 +160,7 @@ export interface PcapPacketWire {
   length: number;
   info: string;
   color_hint: string;
+  stream_id: string | null;
   layers: PcapLayerWire[];
 }
 
@@ -175,6 +176,16 @@ export interface PcapOpenWire {
 export async function pcapOpenDialog(): Promise<PcapOpenWire> {
   if (!inTauri) throw new Error("capture opening requires the desktop runtime");
   return invoke<PcapOpenWire>("pcap_open_dialog", {});
+}
+
+export interface StreamChunkWire {
+  dir: string;
+  text: string;
+}
+
+export async function pcapFollowStream(streamId: string): Promise<StreamChunkWire[]> {
+  if (!inTauri) throw new Error("stream following requires the desktop runtime");
+  return invoke<StreamChunkWire[]>("pcap_follow_stream", { streamId });
 }
 
 export async function pcapPacketBytes(index: number, offset: number, len: number): Promise<HexResponseWire> {
@@ -519,6 +530,78 @@ export interface EngineScanResultWire {
 export async function engineScan(tool: string, target: string): Promise<EngineScanResultWire> {
   if (!inTauri) throw new Error("external engines require the desktop runtime");
   return invoke<EngineScanResultWire>("engine_scan", { tool, target });
+}
+
+// --- network scanner -----------------------------------------------------------
+
+export interface ScanProgressWire {
+  tried: number;
+  total: number;
+  percent: number;
+}
+
+export interface ScanEntryWire {
+  host: string;
+  port: number;
+  state: string;
+  service: string;
+  banner: string;
+}
+
+export interface ScanSummaryWire {
+  id: number;
+  targets: string;
+  ports: string;
+  hosts_scanned: number;
+  open_ports: number;
+  duration_ms: number;
+  at_ms: number;
+}
+
+export interface NetscanStatusWire {
+  running: boolean;
+  results: number;
+}
+
+export async function netscanStart(
+  targets: string,
+  ports: string,
+  onProgress?: (p: ScanProgressWire) => void,
+): Promise<ScanSummaryWire> {
+  if (!inTauri) throw new Error("network scanning requires the desktop runtime");
+  const channel = new Channel<ScanProgressWire>();
+  if (onProgress) channel.onmessage = onProgress;
+  return invoke<ScanSummaryWire>("netscan_start", { targets, ports, onProgress: channel });
+}
+
+export async function netscanResults(): Promise<ScanEntryWire[]> {
+  if (!inTauri) return [];
+  return invoke<ScanEntryWire[]>("netscan_results", {});
+}
+
+export async function netscanStop(): Promise<void> {
+  if (!inTauri) throw new Error("network scanning requires the desktop runtime");
+  return invoke<void>("netscan_stop", {});
+}
+
+export async function netscanStatus(): Promise<NetscanStatusWire> {
+  if (!inTauri) return { running: false, results: 0 };
+  return invoke<NetscanStatusWire>("netscan_status", {});
+}
+
+export interface ScanHistoryItemWire {
+  id: number;
+  targets: string;
+  ports: string;
+  hosts_scanned: number;
+  open_ports: number;
+  duration_ms: number;
+  at_ms: number;
+}
+
+export async function netscanHistory(): Promise<ScanHistoryItemWire[]> {
+  if (!inTauri) return [];
+  return invoke<ScanHistoryItemWire[]>("netscan_history", {});
 }
 
 // --- browser fallback (demo jobs) --------------------------------------------

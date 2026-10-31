@@ -1,87 +1,183 @@
 "use client";
-import { useEffect, useMemo, useState } from "react";
-import { ChevronRight, FolderOpen, Play, ShieldAlert, Square } from "lucide-react";
+/** Scan view: real multithreaded TCP connect scanning via the Rust core (§5.3). */
+import { useCallback, useEffect, useState } from "react";
+import { Play, Square } from "lucide-react";
 import { Chip, EmptyState, Pane, Select, TextInput, ToolButton } from "@ds/panes";
-import { hexDump } from "@lib/hex";
-import { isDesktop, pcapOpenDialog, pcapPacketBytes, type HexResponseWire, type PcapOpenWire, type PcapPacketWire } from "@lib/ipc";
-import { useWorkbench } from "@state/workbench";
-import type { ToolId } from "@features/registry";
 import {
-  PROTOCOL_COLORS,
-  SAMPLE_HOSTS,
-  SAMPLE_PACKETS,
-  detailTree,
-  sampleFrameBytes,
-  type DetailNode,
-} from "../model";
+  isDesktop,
+  netscanResults,
+  netscanStart,
+  netscanStatus,
+  netscanStop,
+  type ScanEntryWire,
+  type ScanProgressWire,
+} from "@lib/ipc";
+import { useWorkbench } from "@state/workbench";
 
-// ---------------------------------------------------------------- scanning ---
+const PORT_PRESETS = [
+  { value: "top25", label: "Top 25 ports" },
+  { value: "top100", label: "Top 100 ports" },
+  { value: "1-1024", label: "Well known (1-1024)" },
+];
 
 export function ScanView() {
+  const desktop = isDesktop();
   const wb = useWorkbench();
-  const [target, setTarget] = useState("10.0.0.0/28");
-  const [profile, setProfile] = useState("discovery");
+  const [target, setTarget] = useState("127.0.0.1");
+  const [ports, setPorts] = useState("top25");
+  const [authorized, setAuthorized] = useState(false);
+  const [running, setRunning] = useState(false);
+  const [progress, setProgress] = useState<ScanProgressWire | null>(null);
+  const [results, setResults] = useState<ScanEntryWire[]>([]);
+  const [error, setError] = useState<string | null>(null);
+  const [status, setStatus] = useState<{ running: boolean; results: number }>({ running: false, results: 0 });
+
+  const poll = useCallback(() => {
+    netscanStatus().then(setStatus).catch(() => undefined);
+    netscanResults().then(setResults).catch(() => undefined);
+  }, []);
+
+  useEffect(() => {
+    if (!desktop) return;
+    const timer = setInterval(poll, 900);
+    return () => clearInterval(timer);
+  }, [poll, desktop]);
+
+  const start = async () => {
+    setRunning(true);
+    setError(null);
+    setResults([]);
+    setProgress({ tried: 0, total: 0, percent: 0 });
+    try {
+      await netscanStart(target, ports, (p) => setProgress(p));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setRunning(false);
+      setProgress(null);
+      poll();
+    }
+  };
+
+  const stop = async () => {
+    try {
+      await netscanStop();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    }
+  };
+
+  const openCount = results.filter((r) => r.state === "open").length;
+  const isPreset = PORT_PRESETS.some((p) => p.value === ports);
 
   return (
     <div className="flex h-full min-h-0 flex-col">
       <div className="flex h-8 shrink-0 items-center gap-2 border-b border-line bg-sidebar px-2">
         <span className="font-mono text-[10px] uppercase text-fg-muted">target</span>
-        <TextInput value={target} onChange={setTarget} placeholder="host / CIDR / target set" ariaLabel="Scan target" className="w-56" />
-        <span className="font-mono text-[10px] uppercase text-fg-muted">profile</span>
+        <TextInput value={target} onChange={setTarget} placeholder="host / CIDR / list" ariaLabel="Scan target" className="w-56" />
+        <span className="font-mono text-[10px] uppercase text-fg-muted">ports</span>
         <Select
-          value={profile}
-          onChange={setProfile}
+          value={isPreset ? ports : "custom"}
+          onChange={setPorts}
           options={[
-            { value: "discovery", label: "Discovery (host/port)" },
-            { value: "service", label: "Service + version" },
-            { value: "web", label: "Web review (engine: arc 4)" },
-            { value: "templates", label: "Template checks (engine: arc 4)" },
+            ...PORT_PRESETS,
+            ...(isPreset ? [] : [{ value: ports, label: ports || "custom" }]),
           ]}
-          ariaLabel="Scan profile"
+          ariaLabel="Port selection"
+          className="w-44"
         />
-        <ToolButton tone="primary" onClick={wb.runDemoJob} title="Runs the shared job pipeline demo; scan engines arrive arc 4">
-          <Play size={11} /> Run
-        </ToolButton>
-        <ToolButton onClick={wb.toggleDock} title="Open the jobs dock (Ctrl+J)">
-          <Square size={11} /> Jobs
-        </ToolButton>
-        <span className="ml-auto font-mono text-[10px] text-fg-muted">
-          engines: nmap-family vetting in progress (NPSL review); jobs are live
-        </span>
+        {!isPreset ? (
+          <TextInput value={ports} onChange={setPorts} placeholder="80,443,8000-8100" ariaLabel="Custom ports" className="w-40" />
+        ) : null}
+        {running ? (
+          <ToolButton tone="danger" onClick={() => void stop()}>
+            <Square size={11} /> Stop
+          </ToolButton>
+        ) : (
+          <ToolButton
+            tone="primary"
+            onClick={() => void start()}
+            disabled={!desktop || !authorized || !target.trim()}
+            title={desktop ? "TCP connect scan across all cores" : "Scanning requires the desktop runtime"}
+          >
+            <Play size={11} /> {running ? "scanning…" : "Run scan"}
+          </ToolButton>
+        )}
+        <Chip tone={running ? "orange" : "muted"}>{running ? "running" : "idle"}</Chip>
+        <span className="ml-auto font-mono text-[10px] text-fg-muted">{openCount} open / {results.length} probed</span>
       </div>
+      {error ? <div className="border-b border-err/50 bg-err/10 px-2 py-1 font-mono text-[10px] text-err">{error}</div> : null}
       <div className="flex min-h-0 flex-1">
-        <Pane title="Hosts / services" className="min-w-0 flex-1">
-          <table className="data-table">
-            <thead>
-              <tr>
-                <th>Host</th>
-                <th>Ports</th>
-                <th>Service</th>
-                <th>Source</th>
-                <th>Status</th>
-              </tr>
-            </thead>
-            <tbody>
-              {SAMPLE_HOSTS.map((host) => (
-                <tr key={host.host}>
-                  <td className="text-fg">{host.host}</td>
-                  <td>{host.ports}</td>
-                  <td className="text-fg-dim">{host.service}</td>
-                  <td className="text-fg-muted">{host.source}</td>
-                  <td>
-                    <Chip tone={host.status === "up" ? "ok" : host.status === "filtered" ? "blue" : "muted"}>{host.status}</Chip>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </Pane>
-        <Pane title="Run output (raw + provenance)" className="w-80 shrink-0">
-          <div className="p-2 font-mono text-[11px] leading-relaxed text-fg-muted">
-            <div className="text-fg-dim">$ profile={profile} target={target}</div>
-            <div className="mt-1">raw engine output, scan diff and export land arc 4;</div>
-            <div>every finding keeps engine id/version and policy in</div>
-            <div>provenance (Master Plan §5.3).</div>
+        <div className="flex min-w-0 flex-1 flex-col gap-px bg-line">
+          <Pane title="Authorization (§9.3)" className="shrink-0">
+            <label className="flex cursor-pointer items-start gap-2 p-2 text-xs leading-relaxed text-fg-dim">
+              <input
+                type="checkbox"
+                checked={authorized}
+                onChange={(e) => setAuthorized(e.target.checked)}
+                className="mt-0.5 accent-[var(--color-orange)]"
+              />
+              <span>
+                I confirm the target is mine or I have written authorization to scan it. Active
+                scanning without authorization is illegal in most jurisdictions.
+              </span>
+            </label>
+          </Pane>
+          {progress ? (
+            <div className="shrink-0 border-b border-line bg-panel px-2 py-1.5">
+              <div className="mb-0.5 flex items-center justify-between font-mono text-[10px] text-fg-muted">
+                <span>{progress.tried} / {progress.total} probes</span>
+                <span>{progress.percent}%</span>
+              </div>
+              <div className="h-1.5 w-full border border-line bg-app">
+                <div className="h-full bg-orange" style={{ width: `${progress.percent}%` }} />
+              </div>
+            </div>
+          ) : null}
+          <Pane title={`Results: ${openCount} open`} className="min-h-0 flex-1">
+            {results.length === 0 ? (
+              <EmptyState
+                title={running ? "Scanning…" : "No results"}
+                detail="TCP connect scan with service banners. Acknowledge the authorization, set target and ports, run."
+                badge="netscan"
+              />
+            ) : (
+              <table className="data-table">
+                <thead>
+                  <tr>
+                    <th className="w-40">Host</th>
+                    <th className="w-16">Port</th>
+                    <th className="w-20">State</th>
+                    <th className="w-28">Service</th>
+                    <th>Banner</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {results.map((r, i) => (
+                    <tr key={`${r.host}-${r.port}-${i}`}>
+                      <td className="text-fg">{r.host}</td>
+                      <td>{r.port}</td>
+                      <td className={r.state === "open" ? "text-ok" : "text-fg-muted"}>{r.state}</td>
+                      <td className="text-orange">{r.service}</td>
+                      <td className="truncate text-fg-muted" title={r.banner}>{r.banner}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+          </Pane>
+        </div>
+        <Pane title="Notes" className="w-80 shrink-0">
+          <div className="p-2 font-mono text-[10px] leading-relaxed text-fg-muted">
+            native TCP connect scanner: CIDR/host targets, port presets or ranges, banner grab on
+            open ports, all cores, live progress. nmap (NPSL) stays license-gated; this engine is
+            our own code.
+          </div>
+          <div className="border-t border-line px-2 py-1.5 font-mono text-[10px] text-fg-muted">
+            status: {status.running ? "scan running" : "idle"} · {status.results} stored results
+          </div>
+          <div className="border-t border-line p-2">
+            <ToolButton onClick={() => wb.runDemoJob()} title="Queue the shared pipeline demo job">Demo job</ToolButton>
           </div>
         </Pane>
       </div>

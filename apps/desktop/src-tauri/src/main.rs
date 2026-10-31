@@ -8,6 +8,7 @@ mod engines;
 mod evidence;
 mod history;
 mod jobs;
+mod netscan;
 mod ops;
 mod pcap;
 mod web;
@@ -23,6 +24,7 @@ fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .manage(jobs::JobManager::new())
+        .manage(netscan::ScanCtx::default())
         .manage(pcap::PcapCtx { current: std::sync::Mutex::new(None) })
         .manage(web::WebCtx {
             proxy_running: std::sync::atomic::AtomicBool::new(false),
@@ -92,6 +94,10 @@ fn main() {
             web::ws_list,
             web::web_engines_detect,
             web::engine_scan,
+            netscan::netscan_start,
+            netscan::netscan_stop,
+            netscan::netscan_results,
+            netscan::netscan_history,
         ])
         .run(tauri::generate_context!())
         .expect("HackTool desktop runtime failed to start");

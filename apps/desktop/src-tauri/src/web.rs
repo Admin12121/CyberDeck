@@ -640,6 +640,43 @@ pub fn proxy_history(ctx: State<'_, WebCtx>) -> Vec<CapturedRequest> {
 
 /// Toggle request interception. When on, requests are held in the pending
 /// queue until forwarded or dropped; the browser waits for the decision.
+#[derive(Debug, Serialize)]
+pub struct StreamChunkWire {
+    pub dir: String,
+    pub text: String,
+}
+
+/// Reassemble one TCP/UDP stream into a printable transcript (A|B sides).
+#[tauri::command]
+pub fn pcap_follow_stream(
+    pcap: State<'_, crate::pcap::PcapCtx>,
+    stream_id: String,
+) -> Result<Vec<StreamChunkWire>, String> {
+    let guard = pcap.current.lock().expect("pcap cache poisoned");
+    let capture = guard.as_ref().ok_or("no capture is open")?;
+    let mut chunks: Vec<StreamChunkWire> = Vec::new();
+    for meta in &capture.packets {
+        if meta.dissected.stream_id.as_deref() != Some(stream_id.as_str()) || meta.dissected.payload.is_empty() {
+            continue;
+        }
+        let frame = capture
+            .bytes
+            .get(meta.offset..meta.offset + meta.incl_len)
+            .ok_or("capture bytes truncated")?;
+        let end = frame.len();
+        let start = end - meta.dissected.payload.len();
+        let text: String = frame[start..end]
+            .iter()
+            .map(|&b| if (0x20..=0x7e).contains(&b) { b as char } else { '.' })
+            .collect();
+        chunks.push(StreamChunkWire {
+            dir: if meta.dissected.source <= meta.dissected.destination { "A".to_string() } else { "B".to_string() },
+            text,
+        });
+    }
+    Ok(chunks)
+}
+
 #[tauri::command]
 pub fn proxy_intercept(on: bool, ctx: State<'_, WebCtx>) -> bool {
     ctx.shared.intercept.store(on, Ordering::Relaxed);
