@@ -26,9 +26,13 @@ import {
 import { detectHashFormats } from "../model/hash";
 import {
   b64,
+  benchmarkDigest,
+  crackCombinatorDialog,
   crackHistoryClear,
   crackHistoryDelete,
   crackHistoryList,
+  crackHybridDialog,
+  crackHybridReverseDialog,
   crackMask,
   crackRulesDialog,
   crackWordlistDialog,
@@ -41,6 +45,7 @@ import {
   kdfVerify,
   pickWordlist,
   type AttackResultWire,
+  type BenchmarkWire,
   type CrackEntryWire,
   type CrackProgressWire,
   type CrackResultWire,
@@ -54,6 +59,13 @@ import {
 import type { ToolId } from "@features/registry";
 
 // ---------------------------------------------------------- hash analysis ---
+
+function formatRate(hps: number): string {
+  if (hps >= 1e9) return `${(hps / 1e9).toFixed(2)} GH/s`;
+  if (hps >= 1e6) return `${(hps / 1e6).toFixed(2)} MH/s`;
+  if (hps >= 1e3) return `${(hps / 1e3).toFixed(2)} kH/s`;
+  return `${Math.round(hps)} H/s`;
+}
 
 interface HashFamily {
   algo: string;
@@ -95,15 +107,21 @@ export function HashAnalysisView() {
   const [verifying, setVerifying] = useState(false);
   const [verifyError, setVerifyError] = useState<string | null>(null);
   const [crackAlgo, setCrackAlgo] = useState("md5");
-  const [crackMode, setCrackMode] = useState<"wordlist" | "rules" | "mask">("wordlist");
+  const [crackMode, setCrackMode] = useState<
+    "wordlist" | "rules" | "mask" | "hybrid" | "hybrid-reverse" | "combinator"
+  >("wordlist");
   const [mask, setMask] = useState("?d?d?d?d");
   const [attackResult, setAttackResult] = useState<AttackResultWire | CrackResultWire | EngineAttackResultWire | null>(null);
   const [crackBusy, setCrackBusy] = useState(false);
   const [crackError, setCrackError] = useState<string | null>(null);
   const [devices, setDevices] = useState<DeviceInfoWire | null>(null);
   const [engines, setEngines] = useState<EngineStatusWire[]>([]);
+  const [benchmarkResult, setBenchmarkResult] = useState<BenchmarkWire | null>(null);
+  const [benchmarking, setBenchmarking] = useState(false);
+  const [benchmarkError, setBenchmarkError] = useState<string | null>(null);
   const [engineChoice, setEngineChoice] = useState("native");
   const [wordlist, setWordlist] = useState<WordlistInfoWire | null>(null);
+  const [wordlistB, setWordlistB] = useState<WordlistInfoWire | null>(null);
   const [wordlistBusy, setWordlistBusy] = useState(false);
   const [crackProgress, setCrackProgress] = useState<CrackProgressWire | null>(null);
   const desktop = isDesktop();
@@ -133,10 +151,12 @@ export function HashAnalysisView() {
       .catch(() => setHistory([]));
   }, [desktop]);
 
-  const chooseWordlist = async () => {
+  const chooseWordlist = async (which: "first" | "second" = "first") => {
     setWordlistBusy(true);
     try {
-      setWordlist(await pickWordlist());
+      const picked = await pickWordlist();
+      if (which === "second") setWordlistB(picked);
+      else setWordlist(picked);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       if (message !== "cancelled") setCrackError(message);
@@ -149,15 +169,24 @@ export function HashAnalysisView() {
   const ENGINE_ONLY = new Set(["sha512crypt", "sha256crypt", "md5crypt", "apr1", "phpass", "mscash2", "sunmd5", "krb5asrep"]);
   const engineOnly = effectiveAlgo !== null && ENGINE_ONLY.has(effectiveAlgo);
   const isKdfAlgo = effectiveAlgo === "bcrypt" || effectiveAlgo === "argon2" || effectiveAlgo === "scrypt" || effectiveAlgo === "pbkdf2";
-  const needsWordlist = crackMode === "wordlist";
+  const needsWordlist =
+    crackMode === "wordlist" || crackMode === "hybrid" || crackMode === "hybrid-reverse" || crackMode === "combinator";
+  const needsSecondWordlist = crackMode === "combinator";
+  const nativeOnlyMode =
+    crackMode === "rules" || crackMode === "hybrid" || crackMode === "hybrid-reverse" || crackMode === "combinator";
+  const benchAlgo = effectiveAlgo ?? (crackAlgo === "auto" ? null : crackAlgo);
+  const benchUnsupported =
+    benchAlgo !== null &&
+    (ENGINE_ONLY.has(benchAlgo) || ["bcrypt", "argon2", "scrypt", "pbkdf2", "yescrypt"].includes(benchAlgo));
   const engineMissing = engineChoice !== "native" && !engines.find((e) => e.id === engineChoice)?.available;
   const runDisabled =
     crackBusy || !desktop || input.trim().length === 0 ||
     effectiveAlgo === null ||
-    (engineChoice !== "native" && crackMode === "rules") ||
+    (engineChoice !== "native" && nativeOnlyMode) ||
     (engineChoice === "native" && engineOnly) ||
     (engineChoice === "native" && isKdfAlgo && crackMode !== "wordlist") ||
-    (needsWordlist && !wordlist);
+    (needsWordlist && !wordlist) ||
+    (needsSecondWordlist && !wordlistB);
 
   const verify = async () => {
     setVerifying(true);
@@ -193,9 +222,15 @@ export function HashAnalysisView() {
           ? await engineAttack(engineChoice, algoForEngine, input, crackMode, crackMode === "mask" ? mask : undefined)
           : crackMode === "mask"
             ? await crackMask(algoForEngine, input, mask)
-            : crackMode === "rules"
-              ? await crackRulesDialog(algoForEngine, input)
-              : await crackWordlistDialog(algoForEngine, input, wordlist?.path, (p) => setCrackProgress(p));
+            : crackMode === "hybrid"
+              ? await crackHybridDialog(algoForEngine, input, mask, wordlist?.path)
+              : crackMode === "hybrid-reverse"
+                ? await crackHybridReverseDialog(algoForEngine, input, mask, wordlist?.path)
+                : crackMode === "combinator"
+                  ? await crackCombinatorDialog(algoForEngine, input, wordlist?.path, wordlistB?.path)
+                  : crackMode === "rules"
+                    ? await crackRulesDialog(algoForEngine, input)
+                    : await crackWordlistDialog(algoForEngine, input, wordlist?.path, (p) => setCrackProgress(p));
       setAttackResult(result);
       if ("matches" in result && result.matches.length > 0) loadHistory();
     } catch (err) {
@@ -204,6 +239,20 @@ export function HashAnalysisView() {
     } finally {
       setCrackBusy(false);
       setCrackProgress(null);
+    }
+  };
+
+  const runBenchmark = async () => {
+    if (!benchAlgo) return;
+    setBenchmarking(true);
+    setBenchmarkError(null);
+    setBenchmarkResult(null);
+    try {
+      setBenchmarkResult(await benchmarkDigest(benchAlgo, 1000));
+    } catch (err) {
+      setBenchmarkError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBenchmarking(false);
     }
   };
 
@@ -397,32 +446,62 @@ export function HashAnalysisView() {
                 { value: "wordlist", label: "Wordlist" },
                 { value: "rules", label: "Wordlist + rules" },
                 { value: "mask", label: "Mask" },
+                { value: "hybrid", label: "Wordlist + mask" },
+                { value: "hybrid-reverse", label: "Mask + wordlist" },
+                { value: "combinator", label: "Wordlist + wordlist" },
               ]}
               ariaLabel="Attack mode"
               className="shrink-0"
             />
           </div>
-          {crackMode === "mask" ? (
+          {crackMode === "mask" || crackMode === "hybrid" || crackMode === "hybrid-reverse" ? (
             <div className="mt-1 flex items-center gap-1">
               <TextInput value={mask} onChange={setMask} placeholder="?d?d?d?d" ariaLabel="Mask pattern" className="min-w-0 flex-1" />
               <span className="font-mono text-[10px] text-fg-muted">?l ?u ?d ?s ?a</span>
             </div>
           ) : null}
           {crackMode !== "mask" ? (
-            <div className="mt-1 flex items-center gap-1">
-              <ToolButton onClick={() => void chooseWordlist()} disabled={wordlistBusy || !desktop} title={desktop ? "Pick the wordlist file once; it is reused for every run" : "Wordlist picking requires the desktop runtime"}>
-                {wordlistBusy ? "reading…" : "Choose wordlist…"}
-              </ToolButton>
-              {wordlist ? (
-                <>
-                  <span className="min-w-0 flex-1 truncate font-mono text-[10px] text-fg-dim" title={wordlist.path}>
-                    {wordlist.name} ({Math.round(wordlist.size / 1024)} KB)
-                  </span>
-                  <button type="button" onClick={() => setWordlist(null)} aria-label="Clear wordlist" className="text-fg-muted hover:text-fg">×</button>
-                </>
-              ) : (
-                <span className="font-mono text-[10px] text-fg-muted">none selected</span>
-              )}
+            <div className="mt-1 space-y-1">
+              <div className="flex items-center gap-1">
+                <ToolButton
+                  onClick={() => void chooseWordlist("first")}
+                  disabled={wordlistBusy || !desktop}
+                  title={desktop ? "Pick the wordlist file once; it is reused for every run" : "Wordlist picking requires the desktop runtime"}
+                >
+                  {wordlistBusy ? "reading…" : crackMode === "combinator" ? "Choose first wordlist…" : "Choose wordlist…"}
+                </ToolButton>
+                {wordlist ? (
+                  <>
+                    <span className="min-w-0 flex-1 truncate font-mono text-[10px] text-fg-dim" title={wordlist.path}>
+                      {wordlist.name} ({Math.round(wordlist.size / 1024)} KB)
+                    </span>
+                    <button type="button" onClick={() => setWordlist(null)} aria-label="Clear wordlist" className="text-fg-muted hover:text-fg">×</button>
+                  </>
+                ) : (
+                  <span className="font-mono text-[10px] text-fg-muted">none selected</span>
+                )}
+              </div>
+              {crackMode === "combinator" ? (
+                <div className="flex items-center gap-1">
+                  <ToolButton
+                    onClick={() => void chooseWordlist("second")}
+                    disabled={wordlistBusy || !desktop}
+                    title={desktop ? "Second wordlist; each word is appended after the first" : "Wordlist picking requires the desktop runtime"}
+                  >
+                    {wordlistBusy ? "reading…" : "Choose second wordlist…"}
+                  </ToolButton>
+                  {wordlistB ? (
+                    <>
+                      <span className="min-w-0 flex-1 truncate font-mono text-[10px] text-fg-dim" title={wordlistB.path}>
+                        {wordlistB.name} ({Math.round(wordlistB.size / 1024)} KB)
+                      </span>
+                      <button type="button" onClick={() => setWordlistB(null)} aria-label="Clear second wordlist" className="text-fg-muted hover:text-fg">×</button>
+                    </>
+                  ) : (
+                    <span className="font-mono text-[10px] text-fg-muted">none selected</span>
+                  )}
+                </div>
+              ) : null}
             </div>
           ) : null}
           {crackBusy && crackProgress ? (
@@ -450,13 +529,15 @@ export function HashAnalysisView() {
                       ? "NTLM runs through hashcat or john; pick an external engine"
                       : engineChoice === "native" && isKdfAlgo && crackMode !== "wordlist"
                         ? "KDF hashes: wordlist mode only (they verify at password-hashing speed)"
-                        : engineChoice !== "native" && crackMode === "rules"
+                        : engineChoice !== "native" && nativeOnlyMode
                           ? "External engines: use wordlist or mask this arc"
                           : engineChoice !== "native" && engineMissing
                             ? "Engine not detected; bundled binaries arrive with the installer"
                             : needsWordlist && !wordlist
                               ? "Choose a wordlist first"
-                              : "Runs in the selected engine"
+                              : needsSecondWordlist && !wordlistB
+                                ? "Choose the second wordlist first"
+                                : "Runs in the selected engine"
               }
             >
               {crackBusy ? "cracking…" : "Run attack"}
@@ -476,6 +557,27 @@ export function HashAnalysisView() {
             <div className="space-y-0.5 font-mono text-[10px] text-fg-dim">
               <div>
                 cpu: {devices ? `${devices.cpu_cores}× ${devices.cpu_arch}` : "…"} · hacktool-crypto <span className="text-ok">active</span>
+              </div>
+              <div className="flex flex-wrap items-center gap-1">
+                <ToolButton
+                  onClick={() => void runBenchmark()}
+                  disabled={benchmarking || benchAlgo === null || benchUnsupported}
+                  title={
+                    benchAlgo === null
+                      ? "Hash not recognized: pick the algorithm manually"
+                      : benchUnsupported
+                        ? "KDF and engine-only formats benchmark in their own engine"
+                        : "Measure the native digest rate for the selected algorithm"
+                  }
+                >
+                  {benchmarking ? "measuring…" : benchAlgo ? `Benchmark ${benchAlgo}` : "Benchmark"}
+                </ToolButton>
+                {benchmarkResult ? (
+                  <span className="text-ok">
+                    {benchmarkResult.algo}: {formatRate(benchmarkResult.hashes_per_second)} · {benchmarkResult.duration_ms} ms
+                  </span>
+                ) : null}
+                {benchmarkError ? <span className="text-err">{benchmarkError}</span> : null}
               </div>
               {devices?.gpu_devices.map((gpu) => (
                 <div key={gpu.name} className="border border-line bg-app px-2 py-1">

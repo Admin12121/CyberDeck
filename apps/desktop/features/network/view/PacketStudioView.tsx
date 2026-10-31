@@ -45,6 +45,7 @@ const SAMPLE_DISPLAY: DisplayPacket[] = SAMPLE_PACKETS.map((p, i) => ({
 
 export function PacketStudioView() {
   const desktop = isDesktop();
+  const wb = useWorkbench();
   const [capture, setCapture] = useState<PcapOpenWire | null>(null);
   const [openError, setOpenError] = useState<string | null>(null);
   const [opening, setOpening] = useState(false);
@@ -269,7 +270,17 @@ export function PacketStudioView() {
           />
           <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden bg-panel">
             <div className="flex h-8 shrink-0 items-center border-b border-line bg-sidebar px-2 text-[10px] font-medium uppercase tracking-wider text-fg-muted">
-              Packet bytes (offset · hex · ascii)
+              <span className="flex-1">Packet bytes (offset · hex · ascii)</span>
+              <ToolButton
+                disabled={!capture || !packetBytes || packetBytes.rows.length === 0}
+                title="Transfer selected captured frame bytes to the Recipes workspace"
+                onClick={() => {
+                  if (!capture || !packetBytes) return;
+                  const hex = packetBytes.rows.map((row) => row.hex.replace(/[^0-9a-f]/gi, "")).join("");
+                  wb.sendToRecipes(hex, `${capture.file_name}: frame ${selected + 1} (visible bytes)`,
+                    [{ opId: "from_hex", enabled: true }]);
+                }}
+              >Send to Recipes</ToolButton>
             </div>
             <div className="min-h-0 flex-1 overflow-auto">
               {capture && packetBytes ? (

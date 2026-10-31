@@ -3,6 +3,7 @@
 use base64::Engine as _;
 use hacktool_crypto::{apply_op, catalog, OpInfo, ENGINE_ID, ENGINE_VERSION};
 use serde::Serialize;
+use hacktool_crypto::recipes::{execute_recipe, NativeRecipeResult, RecipeStep};
 
 #[derive(Debug, Serialize)]
 pub struct OpResult {
@@ -32,6 +33,11 @@ pub fn crypto_op(op: String, data_b64: String, key_b64: Option<String>) -> Resul
         engine: ENGINE_ID.to_string(),
         engine_version: ENGINE_VERSION.to_string(),
     })
+}
+
+#[tauri::command]
+pub fn recipe_run(input: String, steps: Vec<RecipeStep>) -> NativeRecipeResult {
+    execute_recipe(&input, &steps)
 }
 
 #[tauri::command]

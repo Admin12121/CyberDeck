@@ -30,6 +30,7 @@ export function SpiderView() {
   const [depth, setDepth] = useState("2");
   const [links, setLinks] = useState<string[]>([]);
   const [busy, setBusy] = useState(false);
+  const [authorized, setAuthorized] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const crawl = async () => {
@@ -37,7 +38,7 @@ export function SpiderView() {
     setError(null);
     setLinks([]);
     try {
-      setLinks(await spiderScan(normalized, Math.max(1, Math.min(4, Number.parseInt(depth, 10) || 2))));
+      setLinks(await spiderScan(normalized, Math.max(1, Math.min(4, Number.parseInt(depth, 10) || 2)), authorized));
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -62,12 +63,16 @@ export function SpiderView() {
           ]}
           ariaLabel="Spider depth"
         />
-        <ToolButton tone="primary" onClick={() => void crawl()} disabled={busy || !desktop || !normalized} title={desktop ? "Same-host crawl, GET only" : "Spidering requires the desktop runtime"}>
+        <ToolButton tone="primary" onClick={() => void crawl()} disabled={busy || !desktop || !normalized || !authorized} title={desktop ? "Same-host crawl, GET only" : "Spidering requires the desktop runtime"}>
           <Play size={11} /> {busy ? "crawling…" : "Start spider"}
         </ToolButton>
         <span className="ml-auto font-mono text-[10px] text-fg-muted">{links.length} urls</span>
       </div>
       {error ? <div className="border-b border-err/50 bg-err/10 px-2 py-1 font-mono text-[10px] text-err">{error}</div> : null}
+      <label className="flex items-center gap-2 border-b border-line bg-panel px-3 py-2 text-xs text-fg-dim">
+        <input type="checkbox" checked={authorized} onChange={(e) => setAuthorized(e.target.checked)} className="accent-[var(--color-orange)]" />
+        I confirm that I own this target or have written authorization for active assessment.
+      </label>
       <Pane title="Discovered URLs" className="min-h-0 flex-1">
         {links.length === 0 ? (
           <EmptyState title={busy ? "Crawling…" : "No URLs yet"} detail="Depth-limited same-host crawl; discovered links feed the scanner and repeater." badge="spider" />

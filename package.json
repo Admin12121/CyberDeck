@@ -1,6 +1,7 @@
 {
   "name": "hacktool",
   "private": true,
+  "license": "MIT",
   "version": "0.1.0",
   "description": "HackTool — integrated cybersecurity workbench (Tauri 2 + Next.js + Rust)",
   "workspaces": ["apps/*"],

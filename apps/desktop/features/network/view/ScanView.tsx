@@ -54,7 +54,7 @@ export function ScanView() {
     setResults([]);
     setProgress({ tried: 0, total: 0, percent: 0 });
     try {
-      await netscanStart(target, ports, (p) => setProgress(p));
+      await netscanStart(target, ports, authorized, (p) => setProgress(p));
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {

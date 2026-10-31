@@ -1,5 +1,7 @@
 //! Native crypto operations with reference test vectors.
 
+pub mod recipes;
+
 use base64::Engine as _;
 use hmac::{Hmac, Mac};
 use sha2::{Digest, Sha224, Sha256, Sha384, Sha512};

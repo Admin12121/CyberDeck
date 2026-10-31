@@ -29,6 +29,7 @@ export function ScannerView() {
   const { target, setTarget, normalized } = useTarget();
   const [findings, setFindings] = useState<WebFindingWire[]>([]);
   const [busy, setBusy] = useState(false);
+  const [authorized, setAuthorized] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [engines, setEngines] = useState<WebEngineStatusWire[]>([]);
   const [engineOut, setEngineOut] = useState<EngineScanResultWire | null>(null);
@@ -44,7 +45,7 @@ export function ScannerView() {
     setError(null);
     setFindings([]);
     try {
-      setFindings(await webScan(normalized));
+      setFindings(await webScan(normalized, authorized));
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -56,7 +57,7 @@ export function ScannerView() {
     setEngineBusy(tool);
     setEngineOut(null);
     try {
-      setEngineOut(await engineScan(tool, normalized));
+      setEngineOut(await engineScan(tool, normalized, authorized));
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -71,12 +72,16 @@ export function ScannerView() {
       <div className="flex h-8 shrink-0 items-center gap-2 border-b border-line bg-sidebar px-2">
         <span className="font-mono text-[10px] uppercase text-fg-muted">target</span>
         <TextInput value={target} onChange={setTarget} placeholder="http://host" ariaLabel="Scan target" className="w-72" />
-        <ToolButton tone="primary" onClick={() => void scan()} disabled={busy || !desktop || !normalized} title={desktop ? "Native review: paths, headers, banners" : "Scanning requires the desktop runtime"}>
+        <ToolButton tone="primary" onClick={() => void scan()} disabled={busy || !desktop || !normalized || !authorized} title={desktop ? "Native review: paths, headers, banners" : "Scanning requires the desktop runtime"}>
           <Play size={11} /> {busy ? "scanning…" : "Native scan"}
         </ToolButton>
         <span className="ml-auto font-mono text-[10px] text-fg-muted">{findings.length} findings</span>
       </div>
       {error ? <div className="border-b border-err/50 bg-err/10 px-2 py-1 font-mono text-[10px] text-err">{error}</div> : null}
+      <label className="flex items-center gap-2 border-b border-line bg-panel px-3 py-2 text-xs text-fg-dim">
+        <input type="checkbox" checked={authorized} onChange={(e) => setAuthorized(e.target.checked)} className="accent-[var(--color-orange)]" />
+        I confirm that I own this target or have written authorization for active assessment.
+      </label>
       <div className="flex min-h-0 flex-1 gap-px bg-line">
         <Pane title="Findings" className="min-w-0 flex-1">
           {findings.length === 0 ? (
@@ -113,7 +118,7 @@ export function ScannerView() {
                     {engine.label} <span className="text-fg-muted">{engine.available ? engine.version : "not detected"}</span>
                   </span>
                   <Chip tone={engine.available ? "ok" : "muted"}>{engine.license.split("-")[0]}</Chip>
-                  <ToolButton onClick={() => void runEngine(engine.id)} disabled={!engine.available || !normalized || engineBusy !== null} title={engine.available ? `Run ${engine.label} against the target` : "Not on PATH; bundled sidecars arrive with the installer"}>
+                  <ToolButton onClick={() => void runEngine(engine.id)} disabled={!engine.available || !normalized || !authorized || engineBusy !== null} title={engine.available ? `Run ${engine.label} against the target` : "Not on PATH; bundled sidecars arrive with the installer"}>
                     {engineBusy === engine.id ? "…" : <Play size={11} />}
                   </ToolButton>
                 </div>

@@ -1,9 +1,8 @@
 //! Rule-based and mask attacks (§5.5), implemented natively. GPU runs through
 //! hashcat when a driver is present; see docs/engine-licensing.md.
 
-use std::time::Instant;
-
 use serde::Serialize;
+use std::time::{Duration, Instant};
 
 use crate::evidence::MAX_IMPORT_BYTES;
 
@@ -68,33 +67,104 @@ impl AttackSession {
     }
 }
 
+/// Char-safe drops and rotations: byte slicing panics on multi-byte words.
+fn drop_first(word: &str) -> String {
+    word.chars().skip(1).collect()
+}
+
+fn drop_last(word: &str) -> String {
+    let mut chars = word.chars();
+    chars.next_back();
+    chars.as_str().to_string()
+}
+
+fn rotate_left(word: &str) -> String {
+    let mut chars = word.chars();
+    match chars.next() {
+        Some(first) => chars.as_str().to_string() + &first.to_string(),
+        None => String::new(),
+    }
+}
+
+fn rotate_right(word: &str) -> String {
+    let mut chars = word.chars();
+    match chars.next_back() {
+        Some(last) => last.to_string() + chars.as_str(),
+        None => String::new(),
+    }
+}
+
 /// Built-in rule set, hashcat-flavored mangling implemented in our own code.
 fn rule_variants(word: &str) -> Vec<String> {
-    let mut out = vec![word.to_string()];
     let lower = word.to_lowercase();
     let upper = word.to_uppercase();
     let mut cap = String::new();
     if let Some(first) = lower.chars().next() {
         cap = first.to_uppercase().collect::<String>() + &lower[first.len_utf8()..];
     }
-    out.push(cap.clone());
-    out.push(upper.clone());
-    out.push(lower.clone());
-    out.push(word.chars().rev().collect());
+    let rev: String = word.chars().rev().collect();
+    let leet_full = word
+        .replace(['a', 'A'], "4")
+        .replace(['e', 'E'], "3")
+        .replace(['i', 'I'], "1")
+        .replace(['o', 'O'], "0")
+        .replace(['s', 'S'], "5")
+        .replace(['t', 'T'], "7");
+    let leet_vowels = word.replace(['a', 'A'], "4").replace(['e', 'E'], "3").replace(['o', 'O'], "0");
+
+    let mut out: Vec<String> = vec![
+        word.to_string(),
+        cap.clone(),
+        upper.clone(),
+        lower.clone(),
+        rev.clone(),
+        format!("{word}{word}"), // duplicate
+        drop_first(word),
+        drop_last(word),
+        rotate_left(word),
+        rotate_right(word),
+        leet_full.clone(),
+        leet_vowels,
+    ];
+    // append digits
     for d in 0..=9 {
         out.push(format!("{word}{d}"));
     }
     for d in 0..100 {
         out.push(format!("{word}{d:02}"));
     }
-    for suffix in ["123", "1234", "12345", "!", "!!", "@", "#", "*", "2024", "2025", "2026"] {
+    // append specials and combos
+    for suffix in [
+        "123", "1234", "12345", "!", "!!", "@", "#", "*", ".", "-", "_", "+", "?", "=", "$", "%",
+        "!!!", "@#", "#@", "$$", "2023", "2024", "2025", "2026",
+    ] {
         out.push(format!("{word}{suffix}"));
     }
+    out.push(format!("{word}{word}")); // dup (kept: differs from base when short)
+    // prepend digits and specials
+    for d in 0..=9 {
+        out.push(format!("{d}{word}"));
+    }
+    for prefix in ["!", "@", "#", "$", "_", "-", "1", "123"] {
+        out.push(format!("{prefix}{word}"));
+    }
+    // cap combos
     out.push(cap.clone() + "123");
-    out.push(cap + "!");
+    out.push(cap.clone() + "!");
+    out.push(cap.clone() + "1234");
     out.push(lower + "123");
-    // leetspeak
-    out.push(word.replace(['a', 'A'], "4").replace(['e', 'E'], "3").replace(['i', 'I'], "1").replace(['o', 'O'], "0").replace(['s', 'S'], "5").replace(['t', 'T'], "7"));
+    out.push(format!("{upper}!"));
+    // leet + suffix
+    out.push(format!("{leet_full}!"));
+    out.push(format!("{leet_full}123"));
+    // years
+    for year in 1990..=2026 {
+        out.push(format!("{word}{year}"));
+        out.push(format!("{cap}{year}"));
+    }
+    // dedup, keep order
+    let mut seen = std::collections::HashSet::new();
+    out.retain(|c| seen.insert(c.clone()) && !c.is_empty());
     out
 }
 
@@ -206,6 +276,24 @@ enum Slot {
     Literal(char),
 }
 
+fn mask_slots(mask: &str) -> Result<Vec<Slot>, String> {
+    let mut slots: Vec<Slot> = Vec::new();
+    let mut chars = mask.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '?' {
+            let kind = chars.next().ok_or("mask ends with a dangling '?'")?;
+            match kind {
+                'l' | 'u' | 'd' | 's' | 'a' => slots.push(Slot::Class(mask_charset(kind).unwrap())),
+                '?' => slots.push(Slot::Literal('?')),
+                other => return Err(format!("unknown mask class ?{other}")),
+            }
+        } else {
+            slots.push(Slot::Literal(c));
+        }
+    }
+    Ok(slots)
+}
+
 fn run_mask(algo: &str, target: &str, mask: &str) -> Result<AttackSession, String> {
     let plan = plan_mask(mask)?;
     if plan.candidate_count > MAX_CANDIDATES {
@@ -214,30 +302,19 @@ fn run_mask(algo: &str, target: &str, mask: &str) -> Result<AttackSession, Strin
             plan.candidate_count, MAX_CANDIDATES
         ));
     }
-    let mut slots: Vec<Slot> = Vec::new();
-    let mut chars = mask.chars().peekable();
-    while let Some(c) = chars.next() {
-        if c == '?' {
-            let kind = chars.next().unwrap();
-            match kind {
-                'l' | 'u' | 'd' | 's' | 'a' => slots.push(Slot::Class(mask_charset(kind).unwrap())),
-                '?' => slots.push(Slot::Literal('?')),
-                _ => unreachable!("validated by plan_mask"),
-            }
-        } else {
-            slots.push(Slot::Literal(c));
-        }
-    }
+    let slots = mask_slots(mask)?;
     // Parallelize by slicing the FIRST class's charset across threads; each
     // worker runs a full odometer over the remaining classes with its slice
     // of leading characters.
-    let first_class_index = slots.iter().position(|s| matches!(s, Slot::Class(_)));
+    // Slot index (used to slice the charset), not the class index the
+    // odometer counts in: literals such as a leading 'a' occupy slots too.
+    let first_class_slot = slots.iter().position(|s| matches!(s, Slot::Class(_)));
     let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1).clamp(1, 32);
     let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let mut partials: Vec<AttackSession> = Vec::new();
     std::thread::scope(|scope| {
         let mut handles = Vec::new();
-        match first_class_index {
+        match first_class_slot {
             Some(index) => {
                 let first_len = match &slots[index] {
                     Slot::Class(set) => set.len(),
@@ -255,7 +332,8 @@ fn run_mask(algo: &str, target: &str, mask: &str) -> Result<AttackSession, Strin
                             if stop.load(std::sync::atomic::Ordering::Relaxed) {
                                 break;
                             }
-                            run_mask_odometer(algo, &mut session, slots.as_slice(), index, first_value, &stop);
+                            // The first class slot is always class 0 for the odometer.
+                            run_mask_odometer(algo, &mut session, slots.as_slice(), 0, first_value, &stop);
                         }
                         session
                     }));
@@ -285,7 +363,9 @@ fn run_mask_odometer(algo: &str, session: &mut AttackSession, slots: &[Slot], pi
     let class_count = class_sets.len();
     let mut counters = vec![0usize; class_count];
     if pinned_class != usize::MAX {
-        counters[pinned_class] = pinned_value;
+        if let Some(counter) = counters.get_mut(pinned_class) {
+            *counter = pinned_value;
+        }
     }
     let total: u64 = class_sets.iter().enumerate().map(|(i, set)| if i == pinned_class { 1 } else { set.len() as u64 }).product();
     for _ in 0..total {
@@ -408,6 +488,227 @@ fn mask_attack(algo: &str, target_hash: &str, mask: &str) -> Result<AttackResult
     let started = Instant::now();
     let session = run_mask(algo, &target, mask)?;
     Ok(wire("mask", algo.to_string(), target, mask.to_string(), session, started.elapsed().as_millis() as u64))
+}
+
+/// Expand a validated mask into up to `limit` concrete strings in odometer
+/// order. Literals are copied, classes cycle over their charsets.
+fn expand_mask(slots: &[Slot], limit: usize) -> Vec<String> {
+    let sets: Vec<&Vec<char>> = slots
+        .iter()
+        .filter_map(|s| match s {
+            Slot::Class(set) => Some(set),
+            Slot::Literal(_) => None,
+        })
+        .collect();
+    let mut counters = vec![0usize; sets.len()];
+    let mut out = Vec::with_capacity(limit);
+    for _ in 0..limit {
+        let mut candidate = String::new();
+        let mut class_index = 0usize;
+        for slot in slots {
+            match slot {
+                Slot::Literal(ch) => candidate.push(*ch),
+                Slot::Class(set) => {
+                    candidate.push(set[counters[class_index]]);
+                    class_index += 1;
+                }
+            }
+        }
+        out.push(candidate);
+        for pos in (0..counters.len()).rev() {
+            counters[pos] += 1;
+            if counters[pos] < sets[pos].len() {
+                break;
+            }
+            counters[pos] = 0;
+        }
+    }
+    out
+}
+
+/// Validate a hybrid mask and expand at most 1024 entries. The mask's full
+/// space is cap-checked first, so this only bounds per-word work.
+fn mask_expansions(mask: &str) -> Result<Vec<String>, String> {
+    let plan = plan_mask(mask)?;
+    if plan.candidate_count > MAX_CANDIDATES {
+        return Err(format!(
+            "mask generates {} candidates per word; the cap this arc is {}",
+            plan.candidate_count, MAX_CANDIDATES
+        ));
+    }
+    let slots = mask_slots(mask)?;
+    Ok(expand_mask(&slots, plan.candidate_count.min(1024) as usize))
+}
+
+fn words_from_bytes(body: &[u8], limit: usize) -> Vec<String> {
+    String::from_utf8_lossy(body)
+        .lines()
+        .map(|l| l.trim_end_matches(char::is_control).to_string())
+        .filter(|l| !l.is_empty())
+        .take(limit)
+        .collect()
+}
+
+/// Hybrid attack: every wordlist word (capped) + mask suffix.
+/// Word list arrives as raw bytes so the dialog read stays testable.
+pub fn hybrid_over_bytes(algo: &str, target: &str, mask: &str, body: &[u8]) -> Result<AttackResultWire, String> {
+    let t = guard(algo, target)?;
+    let suffixes = mask_expansions(mask)?;
+    let words = words_from_bytes(body, 500); // word cap keeps the product bounded
+    let started = Instant::now();
+    let mut session = AttackSession::new(&t);
+    'outer: for word in &words {
+        for suffix in &suffixes {
+            let candidate = format!("{word}{suffix}");
+            if !session.test(algo, &candidate, session.generated + 1) {
+                break 'outer;
+            }
+        }
+    }
+    Ok(wire("hybrid", algo.to_string(), t, format!("wordlist + {mask}"), session, started.elapsed().as_millis() as u64))
+}
+
+/// Reverse hybrid: mask prefix + every wordlist word (capped).
+pub fn hybrid_reverse_over_bytes(algo: &str, target: &str, mask: &str, body: &[u8]) -> Result<AttackResultWire, String> {
+    let t = guard(algo, target)?;
+    let prefixes = mask_expansions(mask)?;
+    let words = words_from_bytes(body, 500);
+    let started = Instant::now();
+    let mut session = AttackSession::new(&t);
+    'outer: for prefix in &prefixes {
+        for word in &words {
+            let candidate = format!("{prefix}{word}");
+            if !session.test(algo, &candidate, session.generated + 1) {
+                break 'outer;
+            }
+        }
+    }
+    Ok(wire("hybrid-reverse", algo.to_string(), t, format!("{mask} + wordlist"), session, started.elapsed().as_millis() as u64))
+}
+
+/// Full combinator: first wordlist x second wordlist, both capped at 500.
+pub fn combinator_over_bytes(algo: &str, target: &str, first_body: &[u8], second_body: &[u8]) -> Result<AttackResultWire, String> {
+    let t = guard(algo, target)?;
+    let first = words_from_bytes(first_body, 500);
+    let second = words_from_bytes(second_body, 500);
+    let started = Instant::now();
+    let mut session = AttackSession::new(&t);
+    'outer: for a in &first {
+        for b in &second {
+            let candidate = format!("{a}{b}");
+            if !session.test(algo, &candidate, session.generated + 1) {
+                break 'outer;
+            }
+        }
+    }
+    Ok(wire(
+        "combinator",
+        algo.to_string(),
+        t,
+        format!("wordlist x wordlist ({} x {})", first.len(), second.len()),
+        session,
+        started.elapsed().as_millis() as u64,
+    ))
+}
+
+#[tauri::command]
+pub fn crack_hybrid_dialog(
+    app: tauri::AppHandle,
+    algo: String,
+    target_hash: String,
+    mask: String,
+    wordlist_path: Option<String>,
+    ctx: tauri::State<'_, crate::evidence::EvidenceCtx>,
+) -> Result<AttackResultWire, String> {
+    let target = guard(&algo, &target_hash)?;
+    // The UI's chosen wordlist is reused; a dialog opens only when none is set.
+    let (path, name) = crate::crack::resolved_wordlist(&app, wordlist_path.as_deref())?;
+    let body = std::fs::read(&path).map_err(|e| format!("cannot read wordlist: {e}"))?;
+    let mut result = hybrid_over_bytes(&algo, &target, &mask, &body)?;
+    result.source = format!("{name} + {mask}");
+    record_history(&ctx, &algo, &target, &format!("hybrid wordlist + {mask}"), &result.matches);
+    Ok(result)
+}
+
+#[tauri::command]
+pub fn crack_hybrid_reverse_dialog(
+    app: tauri::AppHandle,
+    algo: String,
+    target_hash: String,
+    mask: String,
+    wordlist_path: Option<String>,
+    ctx: tauri::State<'_, crate::evidence::EvidenceCtx>,
+) -> Result<AttackResultWire, String> {
+    let target = guard(&algo, &target_hash)?;
+    let (path, name) = crate::crack::resolved_wordlist(&app, wordlist_path.as_deref())?;
+    let body = std::fs::read(&path).map_err(|e| format!("cannot read wordlist: {e}"))?;
+    let mut result = hybrid_reverse_over_bytes(&algo, &target, &mask, &body)?;
+    result.source = format!("{mask} + {name}");
+    record_history(&ctx, &algo, &target, &format!("hybrid mask + wordlist ({mask})"), &result.matches);
+    Ok(result)
+}
+
+#[tauri::command]
+pub fn crack_combinator_dialog(
+    app: tauri::AppHandle,
+    algo: String,
+    target_hash: String,
+    wordlist_path: Option<String>,
+    second_wordlist_path: Option<String>,
+    ctx: tauri::State<'_, crate::evidence::EvidenceCtx>,
+) -> Result<AttackResultWire, String> {
+    let target = guard(&algo, &target_hash)?;
+    let (first_path, first_name) = crate::crack::resolved_wordlist(&app, wordlist_path.as_deref())?;
+    let (second_path, second_name) =
+        crate::crack::resolved_wordlist(&app, second_wordlist_path.as_deref())?;
+    let first_body = std::fs::read(&first_path).map_err(|e| format!("cannot read first wordlist: {e}"))?;
+    let second_body = std::fs::read(&second_path).map_err(|e| format!("cannot read second wordlist: {e}"))?;
+    let mut result = combinator_over_bytes(&algo, &target, &first_body, &second_body)?;
+    result.source = format!("{first_name} x {second_name}");
+    record_history(
+        &ctx,
+        &algo,
+        &target,
+        &format!("combinator {first_name} x {second_name}"),
+        &result.matches,
+    );
+    Ok(result)
+}
+
+#[derive(Debug, Serialize)]
+pub struct BenchmarkWire {
+    pub algo: String,
+    pub hashes_per_second: f64,
+    pub duration_ms: u64,
+    pub threads: usize,
+}
+
+/// Measure the native engine's digest rate for an algorithm.
+#[tauri::command]
+pub fn benchmark(algo: String, duration_ms: Option<u64>) -> Result<BenchmarkWire, String> {
+    if hacktool_crypto::kdf_format(&algo).is_some() {
+        return Err("KDF formats are deliberately slow; benchmark a digest instead".to_string());
+    }
+    hacktool_crypto::apply_op(&algo, b"bench", None)?; // validate algo
+    let budget = Duration::from_millis(duration_ms.unwrap_or(2000).clamp(200, 10_000));
+    let started = Instant::now();
+    let mut count: u64 = 0;
+    let mut input = *b"benchmark-input-0000";
+    while started.elapsed() < budget {
+        for i in 0..1000u32 {
+            input[16..20].copy_from_slice(&i.to_be_bytes());
+            let _ = hacktool_crypto::apply_op(&algo, &input, None)?;
+            count += 1;
+        }
+    }
+    let elapsed = started.elapsed();
+    let hps = count as f64 / elapsed.as_secs_f64();
+    Ok(BenchmarkWire {
+        algo,
+        hashes_per_second: hps,
+        duration_ms: elapsed.as_millis() as u64,
+        threads: 1,
+    })
 }
 
 /// Persist recovered pairs into the crack history (deduped by the store).
@@ -550,6 +851,67 @@ mod tests {
         assert_eq!(plan_mask("a?d?d").unwrap().candidate_count, 100);
         // "a??d" is a, ?, d: three literals, zero classes
         assert!(plan_mask("a??d").is_err());
+    }
+
+    #[test]
+    fn mask_with_leading_literal_finds_the_needle() {
+        // The literal before the classes takes a slot but is not a class; the
+        // odometer must index classes, not slots, and still walk the whole space.
+        assert_eq!(plan_mask("a?d?d").unwrap().candidate_count, 100);
+        let target = hacktool_crypto::apply_op("sha256", b"a99", None).unwrap();
+        let result = mask_attack("sha256", &hex::encode(target), "a?d?d").unwrap();
+        assert_eq!(result.matches.len(), 1);
+        assert_eq!(result.matches[0].password, "a99");
+        assert_eq!(result.tried, 100);
+    }
+
+    #[test]
+    fn mask_with_non_ascii_literal_finds_the_needle() {
+        let target = hacktool_crypto::apply_op("sha256", "é7".as_bytes(), None).unwrap();
+        let result = mask_attack("sha256", &hex::encode(target), "é?d").unwrap();
+        assert_eq!(result.matches.len(), 1);
+        assert_eq!(result.matches[0].password, "é7");
+        assert_eq!(result.tried, 10);
+    }
+
+    #[test]
+    fn rules_handle_non_ascii_wordlist_entries() {
+        // Multi-byte words used to panic on byte-index slicing inside the rules.
+        let target = hacktool_crypto::apply_op("sha256", "Café123".as_bytes(), None).unwrap();
+        let result = rules_over_bytes("sha256", &hex::encode(target), "é\n日本\ncafé\n".as_bytes()).unwrap();
+        assert_eq!(result.matches.len(), 1);
+        assert_eq!(result.matches[0].password, "Café123");
+        assert!(result.tried > 0);
+    }
+
+    #[test]
+    fn hybrid_handles_literal_prefixed_masks_and_non_ascii_words() {
+        // "a?d?d" yields 100 suffixes despite the leading literal, and the
+        // non-ASCII wordlist words must survive byte handling intact.
+        let target = hacktool_crypto::apply_op("sha256", "caféa99".as_bytes(), None).unwrap();
+        let result = hybrid_over_bytes("sha256", &hex::encode(target), "a?d?d", "café\n日本\n".as_bytes()).unwrap();
+        assert_eq!(result.matches.len(), 1);
+        assert_eq!(result.matches[0].password, "caféa99");
+        assert_eq!(result.tried, 200); // 2 words x 100 suffixes
+        assert!(!result.cap_reached);
+    }
+
+    #[test]
+    fn reverse_hybrid_finds_mask_prefixed_word() {
+        let target = hacktool_crypto::apply_op("sha256", b"42hello", None).unwrap();
+        let result = hybrid_reverse_over_bytes("sha256", &hex::encode(target), "?d?d", b"hello\nworld\n").unwrap();
+        assert_eq!(result.matches.len(), 1);
+        assert_eq!(result.matches[0].password, "42hello");
+        assert_eq!(result.tried, 200); // 100 prefixes x 2 words
+    }
+
+    #[test]
+    fn combinator_finds_joined_words() {
+        let target = hacktool_crypto::apply_op("sha256", b"helloworld", None).unwrap();
+        let result = combinator_over_bytes("sha256", &hex::encode(target), b"hello\nfoo\n", b"world\nbar\n").unwrap();
+        assert_eq!(result.matches.len(), 1);
+        assert_eq!(result.matches[0].password, "helloworld");
+        assert_eq!(result.tried, 4);
     }
 
     #[test]

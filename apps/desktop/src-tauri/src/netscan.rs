@@ -350,8 +350,10 @@ pub fn netscan_start(
     targets: String,
     ports: String,
     on_progress: Channel<ScanProgress>,
+    authorized: bool,
     ctx: State<'_, ScanCtx>,
 ) -> Result<ScanSummaryWire, String> {
+    if !authorized { return Err("explicit scan authorization acknowledgment required".to_string()); }
     if ctx.running.load(Ordering::Relaxed) {
         return Err("a scan is already running; stop it first".to_string());
     }
@@ -447,7 +449,8 @@ pub fn netscan_export(app: AppHandle, format: String, ctx: State<'_, ScanCtx>) -
 /// Host discovery pre-pass: TCP ping a few common ports per host; returns the
 /// hosts that answered (used to skip clearly-down hosts before a full scan).
 #[tauri::command]
-pub fn netscan_discover_hosts(targets: String) -> Result<Vec<String>, String> {
+pub fn netscan_discover_hosts(targets: String, authorized: bool) -> Result<Vec<String>, String> {
+    if !authorized { return Err("explicit scan authorization acknowledgment required".to_string()); }
     let hosts = parse_targets(&targets)?;
     let discovery_ports: &[u16] = &[80, 443, 22, 445, 3389];
     let mut up = Vec::new();

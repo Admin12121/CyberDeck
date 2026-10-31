@@ -23,7 +23,7 @@ export function ConsoleDock() {
         wb.setConsoleLines([]);
         return;
       case "help":
-        log("commands: hash <algo> <text> · verify <kdf-hash> <password> · b64 <text> · unb64 <b64> · scan <url> · spider <url> [depth] · get <url> · crack <algo> <hash> <wordlist> · status · clear");
+        log("commands: hash <algo> <text> · verify <kdf-hash> <password> · b64 <text> · unb64 <b64> · scan --authorized <url> · spider --authorized <url> [depth] · get <url> · crack <algo> <hash> <wordlist> · status · clear");
         return;
       case "status":
         log(`ipc: ${isDesktop() ? "tauri" : "browser fallback"} · tools stay mounted · console keeps last 500 lines`);
@@ -54,10 +54,10 @@ export function ConsoleDock() {
         return;
       }
       case "scan": {
-        if (!args[0]) return log("usage: scan <url>");
-        log(`scan ${args[0]}: running native review…`);
+        if (args[0] !== "--authorized" || !args[1]) return log("usage: scan --authorized <url>  (only targets you own or are authorized to test)");
+        log(`scan ${args[1]}: running native review…`);
         try {
-          const findings = await webScan(args[0]);
+          const findings = await webScan(args[1], true);
           log(`scan: ${findings.length} findings`);
           for (const f of findings.slice(0, 20)) log(`  [${f.severity}] ${f.title}`);
         } catch (err) {
@@ -66,11 +66,11 @@ export function ConsoleDock() {
         return;
       }
       case "spider": {
-        if (!args[0]) return log("usage: spider <url> [depth]");
-        const depth = Math.max(1, Math.min(4, Number.parseInt(args[1] ?? "2", 10) || 2));
-        log(`spider ${args[0]} depth ${depth}: crawling…`);
+        if (args[0] !== "--authorized" || !args[1]) return log("usage: spider --authorized <url> [depth]");
+        const depth = Math.max(1, Math.min(4, Number.parseInt(args[2] ?? "2", 10) || 2));
+        log(`spider ${args[1]} depth ${depth}: crawling…`);
         try {
-          const links = await spiderScan(args[0], depth);
+          const links = await spiderScan(args[1], depth, true);
           log(`spider: ${links.length} urls`);
           for (const url of links.slice(0, 10)) log(`  ${url}`);
         } catch (err) {

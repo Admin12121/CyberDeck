@@ -1,7 +1,7 @@
 //! Web studio backend (§5.2): HTTP sender, native review scanner, spider,
 //! HTTP-only proxy, and sidecar slots for nikto/sqlmap/XSStrike.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -14,6 +14,9 @@ use tauri::{Manager, State};
 use crate::engines::which_exists;
 
 const MAX_BODY_BYTES: usize = 512 * 1024;
+const MAX_CAPTURED_REQUESTS: usize = 10_000;
+const MAX_PENDING_REQUESTS: usize = 100;
+const MAX_PROXY_BODY: usize = 8 * 1024 * 1024;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct MatchReplaceRule {
@@ -85,6 +88,7 @@ pub struct HttpResponseWire {
 fn http_client() -> reqwest::Client {
     reqwest::Client::builder()
         .timeout(Duration::from_secs(15))
+        .redirect(reqwest::redirect::Policy::none())
         .user_agent("HackTool-Workbench/0.1")
         .build()
         .expect("http client")
@@ -145,17 +149,27 @@ pub async fn http_send(request_raw: String) -> Result<HttpResponseWire, String> 
         request = request.body(body.clone());
     }
     let started = Instant::now();
-    let response = request.send().await.map_err(|e| format!("request failed: {e}"))?;
+    let mut response = request.send().await.map_err(|e| format!("request failed: {e}"))?;
     let status = response.status().as_u16();
     let resp_headers: Vec<(String, String)> = response
         .headers()
         .iter()
         .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or("<binary>").to_string()))
         .collect();
-    let bytes = response.bytes().await.map_err(|e| format!("body read failed: {e}"))?;
-    let size = bytes.len();
-    let truncated = size > MAX_BODY_BYTES;
-    let body_text = String::from_utf8_lossy(&bytes[..size.min(MAX_BODY_BYTES)]).to_string();
+    let size_hint = response.content_length().unwrap_or(0).min(usize::MAX as u64) as usize;
+    let mut body_bytes = Vec::new();
+    let mut truncated = false;
+    while let Some(chunk) = response.chunk().await.map_err(|e| format!("body read failed: {e}"))? {
+        let space = MAX_BODY_BYTES.saturating_sub(body_bytes.len());
+        if chunk.len() > space {
+            body_bytes.extend_from_slice(&chunk[..space]);
+            truncated = true;
+            break;
+        }
+        body_bytes.extend_from_slice(&chunk);
+    }
+    let size = if truncated { size_hint.max(body_bytes.len()) } else { body_bytes.len() };
+    let body_text = String::from_utf8_lossy(&body_bytes).to_string();
     Ok(HttpResponseWire {
         status,
         headers: resp_headers,
@@ -200,7 +214,8 @@ const SECURITY_HEADERS: &[(&str, &str)] = &[
 /// Native active review of a target: reachable paths, header hygiene, banner
 /// disclosure. Our own checks; external engines add depth via slots below.
 #[tauri::command]
-pub async fn web_scan(target_url: String) -> Result<Vec<Finding>, String> {
+pub async fn web_scan(target_url: String, authorized: bool) -> Result<Vec<Finding>, String> {
+    require_authorization(authorized)?;
     let base = target_url.trim().trim_end_matches('/').to_string();
     if !base.starts_with("http://") && !base.starts_with("https://") {
         return Err("target must start with http:// or https://".to_string());
@@ -258,50 +273,95 @@ pub async fn web_scan(target_url: String) -> Result<Vec<Finding>, String> {
     Ok(findings)
 }
 
-/// Depth-limited same-host spider (GET only). Returns discovered URLs.
-#[tauri::command]
-pub async fn spider_scan(target_url: String, max_depth: u8) -> Result<Vec<String>, String> {
-    let base = target_url.trim().trim_end_matches('/').to_string();
-    if !base.starts_with("http://") && !base.starts_with("https://") {
-        return Err("target must start with http:// or https://".to_string());
+/// Resolve a link only if its parsed origin matches the authorized origin.
+/// Substring hostname comparisons and automatic redirects are not safe scope checks.
+fn resolve_scoped_link(origin: &reqwest::Url, page: &reqwest::Url, href: &str) -> Option<reqwest::Url> {
+    let mut url = page.join(href).ok()?;
+    if !matches!(url.scheme(), "http" | "https")
+        || url.origin() != origin.origin()
+        || !url.username().is_empty()
+        || url.password().is_some()
+    {
+        return None;
     }
-    let host = base
-        .split('/')
-        .nth(2)
-        .ok_or("cannot parse host")?
-        .to_string();
+    url.set_fragment(None);
+    Some(url)
+}
+
+fn require_authorization(authorized: bool) -> Result<(), String> {
+    if authorized { Ok(()) } else { Err("explicit authorization acknowledgment required".to_string()) }
+}
+
+/// Limit each crawled response; do not buffer an unbounded remote page.
+async fn fetch_crawl_page(client: &reqwest::Client, url: &reqwest::Url) -> Option<String> {
+    const MAX_PAGE: usize = 1024 * 1024;
+    let mut resp = client.get(url.clone()).send().await.ok()?;
+    if !resp.status().is_success() || resp.content_length().unwrap_or(0) > MAX_PAGE as u64 {
+        return None;
+    }
+    let mut body = Vec::new();
+    while let Some(chunk) = resp.chunk().await.ok()? {
+        if body.len().saturating_add(chunk.len()) > MAX_PAGE { return None; }
+        body.extend_from_slice(&chunk);
+    }
+    Some(String::from_utf8_lossy(&body).into_owned())
+}
+
+/// A bounded same-origin crawler; redirects are disabled in http_client().
+#[tauri::command]
+pub async fn spider_scan(target_url: String, max_depth: u8, authorized: bool) -> Result<Vec<String>, String> {
+    require_authorization(authorized)?;
+    let base = reqwest::Url::parse(target_url.trim())
+        .map_err(|e| format!("invalid target URL: {e}"))?;
+    if !matches!(base.scheme(), "http" | "https") || base.host_str().is_none()
+        || !base.username().is_empty() || base.password().is_some()
+    {
+        return Err("target must be HTTP(S) without URL credentials".to_string());
+    }
     let client = http_client();
-    let mut seen = vec![base.clone()];
-    let mut queue: VecDeque<(String, u8)> = VecDeque::new();
-    queue.push_back((base.clone(), 0));
-    let mut links: Vec<String> = vec![base.clone()];
+    let mut seen: HashSet<String> = HashSet::new();
+    seen.insert(base.to_string());
+    let mut queue = VecDeque::from([(base.clone(), 0_u8)]);
+    let mut links = vec![base.to_string()];
     while let Some((url, depth)) = queue.pop_front() {
-        if depth >= max_depth || links.len() >= 60 {
-            break;
-        }
-        let Ok(resp) = client.get(&url).send().await else { continue };
-        let Ok(text) = resp.text().await else { continue };
-        for chunk in text.split("href=\"").skip(1) {
+        if depth >= max_depth.min(4) || links.len() >= 60 { continue; }
+        let Some(html) = fetch_crawl_page(&client, &url).await else { continue };
+        // A deliberate first-stage parser: full HTML tokenization is a later native port.
+        for chunk in html.split("href=\"").skip(1) {
             let Some(end) = chunk.find('"') else { continue };
-            let href = &chunk[..end];
-            let absolute = if href.starts_with("http://") || href.starts_with("https://") {
-                href.to_string()
-            } else if href.starts_with('/') {
-                let origin = url.split('/').take(3).collect::<Vec<_>>().join("/");
-                format!("{origin}{href}")
-            } else {
-                continue;
-            };
-            if !absolute.contains(&host) || seen.contains(&absolute) || absolute.contains('?') {
-                continue;
+            let Some(absolute) = resolve_scoped_link(&base, &url, &chunk[..end]) else { continue };
+            if absolute.query().is_some() { continue; }
+            let key = absolute.to_string();
+            if seen.insert(key.clone()) {
+                links.push(key);
+                if links.len() >= 60 { break; }
+                queue.push_back((absolute, depth + 1));
             }
-            seen.push(absolute.clone());
-            links.push(absolute.clone());
-            queue.push_back((absolute, depth + 1));
         }
     }
     links.sort();
     Ok(links)
+}
+
+#[cfg(test)]
+mod scope_tests {
+    use super::*;
+
+    #[test]
+    fn origin_match_is_not_hostname_substring_match() {
+        let base = reqwest::Url::parse("https://example.com/path").unwrap();
+        assert!(resolve_scoped_link(&base, &base, "https://example.com.evil.test/path").is_none());
+        assert!(resolve_scoped_link(&base, &base, "https://evil.test/example.com").is_none());
+        assert!(resolve_scoped_link(&base, &base, "http://example.com/path").is_none());
+        assert!(resolve_scoped_link(&base, &base, "javascript:alert(1)").is_none());
+        assert_eq!(resolve_scoped_link(&base, &base, "../next").unwrap().as_str(), "https://example.com/next");
+    }
+
+    #[test]
+    fn active_scans_require_acknowledgment() {
+        assert!(require_authorization(false).is_err());
+        assert!(require_authorization(true).is_ok());
+    }
 }
 
 // --- HTTP interception proxy ---------------------------------------------------
@@ -322,6 +382,7 @@ pub async fn proxy_start(
         .map_err(|e| format!("cannot resolve app data dir: {e}"))?
         .join("hacktool");
     let ca = crate::webtls::init_ca(&ca_dir)?;
+    *ctx.shared.ca.lock().expect("ca poisoned") = Some(Arc::clone(&ca));
     *ctx.ca.lock().expect("ca poisoned") = Some(ca);
     if ctx.shared.running.load(Ordering::Relaxed) {
         return Err("proxy already running; stop it first".to_string());
@@ -352,10 +413,11 @@ pub async fn proxy_start(
 }
 
 async fn handle_conn(mut stream: TcpStream, shared: Arc<ProxyShared>) -> std::io::Result<()> {
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    let mut buf = vec![0u8; 65536];
-    let read = stream.read(&mut buf).await?;
-    let text = String::from_utf8_lossy(&buf[..read]).to_string();
+    use tokio::io::AsyncWriteExt;
+    let (head, body_bytes) = tokio::time::timeout(
+        Duration::from_secs(15), crate::webtls::read_http_message(&mut stream),
+    ).await.map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "HTTP request timed out"))??;
+    let text = format!("{head}{}", String::from_utf8_lossy(&body_bytes));
     if text.starts_with("CONNECT") {
         return connect_tunnel(stream, shared, &text).await;
     }
@@ -376,11 +438,19 @@ async fn handle_conn(mut stream: TcpStream, shared: Arc<ProxyShared>) -> std::io
             size: body.len(),
             at_ms: now_ms(),
         };
-        shared
-            .pending
-            .lock()
-            .expect("pending poisoned")
-            .insert(id, PendingRequest { stream, method, url, headers, body, info });
+        let request = PendingRequest { stream, method, url, headers, body, info };
+        let rejected = {
+            let mut pending = shared.pending.lock().expect("pending poisoned");
+            if pending.len() >= MAX_PENDING_REQUESTS {
+                Some(request)
+            } else {
+                pending.insert(id, request);
+                None
+            }
+        };
+        if let Some(mut rejected) = rejected {
+            rejected.stream.write_all(b"HTTP/1.1 503 Service Unavailable\r\ncontent-length: 0\r\nconnection: close\r\n\r\n").await?;
+        }
         return Ok(());
     }
 
@@ -388,7 +458,7 @@ async fn handle_conn(mut stream: TcpStream, shared: Arc<ProxyShared>) -> std::io
     let (method, url, headers, body) = apply_rules(method, url, headers, body, &rules);
     let (status, resp_headers, resp_body) = execute_request(&method, &url, &headers, &body).await;
     let id = shared.next_id.fetch_add(1, Ordering::Relaxed);
-    shared.captured.lock().expect("captured poisoned").push(CapturedRequest {
+    push_capture(&shared, CapturedRequest {
         id,
         method,
         host,
@@ -430,10 +500,8 @@ async fn connect_tunnel(
 
     if !intercepting || ca.is_none() {
         // honest passthrough: relay raw bytes to the upstream host
-        let _ = stream
-            .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
-            .await;
         let upstream = TcpStream::connect(&target).await?;
+        stream.write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n").await?;
         let (mut s_read, mut s_write) = tokio::io::split(stream);
         let (mut u_read, mut u_write) = tokio::io::split(upstream);
         tokio::select! {
@@ -452,7 +520,9 @@ async fn connect_tunnel(
     let mut tls_stream = acceptor.accept(stream).await.map_err(|e| {
         std::io::Error::other(format!("tls handshake with client failed: {e}"))
     })?;
-    let (head_text, body_bytes) = crate::webtls::read_http_message(&mut tls_stream).await?;
+    let (head_text, body_bytes) = tokio::time::timeout(
+        Duration::from_secs(15), crate::webtls::read_http_message(&mut tls_stream),
+    ).await.map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "HTTPS request timed out"))??;
     let request_line = head_text.lines().next().unwrap_or_default().to_string();
     let mut parts = request_line.split_whitespace();
     let method = parts.next().unwrap_or_default().to_string();
@@ -499,7 +569,7 @@ async fn connect_tunnel(
     let (status, resp_headers, resp_body) =
         execute_request(&r_method, &r_url, &r_headers, &r_body).await;
     let id = shared.next_id.fetch_add(1, Ordering::Relaxed);
-    shared.captured.lock().expect("captured poisoned").push(CapturedRequest {
+    push_capture(&shared, CapturedRequest {
         id,
         method: r_method,
         host: host.clone(),
@@ -519,6 +589,15 @@ async fn connect_tunnel(
     tls_stream.write_all(response.as_bytes()).await?;
     tls_stream.write_all(&resp_body).await?;
     Ok(())
+}
+
+fn push_capture(shared: &ProxyShared, request: CapturedRequest) {
+    let mut captured = shared.captured.lock().expect("captured poisoned");
+    if captured.len() >= MAX_CAPTURED_REQUESTS {
+        let remove = captured.len() - MAX_CAPTURED_REQUESTS + 1;
+        captured.drain(0..remove);
+    }
+    captured.push(request);
 }
 
 fn now_ms() -> u64 {
@@ -576,6 +655,7 @@ async fn execute_request(
 ) -> (u16, Vec<(String, String)>, Vec<u8>) {
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(15))
+        .redirect(reqwest::redirect::Policy::none())
         .user_agent("HackTool-Workbench/0.1")
         .build()
         .expect("http client");
@@ -604,16 +684,28 @@ async fn execute_request(
         .iter()
         .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or("<binary>").to_string()))
         .collect();
-    let Ok(bytes) = resp.bytes().await else {
-        return (status, resp_headers, Vec::new());
-    };
-    (status, resp_headers, bytes.to_vec())
+    let mut response = resp;
+    let mut bytes = Vec::new();
+    loop {
+        match response.chunk().await {
+            Ok(Some(chunk)) => {
+                if bytes.len().saturating_add(chunk.len()) > MAX_PROXY_BODY {
+                    return (502, vec![], b"HackTool: upstream response exceeds proxy body limit".to_vec());
+                }
+                bytes.extend_from_slice(&chunk);
+            }
+            Ok(None) => break,
+            Err(_) => return (502, vec![], b"HackTool: upstream body read failed".to_vec()),
+        }
+    }
+    (status, resp_headers, bytes)
 }
 
 #[tauri::command]
 pub async fn proxy_stop(ctx: State<'_, WebCtx>) -> Result<ProxyStatusWire, String> {
     ctx.shared.running.store(false, Ordering::Relaxed);
     ctx.proxy_running.store(false, Ordering::Relaxed);
+    ctx.shared.pending.lock().expect("pending poisoned").clear();
     if let Some(handle) = ctx.proxy_handle.lock().expect("proxy handle poisoned").take() {
         handle.abort();
     }
@@ -734,7 +826,7 @@ pub async fn proxy_forward(id: u64, ctx: State<'_, WebCtx>) -> Result<u16, Strin
     response.push_str(&format!("content-length: {}\r\nconnection: close\r\n\r\n", resp_body.len()));
     let _ = stream.write_all(response.as_bytes()).await;
     let _ = stream.write_all(&resp_body).await;
-    ctx.shared.captured.lock().expect("captured poisoned").push(CapturedRequest {
+    push_capture(&ctx.shared, CapturedRequest {
         id,
         method,
         host: pending.info.host,
@@ -857,7 +949,8 @@ pub struct EngineScanResult {
 
 /// Run an approved external web engine against the target when it is on PATH.
 #[tauri::command]
-pub async fn engine_scan(tool: String, target: String) -> Result<EngineScanResult, String> {
+pub async fn engine_scan(tool: String, target: String, authorized: bool) -> Result<EngineScanResult, String> {
+    require_authorization(authorized)?;
     let target = target.trim().to_string();
     if !target.starts_with("http") {
         return Err("target must start with http:// or https://".to_string());

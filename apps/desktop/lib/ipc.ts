@@ -87,6 +87,27 @@ function hexToB64(hexText: string): string {
   return b64.encode(bytes);
 }
 
+// --- native recipe execution ----------------------------------------------------
+
+export interface RecipeStepWire {
+  opId: string;
+  enabled: boolean;
+  param?: string;
+}
+
+export interface RecipeRunWire {
+  outputB64: string;
+  byteLength: number;
+  elapsedMs: number;
+  error: { stepIndex: number; opId: string; message: string } | null;
+}
+
+/** Execute supported recipe pipelines inside the native Rust crate. */
+export async function recipeRun(input: string, steps: RecipeStepWire[]): Promise<RecipeRunWire> {
+  if (!inTauri) throw new Error("native recipe execution requires the desktop runtime");
+  return invoke<RecipeRunWire>("recipe_run", { input, steps });
+}
+
 // --- evidence ----------------------------------------------------------------
 
 export interface ArtifactRecord {
@@ -290,6 +311,67 @@ export async function crackMask(algo: string, targetHash: string, mask: string):
   return invoke<AttackResultWire>("crack_mask", { algo, targetHash, mask });
 }
 
+/** Wordlist words with a mask suffix; reuses the picked wordlist when given. */
+export async function crackHybridDialog(
+  algo: string,
+  targetHash: string,
+  mask: string,
+  wordlistPath?: string,
+): Promise<AttackResultWire> {
+  if (!inTauri) throw new Error("hybrid attacks require the desktop runtime");
+  return invoke<AttackResultWire>("crack_hybrid_dialog", {
+    algo,
+    targetHash,
+    mask,
+    wordlistPath: wordlistPath ?? null,
+  });
+}
+
+/** Mask prefix + wordlist words; reuses the picked wordlist when given. */
+export async function crackHybridReverseDialog(
+  algo: string,
+  targetHash: string,
+  mask: string,
+  wordlistPath?: string,
+): Promise<AttackResultWire> {
+  if (!inTauri) throw new Error("hybrid attacks require the desktop runtime");
+  return invoke<AttackResultWire>("crack_hybrid_reverse_dialog", {
+    algo,
+    targetHash,
+    mask,
+    wordlistPath: wordlistPath ?? null,
+  });
+}
+
+/** Full combinator: first wordlist word + second wordlist word. */
+export async function crackCombinatorDialog(
+  algo: string,
+  targetHash: string,
+  firstWordlistPath?: string,
+  secondWordlistPath?: string,
+): Promise<AttackResultWire> {
+  if (!inTauri) throw new Error("combinator attacks require the desktop runtime");
+  return invoke<AttackResultWire>("crack_combinator_dialog", {
+    algo,
+    targetHash,
+    wordlistPath: firstWordlistPath ?? null,
+    secondWordlistPath: secondWordlistPath ?? null,
+  });
+}
+
+export interface BenchmarkWire {
+  algo: string;
+  hashes_per_second: number;
+  duration_ms: number;
+  threads: number;
+}
+
+/** Measure the native digest rate for an algorithm (KDFs are rejected). */
+export async function benchmarkDigest(algo: string, durationMs?: number): Promise<BenchmarkWire> {
+  if (!inTauri) throw new Error("benchmarking requires the desktop runtime");
+  return invoke<BenchmarkWire>("benchmark", { algo, durationMs: durationMs ?? null });
+}
+
 export interface GpuDeviceWire {
   name: string;
   driver_version: string;
@@ -408,14 +490,14 @@ export interface WebFindingWire {
   evidence: string;
 }
 
-export async function webScan(targetUrl: string): Promise<WebFindingWire[]> {
+export async function webScan(targetUrl: string, authorized: boolean): Promise<WebFindingWire[]> {
   if (!inTauri) throw new Error("scanning requires the desktop runtime");
-  return invoke<WebFindingWire[]>("web_scan", { targetUrl });
+  return invoke<WebFindingWire[]>("web_scan", { targetUrl, authorized });
 }
 
-export async function spiderScan(targetUrl: string, maxDepth: number): Promise<string[]> {
+export async function spiderScan(targetUrl: string, maxDepth: number, authorized: boolean): Promise<string[]> {
   if (!inTauri) throw new Error("spidering requires the desktop runtime");
-  return invoke<string[]>("spider_scan", { targetUrl, maxDepth });
+  return invoke<string[]>("spider_scan", { targetUrl, maxDepth, authorized });
 }
 
 export interface CapturedRequestWire {
@@ -527,9 +609,9 @@ export interface EngineScanResultWire {
   duration_ms: number;
 }
 
-export async function engineScan(tool: string, target: string): Promise<EngineScanResultWire> {
+export async function engineScan(tool: string, target: string, authorized: boolean): Promise<EngineScanResultWire> {
   if (!inTauri) throw new Error("external engines require the desktop runtime");
-  return invoke<EngineScanResultWire>("engine_scan", { tool, target });
+  return invoke<EngineScanResultWire>("engine_scan", { tool, target, authorized });
 }
 
 // --- network scanner -----------------------------------------------------------
@@ -566,12 +648,13 @@ export interface NetscanStatusWire {
 export async function netscanStart(
   targets: string,
   ports: string,
+  authorized: boolean,
   onProgress?: (p: ScanProgressWire) => void,
 ): Promise<ScanSummaryWire> {
   if (!inTauri) throw new Error("network scanning requires the desktop runtime");
   const channel = new Channel<ScanProgressWire>();
   if (onProgress) channel.onmessage = onProgress;
-  return invoke<ScanSummaryWire>("netscan_start", { targets, ports, onProgress: channel });
+  return invoke<ScanSummaryWire>("netscan_start", { targets, ports, authorized, onProgress: channel });
 }
 
 export async function netscanResults(): Promise<ScanEntryWire[]> {
@@ -609,9 +692,9 @@ export async function netscanExport(format: "json" | "csv"): Promise<string> {
   return invoke<string>("netscan_export", { format });
 }
 
-export async function netscanDiscoverHosts(targets: string): Promise<string[]> {
+export async function netscanDiscoverHosts(targets: string, authorized: boolean): Promise<string[]> {
   if (!inTauri) throw new Error("host discovery requires the desktop runtime");
-  return invoke<string[]>("netscan_discover_hosts", { targets });
+  return invoke<string[]>("netscan_discover_hosts", { targets, authorized });
 }
 
 // --- browser fallback (demo jobs) --------------------------------------------

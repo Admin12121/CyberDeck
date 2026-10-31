@@ -10,6 +10,7 @@ import {
   runRecipe,
   type OperationCategory,
   type RecipeState,
+  type RecipeResult,
 } from "../model";
 import {
   addStep,
@@ -23,7 +24,8 @@ import {
   setStepParam,
   toggleStep,
 } from "../controller";
-import { b64 } from "@lib/ipc";
+import { b64, isDesktop, recipeRun, type RecipeRunWire } from "@lib/ipc";
+import { useWorkbench } from "@state/workbench";
 
 /** Recipes: four-column pipeline with drag-and-drop, params, image preview. */
 
@@ -33,10 +35,45 @@ const CATEGORY_ORDER: OperationCategory[] = ["encoding", "transforms", "parsing"
 const OP_MIME = "application/x-hacktool-op";
 const STEP_MIME = "application/x-hacktool-step";
 
+const NATIVE_RECIPE_OPS = new Set([
+  "to_base64", "from_base64", "to_base64url", "from_base64url",
+  "to_hex", "from_hex", "to_binary", "from_binary",
+  "to_decimal", "from_decimal", "rot_n", "rot13", "rot47", "atbash",
+  "xor", "reverse", "swap_endianness", "rotate_bytes", "bit_shift_left",
+  "bit_shift_right", "to_uppercase", "to_lowercase", "trim_lines",
+  "unique_lines", "reverse_lines", "filter_lines", "head_lines",
+  "tail_lines", "text_split", "find_replace", "json_beautify",
+  "json_minify", "slice_bytes", "to_utf8",
+]);
+
+function nativeUiResult(wire: RecipeRunWire): RecipeResult {
+  const bytes = wire.error ? new Uint8Array() : b64.decode(wire.outputB64);
+  return {
+    output: new TextDecoder().decode(bytes),
+    outputBytes: bytes,
+    byteLength: wire.byteLength,
+    elapsedMs: wire.elapsedMs,
+    error: wire.error
+      ? { stepIndex: wire.error.stepIndex, opId: wire.error.opId, message: wire.error.message }
+      : undefined,
+  };
+}
+
 export function RecipesView() {
+  const wb = useWorkbench();
   const [state, setState] = useState<RecipeState>(initialRecipeState);
   const [search, setSearch] = useState("");
-  const [committed, setCommitted] = useState<ReturnType<typeof runRecipe> | null>(null);
+  const [committed, setCommitted] = useState<RecipeResult | null>(null);
+  // Consume an explicit cross-workspace transfer once, without saving it
+  // in localStorage (captured traffic may contain sensitive data).
+  useEffect(() => {
+    if (!wb.recipeHandoff) return;
+    const transfer = wb.recipeHandoff;
+    setState((previous) => ({ ...previous, input: transfer.input, steps: transfer.steps }));
+    wb.consumeRecipeHandoff();
+  }, [wb.recipeHandoff, wb.consumeRecipeHandoff]);
+  const [committedNative, setCommittedNative] = useState(false);
+  const [nativeAuto, setNativeAuto] = useState<{ key: string; value: RecipeResult } | null>(null);
   const [opsWidth, setOpsWidth] = useState(224);
   const [recipeWidth, setRecipeWidth] = useState(256);
   // null keeps input and output at an even 50/50 split; dragging pins px.
@@ -48,8 +85,47 @@ export function RecipesView() {
   const [mounted, setMounted] = useState(false);
   useEffect(() => setMounted(true), []);
 
-  const live = useMemo(() => runRecipe(state.input, state.steps), [state.input, state.steps]);
-  const result = state.autoBake ? live : committed;
+  const eligibleForNative = isDesktop() && state.steps.every((step) => !step.enabled || NATIVE_RECIPE_OPS.has(step.opId));
+  const live = useMemo(() => eligibleForNative ? null : runRecipe(state.input, state.steps), [state.input, state.steps, eligibleForNative]);
+  const recipeKey = useMemo(() => JSON.stringify([state.input, state.steps]), [state.input, state.steps]);
+  useEffect(() => {
+    if (!state.autoBake || !eligibleForNative) return;
+    let active = true;
+    const timer = setTimeout(() => {
+      recipeRun(state.input, state.steps).then((wire) => {
+        if (active) setNativeAuto({ key: recipeKey, value: nativeUiResult(wire) });
+      }).catch((err: unknown) => {
+        if (active) setNativeAuto({
+          key: recipeKey,
+          value: {
+            output: "", outputBytes: new Uint8Array(), byteLength: 0, elapsedMs: 0,
+            error: { stepIndex: 0, opId: "native", message: String(err) },
+          },
+        });
+      });
+    }, 120);
+    return () => { active = false; clearTimeout(timer); };
+  }, [state.input, state.steps, state.autoBake, eligibleForNative, recipeKey]);
+
+  const nativeReady = eligibleForNative && nativeAuto?.key === recipeKey;
+  const result = state.autoBake ? (nativeReady && nativeAuto ? nativeAuto.value : live) : committed;
+  const nativeResult = state.autoBake ? nativeReady : committedNative;
+  const bake = async () => {
+    if (!eligibleForNative) {
+      setCommittedNative(false);
+      setCommitted(runRecipe(state.input, state.steps));
+      return;
+    }
+    try {
+      const wire = await recipeRun(state.input, state.steps);
+      setCommitted(nativeUiResult(wire));
+      setCommittedNative(true);
+    } catch (error) {
+      setCommittedNative(false);
+      setCommitted({ output: "", outputBytes: new Uint8Array(), byteLength: 0, elapsedMs: 0,
+        error: { stepIndex: 0, opId: "native", message: String(error) } });
+    }
+  };
   const inputBytes = useMemo(() => new TextEncoder().encode(state.input).length, [state.input]);
   const imageMime = useMemo(
     () => (result && !result.error ? detectImageMime(result.outputBytes) : null),
@@ -225,7 +301,7 @@ export function RecipesView() {
           <ToolButton onClick={applyMagic} title="Detect stacked encodings and build the decode recipe">
             <Wand2 size={11} /> Magic
           </ToolButton>
-          <ToolButton onClick={() => setCommitted(runRecipe(state.input, state.steps))} disabled={state.autoBake} title="Run recipe manually">
+          <ToolButton onClick={() => void bake()} disabled={state.autoBake} title="Run recipe manually">
             <Play size={11} /> Bake
           </ToolButton>
           <ToolButton onClick={() => setState((s) => clearRecipe(s))}>Clear</ToolButton>
@@ -342,11 +418,11 @@ export function RecipesView() {
             )
           ) : (
             <div className="min-h-0 flex-1 overflow-hidden">
-              <EmptyState title="No result yet" detail="Enable auto-bake or press Bake to evaluate the recipe." badge="recipes" />
+              <EmptyState title={state.autoBake && eligibleForNative ? "Processing in Rust…" : "No result yet"} detail={state.autoBake && eligibleForNative ? "Evaluating the recipe in the native engine." : "Enable auto-bake or press Bake to evaluate the recipe."} badge="recipes" />
             </div>
           )}
           <div className="shrink-0 border-t border-line px-2 py-0.5 font-mono text-[10px] text-fg-muted">
-            {result ? `${result.byteLength} bytes out${mounted ? ` · ${result.elapsedMs.toFixed(1)} ms` : ""}` : "n/a"}
+            {result ? `${result.byteLength} bytes out${mounted ? ` · ${result.elapsedMs.toFixed(1)} ms` : ""} · ${nativeResult ? "Rust engine" : "TypeScript engine"}` : "n/a"}
           </div>
         </Pane>
       </div>

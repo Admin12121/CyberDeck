@@ -67,7 +67,7 @@ pub fn pick_wordlist(app: AppHandle) -> Result<WordlistInfoWire, String> {
     })
 }
 
-fn resolved_wordlist(
+pub(crate) fn resolved_wordlist(
     app: &AppHandle,
     wordlist_path: Option<&str>,
 ) -> Result<(PathBuf, String), String> {

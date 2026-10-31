@@ -53,10 +53,27 @@ pub fn init_ca(dir: &std::path::Path) -> Result<Arc<CaState>, String> {
         let cert_pem = cert.pem();
         let key_pem = key.serialize_pem();
         std::fs::write(&cert_path, &cert_pem).map_err(|e| format!("cannot write CA cert: {e}"))?;
+        // Restrict a locally trusted interception CA key to this OS user.
+        #[cfg(unix)]
+        {
+            use std::io::Write;
+            use std::os::unix::fs::OpenOptionsExt;
+            let mut file = std::fs::OpenOptions::new()
+                .write(true).create(true).truncate(true).mode(0o600)
+                .open(&key_path).map_err(|e| format!("cannot create CA key: {e}"))?;
+            file.write_all(key_pem.as_bytes()).map_err(|e| format!("cannot write CA key: {e}"))?;
+        }
+        #[cfg(not(unix))]
         std::fs::write(&key_path, &key_pem).map_err(|e| format!("cannot write CA key: {e}"))?;
         (cert_pem, key_pem)
     };
 
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&key_path, std::fs::Permissions::from_mode(0o600))
+            .map_err(|e| format!("cannot secure CA key: {e}"))?;
+    }
     let key = KeyPair::from_pem(&key_pem).map_err(|e| format!("cannot load CA key: {e}"))?;
     let ca_cert = ca_params()?
         .self_signed(&key)
@@ -98,7 +115,8 @@ pub fn acceptor_for_host(ca: &Arc<CaState>, host: &str) -> Result<Arc<ServerConf
         .with_no_client_auth()
         .with_single_cert(cert_chain, PrivateKeyDer::Pkcs8(key_der))
         .map_err(|e| format!("tls config failed: {e}"))?;
-    config.alpn_protocols = vec![b"http/1.1".to_vec(), b"h2".to_vec()];
+    // Only HTTP/1.1 is supported by the bounded interception parser.
+    config.alpn_protocols = vec![b"http/1.1".to_vec()];
     let config = Arc::new(config);
     {
         let mut cache = ca.leaf_cache.lock().expect("leaf cache poisoned");
@@ -121,37 +139,81 @@ pub fn tls_client() -> Result<TlsConnector, String> {
     Ok(TlsConnector::from(Arc::new(config)))
 }
 
-/// Read one HTTP message (head + content-length body) from any async reader.
+/// Read a bounded HTTP/1.1 message. Unsupported request transfer encodings
+/// fail closed rather than forwarding a truncated or incorrectly framed body.
 pub async fn read_http_message<R>(reader: &mut R) -> std::io::Result<(String, Vec<u8>)>
 where
     R: tokio::io::AsyncRead + Unpin,
 {
+    use std::io::{Error, ErrorKind};
     use tokio::io::AsyncReadExt;
-    let mut head = Vec::new();
+
+    const MAX_HEADERS: usize = 32 * 1024;
+    const MAX_BODY: usize = 4 * 1024 * 1024;
+    let mut head = Vec::with_capacity(1024);
     let mut byte = [0u8; 1];
     loop {
-        let n = reader.read(&mut byte).await?;
-        if n == 0 {
-            break;
+        if head.len() >= MAX_HEADERS {
+            return Err(Error::new(ErrorKind::InvalidData, "HTTP header limit exceeded"));
+        }
+        if reader.read(&mut byte).await? == 0 {
+            return Err(Error::new(ErrorKind::UnexpectedEof, "incomplete HTTP headers"));
         }
         head.push(byte[0]);
-        if head.ends_with(b"\r\n\r\n") {
-            break;
+        if head.ends_with(b"\r\n\r\n") { break; }
+    }
+    let head_text = String::from_utf8(head)
+        .map_err(|_| Error::new(ErrorKind::InvalidData, "non-UTF8 HTTP headers"))?;
+    let mut length: Option<usize> = None;
+    for line in head_text.split("\r\n").skip(1) {
+        let Some((name, value)) = line.split_once(':') else { continue };
+        if name.eq_ignore_ascii_case("transfer-encoding") && !value.trim().eq_ignore_ascii_case("identity") {
+            return Err(Error::new(ErrorKind::InvalidData, "unsupported request transfer encoding"));
+        }
+        if name.eq_ignore_ascii_case("content-length") {
+            let parsed: usize = value.trim().parse()
+                .map_err(|_| Error::new(ErrorKind::InvalidData, "invalid content-length"))?;
+            if length.is_some_and(|previous| previous != parsed) {
+                return Err(Error::new(ErrorKind::InvalidData, "conflicting content-length values"));
+            }
+            length = Some(parsed);
         }
     }
-    let head_text = String::from_utf8_lossy(&head).to_string();
-    let mut body = Vec::new();
-    let content_length = head_text
-        .lines()
-        .find(|l| l.to_lowercase().starts_with("content-length:"))
-        .and_then(|l| l.split(':').nth(1))
-        .and_then(|v| v.trim().parse::<usize>().ok())
-        .unwrap_or(0);
-    if content_length > 0 {
-        body = vec![0u8; content_length.min(4 * 1024 * 1024)];
-        reader.read_exact(&mut body).await?;
+    let content_length = length.unwrap_or(0);
+    if content_length > MAX_BODY {
+        return Err(Error::new(ErrorKind::InvalidData, "HTTP body limit exceeded"));
     }
+    let mut body = vec![0u8; content_length];
+    reader.read_exact(&mut body).await?;
     Ok((head_text, body))
+}
+
+#[cfg(test)]
+mod framing_tests {
+    use super::read_http_message;
+    use tokio::io::{duplex, AsyncWriteExt};
+
+    #[tokio::test]
+    async fn bounded_request_body_roundtrip() {
+        let (mut tx, mut rx) = duplex(256);
+        tx.write_all(b"POST / HTTP/1.1\r\nHost: local\r\nContent-Length: 4\r\n\r\ntest").await.unwrap();
+        let (head, body) = read_http_message(&mut rx).await.unwrap();
+        assert!(head.starts_with("POST / HTTP/1.1"));
+        assert_eq!(body, b"test");
+    }
+
+    #[tokio::test]
+    async fn rejects_oversized_or_chunked_requests() {
+        for header in [
+            "Content-Length: 5000000",
+            "Transfer-Encoding: chunked",
+            "Content-Length: nope",
+        ] {
+            let (mut tx, mut rx) = duplex(256);
+            tx.write_all(format!("POST / HTTP/1.1\r\nHost: local\r\n{header}\r\n\r\n").as_bytes()).await.unwrap();
+            assert!(read_http_message(&mut rx).await.is_err());
+        }
+    }
 }
 
 #[derive(Debug, Clone, serde::Serialize)]

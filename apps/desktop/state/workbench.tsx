@@ -14,10 +14,20 @@ import {
   useState,
 } from "react";
 import { CATEGORIES, type CategoryId, type ToolId } from "@features/registry";
+import type { RecipeStep } from "@features/crypto/model";
 import { jobCancel, jobStart } from "@lib/ipc";
 import { applyJobEvent, type JobView } from "@state/jobs-model";
 
+export interface RecipeHandoff {
+  input: string;
+  steps: RecipeStep[];
+  source: string;
+}
+
 interface WorkbenchApi {
+  recipeHandoff: RecipeHandoff | null;
+  sendToRecipes: (input: string, source: string, steps?: RecipeStep[]) => void;
+  consumeRecipeHandoff: () => void;
   dockTab: "jobs" | "console";
   setDockTab: (tab: "jobs" | "console") => void;
   consoleLines: string[];
@@ -88,6 +98,7 @@ export function WorkbenchProvider({ children }: { children: React.ReactNode }) {
   const [dockOpen, setDockOpen] = useState(false);
   const [dockTab, setDockTab] = useState<"jobs" | "console">("jobs");
   const [consoleLines, setConsoleLines] = useState<string[]>([]);
+  const [recipeHandoff, setRecipeHandoff] = useState<RecipeHandoff | null>(null);
   // Default tool is in Crypto, which carries its own side panes; users toggle
   // the inspector from the title bar and it returns automatically elsewhere.
   // First paint uses the fallback sizes so SSR and hydration match; persisted
@@ -173,6 +184,19 @@ export function WorkbenchProvider({ children }: { children: React.ReactNode }) {
     setConsoleLines((prev) => [...prev.slice(-499), line]);
   }, []);
 
+  // An explicit, bounded in-memory handoff: preserves source context without reimport.
+  // Durable case links will replace this temporary channel in the case milestone.
+  const sendToRecipes = useCallback((input: string, source: string, steps: RecipeStep[] = []) => {
+    if (input.length > 1024 * 1024) {
+      logConsole("recipe handoff refused: input exceeds 1 MiB limit");
+      return;
+    }
+    setRecipeHandoff({ input, source, steps });
+    selectTool("crypto.recipes");
+    logConsole(`sent analysis data to Recipes from ${source}`);
+  }, [selectTool, logConsole]);
+  const consumeRecipeHandoff = useCallback(() => setRecipeHandoff(null), []);
+
   // Global shortcuts: Ctrl/Cmd+K palette, Ctrl+J jobs dock (Master Plan §3.5)
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -205,6 +229,9 @@ export function WorkbenchProvider({ children }: { children: React.ReactNode }) {
       dockOpen,
       dockTab,
       consoleLines,
+      recipeHandoff,
+      sendToRecipes,
+      consumeRecipeHandoff,
       navigatorWidth: panels.navigator,
       dockHeight: panels.dock,
       selectCategory,
@@ -228,6 +255,9 @@ export function WorkbenchProvider({ children }: { children: React.ReactNode }) {
       dockOpen,
       dockTab,
       consoleLines,
+      recipeHandoff,
+      sendToRecipes,
+      consumeRecipeHandoff,
       panels.navigator,
       panels.dock,
       selectCategory,
