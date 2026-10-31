@@ -14,7 +14,19 @@ export function StatusBar() {
       <span className={isDesktop() ? "text-ok" : "text-warn"}>{isDesktop() ? "ipc: tauri" : "ipc: browser fallback"}</span>
       <span>workspace: {tool ? `${tool.category} / ${tool.label}` : wb.tool}</span>
       <span className={running > 0 ? "text-orange" : ""}>jobs: {running > 0 ? `${running} running` : "idle"}</span>
-      <span className="ml-auto">hacktool 0.1.0 · arc 3 · darkmatter</span>
+      <span className="ml-auto flex items-center gap-3">
+        <button
+          type="button"
+          onClick={() => {
+            wb.setDockTab("console");
+            wb.setDockOpen(true);
+          }}
+          className="border border-line px-2 py-0.5 hover:border-line-strong hover:text-fg"
+        >
+          console (Ctrl+`)
+        </button>
+        <span>hacktool 0.1.0 · arc 3 · darkmatter</span>
+      </span>
     </footer>
   );
 }

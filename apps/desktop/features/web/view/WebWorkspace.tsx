@@ -25,7 +25,6 @@ export function WebWorkspace() {
             {t}
           </button>
         ))}
-        <span className="ml-auto font-mono text-[10px] text-fg-muted">web studio · zap-model workflow</span>
       </div>
       <div className="min-h-0 flex-1">
         <div className={show("proxy")}><ProxyView /></div>

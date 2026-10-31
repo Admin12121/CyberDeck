@@ -1,21 +1,21 @@
 //! Web studio backend (§5.2): HTTP sender, native review scanner, spider,
 //! HTTP-only proxy, and sidecar slots for nikto/sqlmap/XSStrike.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+use tokio::net::TcpStream;
 
 use serde::Serialize;
-use tauri::State;
+use tauri::{Manager, State};
 
 use crate::engines::which_exists;
 
 const MAX_BODY_BYTES: usize = 512 * 1024;
-const MAX_CAPTURE: usize = 1000;
 
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct MatchReplaceRule {
     pub find: String,
     pub replace: String,
@@ -39,14 +39,18 @@ pub struct ProxyShared {
     pub captured: Mutex<Vec<CapturedRequest>>,
     pub pending: Mutex<HashMap<u64, PendingRequest>>,
     pub next_id: AtomicU64,
+    /// CA state for TLS interception, set by proxy_start.
+    pub ca: Mutex<Option<Arc<crate::webtls::CaState>>>,
+    /// Relayed WebSocket connections, recorded during TLS interception.
+    pub ws: Mutex<Vec<crate::webtls::WsConnection>>,
 }
 
 pub struct WebCtx {
     pub proxy_running: AtomicBool,
     pub proxy_port: AtomicU16,
     pub proxy_handle: Mutex<Option<tokio::task::JoinHandle<()>>>,
-    pub captured: Mutex<Vec<CapturedRequest>>,
     pub shared: Arc<ProxyShared>,
+    pub ca: Mutex<Option<Arc<crate::webtls::CaState>>>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -303,128 +307,467 @@ pub async fn spider_scan(target_url: String, max_depth: u8) -> Result<Vec<String
 // --- HTTP interception proxy ---------------------------------------------------
 
 /// Start the local interception proxy on 127.0.0.1:port. Plain-HTTP requests
-/// are captured and forwarded; CONNECT (HTTPS) tunnels pass through without
-/// interception until the CA arc lands.
+/// are captured and forwarded (or held when interception is on); CONNECT
+/// tunnels pass through without interception until the CA arc lands.
 #[tauri::command]
-pub async fn proxy_start(port: u16, ctx: State<'_, WebCtx>) -> Result<ProxyStatusWire, String> {
-    if ctx.proxy_running.load(Ordering::Relaxed) {
+pub async fn proxy_start(
+    app: tauri::AppHandle,
+    port: u16,
+    ctx: State<'_, WebCtx>,
+) -> Result<ProxyStatusWire, String> {
+    // CA is initialized with the proxy so HTTPS interception is ready at once
+    let ca_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("cannot resolve app data dir: {e}"))?
+        .join("hacktool");
+    let ca = crate::webtls::init_ca(&ca_dir)?;
+    *ctx.ca.lock().expect("ca poisoned") = Some(ca);
+    if ctx.shared.running.load(Ordering::Relaxed) {
         return Err("proxy already running; stop it first".to_string());
     }
     let addr: SocketAddr = format!("127.0.0.1:{port}").parse().map_err(|e| format!("bad port: {e}"))?;
     let listener = tokio::net::TcpListener::bind(addr)
         .await
         .map_err(|e| format!("cannot bind 127.0.0.1:{port}: {e}"))?;
+    ctx.shared.running.store(true, Ordering::Relaxed);
+    ctx.shared.port.store(port, Ordering::Relaxed);
     ctx.proxy_running.store(true, Ordering::Relaxed);
     ctx.proxy_port.store(port, Ordering::Relaxed);
-    let running = Arc::new(AtomicBool::new(true));
-    let captured = Arc::new(Mutex::new(Vec::<CapturedRequest>::new()));
-    let next_id = Arc::new(AtomicU64::new(1));
+    let shared = Arc::clone(&ctx.shared);
     let handle = tokio::spawn(async move {
         loop {
-            if !running.load(Ordering::Relaxed) {
+            if !shared.running.load(Ordering::Relaxed) {
                 break;
             }
             let Ok((stream, _)) = listener.accept().await else { continue };
-            let captured = Arc::clone(&captured);
-            let next_id = Arc::clone(&next_id);
-            let running = Arc::clone(&running);
+            let shared = Arc::clone(&shared);
             tokio::spawn(async move {
-                let _ = handle_conn(stream, captured, next_id, running).await;
+                let _ = handle_conn(stream, shared).await;
             });
         }
     });
     *ctx.proxy_handle.lock().expect("proxy handle poisoned") = Some(handle);
-    Ok(ProxyStatusWire { running: true, port, captured: ctx.captured.lock().expect("captured poisoned").len() })
+    Ok(ProxyStatusWire { running: true, port, captured: ctx.shared.captured.lock().expect("captured poisoned").len() })
 }
 
-async fn handle_conn(
-    mut stream: tokio::net::TcpStream,
-    captured: Arc<Mutex<Vec<CapturedRequest>>>,
-    next_id: Arc<AtomicU64>,
-    running: Arc<AtomicBool>,
-) -> std::io::Result<()> {
+async fn handle_conn(mut stream: TcpStream, shared: Arc<ProxyShared>) -> std::io::Result<()> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let mut buf = vec![0u8; 65536];
     let read = stream.read(&mut buf).await?;
     let text = String::from_utf8_lossy(&buf[..read]).to_string();
     if text.starts_with("CONNECT") {
-        // honest pass-through: TLS interception needs the CA arc
-        let _ = stream.write_all(b"HTTP/1.1 502 HackTool: HTTPS interception not enabled\r\n\r\n").await;
-        return Ok(());
+        return connect_tunnel(stream, shared, &text).await;
     }
-    let (method, url, headers, body) = match parse_raw_request(&text, "http") {
-        Ok(parsed) => parsed,
-        Err(_) => return Ok(()),
-    };
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(15))
-        .danger_accept_invalid_certs(false)
-        .build()
-        .unwrap();
-    let method_req = match reqwest::Method::from_bytes(method.as_bytes()) {
-        Ok(m) => m,
-        Err(_) => return Ok(()),
-    };
-    let mut request = client.request(method_req, &url);
-    for (name, value) in &headers {
-        if name.eq_ignore_ascii_case("host") || name.eq_ignore_ascii_case("content-length") || name.eq_ignore_ascii_case("connection") {
-            continue;
-        }
-        request = request.header(name, value);
-    }
-    if !body.is_empty() && !matches!(method.as_str(), "GET" | "HEAD") {
-        request = request.body(body);
-    }
-    let Ok(resp) = request.send().await else { return Ok(()) };
-    let status = resp.status().as_u16();
-    let size = resp.content_length().unwrap_or(0) as usize;
+    let Ok((method, url, headers, body)) = parse_raw_request(&text, "http") else { return Ok(()) };
     let host = url.split('/').nth(2).unwrap_or_default().to_string();
     let path = format!("/{}", url.splitn(4, '/').nth(3).unwrap_or(""));
-    let id = next_id.fetch_add(1, Ordering::Relaxed);
-    let entry = CapturedRequest {
+
+    // interceptor holds the request (and the browser connection) until the
+    // user forwards or drops it
+    if shared.intercept.load(Ordering::Relaxed) {
+        let id = shared.next_id.fetch_add(1, Ordering::Relaxed);
+        let info = CapturedRequest {
+            id,
+            method: method.clone(),
+            host: host.clone(),
+            path: path.clone(),
+            status: 0,
+            size: body.len(),
+            at_ms: now_ms(),
+        };
+        shared
+            .pending
+            .lock()
+            .expect("pending poisoned")
+            .insert(id, PendingRequest { stream, method, url, headers, body, info });
+        return Ok(());
+    }
+
+    let rules = shared.rules.lock().expect("rules poisoned").clone();
+    let (method, url, headers, body) = apply_rules(method, url, headers, body, &rules);
+    let (status, resp_headers, resp_body) = execute_request(&method, &url, &headers, &body).await;
+    let id = shared.next_id.fetch_add(1, Ordering::Relaxed);
+    shared.captured.lock().expect("captured poisoned").push(CapturedRequest {
         id,
         method,
         host,
         path,
         status,
-        size,
-        at_ms: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0),
-    };
-    {
-        let mut cap = captured.lock().expect("captured poisoned");
-        cap.push(entry);
-        if cap.len() > MAX_CAPTURE {
-            cap.remove(0);
+        size: resp_body.len(),
+        at_ms: now_ms(),
+    });
+
+    let mut response = format!("HTTP/1.1 {status} {reason}\r\n", reason = reason_phrase(status));
+    for (name, value) in &resp_headers {
+        if name.eq_ignore_ascii_case("transfer-encoding") || name.eq_ignore_ascii_case("content-length") {
+            continue;
         }
+        response.push_str(&format!("{name}: {value}\r\n"));
     }
-    let mut response = format!("HTTP/1.1 {status} OK\r\n");
-    response.push_str("X-HackTool-Proxy: arc-4\r\n\r\n");
-    let _ = stream.write_all(response.as_bytes()).await;
-    let _ = running; // kept for the accept-loop stop check
+    response.push_str(&format!("content-length: {}\r\nconnection: close\r\n\r\n", resp_body.len()));
+    stream.write_all(response.as_bytes()).await?;
+    stream.write_all(&resp_body).await?;
     Ok(())
+}
+
+
+/// CONNECT tunnel: raw TCP passthrough when interception is off; full TLS
+/// MITM (per-host leaf certs, rules, history, WS relay) when on.
+async fn connect_tunnel(
+    mut stream: TcpStream,
+    shared: Arc<ProxyShared>,
+    head_text: &str,
+) -> std::io::Result<()> {
+    use tokio::io::AsyncWriteExt;
+    let target = head_text
+        .split_whitespace()
+        .nth(1)
+        .unwrap_or_default()
+        .to_string();
+    let intercepting = shared.intercept.load(Ordering::Relaxed);
+    let ca = shared.ca.lock().expect("ca poisoned").clone();
+
+    if !intercepting || ca.is_none() {
+        // honest passthrough: relay raw bytes to the upstream host
+        let _ = stream
+            .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+            .await;
+        let upstream = TcpStream::connect(&target).await?;
+        let (mut s_read, mut s_write) = tokio::io::split(stream);
+        let (mut u_read, mut u_write) = tokio::io::split(upstream);
+        tokio::select! {
+            _ = tokio::io::copy(&mut s_read, &mut u_write) => {},
+            _ = tokio::io::copy(&mut u_read, &mut s_write) => {},
+        }
+        return Ok(());
+    }
+
+    let host = target.split(':').next().unwrap_or_default().to_string();
+    let _ = stream
+        .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+        .await;
+    let ca = ca.expect("ca checked");
+    let acceptor = crate::webtls::tls_acceptor(&ca, &host).map_err(|e| std::io::Error::other(e))?;
+    let mut tls_stream = acceptor.accept(stream).await.map_err(|e| {
+        std::io::Error::other(format!("tls handshake with client failed: {e}"))
+    })?;
+    let (head_text, body_bytes) = crate::webtls::read_http_message(&mut tls_stream).await?;
+    let request_line = head_text.lines().next().unwrap_or_default().to_string();
+    let mut parts = request_line.split_whitespace();
+    let method = parts.next().unwrap_or_default().to_string();
+    let path = parts.next().unwrap_or_default().to_string();
+    let headers: Vec<(String, String)> = head_text
+        .lines()
+        .skip(1)
+        .filter_map(|l| l.split_once(':'))
+        .map(|(k, v)| (k.trim().to_string(), v.trim().to_string()))
+        .collect();
+    let body = String::from_utf8_lossy(&body_bytes).to_string();
+
+    // WebSocket upgrade: relay frames both ways and list the connection
+    if head_text.to_lowercase().contains("upgrade: websocket") {
+        let tcp = TcpStream::connect((host.as_str(), 443))
+            .await
+            .map_err(|e| std::io::Error::other(format!("ws upstream connect failed: {e}")))?;
+        let connector = crate::webtls::tls_client().map_err(|e| std::io::Error::other(e))?;
+        let server_name = rustls::pki_types::ServerName::try_from(host.clone())
+            .map_err(|e| std::io::Error::other(format!("bad sni: {e}")))?;
+        let mut upstream = connector
+            .connect(server_name, tcp)
+            .await
+            .map_err(|e| std::io::Error::other(format!("ws upstream tls failed: {e}")))?;
+        upstream.write_all(head_text.as_bytes()).await?;
+        upstream.write_all(body.as_bytes()).await?;
+        let (mut c_read, mut c_write) = tokio::io::split(tls_stream);
+        let (mut u_read, mut u_write) = tokio::io::split(upstream);
+        let c2u = tokio::io::copy(&mut c_read, &mut u_write);
+        let u2c = tokio::io::copy(&mut u_read, &mut c_write);
+        let (a, b) = tokio::join!(c2u, u2c);
+        shared.ws.lock().expect("ws poisoned").push(crate::webtls::WsConnection {
+            host: host.clone(),
+            at_ms: now_ms(),
+        });
+        let _ = (a, b);
+        return Ok(());
+    }
+
+    // plain HTTP inside TLS: same rules + capture path as plain proxying
+    let rules = shared.rules.lock().expect("rules poisoned").clone();
+    let (r_method, r_url, r_headers, r_body) =
+        apply_rules(method.clone(), format!("https://{host}{path}"), headers, body, &rules);
+    let (status, resp_headers, resp_body) =
+        execute_request(&r_method, &r_url, &r_headers, &r_body).await;
+    let id = shared.next_id.fetch_add(1, Ordering::Relaxed);
+    shared.captured.lock().expect("captured poisoned").push(CapturedRequest {
+        id,
+        method: r_method,
+        host: host.clone(),
+        path: path.clone(),
+        status,
+        size: resp_body.len(),
+        at_ms: now_ms(),
+    });
+    let mut response = format!("HTTP/1.1 {status} {reason}\r\n", reason = reason_phrase(status));
+    for (name, value) in &resp_headers {
+        if name.eq_ignore_ascii_case("transfer-encoding") || name.eq_ignore_ascii_case("content-length") {
+            continue;
+        }
+        response.push_str(&format!("{name}: {value}\r\n"));
+    }
+    response.push_str(&format!("content-length: {}\r\nconnection: close\r\n\r\n", resp_body.len()));
+    tls_stream.write_all(response.as_bytes()).await?;
+    tls_stream.write_all(&resp_body).await?;
+    Ok(())
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+fn reason_phrase(status: u16) -> &'static str {
+    match status {
+        200 => "OK",
+        301 | 308 => "Moved Permanently",
+        302 | 307 => "Found",
+        304 => "Not Modified",
+        400 => "Bad Request",
+        401 => "Unauthorized",
+        403 => "Forbidden",
+        404 => "Not Found",
+        500 => "Internal Server Error",
+        502 => "Bad Gateway",
+        _ => "OK",
+    }
+}
+
+/// Apply match-and-replace rules to path, headers and body.
+fn apply_rules(
+    mut method: String,
+    mut url: String,
+    mut headers: Vec<(String, String)>,
+    mut body: String,
+    rules: &[MatchReplaceRule],
+) -> (String, String, Vec<(String, String)>, String) {
+    for rule in rules {
+        if rule.find.is_empty() {
+            continue;
+        }
+        url = url.replace(&rule.find, &rule.replace);
+        body = body.replace(&rule.find, &rule.replace);
+        for (name, value) in &mut headers {
+            *value = value.replace(&rule.find, &rule.replace);
+            *name = name.replace(&rule.find, &rule.replace);
+        }
+        method = method.replace(&rule.find, &rule.replace);
+    }
+    (method, url, headers, body)
+}
+
+/// Forward a parsed request through the HTTP client; returns response parts.
+async fn execute_request(
+    method: &str,
+    url: &str,
+    headers: &[(String, String)],
+    body: &str,
+) -> (u16, Vec<(String, String)>, Vec<u8>) {
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(15))
+        .user_agent("HackTool-Workbench/0.1")
+        .build()
+        .expect("http client");
+    let Ok(method_req) = reqwest::Method::from_bytes(method.as_bytes()) else {
+        return (400, vec![], b"bad method".to_vec());
+    };
+    let mut request = client.request(method_req, url);
+    for (name, value) in headers {
+        if name.eq_ignore_ascii_case("host")
+            || name.eq_ignore_ascii_case("content-length")
+            || name.eq_ignore_ascii_case("connection")
+        {
+            continue;
+        }
+        request = request.header(name, value);
+    }
+    if !body.is_empty() && !matches!(method, "GET" | "HEAD") {
+        request = request.body(body.to_string());
+    }
+    let Ok(resp) = request.send().await else {
+        return (502, vec![], b"HackTool: upstream request failed".to_vec());
+    };
+    let status = resp.status().as_u16();
+    let resp_headers: Vec<(String, String)> = resp
+        .headers()
+        .iter()
+        .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or("<binary>").to_string()))
+        .collect();
+    let Ok(bytes) = resp.bytes().await else {
+        return (status, resp_headers, Vec::new());
+    };
+    (status, resp_headers, bytes.to_vec())
 }
 
 #[tauri::command]
 pub async fn proxy_stop(ctx: State<'_, WebCtx>) -> Result<ProxyStatusWire, String> {
+    ctx.shared.running.store(false, Ordering::Relaxed);
     ctx.proxy_running.store(false, Ordering::Relaxed);
     if let Some(handle) = ctx.proxy_handle.lock().expect("proxy handle poisoned").take() {
         handle.abort();
     }
-    Ok(ProxyStatusWire { running: false, port: ctx.proxy_port.load(Ordering::Relaxed), captured: ctx.captured.lock().expect("captured poisoned").len() })
+    Ok(proxy_status_inner(&ctx))
 }
 
-#[tauri::command]
-pub fn proxy_status(ctx: State<'_, WebCtx>) -> ProxyStatusWire {
+fn proxy_status_inner(ctx: &WebCtx) -> ProxyStatusWire {
     ProxyStatusWire {
-        running: ctx.proxy_running.load(Ordering::Relaxed),
-        port: ctx.proxy_port.load(Ordering::Relaxed),
-        captured: ctx.captured.lock().expect("captured poisoned").len(),
+        running: ctx.shared.running.load(Ordering::Relaxed),
+        port: ctx.shared.port.load(Ordering::Relaxed),
+        captured: ctx.shared.captured.lock().expect("captured poisoned").len(),
     }
 }
 
 #[tauri::command]
+pub fn proxy_status(ctx: State<'_, WebCtx>) -> ProxyStatusWire {
+    proxy_status_inner(&ctx)
+}
+
+#[tauri::command]
 pub fn proxy_history(ctx: State<'_, WebCtx>) -> Vec<CapturedRequest> {
-    ctx.captured.lock().expect("captured poisoned").clone()
+    ctx.shared.captured.lock().expect("captured poisoned").clone()
+}
+
+/// Toggle request interception. When on, requests are held in the pending
+/// queue until forwarded or dropped; the browser waits for the decision.
+#[tauri::command]
+pub fn proxy_intercept(on: bool, ctx: State<'_, WebCtx>) -> bool {
+    ctx.shared.intercept.store(on, Ordering::Relaxed);
+    on
+}
+
+#[derive(Debug, Serialize)]
+pub struct PendingWire {
+    pub id: u64,
+    pub method: String,
+    pub url: String,
+    pub host: String,
+    pub path: String,
+    pub body_preview: String,
+}
+
+#[tauri::command]
+pub fn proxy_pending(ctx: State<'_, WebCtx>) -> Vec<PendingWire> {
+    ctx.shared
+        .pending
+        .lock()
+        .expect("pending poisoned")
+        .values()
+        .map(|p| PendingWire {
+            id: p.info.id,
+            method: p.method.clone(),
+            url: p.url.clone(),
+            host: p.info.host.clone(),
+            path: p.info.path.clone(),
+            body_preview: p.body.chars().take(200).collect(),
+        })
+        .collect()
+}
+
+/// Forward a held request: applies match-and-replace, executes, writes the
+/// real response back to the waiting browser, and records it in history.
+#[tauri::command]
+pub async fn proxy_forward(id: u64, ctx: State<'_, WebCtx>) -> Result<u16, String> {
+    let pending = ctx.shared.pending.lock().expect("pending poisoned").remove(&id);
+    let Some(pending) = pending else {
+        return Err("request no longer pending (browser timeout)".to_string());
+    };
+    let rules = ctx.shared.rules.lock().expect("rules poisoned").clone();
+    let (method, url, headers, body) = apply_rules(pending.method, pending.url, pending.headers, pending.body, &rules);
+    let mut stream = pending.stream;
+    use tokio::io::AsyncWriteExt;
+    let (status, resp_headers, resp_body) = execute_request(&method, &url, &headers, &body).await;
+    let mut response = format!("HTTP/1.1 {status} {reason}\r\n", reason = reason_phrase(status));
+    for (name, value) in &resp_headers {
+        if name.eq_ignore_ascii_case("transfer-encoding") || name.eq_ignore_ascii_case("content-length") {
+            continue;
+        }
+        response.push_str(&format!("{name}: {value}\r\n"));
+    }
+    response.push_str(&format!("content-length: {}\r\nconnection: close\r\n\r\n", resp_body.len()));
+    let _ = stream.write_all(response.as_bytes()).await;
+    let _ = stream.write_all(&resp_body).await;
+    ctx.shared.captured.lock().expect("captured poisoned").push(CapturedRequest {
+        id,
+        method,
+        host: pending.info.host,
+        path: pending.info.path,
+        status,
+        size: resp_body.len(),
+        at_ms: now_ms(),
+    });
+    Ok(status)
+}
+
+/// Drop a held request; the browser receives a 502.
+#[tauri::command]
+pub async fn proxy_drop(id: u64, ctx: State<'_, WebCtx>) -> Result<(), String> {
+    let pending = ctx.shared.pending.lock().expect("pending poisoned").remove(&id);
+    if let Some(mut pending) = pending {
+        use tokio::io::AsyncWriteExt;
+        let _ = pending
+            .stream
+            .write_all(b"HTTP/1.1 502 HackTool: request dropped by interceptor\r\ncontent-length: 0\r\nconnection: close\r\n\r\n")
+            .await;
+    }
+    Ok(())
+}
+
+/// Replace the match-and-replace rule list.
+#[tauri::command]
+pub fn proxy_set_rules(rules: Vec<MatchReplaceRule>, ctx: State<'_, WebCtx>) -> usize {
+    *ctx.shared.rules.lock().expect("rules poisoned") = rules;
+    ctx.shared.rules.lock().expect("rules poisoned").len()
+}
+
+/// Export the CA certificate PEM for browser trust-store installation.
+#[tauri::command]
+pub async fn proxy_ca_pem(app: tauri::AppHandle, ctx: State<'_, WebCtx>) -> Result<String, String> {
+    if let Some(ca) = ctx.ca.lock().expect("ca poisoned").as_ref() {
+        return Ok(ca.cert_pem.clone());
+    }
+    let ca_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("cannot resolve app data dir: {e}"))?
+        .join("hacktool");
+    let ca = crate::webtls::init_ca(&ca_dir)?;
+    *ctx.ca.lock().expect("ca poisoned") = Some(Arc::clone(&ca));
+    Ok(ca.cert_pem.clone())
+}
+
+#[derive(Debug, Serialize)]
+pub struct WsConnectionWire {
+    pub host: String,
+    pub bytes_client_to_server: u64,
+    pub bytes_server_to_client: u64,
+    pub at_ms: u64,
+}
+
+#[tauri::command]
+pub fn ws_list(ctx: State<'_, WebCtx>) -> Vec<WsConnectionWire> {
+    ctx.shared
+        .ws
+        .lock()
+        .expect("ws poisoned")
+        .iter()
+        .map(|w| WsConnectionWire {
+            host: w.host.clone(),
+            bytes_client_to_server: 0,
+            bytes_server_to_client: 0,
+            at_ms: w.at_ms,
+        })
+        .collect()
 }
 
 // --- external engine slots (GPLv2, user-approved) ------------------------------

@@ -443,6 +443,60 @@ export async function proxyHistory(): Promise<CapturedRequestWire[]> {
   return invoke<CapturedRequestWire[]>("proxy_history", {});
 }
 
+export interface MatchReplaceRuleWire {
+  find: string;
+  replace: string;
+}
+
+export async function proxyIntercept(on: boolean): Promise<boolean> {
+  if (!inTauri) return on;
+  return invoke<boolean>("proxy_intercept", { on });
+}
+
+export interface PendingRequestWire {
+  id: number;
+  method: string;
+  url: string;
+  host: string;
+  path: string;
+  body_preview: string;
+}
+
+export async function proxyPending(): Promise<PendingRequestWire[]> {
+  if (!inTauri) return [];
+  return invoke<PendingRequestWire[]>("proxy_pending", {});
+}
+
+export async function proxyForward(id: number): Promise<number> {
+  if (!inTauri) throw new Error("the proxy requires the desktop runtime");
+  return invoke<number>("proxy_forward", { id });
+}
+
+export async function proxyDrop(id: number): Promise<void> {
+  if (!inTauri) throw new Error("the proxy requires the desktop runtime");
+  return invoke<void>("proxy_drop", { id });
+}
+
+export async function proxySetRules(rules: MatchReplaceRuleWire[]): Promise<number> {
+  if (!inTauri) return 0;
+  return invoke<number>("proxy_set_rules", { rules });
+}
+
+export async function proxyCaPem(): Promise<string> {
+  if (!inTauri) throw new Error("CA export requires the desktop runtime");
+  return invoke<string>("proxy_ca_pem", {});
+}
+
+export interface WsConnectionWire {
+  host: string;
+  at_ms: number;
+}
+
+export async function wsList(): Promise<WsConnectionWire[]> {
+  if (!inTauri) return [];
+  return invoke<WsConnectionWire[]>("ws_list", {});
+}
+
 export interface WebEngineStatusWire {
   id: string;
   label: string;

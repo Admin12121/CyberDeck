@@ -8,8 +8,8 @@ export function BottomDock() {
   const wb = useWorkbench();
   const jobs = wb.dockTab === "jobs";
   return (
-    <>
+    <div className="flex shrink-0 flex-col" style={{ height: wb.dockHeight }}>
       {jobs ? <JobsDock /> : <ConsoleDock />}
-    </>
+    </div>
   );
 }

@@ -11,6 +11,7 @@ mod jobs;
 mod ops;
 mod pcap;
 mod web;
+mod webtls;
 
 use std::sync::Mutex;
 
@@ -27,7 +28,18 @@ fn main() {
             proxy_running: std::sync::atomic::AtomicBool::new(false),
             proxy_port: std::sync::atomic::AtomicU16::new(8080),
             proxy_handle: std::sync::Mutex::new(None),
-            captured: std::sync::Mutex::new(Vec::new()),
+            ca: std::sync::Mutex::new(None),
+            shared: std::sync::Arc::new(web::ProxyShared {
+                running: std::sync::atomic::AtomicBool::new(false),
+                intercept: std::sync::atomic::AtomicBool::new(false),
+                port: std::sync::atomic::AtomicU16::new(8080),
+                rules: std::sync::Mutex::new(Vec::new()),
+                captured: std::sync::Mutex::new(Vec::new()),
+                pending: std::sync::Mutex::new(std::collections::HashMap::new()),
+                next_id: std::sync::atomic::AtomicU64::new(1),
+                ca: std::sync::Mutex::new(None),
+                ws: std::sync::Mutex::new(Vec::new()),
+            }),
         })
         .setup(|app| {
             // Case store lives under the OS app-data directory; the SQLite
@@ -71,6 +83,13 @@ fn main() {
             web::proxy_stop,
             web::proxy_status,
             web::proxy_history,
+            web::proxy_intercept,
+            web::proxy_pending,
+            web::proxy_forward,
+            web::proxy_drop,
+            web::proxy_set_rules,
+            web::proxy_ca_pem,
+            web::ws_list,
             web::web_engines_detect,
             web::engine_scan,
         ])

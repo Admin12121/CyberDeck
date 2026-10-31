@@ -50,7 +50,7 @@ const WorkbenchContext = createContext<WorkbenchApi | null>(null);
 export const PANEL_LIMITS = {
   navigator: { min: 180, max: 340, fallback: 224 },
   inspector: { min: 240, max: 420, fallback: 288 },
-  dock: { min: 96, max: 280, fallback: 160 },
+  dock: { min: 140, max: 640, fallback: 280 },
 } as const;
 
 type PanelSizes = { navigator: number; inspector: number; dock: number };
@@ -100,6 +100,7 @@ export function WorkbenchProvider({ children }: { children: React.ReactNode }) {
   const [inspectorOpen, setInspectorOpen] = useState(false);
   // First paint uses the fallback sizes so SSR and hydration match; persisted
   // sizes apply right after mount, and persistence stays off until then.
+  const [locationLoaded, setLocationLoaded] = useState(false);
   const [panels, setPanels] = useState<PanelSizes>(() => ({
     navigator: PANEL_LIMITS.navigator.fallback,
     inspector: PANEL_LIMITS.inspector.fallback,
@@ -110,7 +111,28 @@ export function WorkbenchProvider({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     setPanels(loadPanelSizes());
     setPanelsLoaded(true);
+    // restore last workspace location
+    try {
+      const raw = window.localStorage.getItem("hacktool.location");
+      if (raw) {
+        const loc = JSON.parse(raw) as { category?: CategoryId; tool?: ToolId };
+        if (loc.category) setCategory(loc.category);
+        if (loc.tool) setTool(loc.tool);
+      }
+    } catch {
+      // ignore malformed location
+    }
+    setLocationLoaded(true);
   }, []);
+
+  useEffect(() => {
+    if (!locationLoaded) return;
+    try {
+      window.localStorage.setItem("hacktool.location", JSON.stringify({ category, tool }));
+    } catch {
+      // ignore quota failures
+    }
+  }, [category, tool, locationLoaded]);
 
   // Persist panel sizes after every user-driven change.
   useEffect(() => {
