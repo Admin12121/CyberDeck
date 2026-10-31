@@ -1,8 +1,7 @@
 "use client";
 /**
- * Workbench shell: the common desktop layout every studio plugs into
- * (Master Plan §3.4). Navigator, inspector and dock are resizable with
- * clamped min/max via drag handles.
+ * Workbench shell: logo rail + workspace column. Every category stays
+ * mounted; hidden ones keep their state across switches (Master Plan §3.5).
  */
 import { WorkbenchProvider, useWorkbench } from "@state/workbench";
 import { PANEL_LIMITS } from "@state/workbench";
@@ -12,34 +11,14 @@ import { WebWorkspace } from "@features/web";
 import { ReverseWorkspace } from "@features/reverse";
 import { ForensicsWorkspace } from "@features/forensics";
 import { Rail } from "./Rail";
-import { Navigator } from "./Navigator";
 import { BottomDock } from "./BottomDock";
 import { StatusBar } from "./StatusBar";
 import { CommandPalette } from "./CommandPalette";
 import { Resizer } from "@ds/Resizer";
 
-function TitleBar() {
-  const wb = useWorkbench();
-  return (
-    <header
-      data-tauri-drag-region
-      className="flex h-9 shrink-0 items-center gap-3 border-b border-line bg-sidebar px-3"
-    >
-      <img src="/logo.webp" alt="" aria-hidden className="h-5 w-5" />
-      <span className="text-xs font-medium text-fg">HackTool</span>
-      <span className="ml-auto font-mono text-[10px] text-fg-muted">
-        <button type="button" onClick={() => wb.setPaletteOpen(true)} className="border border-line px-2 py-0.5 hover:border-line-strong hover:text-fg">
-          Ctrl K · commands
-        </button>
-      </span>
-    </header>
-  );
-}
-
 /**
  * Every category stays mounted; hidden ones keep their state so users can
- * hop between tools without losing work (Master Plan §3.5: no data loss on
- * workspace switching).
+ * hop between tools without losing work (Master Plan §3.5).
  */
 function ActiveWorkspace() {
   const wb = useWorkbench();
@@ -57,44 +36,30 @@ function ActiveWorkspace() {
 
 function Shell() {
   const wb = useWorkbench();
-  // Web is a full-bleed ZAP-style workspace: its own top tabs replace the navigator.
-  const fullBleed = wb.category === "web";
   return (
     <div className="flex h-screen w-screen flex-col overflow-hidden">
-      <TitleBar />
       <div className="flex min-h-0 flex-1">
         <Rail />
-        {!fullBleed && (
-          <>
-            <Navigator />
-            <Resizer
-              direction="horizontal"
-              ariaLabel="Resize navigator"
-              value={wb.navigatorWidth}
-              onChange={wb.setNavigatorWidth}
-              min={PANEL_LIMITS.navigator.min}
-              max={PANEL_LIMITS.navigator.max}
-            />
-          </>
-        )}
-        <main className="min-w-0 flex-1 overflow-hidden bg-app" aria-label="Active workspace">
-          <ActiveWorkspace />
-        </main>
+        <div className="flex min-w-0 flex-1 flex-col">
+          <main className="min-h-0 flex-1 overflow-hidden bg-app" aria-label="Active workspace">
+            <ActiveWorkspace />
+          </main>
+          {wb.dockOpen ? (
+            <>
+              <Resizer
+                direction="vertical"
+                flip
+                ariaLabel="Resize jobs dock"
+                value={wb.dockHeight}
+                onChange={wb.setDockHeight}
+                min={PANEL_LIMITS.dock.min}
+                max={PANEL_LIMITS.dock.max}
+              />
+              <BottomDock />
+            </>
+          ) : null}
+        </div>
       </div>
-      {wb.dockOpen ? (
-        <>
-          <Resizer
-            direction="vertical"
-            flip
-            ariaLabel="Resize jobs dock"
-            value={wb.dockHeight}
-            onChange={wb.setDockHeight}
-            min={PANEL_LIMITS.dock.min}
-            max={PANEL_LIMITS.dock.max}
-          />
-          <BottomDock />
-        </>
-      ) : null}
       <StatusBar />
       <CommandPalette />
     </div>

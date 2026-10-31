@@ -89,7 +89,8 @@ export function Resizer({ direction, value, onChange, min, max, flip = false, ar
       }}
       className={`group relative z-10 shrink-0 transition-colors ${
         direction === "horizontal" ? "w-px cursor-col-resize" : "h-px cursor-row-resize"
-      } ${dragging ? "bg-orange" : "bg-line hover:bg-blue focus-visible:bg-blue focus-visible:outline-none"}`}
+      } ${dragging ? "bg-orange" : "bg-line hover:bg-line-strong"}`}
+      style={{ touchAction: "none" }}
       data-dragging={dragging || undefined}
     >
       {/* wider invisible hit area around the 1px visual line */}

@@ -1,6 +1,6 @@
 "use client";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { ArrowDown, ArrowUp, Copy, Play, Wand2, X } from "lucide-react";
+import { ArrowDown, ArrowUp, Copy, FileDown, Play, Wand2, X } from "lucide-react";
 import { Chip, EmptyState, Pane, Resizer, Select, TextInput, ToolButton } from "@ds/panes";
 import {
   OPERATIONS,
@@ -37,7 +37,6 @@ export function RecipesView() {
   const [state, setState] = useState<RecipeState>(initialRecipeState);
   const [search, setSearch] = useState("");
   const [committed, setCommitted] = useState<ReturnType<typeof runRecipe> | null>(null);
-  const [showHex, setShowHex] = useState(false);
   const [opsWidth, setOpsWidth] = useState(224);
   const [recipeWidth, setRecipeWidth] = useState(256);
   // null keeps input and output at an even 50/50 split; dragging pins px.
@@ -56,6 +55,42 @@ export function RecipesView() {
     () => (result && !result.error ? detectImageMime(result.outputBytes) : null),
     [result],
   );
+  // Output renders as an image when the bytes are one directly, or when the
+  // output text itself is Base64 that decodes to one (the common paste flow).
+  const decodedImage = useMemo(() => {
+    if (!result || result.error) return null;
+    if (imageMime) return { mime: imageMime, bytes: result.outputBytes };
+    const b64 = result.output.replace(/\s+/g, "");
+    if (b64.length < 16 || !/^[A-Za-z0-9+/]+={0,2}$/.test(b64)) return null;
+    try {
+      const bin = atob(b64);
+      const bytes = Uint8Array.from(bin, (c) => c.charCodeAt(0));
+      const mime = detectImageMime(bytes);
+      return mime ? { mime, bytes } : null;
+    } catch {
+      return null;
+    }
+  }, [result, imageMime]);
+  const [outMode, setOutMode] = useState<"text" | "hex" | "image">("text");
+  useEffect(() => {
+    // auto-switch: an image result shows as an image, anything else as text
+    setOutMode(decodedImage ? "image" : "text");
+  }, [decodedImage]);
+  const imageSrc = decodedImage
+    ? `data:${decodedImage.mime};base64,${b64.encode(decodedImage.bytes)}`
+    : null;
+  const downloadOutput = () => {
+    if (!result) return;
+    const bytes = outMode === "image" && decodedImage ? decodedImage.bytes : result.outputBytes;
+    const ext = outMode === "image" && decodedImage ? decodedImage.mime.split("/")[1].replace("jpeg", "jpg") : "bin";
+    const blob = new Blob([bytes as BlobPart], { type: "application/octet-stream" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `output.${ext}`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
 
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
@@ -252,13 +287,20 @@ export function RecipesView() {
           bodyClassName="flex min-h-0 flex-col p-0"
           actions={
             <div className="flex h-6 items-center gap-1">
-              <button
-                type="button"
-                onClick={() => setShowHex((v) => !v)}
-                className={`flex h-6 items-center border px-1.5 font-mono text-[10px] uppercase ${showHex ? "border-orange/50 text-orange" : "border-line text-fg-muted"}`}
-              >
-                hex
-              </button>
+              {(["text", "hex", "image"] as const).map((mode) => (
+                <button
+                  key={mode}
+                  type="button"
+                  disabled={mode === "image" && !decodedImage}
+                  onClick={() => setOutMode(mode)}
+                  className={`flex h-6 items-center border px-1.5 font-mono text-[10px] uppercase disabled:opacity-30 ${outMode === mode ? "border-orange/50 text-orange" : "border-line text-fg-muted"}`}
+                >
+                  {mode}
+                </button>
+              ))}
+              <ToolButton onClick={downloadOutput} disabled={!result} title="Save output as file">
+                <FileDown size={11} />
+              </ToolButton>
               <ToolButton onClick={() => void navigator.clipboard?.writeText(result?.output ?? "")} title="Copy output">
                 <Copy size={11} />
               </ToolButton>
@@ -273,24 +315,26 @@ export function RecipesView() {
               </div>
             </div>
           ) : result ? (
-            showHex ? (
+            outMode === "hex" ? (
               <pre className="min-h-0 flex-1 overflow-auto whitespace-pre-wrap break-all p-2 font-mono text-xs text-fg">
                 {Array.from(result.outputBytes, (b) => b.toString(16).padStart(2, "0")).join(" ")}
               </pre>
-            ) : imageMime ? (
-              <div className="flex min-h-0 flex-1 flex-col">
-                <div className="flex min-h-0 flex-1 items-center justify-center overflow-auto bg-app p-3">
-                  {/* eslint-disable-next-line @next/next/no-img-element */}
-                  <img
-                    src={`data:${imageMime};base64,${b64.encode(result.outputBytes)}`}
-                    alt="recipe output preview"
-                    className="max-h-full max-w-full object-contain"
-                  />
+            ) : outMode === "image" ? (
+              decodedImage ? (
+                <div className="flex min-h-0 flex-1 flex-col">
+                  <div className="flex min-h-0 flex-1 items-center justify-center overflow-auto bg-app p-3">
+                    {/* eslint-disable-next-line @next/next/no-img-element */}
+                    <img src={imageSrc ?? ""} alt="recipe output preview" className="max-h-full max-w-full object-contain" />
+                  </div>
+                  <div className="shrink-0 border-t border-line px-2 py-0.5 font-mono text-[10px] text-fg-muted">
+                    {decodedImage.mime} · {result.byteLength} bytes
+                  </div>
                 </div>
-                <div className="shrink-0 border-t border-line px-2 py-0.5 font-mono text-[10px] text-fg-muted">
-                  {imageMime} preview · {result.byteLength} bytes
+              ) : (
+                <div className="min-h-0 flex-1 overflow-auto p-2 font-mono text-[11px] text-fg-muted">
+                  output is not a recognizable image (PNG, JPEG, GIF, WebP, BMP)
                 </div>
-              </div>
+              )
             ) : (
               <pre className="min-h-0 flex-1 overflow-auto whitespace-pre-wrap break-all p-2 font-mono text-xs text-fg">
                 {result.output || "(empty output)"}

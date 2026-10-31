@@ -100,6 +100,8 @@ fn main() {
             netscan::netscan_results,
             netscan::netscan_status,
             netscan::netscan_history,
+            netscan::netscan_export,
+            netscan::netscan_discover_hosts,
         ])
         .run(tauri::generate_context!())
         .expect("HackTool desktop runtime failed to start");

@@ -604,6 +604,16 @@ export async function netscanHistory(): Promise<ScanHistoryItemWire[]> {
   return invoke<ScanHistoryItemWire[]>("netscan_history", {});
 }
 
+export async function netscanExport(format: "json" | "csv"): Promise<string> {
+  if (!inTauri) throw new Error("export requires the desktop runtime");
+  return invoke<string>("netscan_export", { format });
+}
+
+export async function netscanDiscoverHosts(targets: string): Promise<string[]> {
+  if (!inTauri) throw new Error("host discovery requires the desktop runtime");
+  return invoke<string[]>("netscan_discover_hosts", { targets });
+}
+
 // --- browser fallback (demo jobs) --------------------------------------------
 
 interface Simulation {

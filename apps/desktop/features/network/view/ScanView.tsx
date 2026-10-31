@@ -5,11 +5,14 @@ import { Play, Square } from "lucide-react";
 import { Chip, EmptyState, Pane, Select, TextInput, ToolButton } from "@ds/panes";
 import {
   isDesktop,
+  netscanExport,
+  netscanHistory,
   netscanResults,
   netscanStart,
   netscanStatus,
   netscanStop,
   type ScanEntryWire,
+  type ScanHistoryItemWire,
   type ScanProgressWire,
 } from "@lib/ipc";
 import { useWorkbench } from "@state/workbench";
@@ -31,10 +34,12 @@ export function ScanView() {
   const [results, setResults] = useState<ScanEntryWire[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [status, setStatus] = useState<{ running: boolean; results: number }>({ running: false, results: 0 });
+  const [history, setHistory] = useState<ScanHistoryItemWire[]>([]);
 
   const poll = useCallback(() => {
     netscanStatus().then(setStatus).catch(() => undefined);
     netscanResults().then(setResults).catch(() => undefined);
+    netscanHistory().then(setHistory).catch(() => undefined);
   }, []);
 
   useEffect(() => {
@@ -68,6 +73,17 @@ export function ScanView() {
   };
 
   const openCount = results.filter((r) => r.state === "open").length;
+
+  const exportResults = async (format: "json" | "csv") => {
+    setError(null);
+    try {
+      const path = await netscanExport(format);
+      wb.logConsole(`scan exported: ${path}`);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      if (message !== "cancelled") setError(message);
+    }
+  };
   const isPreset = PORT_PRESETS.some((p) => p.value === ports);
 
   return (
@@ -104,6 +120,12 @@ export function ScanView() {
           </ToolButton>
         )}
         <Chip tone={running ? "orange" : "muted"}>{running ? "running" : "idle"}</Chip>
+        {results.length > 0 ? (
+          <>
+            <ToolButton onClick={() => void exportResults("json")} title="Save results as JSON">JSON</ToolButton>
+            <ToolButton onClick={() => void exportResults("csv")} title="Save results as CSV">CSV</ToolButton>
+          </>
+        ) : null}
         <span className="ml-auto font-mono text-[10px] text-fg-muted">{openCount} open / {results.length} probed</span>
       </div>
       {error ? <div className="border-b border-err/50 bg-err/10 px-2 py-1 font-mono text-[10px] text-err">{error}</div> : null}
@@ -178,6 +200,20 @@ export function ScanView() {
           </div>
           <div className="border-t border-line p-2">
             <ToolButton onClick={() => wb.runDemoJob()} title="Queue the shared pipeline demo job">Demo job</ToolButton>
+          </div>
+          <div className="border-t border-line p-2">
+            <div className="mb-1 text-[10px] uppercase tracking-wider text-fg-muted">Scan history ({history.length})</div>
+            {history.length === 0 ? (
+              <div className="font-mono text-[10px] text-fg-muted">completed scans appear here</div>
+            ) : (
+              <div className="max-h-40 space-y-0.5 overflow-auto">
+                {[...history].reverse().map((h) => (
+                  <div key={h.id} className="font-mono text-[10px] text-fg-dim">
+                    {h.targets} · {h.open_ports} open · {(h.duration_ms / 1000).toFixed(1)}s
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
         </Pane>
       </div>

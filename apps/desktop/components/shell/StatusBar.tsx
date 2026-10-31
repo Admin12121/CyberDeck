@@ -25,7 +25,7 @@ export function StatusBar() {
         >
           console (Ctrl+`)
         </button>
-        <span>hacktool 0.1.0 · arc 3 · darkmatter</span>
+        <span>hacktool 0.1.0 · arc 4 · darkmatter</span>
       </span>
     </footer>
   );

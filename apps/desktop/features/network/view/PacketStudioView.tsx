@@ -231,7 +231,11 @@ export function PacketStudioView() {
         </div>
 
         <div className="flex min-h-0 flex-[3]">
-          <div aria-label="Packet details container" className="flex min-w-0 flex-1 flex-col overflow-hidden bg-panel">
+          <div
+            aria-label="Packet details container"
+            className={detailsWidth === null ? "flex min-w-0 flex-1 flex-col overflow-hidden bg-panel" : "flex shrink-0 flex-col overflow-hidden bg-panel"}
+            style={detailsWidth === null ? undefined : { width: detailsWidth }}
+          >
             <div className="flex h-8 shrink-0 items-center border-b border-line bg-sidebar px-2 text-[10px] font-medium uppercase tracking-wider text-fg-muted">
               Packet details: {current ? `frame ${current.index + 1}` : "no selection"}
             </div>
@@ -263,7 +267,7 @@ export function PacketStudioView() {
               }
             }}
           />
-          <div className="flex min-h-0 flex-1 flex-col overflow-hidden bg-panel" style={detailsWidth === null ? undefined : { width: detailsWidth }}>
+          <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden bg-panel">
             <div className="flex h-8 shrink-0 items-center border-b border-line bg-sidebar px-2 text-[10px] font-medium uppercase tracking-wider text-fg-muted">
               Packet bytes (offset · hex · ascii)
             </div>
