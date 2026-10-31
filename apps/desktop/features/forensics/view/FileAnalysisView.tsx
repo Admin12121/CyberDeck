@@ -28,7 +28,7 @@ export function FileAnalysisView() {
         : false;
 
   return (
-    <div className="flex h-full min-h-0">
+    <div className="flex h-full min-h-0 gap-px bg-line">
       <EvidenceTree ctx={ctx} />
       <Pane title={`Hex: ${ctx.selectedArtifact?.name ?? ctx.selectedSample?.name ?? "no selection"}`} className="min-w-0 flex-1" bodyClassName="relative">
         <HexBody ctx={ctx} />

@@ -87,11 +87,9 @@ export function Resizer({ direction, value, onChange, min, max, flip = false, ar
           onChange(Math.min(max, Math.max(min, value + dir * step)));
         }
       }}
-      className={`group relative z-10 shrink-0 ${
+      className={`group relative z-10 shrink-0 transition-colors ${
         direction === "horizontal" ? "w-px cursor-col-resize" : "h-px cursor-row-resize"
-      } bg-line transition-colors hover:bg-orange focus-visible:bg-orange focus-visible:outline-none ${
-        dragging ? "bg-orange" : ""
-      }`}
+      } ${dragging ? "bg-orange" : "bg-line hover:bg-blue focus-visible:bg-blue focus-visible:outline-none"}`}
       data-dragging={dragging || undefined}
     >
       {/* wider invisible hit area around the 1px visual line */}

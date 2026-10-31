@@ -45,7 +45,7 @@ export function HistoryView() {
   });
 
   return (
-    <div className="flex h-full min-h-0">
+    <div className="flex h-full min-h-0 gap-px bg-line">
       <Pane title={`HTTP history: ${rows.length} captured`} className="min-w-0 flex-1" bodyClassName="p-0"
         actions={<TextInput value={query} onChange={setQuery} placeholder="filter" ariaLabel="History filter" className="w-48" />}
       >

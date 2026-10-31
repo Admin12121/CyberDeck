@@ -107,7 +107,7 @@ export function ScanView() {
         <span className="ml-auto font-mono text-[10px] text-fg-muted">{openCount} open / {results.length} probed</span>
       </div>
       {error ? <div className="border-b border-err/50 bg-err/10 px-2 py-1 font-mono text-[10px] text-err">{error}</div> : null}
-      <div className="flex min-h-0 flex-1">
+      <div className="flex min-h-0 flex-1 gap-px bg-line">
         <div className="flex min-w-0 flex-1 flex-col gap-px bg-line">
           <Pane title="Authorization (§9.3)" className="shrink-0">
             <label className="flex cursor-pointer items-start gap-2 p-2 text-xs leading-relaxed text-fg-dim">

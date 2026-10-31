@@ -10,7 +10,7 @@ export function Navigator() {
 
   return (
     <aside
-      className="flex shrink-0 flex-col border-r border-line bg-sidebar"
+      className="flex shrink-0 flex-col bg-sidebar"
       style={{ width: wb.navigatorWidth }}
       aria-label="Tools"
     >
@@ -40,16 +40,6 @@ export function Navigator() {
             </button>
           );
         })}
-      </div>
-      <div className="shrink-0 border-t border-line p-2">
-        <button
-          type="button"
-          onClick={() => wb.setPaletteOpen(true)}
-          className="flex w-full items-center justify-between border border-line px-2 py-1 font-mono text-[10px] text-fg-muted hover:border-line-strong hover:text-fg"
-        >
-          search tools…
-          <kbd className="border border-line px-1">Ctrl K</kbd>
-        </button>
       </div>
     </aside>
   );

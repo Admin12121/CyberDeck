@@ -148,7 +148,7 @@ export function RecipesView() {
         }
       >
         <div
-          className={`min-h-0 flex-1 overflow-auto p-1 ${dropIndex !== null ? "ring-1 ring-inset ring-orange/60" : ""}`}
+          className="min-h-0 flex-1 overflow-auto p-1"
           onDragOver={(e) => {
             if (dropAllowed(e)) {
               e.preventDefault();
@@ -160,19 +160,12 @@ export function RecipesView() {
           }}
           onDrop={(e) => dropOp(e, null)}
         >
-          {state.steps.length === 0 ? (
-            <div className="p-3 font-mono text-[11px] leading-relaxed text-fg-muted">
-              Drop operations here, or add them from the catalog.
-              <br />
-              Steps apply top to bottom.
-            </div>
-          ) : (
+          {state.steps.length === 0 ? null : (
             state.steps.map((step, index) => (
               <StepRow
                 key={`${step.opId}-${index}`}
                 step={step}
                 index={index}
-                isDropTarget={dropIndex === index}
                 onToggle={() => setState((s) => toggleStep(s, index))}
                 onMoveUp={() => setState((s) => moveStep(s, index, -1))}
                 onMoveDown={() => setState((s) => moveStep(s, index, 1))}
@@ -183,7 +176,6 @@ export function RecipesView() {
                     e.preventDefault();
                     e.stopPropagation();
                     e.dataTransfer.dropEffect = "move";
-                    setDropIndex(index);
                   }
                 }}
                 onDropRow={(e) => {
@@ -321,7 +313,6 @@ export function RecipesView() {
 interface StepRowProps {
   step: RecipeState["steps"][number];
   index: number;
-  isDropTarget: boolean;
   onToggle: () => void;
   onMoveUp: () => void;
   onMoveDown: () => void;
@@ -331,7 +322,7 @@ interface StepRowProps {
   onDropRow: (e: React.DragEvent) => void;
 }
 
-export function StepRow({ step, index, isDropTarget, onToggle, onMoveUp, onMoveDown, onRemove, onParam, onDragOverRow, onDropRow }: StepRowProps) {
+export function StepRow({ step, index, onToggle, onMoveUp, onMoveDown, onRemove, onParam, onDragOverRow, onDropRow }: StepRowProps) {
   const op = operationById(step.opId);
   return (
     <div
@@ -342,9 +333,7 @@ export function StepRow({ step, index, isDropTarget, onToggle, onMoveUp, onMoveD
       }}
       onDragOver={onDragOverRow}
       onDrop={onDropRow}
-      className={`group mb-px flex items-center gap-2 border border-line bg-app px-2 py-1.5 ${step.enabled ? "" : "opacity-50"} ${
-        isDropTarget ? "border-t-orange" : ""
-      }`}
+      className={`group mb-px flex items-center gap-2 border border-line bg-app px-2 py-1.5 ${step.enabled ? "" : "opacity-50"}`}
     >
       <span aria-hidden title="Drag to reorder" className="cursor-grab select-none font-mono text-[13px] leading-none text-fg-muted group-hover:text-fg-dim">⠿</span>
       <input

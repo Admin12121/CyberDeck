@@ -68,6 +68,7 @@ fn main() {
             evidence::digest_file_dialog,
             pcap::pcap_open_dialog,
             pcap::pcap_packet_bytes,
+            web::pcap_follow_stream,
             crack::crack_wordlist_dialog,
             crack::pick_wordlist,
             history::crack_history_list,
@@ -97,6 +98,7 @@ fn main() {
             netscan::netscan_start,
             netscan::netscan_stop,
             netscan::netscan_results,
+            netscan::netscan_status,
             netscan::netscan_history,
         ])
         .run(tauri::generate_context!())

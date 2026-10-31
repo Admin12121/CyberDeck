@@ -1,7 +1,7 @@
 "use client";
 import { useEffect, useMemo, useState } from "react";
 import { ChevronRight, FolderOpen, Play, ShieldAlert, Square } from "lucide-react";
-import { Chip, EmptyState, Pane, Select, TextInput, ToolButton } from "@ds/panes";
+import { Chip, EmptyState, Pane, Resizer, Select, TextInput, ToolButton } from "@ds/panes";
 import { hexDump } from "@lib/hex";
 import {
   isDesktop,
@@ -52,6 +52,8 @@ export function PacketStudioView() {
   const [selected, setSelected] = useState(0);
   const [tab, setTab] = useState<"packets" | "conversations" | "statistics" | "streams">("packets");
   const [packetBytes, setPacketBytes] = useState<HexResponseWire | null>(null);
+  // null: details and bytes share the row evenly; dragging pins px.
+  const [detailsWidth, setDetailsWidth] = useState<number | null>(null);
 
   const packets = capture?.packets ?? SAMPLE_DISPLAY;
 
@@ -114,19 +116,13 @@ export function PacketStudioView() {
         <ToolButton disabled title="Live capture requires platform driver clearance (§7.2)">
           <Play size={11} /> Capture
         </ToolButton>
-        <Select value="" onChange={() => {}} options={[{ value: "", label: "interface: arc 4" }]} ariaLabel="Capture interface" />
-        <span className="mx-1 h-4 w-px bg-line" />
-        <div className="flex min-w-0 flex-1 items-center gap-1">
-          <span className="font-mono text-[10px] uppercase text-fg-muted">display filter</span>
-          <TextInput
-            value={filter}
-            onChange={setFilter}
-            placeholder="column match; arc 4 adds filter syntax"
-            ariaLabel="Display filter"
-            className="min-w-0 flex-1"
-          />
-          <Chip tone={filter ? "ok" : "muted"}>{filter ? "matching" : "no filter"}</Chip>
-        </div>
+        <TextInput
+          value={filter}
+          onChange={setFilter}
+          placeholder="display filter (tcp.port == 443)"
+          ariaLabel="Display filter"
+          className="min-w-0 flex-1"
+        />
         {capture ? (
           <Chip tone="ok">{capture.file_name}: {capture.packet_count} packets</Chip>
         ) : (
@@ -234,53 +230,70 @@ export function PacketStudioView() {
           )}
         </div>
 
-        <div className="flex min-h-0 flex-[3] flex-col overflow-hidden border-b border-line bg-panel">
-          <div className="flex h-8 shrink-0 items-center border-b border-line bg-sidebar px-2 text-[10px] font-medium uppercase tracking-wider text-fg-muted">
-            Packet details: {current ? `frame ${current.index + 1}` : "no selection"}
+        <div className="flex min-h-0 flex-[3]">
+          <div aria-label="Packet details container" className="flex min-w-0 flex-1 flex-col overflow-hidden bg-panel">
+            <div className="flex h-8 shrink-0 items-center border-b border-line bg-sidebar px-2 text-[10px] font-medium uppercase tracking-wider text-fg-muted">
+              Packet details: {current ? `frame ${current.index + 1}` : "no selection"}
+            </div>
+            <div className="min-h-0 flex-1 overflow-auto p-1">
+              {current ? (
+                capture ? (
+                  current.layers.map((layer, i) => (
+                    <DetailBranch key={i} node={{ label: layer.label, value: layer.value }} depth={0} />
+                  ))
+                ) : (
+                  detailTree(SAMPLE_PACKETS[current.index]).map((node, i) => <DetailBranch key={i} node={node} depth={0} />)
+                )
+              ) : null}
+            </div>
           </div>
-          <div className="min-h-0 flex-1 overflow-auto p-1">
-            {current ? (
-              capture ? (
-                current.layers.map((layer, i) => (
-                  <DetailBranch key={i} node={{ label: layer.label, value: layer.value }} depth={0} />
-                ))
-              ) : (
-                detailTree(SAMPLE_PACKETS[current.index]).map((node, i) => <DetailBranch key={i} node={node} depth={0} />)
-              )
-            ) : null}
-          </div>
-        </div>
-
-        <div className="flex min-h-0 flex-[3] flex-col overflow-hidden bg-panel">
-          <div className="flex h-8 shrink-0 items-center border-b border-line bg-sidebar px-2 text-[10px] font-medium uppercase tracking-wider text-fg-muted">
-            Packet bytes (offset · hex · ascii)
-          </div>
-          <div className="min-h-0 flex-1 overflow-auto">
-            {capture && packetBytes ? (
-              <pre className="p-1 font-mono text-[11px] leading-relaxed text-fg-dim">
-                {packetBytes.rows.map((row) => (
-                  <div key={row.offset}>
-                    <span className="text-fg-muted">{row.offset.toString(16).padStart(4, "0")}</span>
-                    {"  "}
-                    {row.hex}
-                    {"  "}
-                    <span className="text-orange">{row.ascii}</span>
-                  </div>
-                ))}
-              </pre>
-            ) : !capture ? (
-              <pre className="p-1 font-mono text-[11px] leading-relaxed text-fg-dim">
-                {hexDump(sampleBytes).map((row) => (
-                  <div key={row.offset}>
-                    <span className="text-fg-muted">{row.offset.toString(16).padStart(4, "0")}</span>
-                    {"  "}
-                    {row.hex}
-                    {"  "}
-                    <span className="text-orange">{row.ascii}</span>
-                  </div>
-                ))}
-              </pre>
-            ) : null}
+          <Resizer
+            direction="horizontal"
+            ariaLabel="Resize packet details"
+            value={detailsWidth ?? 0}
+            onChange={setDetailsWidth}
+            min={240}
+            max={720}
+            onDragStart={() => {
+              if (detailsWidth === null) {
+                const left = document.querySelector('div[aria-label="Packet details container"]');
+                const measured = Math.round((left?.getBoundingClientRect().width ?? 0));
+                setDetailsWidth(measured);
+                return measured;
+              }
+            }}
+          />
+          <div className="flex min-h-0 flex-1 flex-col overflow-hidden bg-panel" style={detailsWidth === null ? undefined : { width: detailsWidth }}>
+            <div className="flex h-8 shrink-0 items-center border-b border-line bg-sidebar px-2 text-[10px] font-medium uppercase tracking-wider text-fg-muted">
+              Packet bytes (offset · hex · ascii)
+            </div>
+            <div className="min-h-0 flex-1 overflow-auto">
+              {capture && packetBytes ? (
+                <pre className="p-1 font-mono text-[11px] leading-relaxed text-fg-dim">
+                  {packetBytes.rows.map((row) => (
+                    <div key={row.offset}>
+                      <span className="text-fg-muted">{row.offset.toString(16).padStart(4, "0")}</span>
+                      {"  "}
+                      {row.hex}
+                      {"  "}
+                      <span className="text-orange">{row.ascii}</span>
+                    </div>
+                  ))}
+                </pre>
+              ) : !capture ? (
+                <pre className="p-1 font-mono text-[11px] leading-relaxed text-fg-dim">
+                  {hexDump(sampleBytes).map((row) => (
+                    <div key={row.offset}>
+                      <span className="text-fg-muted">{row.offset.toString(16).padStart(4, "0")}</span>
+                      {"  "}
+                      {row.hex}
+                      {"  "}
+                      <span className="text-orange">{row.ascii}</span>
+                    </div>
+                  ))}
+                </pre>
+              ) : null}
+            </div>
           </div>
         </div>
       </div>
@@ -298,11 +311,6 @@ export function PacketStudioView() {
             {t}
           </button>
         ))}
-        <span className="ml-auto font-mono text-[10px] text-fg-muted">
-          {capture
-            ? `engine: hacktool-packet (rust) · ${capture.shown} shown`
-            : "open a pcap for native dissection"}
-        </span>
       </div>
     </div>
   );

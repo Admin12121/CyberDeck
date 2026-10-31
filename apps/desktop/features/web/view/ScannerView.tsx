@@ -77,7 +77,7 @@ export function ScannerView() {
         <span className="ml-auto font-mono text-[10px] text-fg-muted">{findings.length} findings</span>
       </div>
       {error ? <div className="border-b border-err/50 bg-err/10 px-2 py-1 font-mono text-[10px] text-err">{error}</div> : null}
-      <div className="flex min-h-0 flex-1">
+      <div className="flex min-h-0 flex-1 gap-px bg-line">
         <Pane title="Findings" className="min-w-0 flex-1">
           {findings.length === 0 ? (
             <EmptyState title={busy ? "Scanning…" : "No findings yet"} detail="Set a target and run the native scan: reachable paths, security headers, banner disclosure." badge="scanner" />

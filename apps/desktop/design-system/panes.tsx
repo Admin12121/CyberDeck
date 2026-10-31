@@ -25,7 +25,7 @@ export function Pane({
   style?: CSSProperties;
 }) {
   return (
-    <section style={style} className={`flex min-h-0 min-w-0 flex-col border border-line bg-panel ${className}`}>
+    <section style={style} className={`flex min-h-0 min-w-0 flex-col bg-panel ${className}`}>
       <header className="flex h-8 shrink-0 items-center justify-between gap-2 border-b border-line bg-sidebar px-2">
         <span className="truncate text-[10px] font-medium uppercase tracking-wider text-fg-muted">
           {title}

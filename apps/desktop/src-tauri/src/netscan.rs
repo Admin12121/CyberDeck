@@ -198,7 +198,6 @@ fn probe(host: IpAddr, port: u16) -> (String, String) {
                 let _ = std::io::Write::write_all(&mut stream, probe.as_bytes());
             }
             let mut buf = [0u8; 256];
-            use std::io::Read as _;
             if let Ok(n) = std::io::Read::read(&mut stream, &mut buf) {
                 if n > 0 {
                     banner = String::from_utf8_lossy(&buf[..n])
@@ -210,13 +209,6 @@ fn probe(host: IpAddr, port: u16) -> (String, String) {
             ("open".to_string(), banner)
         }
     }
-}
-
-#[derive(Debug, Serialize)]
-pub struct ScanRun {
-    pub tried: u64,
-    pub total: u64,
-    pub percent: u32,
 }
 
 /// Run a scan across all cores. Results append live to the shared store;

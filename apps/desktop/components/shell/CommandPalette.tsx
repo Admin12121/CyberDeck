@@ -29,7 +29,6 @@ export function CommandPalette() {
     const actions: Command[] = [
       { id: "action.job", label: "Run demo job", hint: "Queue a cancellable job through the shared pipeline", run: wb.runDemoJob },
       { id: "action.dock", label: "Toggle jobs dock", hint: "Ctrl+J", run: wb.toggleDock },
-      { id: "action.inspector", label: "Toggle inspector", hint: "Show or hide the contextual inspector", run: wb.toggleInspector },
     ];
     return [...toolCommands, ...actions];
   }, [wb]);

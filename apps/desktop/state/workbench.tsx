@@ -28,9 +28,7 @@ interface WorkbenchApi {
   jobs: Record<number, JobView>;
   paletteOpen: boolean;
   dockOpen: boolean;
-  inspectorOpen: boolean;
   navigatorWidth: number;
-  inspectorWidth: number;
   dockHeight: number;
   selectCategory: (id: CategoryId) => void;
   selectTool: (id: ToolId) => void;
@@ -39,9 +37,7 @@ interface WorkbenchApi {
   setPaletteOpen: (open: boolean) => void;
   setDockOpen: (open: boolean) => void;
   toggleDock: () => void;
-  toggleInspector: () => void;
   setNavigatorWidth: (px: number) => void;
-  setInspectorWidth: (px: number) => void;
   setDockHeight: (px: number) => void;
 }
 
@@ -49,11 +45,10 @@ const WorkbenchContext = createContext<WorkbenchApi | null>(null);
 
 export const PANEL_LIMITS = {
   navigator: { min: 180, max: 340, fallback: 224 },
-  inspector: { min: 240, max: 420, fallback: 288 },
   dock: { min: 140, max: 640, fallback: 280 },
 } as const;
 
-type PanelSizes = { navigator: number; inspector: number; dock: number };
+type PanelSizes = { navigator: number; dock: number };
 
 const STORAGE_KEY = "hacktool.panel-sizes";
 
@@ -64,7 +59,6 @@ function clamp(value: number, min: number, max: number): number {
 function loadPanelSizes(): PanelSizes {
   const fallback: PanelSizes = {
     navigator: PANEL_LIMITS.navigator.fallback,
-    inspector: PANEL_LIMITS.inspector.fallback,
     dock: PANEL_LIMITS.dock.fallback,
   };
   if (typeof window === "undefined") return fallback;
@@ -74,7 +68,6 @@ function loadPanelSizes(): PanelSizes {
     const parsed = JSON.parse(raw) as Partial<PanelSizes>;
     return {
       navigator: clamp(Number(parsed.navigator) || fallback.navigator, PANEL_LIMITS.navigator.min, PANEL_LIMITS.navigator.max),
-      inspector: clamp(Number(parsed.inspector) || fallback.inspector, PANEL_LIMITS.inspector.min, PANEL_LIMITS.inspector.max),
       dock: clamp(Number(parsed.dock) || fallback.dock, PANEL_LIMITS.dock.min, PANEL_LIMITS.dock.max),
     };
   } catch {
@@ -97,13 +90,11 @@ export function WorkbenchProvider({ children }: { children: React.ReactNode }) {
   const [consoleLines, setConsoleLines] = useState<string[]>([]);
   // Default tool is in Crypto, which carries its own side panes; users toggle
   // the inspector from the title bar and it returns automatically elsewhere.
-  const [inspectorOpen, setInspectorOpen] = useState(false);
   // First paint uses the fallback sizes so SSR and hydration match; persisted
   // sizes apply right after mount, and persistence stays off until then.
   const [locationLoaded, setLocationLoaded] = useState(false);
   const [panels, setPanels] = useState<PanelSizes>(() => ({
     navigator: PANEL_LIMITS.navigator.fallback,
-    inspector: PANEL_LIMITS.inspector.fallback,
     dock: PANEL_LIMITS.dock.fallback,
   }));
   const [panelsLoaded, setPanelsLoaded] = useState(false);
@@ -147,9 +138,6 @@ export function WorkbenchProvider({ children }: { children: React.ReactNode }) {
   const setNavigatorWidth = useCallback((px: number) => {
     setPanels((p) => ({ ...p, navigator: clamp(px, PANEL_LIMITS.navigator.min, PANEL_LIMITS.navigator.max) }));
   }, []);
-  const setInspectorWidth = useCallback((px: number) => {
-    setPanels((p) => ({ ...p, inspector: clamp(px, PANEL_LIMITS.inspector.min, PANEL_LIMITS.inspector.max) }));
-  }, []);
   const setDockHeight = useCallback((px: number) => {
     setPanels((p) => ({ ...p, dock: clamp(px, PANEL_LIMITS.dock.min, PANEL_LIMITS.dock.max) }));
   }, []);
@@ -159,14 +147,14 @@ export function WorkbenchProvider({ children }: { children: React.ReactNode }) {
     setTool(firstToolOf(id));
     // Crypto studios carry their own side panes; the global inspector only
     // gets in the way there. Users can still toggle it from the title bar.
-    setInspectorOpen(id !== "crypto" && id !== "web");
+
   }, []);
 
   const selectTool = useCallback((id: ToolId) => {
     setTool(id);
     const cat = id.split(".")[0] as CategoryId;
     setCategory(cat);
-    setInspectorOpen(cat !== "crypto" && cat !== "web");
+
   }, []);
 
   const runDemoJob = useCallback(() => {
@@ -184,7 +172,6 @@ export function WorkbenchProvider({ children }: { children: React.ReactNode }) {
   const logConsole = useCallback((line: string) => {
     setConsoleLines((prev) => [...prev.slice(-499), line]);
   }, []);
-  const toggleInspector = useCallback(() => setInspectorOpen((v) => !v), []);
 
   // Global shortcuts: Ctrl/Cmd+K palette, Ctrl+J jobs dock (Master Plan §3.5)
   useEffect(() => {
@@ -218,9 +205,7 @@ export function WorkbenchProvider({ children }: { children: React.ReactNode }) {
       dockOpen,
       dockTab,
       consoleLines,
-      inspectorOpen,
       navigatorWidth: panels.navigator,
-      inspectorWidth: panels.inspector,
       dockHeight: panels.dock,
       selectCategory,
       selectTool,
@@ -232,9 +217,7 @@ export function WorkbenchProvider({ children }: { children: React.ReactNode }) {
       logConsole,
       setConsoleLines,
       toggleDock,
-      toggleInspector,
       setNavigatorWidth,
-      setInspectorWidth,
       setDockHeight,
     }),
     [
@@ -246,16 +229,13 @@ export function WorkbenchProvider({ children }: { children: React.ReactNode }) {
       dockTab,
       consoleLines,
       panels.navigator,
-      panels.inspector,
       panels.dock,
       selectCategory,
       selectTool,
       runDemoJob,
       cancelJob,
       toggleDock,
-      toggleInspector,
       setNavigatorWidth,
-      setInspectorWidth,
       setDockHeight,
     ],
   );

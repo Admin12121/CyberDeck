@@ -52,7 +52,7 @@ export function StringsView() {
   const rows = hits ?? localHits;
 
   return (
-    <div className="flex h-full min-h-0">
+    <div className="flex h-full min-h-0 gap-px bg-line">
       <EvidenceTree ctx={ctx} />
       <Pane
         title={`Strings: ${ctx.selectedArtifact?.name ?? ctx.selectedSample?.name ?? "no selection"}`}
