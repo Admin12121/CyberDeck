@@ -393,9 +393,15 @@ pub fn follow_stream(packets: &[PacketMeta], stream_id: &str) -> Result<StreamTr
                 break;
             }
             let take = room.min(d.payload.len());
-            let a = endpoints
-                .split_once('|')
-                .is_some_and(|(a, _)| d.source == a.rsplit_once(':').map(|v| v.0).unwrap_or(""));
+            // Source port disambiguates localhost and IPv6 UDP directions.
+            let a = d
+                .layers
+                .iter()
+                .find(|l| l.label == "source port")
+                .map(|p| format!("{}:{}", d.source, p.value) == endpoint_a)
+                .unwrap_or_else(|| {
+                    d.source == endpoint_a.rsplit_once(':').map(|v| v.0).unwrap_or("")
+                });
             result.chunks.push(StreamChunk {
                 dir: if a { "A" } else { "B" }.into(),
                 kind: "datagram".into(),
@@ -735,5 +741,29 @@ mod tests {
         let out = follow_stream(&[a, mismatch], id).unwrap();
         assert!(out.conflicts > 0);
         assert!(out.application_hints.is_empty());
+    }
+
+    #[test]
+    fn udp_same_ip_opposite_ports_preserve_direction() {
+        let id = "udp|127.0.0.1:1234|127.0.0.1:5678";
+        let mut a = packet("A", 1, 0, b"query");
+        a.dissected.source = "127.0.0.1".into();
+        a.dissected.tcp = None;
+        a.dissected.stream_id = Some(id.into());
+        a.dissected.layers = vec![Layer {
+            label: "source port".into(),
+            value: "1234".into(),
+        }];
+        let mut b = packet("B", 1, 0, b"reply");
+        b.dissected.source = "127.0.0.1".into();
+        b.dissected.tcp = None;
+        b.dissected.stream_id = Some(id.into());
+        b.dissected.layers = vec![Layer {
+            label: "source port".into(),
+            value: "5678".into(),
+        }];
+        let result = follow_stream(&[a, b], id).unwrap();
+        assert_eq!(result.chunks[0].dir, "A");
+        assert_eq!(result.chunks[1].dir, "B");
     }
 }

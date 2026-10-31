@@ -980,7 +980,9 @@ async fn handle_conn(mut stream: TcpStream, shared: Arc<ProxyShared>) -> std::io
         reason = reason_phrase(status)
     );
     for (name, value) in &resp_headers {
-        if name.eq_ignore_ascii_case("content-length") || is_hop_header_for_message(name, &resp_headers) {
+        if name.eq_ignore_ascii_case("content-length")
+            || is_hop_header_for_message(name, &resp_headers)
+        {
             continue;
         }
         response.push_str(&format!("{name}: {value}\r\n"));
@@ -1178,7 +1180,9 @@ async fn connect_tunnel(
         reason = reason_phrase(status)
     );
     for (name, value) in &resp_headers {
-        if name.eq_ignore_ascii_case("content-length") || is_hop_header_for_message(name, &resp_headers) {
+        if name.eq_ignore_ascii_case("content-length")
+            || is_hop_header_for_message(name, &resp_headers)
+        {
             continue;
         }
         response.push_str(&format!("{name}: {value}\r\n"));
@@ -1278,10 +1282,17 @@ fn is_hop_header(name: &str) -> bool {
 /// Strip both standard hop-by-hop headers and names nominated by Connection.
 fn is_hop_header_for_message(name: &str, headers: &[(String, String)]) -> bool {
     is_hop_header(name)
-        || headers.iter()
-            .filter(|(key, _)| key.eq_ignore_ascii_case("connection")
-                || key.eq_ignore_ascii_case("proxy-connection"))
-            .any(|(_, value)| value.split(',').any(|token| token.trim().eq_ignore_ascii_case(name)))
+        || headers
+            .iter()
+            .filter(|(key, _)| {
+                key.eq_ignore_ascii_case("connection")
+                    || key.eq_ignore_ascii_case("proxy-connection")
+            })
+            .any(|(_, value)| {
+                value
+                    .split(',')
+                    .any(|token| token.trim().eq_ignore_ascii_case(name))
+            })
 }
 
 /// Text match-and-replace must preserve bytes outside the matched byte ranges.
@@ -1531,14 +1542,15 @@ pub async fn proxy_forward(id: u64, ctx: State<'_, WebCtx>) -> Result<u16, Strin
         &rules,
     );
     let mut stream = pending.stream;
-    use tokio::io::AsyncWriteExt;
     let (status, resp_headers, resp_body) = execute_request(&method, &url, &headers, &body).await;
     let mut response = format!(
         "HTTP/1.1 {status} {reason}\r\n",
         reason = reason_phrase(status)
     );
     for (name, value) in &resp_headers {
-        if name.eq_ignore_ascii_case("content-length") || is_hop_header_for_message(name, &resp_headers) {
+        if name.eq_ignore_ascii_case("content-length")
+            || is_hop_header_for_message(name, &resp_headers)
+        {
             continue;
         }
         response.push_str(&format!("{name}: {value}\r\n"));
@@ -1574,7 +1586,6 @@ pub async fn proxy_drop(id: u64, ctx: State<'_, WebCtx>) -> Result<(), String> {
         .expect("pending poisoned")
         .remove(&id);
     if let Some(mut pending) = pending {
-        use tokio::io::AsyncWriteExt;
         let _ = pending
             .stream
             .write_all(b"HTTP/1.1 502 CyberDeck: request dropped by interceptor\r\ncontent-length: 0\r\nconnection: close\r\n\r\n")
@@ -1747,4 +1758,157 @@ pub async fn engine_scan(
         raw,
         duration_ms: started.elapsed().as_millis() as u64,
     })
+}
+
+#[cfg(test)]
+mod local_wire_tests {
+    use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::{TcpListener, TcpStream};
+
+    fn shared(intercept: bool, ca: Option<Arc<crate::webtls::CaState>>) -> Arc<ProxyShared> {
+        Arc::new(ProxyShared {
+            running: AtomicBool::new(true),
+            intercept: AtomicBool::new(intercept),
+            port: AtomicU16::new(0),
+            rules: Mutex::new(vec![]),
+            captured: Mutex::new(vec![]),
+            pending: Mutex::new(HashMap::new()),
+            next_id: AtomicU64::new(1),
+            ca: Mutex::new(ca),
+            ws: Mutex::new(vec![]),
+        })
+    }
+
+    #[tokio::test]
+    async fn binary_http_roundtrip_through_proxy() {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            let upstream_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let upstream_port = upstream_listener.local_addr().unwrap().port();
+            let upstream = tokio::spawn(async move {
+                let (mut conn, _) = upstream_listener.accept().await.unwrap();
+                let (_, body) = crate::webtls::read_http_message(&mut conn).await.unwrap();
+                assert_eq!(body, vec![0xff,0x00,0x7f]);
+                conn.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: 3\r\nConnection: close\r\n\r\n").await.unwrap();
+                conn.write_all(&[0xff,0x00,0x01]).await.unwrap();
+            });
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let proxy_addr = listener.local_addr().unwrap();
+            let state = shared(false, None);
+            let serve_state = Arc::clone(&state);
+            let worker = tokio::spawn(async move {
+                let (conn, _) = listener.accept().await.unwrap();
+                handle_conn(conn, serve_state).await.unwrap();
+            });
+            let mut browser = TcpStream::connect(proxy_addr).await.unwrap();
+            let head = format!("POST http://127.0.0.1:{upstream_port}/binary HTTP/1.1\r\nHost: 127.0.0.1:{upstream_port}\r\nContent-Length: 3\r\n\r\n");
+            browser.write_all(head.as_bytes()).await.unwrap();
+            browser.write_all(&[0xff,0x00,0x7f]).await.unwrap();
+            let mut output = Vec::new();
+            browser.read_to_end(&mut output).await.unwrap();
+            assert!(output.starts_with(b"HTTP/1.1 200"), "{output:?}");
+            assert!(output.ends_with(&[0xff,0x00,0x01]), "{output:?}");
+            worker.await.unwrap();
+            upstream.await.unwrap();
+            let captured = state.captured.lock().unwrap();
+            assert_eq!(captured.len(), 1);
+            assert_eq!(captured[0].status, 200);
+        }).await.expect("local HTTP proxy timed out");
+    }
+
+    #[tokio::test]
+    async fn connect_half_close_keeps_reverse_flow_alive() {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            let backend_listener=TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let backend_port=backend_listener.local_addr().unwrap().port();
+            let backend=tokio::spawn(async move {
+                let (mut conn,_)=backend_listener.accept().await.unwrap();
+                let mut got=Vec::new();
+                conn.read_to_end(&mut got).await.unwrap();
+                assert_eq!(got,b"PING");
+                conn.write_all(b"PONG").await.unwrap();
+            });
+            let proxy_listener=TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr=proxy_listener.local_addr().unwrap();
+            let state=shared(false,None);
+            let worker=tokio::spawn(async move {
+                let (conn,_)=proxy_listener.accept().await.unwrap();
+                handle_conn(conn,state).await.unwrap();
+            });
+            let mut browser=TcpStream::connect(addr).await.unwrap();
+            browser.write_all(format!("CONNECT 127.0.0.1:{backend_port} HTTP/1.1\r\nHost: 127.0.0.1:{backend_port}\r\n\r\n").as_bytes()).await.unwrap();
+            let (established,_)=crate::webtls::read_http_message(&mut browser).await.unwrap();
+            assert!(established.starts_with("HTTP/1.1 200"), "{established}");
+            browser.write_all(b"PING").await.unwrap();
+            browser.shutdown().await.unwrap();
+            let mut got=Vec::new();
+            browser.read_to_end(&mut got).await.unwrap();
+            assert_eq!(got,b"PONG");
+            worker.await.unwrap(); backend.await.unwrap();
+        }).await.expect("CONNECT passthrough timed out");
+    }
+
+    #[tokio::test]
+    async fn intercepted_tls_request_can_be_dropped() {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            let folder = tempfile::tempdir().unwrap();
+            let ca = crate::webtls::init_ca(folder.path()).unwrap();
+            let shared = shared(true, Some(Arc::clone(&ca)));
+            let proxy_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = proxy_listener.local_addr().unwrap();
+            let worker_state = Arc::clone(&shared);
+            let worker = tokio::spawn(async move {
+                let (conn, _) = proxy_listener.accept().await.unwrap();
+                handle_conn(conn, worker_state).await.unwrap();
+            });
+            let mut browser = TcpStream::connect(addr).await.unwrap();
+            browser
+                .write_all(b"CONNECT localhost:8443 HTTP/1.1\r\nHost: localhost:8443\r\n\r\n")
+                .await
+                .unwrap();
+            let (established, _) = crate::webtls::read_http_message(&mut browser)
+                .await
+                .unwrap();
+            assert!(established.starts_with("HTTP/1.1 200"));
+            let mut roots = rustls::RootCertStore::empty();
+            roots
+                .add(rustls::pki_types::CertificateDer::from(
+                    crate::webtls::pem_to_der(&ca.cert_pem),
+                ))
+                .unwrap();
+            let config = rustls::ClientConfig::builder()
+                .with_root_certificates(roots)
+                .with_no_client_auth();
+            let connector = tokio_rustls::TlsConnector::from(Arc::new(config));
+            let mut tls = connector
+                .connect(
+                    rustls::pki_types::ServerName::try_from("localhost".to_string()).unwrap(),
+                    browser,
+                )
+                .await
+                .unwrap();
+            tls.write_all(b"GET /health HTTP/1.1\r\nHost: localhost:8443\r\n\r\n")
+                .await
+                .unwrap();
+            worker.await.unwrap();
+            assert_eq!(shared.pending.lock().unwrap().len(), 1);
+            let ctx = WebCtx {
+                proxy_running: AtomicBool::new(true),
+                proxy_port: AtomicU16::new(0),
+                proxy_handle: Mutex::new(None),
+                shared,
+                ca: Mutex::new(Some(ca)),
+            };
+            proxy_drop(1, &ctx).await.unwrap();
+            let mut response = [0u8; 512];
+            let size = tls.read(&mut response).await.unwrap();
+            assert!(
+                response[..size].starts_with(b"HTTP/1.1 502"),
+                "{:?}",
+                &response[..size]
+            );
+        })
+        .await
+        .expect("HTTPS intercepted request timed out");
+    }
 }

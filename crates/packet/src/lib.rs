@@ -439,7 +439,22 @@ fn dissect_ipv4(payload: &[u8], parent_layers: &[Layer]) -> Dissected {
     if total_length < ihl {
         return empty_frame();
     }
-    let effective_end = total_length.min(payload.len());
+    // Snapshot-length truncation is not IP fragmentation. A partial TCP
+    // payload must not become part of a supposedly reconstructed stream.
+    if total_length > payload.len() {
+        return Dissected {
+            source,
+            destination,
+            protocol: "IPv4-truncated".into(),
+            info: format!("Captured {} of {total_length} IPv4 byte(s)", payload.len()),
+            color_hint: color_for("other"),
+            layers,
+            stream_id: None,
+            tcp: None,
+            payload: Vec::new(),
+        };
+    }
+    let effective_end = total_length;
     let transport = &payload[ihl..effective_end];
     let fragment_bits = u16::from_be_bytes([payload[6], payload[7]]);
     let fragment_offset = (fragment_bits & 0x1fff) as usize * 8;
@@ -532,7 +547,22 @@ fn dissect_ipv6(payload: &[u8], parent_layers: &[Layer]) -> Dissected {
             payload: Vec::new(),
         };
     }
-    let end = (40usize.saturating_add(payload_len)).min(payload.len());
+    let Some(end) = 40usize.checked_add(payload_len) else {
+        return empty_frame();
+    };
+    if end > payload.len() {
+        return Dissected {
+            source,
+            destination,
+            protocol: "IPv6-truncated".into(),
+            info: format!("Captured {} of {end} IPv6 byte(s)", payload.len()),
+            color_hint: color_for("IPv6"),
+            layers,
+            stream_id: None,
+            tcp: None,
+            payload: Vec::new(),
+        };
+    }
     let mut cursor = 40usize;
     for _ in 0..8 {
         let extension = next;
@@ -1306,5 +1336,35 @@ mod tests {
         assert_eq!(derived.last_packet_index, 1);
         assert_eq!(derived.dissected.protocol, "DNS");
         assert_eq!(&derived.ip_packet[20..], &udp);
+    }
+
+    #[test]
+    fn ipv4_snaplen_truncation_never_promotes_partial_udp() {
+        let mut ip = vec![0x45, 0, 0, 36, 0, 1, 0, 0, 64, 17, 0, 0];
+        ip.extend_from_slice(&[192, 0, 2, 1, 192, 0, 2, 2]);
+        ip.extend_from_slice(&[0x04, 0xd2, 0, 53, 0, 8, 0, 0]);
+        let truncated = dissect(101, &ip);
+        assert_eq!(truncated.protocol, "IPv4-truncated");
+        assert!(truncated.stream_id.is_none());
+        assert!(truncated.payload.is_empty());
+        assert!(truncated.tcp.is_none());
+        ip[2..4].copy_from_slice(&(ip.len() as u16).to_be_bytes());
+        assert_eq!(dissect(101, &ip).protocol, "UDP");
+    }
+
+    #[test]
+    fn ipv6_snaplen_truncation_never_promotes_partial_udp() {
+        let mut ip = vec![0x60, 0, 0, 0, 0, 24, 17, 64];
+        ip.extend_from_slice(&[0; 15]);
+        ip.push(1);
+        ip.extend_from_slice(&[0; 15]);
+        ip.push(2);
+        ip.extend_from_slice(&[0x04, 0xd2, 0, 53, 0, 8, 0, 0]);
+        let truncated = dissect(101, &ip);
+        assert_eq!(truncated.protocol, "IPv6-truncated");
+        assert!(truncated.stream_id.is_none());
+        assert!(truncated.payload.is_empty());
+        ip[4..6].copy_from_slice(&8u16.to_be_bytes());
+        assert_eq!(dissect(101, &ip).protocol, "UDP");
     }
 }

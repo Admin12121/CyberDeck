@@ -77,6 +77,7 @@ fn main() {
             evidence::file_list,
             evidence::file_hex,
             evidence::file_signature_scan,
+            evidence::file_binary_inspect,
             evidence::file_extract_gzip,
             evidence::file_extract_archive,
             evidence::file_strings,

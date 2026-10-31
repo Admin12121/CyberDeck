@@ -7,6 +7,8 @@ import {
   fileSignatureScan,
   fileExtractGzip,
   fileExtractArchive,
+  fileBinaryInspect,
+  type BinaryInfoWire,
   type SignatureScanWire,
   fileImportDialog,
   fileList,
@@ -27,11 +29,13 @@ export function FileAnalysisView() {
   const ctx = useEvidence();
   const wb = useWorkbench();
   const [scan, setScan] = useState<SignatureScanWire | null>(null);
+  const [binary, setBinary] = useState<BinaryInfoWire | null>(null);
+  const [binaryBusy, setBinaryBusy] = useState(false);
   const [scanBusy, setScanBusy] = useState(false);
   const [scanError, setScanError] = useState<string | null>(null);
   const [extracting, setExtracting] = useState<number | null>(null);
   const [extractNote, setExtractNote] = useState<string | null>(null);
-  useEffect(() => { setScan(null); setScanError(null); setExtractNote(null); }, [ctx.selectedArtifact?.id, wb.caseId]);
+  useEffect(() => { setScan(null); setBinary(null); setScanError(null); setExtractNote(null); }, [ctx.selectedArtifact?.id, wb.caseId]);
   const extract = async (offset: number) => {
     const artifact = ctx.selectedArtifact;
     if (!artifact || extracting !== null) return;
@@ -57,6 +61,16 @@ export function FileAnalysisView() {
       await ctx.refresh();
     } catch (cause) { setScanError(String(cause)); }
     finally { setExtracting(null); }
+  };
+  const inspectBinary = async () => {
+    const selected = ctx.selectedArtifact;
+    if (!selected) return;
+    setBinaryBusy(true);
+    setScanError(null);
+    setBinary(null);
+    try { setBinary(await fileBinaryInspect(wb.caseId, selected.id)); }
+    catch (cause) { setScanError(String(cause)); }
+    finally { setBinaryBusy(false); }
   };
   const runScan = async () => {
     const artifact = ctx.selectedArtifact;
@@ -109,6 +123,27 @@ export function FileAnalysisView() {
             title="Native Rust scan of the first 16 MiB; includes SHA-256 verification for smaller evidence">
             {scanBusy ? "Scanning…" : "Scan Embedded Formats"}
           </ToolButton>
+          <ToolButton onClick={() => void inspectBinary()} disabled={!ctx.selectedArtifact || !ctx.desktop || binaryBusy}
+            title="Native PE, ELF and Mach-O structural inspection with SHA-256 verification and strict size limits">
+            {binaryBusy ? "Inspecting…" : "Inspect Executable"}
+          </ToolButton>
+          {binary ? (
+            <div className="space-y-1 border-t border-line py-2 font-mono text-[10px] text-fg-dim">
+              <div className="text-fg">{binary.format.toUpperCase()} · {binary.architecture} · {binary.bits}-bit</div>
+              <div>{binary.little_endian ? "Little-endian" : "Big-endian"} · {binary.sections.length} sections</div>
+              <div>Entry ({binary.entry_kind}): {binary.entry_point === null ? "n/a" : `0x${binary.entry_point.toString(16)}`}</div>
+              <div className="max-h-60 overflow-y-auto border-t border-line">
+                {binary.sections.slice(0, 64).map((section, index) => (
+                  <div key={index} className="border-b border-line/50 py-1">
+                    <div className="text-fg break-all">{section.name || `section ${index}`}</div>
+                    <div>file 0x{section.offset.toString(16)} · {section.size} bytes</div>
+                    <div>address 0x{section.address.toString(16)}</div>
+                  </div>
+                ))}
+                {binary.sections.length > 64 ? <div>Showing first 64 of {binary.sections.length} sections</div> : null}
+              </div>
+            </div>
+          ) : null}
           {scanError ? <div className="text-xs text-err">{scanError}</div> : null}
           {extractNote ? <div className="text-xs text-fg">{extractNote}</div> : null}
           {scan ? (

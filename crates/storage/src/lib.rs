@@ -118,13 +118,30 @@ impl ArtifactStore {
             std::fs::create_dir_all(parent)
                 .map_err(|e| format!("cannot create store directory: {e}"))?;
         }
-        let conn =
+        let mut conn =
             Connection::open(path).map_err(|e| format!("cannot open artifact index: {e}"))?;
         conn.execute_batch(
-            "PRAGMA journal_mode = WAL;
-             CREATE TABLE IF NOT EXISTS artifacts (
+            "PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;",
+        )
+        .map_err(|e| format!("cannot configure artifact index: {e}"))?;
+        const SCHEMA_VERSION: i64 = 1;
+        let version: i64 = conn
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .map_err(|e| format!("cannot read artifact index version: {e}"))?;
+        if version > SCHEMA_VERSION {
+            return Err(format!(
+                "artifact index schema {version} is newer than supported {SCHEMA_VERSION}"
+            ));
+        }
+        if version < SCHEMA_VERSION {
+            let migration = conn
+                .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+                .map_err(|e| format!("cannot begin artifact index migration: {e}"))?;
+            migration
+                .execute_batch(
+                    "CREATE TABLE IF NOT EXISTS artifacts (
                  id            TEXT PRIMARY KEY,
-                 case_id       TEXT NOT NULL,
+                 case_id       TEXT NOT NULL REFERENCES cases(id),
                  name          TEXT NOT NULL,
                  stored_path   TEXT NOT NULL,
                  original_path TEXT,
@@ -177,8 +194,38 @@ impl ArtifactStore {
                  recovered_at TEXT NOT NULL,
                  UNIQUE(hash, password)
              );",
-        )
-        .map_err(|e| format!("cannot initialize artifact index: {e}"))?;
+                )
+                .map_err(|e| format!("cannot initialize artifact index: {e}"))?;
+            // Trigger guards also protect legacy tables which lack artifact foreign keys.
+            migration.execute_batch(r#"
+                CREATE TRIGGER IF NOT EXISTS artifact_case_insert BEFORE INSERT ON artifacts
+                WHEN NOT EXISTS(SELECT 1 FROM cases WHERE id=NEW.case_id)
+                BEGIN SELECT RAISE(ABORT,'artifact case missing'); END;
+                CREATE TRIGGER IF NOT EXISTS artifact_case_update BEFORE UPDATE OF case_id ON artifacts
+                WHEN NOT EXISTS(SELECT 1 FROM cases WHERE id=NEW.case_id)
+                BEGIN SELECT RAISE(ABORT,'artifact case missing'); END;
+                CREATE TRIGGER IF NOT EXISTS artifact_identity_immutable BEFORE UPDATE ON artifacts
+                WHEN NEW.id!=OLD.id OR NEW.case_id!=OLD.case_id OR NEW.sha256!=OLD.sha256
+                  OR NEW.size!=OLD.size OR NEW.stored_path!=OLD.stored_path
+                BEGIN SELECT RAISE(ABORT,'artifact identity immutable'); END;
+                CREATE TRIGGER IF NOT EXISTS finding_artifact_scope BEFORE INSERT ON findings
+                WHEN NEW.artifact_id IS NOT NULL AND NOT EXISTS
+                    (SELECT 1 FROM artifacts WHERE id=NEW.artifact_id AND case_id=NEW.case_id)
+                BEGIN SELECT RAISE(ABORT,'finding artifact case mismatch'); END;
+                CREATE TRIGGER IF NOT EXISTS event_artifact_scope BEFORE INSERT ON case_events
+                WHEN NEW.artifact_id IS NOT NULL AND NOT EXISTS
+                    (SELECT 1 FROM artifacts WHERE id=NEW.artifact_id AND case_id=NEW.case_id)
+                BEGIN SELECT RAISE(ABORT,'event artifact case mismatch'); END;
+                CREATE TRIGGER IF NOT EXISTS event_immutable_update BEFORE UPDATE ON case_events
+                BEGIN SELECT RAISE(ABORT,'provenance immutable'); END;
+                CREATE TRIGGER IF NOT EXISTS event_immutable_delete BEFORE DELETE ON case_events
+                BEGIN SELECT RAISE(ABORT,'provenance immutable'); END;
+                PRAGMA user_version = 1;
+            "#).map_err(|e| format!("cannot migrate artifact index: {e}"))?;
+            migration
+                .commit()
+                .map_err(|e| format!("cannot commit artifact index migration: {e}"))?;
+        }
         Ok(Self { conn })
     }
 
@@ -280,13 +327,20 @@ impl ArtifactStore {
             }
         }
         let now = timestamp_ms();
+        let transaction = self
+            .conn
+            .unchecked_transaction()
+            .map_err(|e| format!("cannot start findings transaction: {e}"))?;
         for f in findings {
-            self.conn.execute(
+            transaction.execute(
                 "INSERT INTO findings (case_id,source,title,severity,details,artifact_id,created_ms)
                  VALUES (?1,?2,?3,?4,?5,?6,?7)",
                 params![case_id,source,f.title,f.severity,f.details,artifact_id,now],
             ).map_err(|e| format!("cannot store finding: {e}"))?;
         }
+        transaction
+            .commit()
+            .map_err(|e| format!("cannot commit findings: {e}"))?;
         Ok(findings.len())
     }
 
@@ -445,16 +499,13 @@ impl ArtifactStore {
         if !self.case_exists(&record.case_id)? {
             return Err("case not found".into());
         }
-        self.conn
+        let inserted = self
+            .conn
             .execute(
                 "INSERT INTO artifacts (id, case_id, name, stored_path, original_path, size,
                                         sha256, md5, sha1, crc32, signature, entropy, imported_at)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
-                 ON CONFLICT(id) DO UPDATE SET
-                    case_id=excluded.case_id, name=excluded.name, stored_path=excluded.stored_path,
-                    original_path=excluded.original_path, size=excluded.size, sha256=excluded.sha256,
-                    md5=excluded.md5, sha1=excluded.sha1, crc32=excluded.crc32,
-                    signature=excluded.signature, entropy=excluded.entropy, imported_at=excluded.imported_at",
+                 ON CONFLICT(id) DO NOTHING",
                 params![
                     record.id,
                     record.case_id,
@@ -472,6 +523,18 @@ impl ArtifactStore {
                 ],
             )
             .map_err(|e| format!("cannot persist artifact record: {e}"))?;
+        if inserted == 0 {
+            let existing = self
+                .get_artifact(&record.id)?
+                .ok_or_else(|| "conflicting artifact disappeared".to_string())?;
+            if existing.case_id != record.case_id
+                || existing.sha256 != record.sha256
+                || existing.size != record.size
+                || existing.stored_path != record.stored_path
+            {
+                return Err("artifact identifier conflicts with immutable evidence".into());
+            }
+        }
         Ok(())
     }
 
@@ -771,16 +834,113 @@ mod tests {
     }
 
     #[test]
-    fn upsert_same_id_replaces() {
+    fn upsert_same_id_is_idempotent_but_never_replaces_evidence() {
         let dir = tempfile::tempdir().unwrap();
         let store = ArtifactStore::open(&dir.path().join("index.db")).unwrap();
         store.upsert_artifact(&record("a1")).unwrap();
+        store.upsert_artifact(&record("a1")).unwrap();
         let mut updated = record("a1");
         updated.size = 999;
-        store.upsert_artifact(&updated).unwrap();
+        assert!(store.upsert_artifact(&updated).is_err());
         let list = store.list_artifacts(DEFAULT_CASE).unwrap();
         assert_eq!(list.len(), 1);
-        assert_eq!(list[0].size, 999);
+        assert_eq!(list[0].size, 128);
+        assert!(store
+            .conn
+            .execute("UPDATE artifacts SET sha256='modified' WHERE id='a1'", [])
+            .is_err());
+    }
+
+    #[test]
+    fn migration_preserves_legacy_index_and_enforces_cases() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("index.db");
+        {
+            let legacy = Connection::open(&db).unwrap();
+            legacy.execute_batch(
+                "CREATE TABLE artifacts (
+                    id TEXT PRIMARY KEY, case_id TEXT NOT NULL, name TEXT NOT NULL,
+                    stored_path TEXT NOT NULL, original_path TEXT, size INTEGER NOT NULL,
+                    sha256 TEXT NOT NULL, md5 TEXT NOT NULL, sha1 TEXT NOT NULL,
+                    crc32 TEXT NOT NULL, signature TEXT, entropy REAL NOT NULL,
+                    imported_at TEXT NOT NULL
+                 );
+                 INSERT INTO artifacts VALUES
+                    ('legacy','scratchpad','old.bin','/old/path',NULL,1,'aa','bb','cc','dd',NULL,0.0,'old');"
+            ).unwrap();
+        }
+        let store = ArtifactStore::open(&db).unwrap();
+        assert_eq!(
+            store.get_artifact("legacy").unwrap().unwrap().stored_path,
+            "/old/path"
+        );
+        let v: i64 = store
+            .conn
+            .pragma_query_value(None, "user_version", |r| r.get(0))
+            .unwrap();
+        assert_eq!(v, 1);
+        assert!(store.conn.execute("INSERT INTO artifacts SELECT 'orphan','not-a-case',name,stored_path,original_path,size,sha256,md5,sha1,crc32,signature,entropy,imported_at FROM artifacts WHERE id='legacy'", []).is_err());
+        assert!(store
+            .conn
+            .execute(
+                "UPDATE artifacts SET case_id='not-a-case' WHERE id='legacy'",
+                []
+            )
+            .is_err());
+        drop(store);
+        assert!(ArtifactStore::open(&db).is_ok());
+    }
+
+    #[test]
+    fn failed_finding_batch_rolls_back_transaction() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ArtifactStore::open(&dir.path().join("index.db")).unwrap();
+        store
+            .conn
+            .execute_batch(
+                "CREATE TRIGGER reject_test BEFORE INSERT ON findings
+             WHEN NEW.title='reject' BEGIN SELECT RAISE(ABORT,'test rejection'); END;",
+            )
+            .unwrap();
+        let result = store.add_findings(
+            DEFAULT_CASE,
+            "test",
+            None,
+            &[
+                NewFinding {
+                    title: "ok".into(),
+                    severity: "info".into(),
+                    details: "one".into(),
+                },
+                NewFinding {
+                    title: "reject".into(),
+                    severity: "info".into(),
+                    details: "two".into(),
+                },
+            ],
+        );
+        assert!(result.is_err());
+        assert!(store.list_findings(DEFAULT_CASE).unwrap().is_empty());
+    }
+
+    #[test]
+    fn provenance_events_are_immutable() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ArtifactStore::open(&dir.path().join("index.db")).unwrap();
+        let id = store
+            .record_event(DEFAULT_CASE, "test", "import", None, "source")
+            .unwrap();
+        assert!(store
+            .conn
+            .execute(
+                "UPDATE case_events SET action='edited' WHERE id=?1",
+                params![id]
+            )
+            .is_err());
+        assert!(store
+            .conn
+            .execute("DELETE FROM case_events WHERE id=?1", params![id])
+            .is_err());
     }
 
     #[test]

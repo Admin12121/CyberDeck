@@ -276,6 +276,42 @@ fn load_record_bytes(
     Ok((record, bytes))
 }
 
+/// Inspect one case artifact without executing it. Limited to 16 MiB; every
+/// inspected byte is checked against the immutable evidence digest.
+#[tauri::command]
+pub fn file_binary_inspect(
+    ctx: State<'_, EvidenceCtx>,
+    case_id: String,
+    id: String,
+) -> Result<cyberdeck_crypto::formats::binary::BinaryInfo, String> {
+    binary_inspect(&ctx, &case_id, &id)
+}
+
+fn binary_inspect(
+    ctx: &EvidenceCtx,
+    case_id: &str,
+    id: &str,
+) -> Result<cyberdeck_crypto::formats::binary::BinaryInfo, String> {
+    use cyberdeck_crypto::formats::binary::{inspect_binary, MAX_BINARY_BYTES};
+    validate_case_id(case_id)?;
+    let record = ctx
+        .store
+        .lock()
+        .map_err(|_| "case store unavailable")?
+        .get_artifact(id)?
+        .filter(|item| item.case_id == case_id)
+        .ok_or("artifact not found in selected case")?;
+    if record.size > MAX_BINARY_BYTES as u64 {
+        return Err("binary inspection currently limited to 16 MiB evidence".into());
+    }
+    let bytes =
+        std::fs::read(&record.stored_path).map_err(|e| format!("cannot read evidence: {e}"))?;
+    if bytes.len() as u64 != record.size || digest_of("sha256", &bytes)? != record.sha256 {
+        return Err("source evidence integrity failure".into());
+    }
+    inspect_binary(&bytes)
+}
+
 #[derive(Debug, Serialize)]
 pub struct SignatureScanResponse {
     pub hits: Vec<cyberdeck_crypto::formats::SignatureHit>,
@@ -652,6 +688,34 @@ mod tests {
             store: Mutex::new(ArtifactStore::open(&dir.join("index.db")).unwrap()),
             artifacts_dir: dir.to_path_buf(),
         }
+    }
+
+    #[test]
+    fn binary_inspection_requires_case_membership_and_intact_evidence() {
+        let temp = tempfile::tempdir().unwrap();
+        let ctx = test_ctx(temp.path());
+        let mut elf = vec![0u8; 64];
+        elf[..4].copy_from_slice(b"\x7fELF");
+        elf[4..7].copy_from_slice(&[2, 1, 1]);
+        elf[18..20].copy_from_slice(&183u16.to_le_bytes());
+        let record = import_bytes(&ctx, Path::new("sample.elf"), &elf, DEFAULT_CASE, true).unwrap();
+        assert_eq!(
+            binary_inspect(&ctx, DEFAULT_CASE, &record.id)
+                .unwrap()
+                .architecture,
+            "ARM64"
+        );
+        let another = ctx
+            .store
+            .lock()
+            .unwrap()
+            .create_case("Other case", "")
+            .unwrap();
+        assert!(binary_inspect(&ctx, &another.id, &record.id).is_err());
+        std::fs::write(&record.stored_path, b"modified").unwrap();
+        assert!(binary_inspect(&ctx, DEFAULT_CASE, &record.id)
+            .unwrap_err()
+            .contains("integrity"));
     }
 
     #[test]

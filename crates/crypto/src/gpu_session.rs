@@ -18,18 +18,21 @@ const PROGRAM_BUILD_LOG: u32 = 0x1183;
 pub(super) enum Algorithm {
     Sha256,
     Md5,
+    Sha1,
 }
 impl Algorithm {
     fn digest_bytes(self) -> usize {
         match self {
             Self::Sha256 => 32,
             Self::Md5 => 16,
+            Self::Sha1 => 20,
         }
     }
     fn verify(self, candidate: &[u8], target: &[u8]) -> bool {
         match self {
             Self::Sha256 => Sha256::digest(candidate).as_slice() == target,
             Self::Md5 => md5::Md5::digest(candidate).as_slice() == target,
+            Self::Sha1 => sha1::Sha1::digest(candidate).as_slice() == target,
         }
     }
 }
@@ -112,6 +115,7 @@ impl Session {
             let source = match algorithm {
                 Algorithm::Sha256 => include_str!("sha256.cl"),
                 Algorithm::Md5 => include_str!("md5.cl"),
+                Algorithm::Sha1 => include_str!("sha1.cl"),
             };
             let source_ptr = source.as_ptr().cast::<c_char>();
             let source_len = source.len();
@@ -169,6 +173,7 @@ impl Session {
             let name = CString::new(match algorithm {
                 Algorithm::Sha256 => "sha256_match",
                 Algorithm::Md5 => "md5_match",
+                Algorithm::Sha1 => "sha1_match",
             })
             .expect("kernel name");
             let kernel = Owned {
@@ -249,7 +254,7 @@ impl Session {
         let words: Vec<u32> = target
             .chunks_exact(4)
             .map(|b| match self.algorithm {
-                Algorithm::Sha256 => u32::from_be_bytes(b.try_into().expect("digest word")),
+                Algorithm::Sha256 | Algorithm::Sha1 => u32::from_be_bytes(b.try_into().expect("digest word")),
                 Algorithm::Md5 => u32::from_le_bytes(b.try_into().expect("digest word")),
             })
             .collect();

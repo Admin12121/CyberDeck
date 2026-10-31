@@ -5,6 +5,9 @@
 //! coverage, but no Binwalk parser/extractor code is incorporated here.
 //! Each detection is a candidate, not proof of a complete/valid embedded file.
 
+#[path = "binary.rs"]
+pub mod binary;
+
 use serde::Serialize;
 
 pub const MAX_SIGNATURE_HITS: usize = 256;

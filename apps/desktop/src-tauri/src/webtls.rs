@@ -301,6 +301,53 @@ mod framing_tests {
     }
 }
 
+#[cfg(test)]
+mod certificate_tests {
+    use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    #[tokio::test]
+    async fn saved_ca_signs_trusted_leaves_after_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = init_ca(dir.path()).unwrap();
+        let reloaded = init_ca(dir.path()).unwrap();
+        assert_eq!(first.cert_pem, reloaded.cert_pem);
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            let mut connection = tls_acceptor(&reloaded, "localhost")
+                .unwrap()
+                .accept(socket)
+                .await
+                .unwrap();
+            let mut message = [0u8; 4];
+            connection.read_exact(&mut message).await.unwrap();
+            assert_eq!(&message, b"PING");
+            connection.write_all(b"PONG").await.unwrap();
+            connection.flush().await.unwrap();
+        });
+
+        let mut roots = rustls::RootCertStore::empty();
+        roots
+            .add(CertificateDer::from(pem_to_der(&first.cert_pem)))
+            .unwrap();
+        let client_config = rustls::ClientConfig::builder()
+            .with_root_certificates(roots)
+            .with_no_client_auth();
+        let connector = TlsConnector::from(Arc::new(client_config));
+        let socket = tokio::net::TcpStream::connect(address).await.unwrap();
+        let server_name = rustls::pki_types::ServerName::try_from("localhost".to_string()).unwrap();
+        let mut connection = connector.connect(server_name, socket).await.unwrap();
+        connection.write_all(b"PING").await.unwrap();
+        let mut message = [0u8; 4];
+        connection.read_exact(&mut message).await.unwrap();
+        assert_eq!(&message, b"PONG");
+        server.await.unwrap();
+    }
+}
+
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct WsConnection {
     pub host: String,

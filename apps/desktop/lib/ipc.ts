@@ -239,6 +239,26 @@ export async function fileImportDerived(caseId: string, name: string, bytes: Uin
   return invoke<ArtifactRecord>("file_import_derived", { caseId, name, dataB64: b64.encode(bytes), sourceDescription: sourceDescription ?? null });
 }
 
+export interface BinarySectionWire {
+  name: string;
+  offset: number;
+  size: number;
+  address: number;
+}
+export interface BinaryInfoWire {
+  format: "pe" | "elf" | "mach-o";
+  architecture: string;
+  bits: number;
+  little_endian: boolean;
+  entry_point: number | null;
+  entry_kind: "rva" | "virtual-address" | "file-offset";
+  sections: BinarySectionWire[];
+}
+export async function fileBinaryInspect(caseId: string, id: string): Promise<BinaryInfoWire> {
+  if (!inTauri) throw new Error("Binary inspection requires the native desktop runtime");
+  return invoke<BinaryInfoWire>("file_binary_inspect", { caseId, id });
+}
+
 export interface SignatureScanWire {
   hits: { offset: number; format: string; description: string }[];
   scanned_bytes: number;

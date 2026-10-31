@@ -352,6 +352,7 @@ pub struct FragmentReassembler {
     rejected: HashSet<Key>,
     report: ReassemblyReport,
     inspected: usize,
+    blocked: bool,
 }
 
 impl Default for FragmentReassembler {
@@ -361,6 +362,7 @@ impl Default for FragmentReassembler {
             rejected: HashSet::new(),
             report: ReassemblyReport::default(),
             inspected: 0,
+            blocked: false,
         }
     }
 }
@@ -371,7 +373,7 @@ impl FragmentReassembler {
     }
 
     pub fn push_frame(&mut self, linktype: u32, frame: &[u8], packet_index: usize) {
-        if self.inspected >= MAX_FRAGMENTS_TOTAL {
+        if self.blocked || self.inspected >= MAX_FRAGMENTS_TOTAL {
             self.report.limited = true;
             return;
         }
@@ -403,7 +405,10 @@ impl FragmentReassembler {
                 if self.rejected.len() < MAX_ACTIVE_DATAGRAMS {
                     self.rejected.insert(key);
                 } else {
+                    // Do not re-accept an untracked, previously rejected
+                    // datagram once poisoned-key capacity is exhausted.
                     self.report.limited = true;
+                    self.blocked = true;
                 }
             }
             Ok(true) => {
@@ -435,6 +440,7 @@ impl FragmentReassembler {
         self.report.incomplete += self.active.len();
         self.active.clear();
         self.rejected.clear();
+        self.blocked = false;
     }
 
     pub fn finish(mut self) -> ReassemblyReport {
@@ -622,5 +628,22 @@ mod tests {
         let mut assembler = FragmentReassembler::new();
         assembler.push_frame(101, &sample, 0);
         assert_eq!(assembler.finish().malformed, 1);
+    }
+
+    #[test]
+    fn rejected_key_cap_exhaustion_fails_closed() {
+        let original = udp();
+        let mut changed = original[..16].to_vec();
+        changed[1] ^= 1;
+        let mut assembler = FragmentReassembler::new();
+        for i in 0..=MAX_ACTIVE_DATAGRAMS {
+            assembler.push_frame(101, &v4(i as u16, 0, true, &original[..16]), i * 2);
+            assembler.push_frame(101, &v4(i as u16, 0, true, &changed), i * 2 + 1);
+        }
+        assembler.push_frame(101, &v4(200, 0, true, &original[..16]), 1000);
+        assembler.push_frame(101, &v4(200, 16, false, &original[16..]), 1001);
+        let report = assembler.finish();
+        assert!(report.completed.is_empty());
+        assert!(report.limited);
     }
 }
