@@ -197,6 +197,8 @@ pub fn kdf_format(hash: &str) -> Option<&'static str> {
         Some("argon2i")
     } else if hash.starts_with("$argon2d$") {
         Some("argon2d")
+    } else if hash.starts_with("$y$") || hash.starts_with("$7$") {
+        Some("yescrypt")
     } else if hash.starts_with("$scrypt$") {
         Some("scrypt")
     } else if hash.starts_with("$pbkdf2-sha256$") {
@@ -221,6 +223,12 @@ pub fn verify_kdf(hash: &str, candidate: &str) -> Result<bool, String> {
             let parsed = PasswordHash::new(hash).map_err(|e| format!("invalid scrypt hash string: {e}"))?;
             Ok(scrypt::Scrypt.verify_password(candidate.as_bytes(), &parsed).is_ok())
         }
+        Some("yescrypt") => {
+            use yescrypt::password_hash::PasswordVerifier as _;
+            Ok(yescrypt::Yescrypt::default()
+                .verify_password(candidate.as_bytes(), hash)
+                .is_ok())
+        }
         Some(format) if format.starts_with("pbkdf2") => {
             let parsed = PasswordHash::new(hash).map_err(|e| format!("invalid pbkdf2 hash string: {e}"))?;
             Ok(pbkdf2::Pbkdf2.verify_password(candidate.as_bytes(), &parsed).is_ok())
@@ -229,7 +237,7 @@ pub fn verify_kdf(hash: &str, candidate: &str) -> Result<bool, String> {
             let parsed = PasswordHash::new(hash).map_err(|e| format!("invalid argon2 hash string: {e}"))?;
             Ok(argon2::Argon2::default().verify_password(candidate.as_bytes(), &parsed).is_ok())
         }
-        None => Err("unsupported KDF format; bcrypt, argon2, scrypt and pbkdf2 are supported natively".to_string()),
+        None => Err("unsupported KDF format; bcrypt, argon2, scrypt, pbkdf2 and yescrypt are supported natively".to_string()),
     }
 }
 
@@ -448,6 +456,20 @@ mod tests {
         // "abc" per the Keccak team's SHA3-256 test vector
         let out = apply_op("sha3_256", b"abc", None).unwrap();
         assert_eq!(hex::encode(out), "3a985da74fe225b2045c172d6bd390bd855f086e3e9d525b46bfe24511431532");
+    }
+
+    #[test]
+    fn yescrypt_verify_roundtrip() {
+        use yescrypt::password_hash::CustomizedPasswordHasher as _;
+        let salt = b"0123456789abcdef";
+        let hash = yescrypt::Yescrypt::default()
+            .hash_password_customized(b"hello", salt, None, None, yescrypt::Params::default())
+            .unwrap()
+            .to_string();
+        assert!(hash.starts_with("$y$"));
+        assert!(verify_kdf(&hash, "hello").unwrap());
+        assert!(!verify_kdf(&hash, "world").unwrap());
+        assert_eq!(kdf_format(&hash), Some("yescrypt"));
     }
 
     #[test]

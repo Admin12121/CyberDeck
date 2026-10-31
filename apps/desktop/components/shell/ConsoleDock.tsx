@@ -4,8 +4,7 @@
  * (help, clear, scan, spider, get, crack, status).
  */
 import { useState } from "react";
-import { crackWordlistDialog, httpSend, isDesktop, spiderScan, webScan } from "@lib/ipc";
-import { useWorkbench } from "@state/workbench";
+import { b64,crackWordlistDialog,cryptoOp,httpSend,isDesktop,kdfVerify,spiderScan,webScan } from "@lib/ipc";import { useWorkbench } from "@state/workbench";
 
 export function ConsoleDock() {
   const wb = useWorkbench();
@@ -24,11 +23,36 @@ export function ConsoleDock() {
         wb.setConsoleLines([]);
         return;
       case "help":
-        log("commands: scan <url> · spider <url> [depth] · get <url> · crack <algo> <hash> <wordlist> · status · clear");
+        log("commands: hash <algo> <text> · verify <kdf-hash> <password> · b64 <text> · unb64 <b64> · scan <url> · spider <url> [depth] · get <url> · crack <algo> <hash> <wordlist> · status · clear");
         return;
       case "status":
         log(`ipc: ${isDesktop() ? "tauri" : "browser fallback"} · tools stay mounted · console keeps last 500 lines`);
         return;
+      case "hash": {
+        if (args.length < 2) return log("usage: hash <algo> <text>  (algos: md5, sha1, sha224, sha256, sha384, sha512, crc32, ntlm, sha3_256, sha3_512)");
+        const result = await cryptoOp(args[0], new TextEncoder().encode(args.slice(1).join(" ")));
+        log(`hash: ${result.output_hex}  · engine ${result.engine} ${result.engine_version}`);
+        return;
+      }
+      case "verify": {
+        if (args.length < 2) return log("usage: verify <bcrypt-or-argon2-hash> <password>");
+        const matched = await kdfVerify(args[0], args.slice(1).join(" "));
+        log(matched ? "verify: MATCH" : "verify: no match");
+        return;
+      }
+      case "b64": {
+        if (!args[0]) return log("usage: b64 <text>");
+        const encoded = b64.encode(new TextEncoder().encode(args.join(" ")));
+        log(`b64: ${encoded}`);
+        return;
+      }
+      case "unb64": {
+        if (!args[0]) return log("usage: unb64 <base64>");
+        const decoded = b64.decode(args.join(""));
+        const text = new TextDecoder().decode(decoded);
+        log(`unb64: ${text}`);
+        return;
+      }
       case "scan": {
         if (!args[0]) return log("usage: scan <url>");
         log(`scan ${args[0]}: running native review…`);

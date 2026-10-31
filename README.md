@@ -2,7 +2,7 @@
 
 Integrated desktop security workbench: **Tauri 2 + Rust** native core, **Next.js (static export) + TypeScript** interface, **Dark Matter** theme (Zed-style near-black, blue = selection/analysis, orange = active operations).
 
-Full product and engineering specification: [Master Plan.md](./Master Plan.md).
+Full product and engineering specification: [Master Plan.md](./Master Plan.md). Per-engine capability review and improvement backlog: [docs/engine-review.md](./docs/engine-review.md).
 Upstream sources for study and future engine packaging live in `reference/` (never committed, never shipped as-is).
 
 ## Status: Arc 3 (recipes suite + packet engine)
