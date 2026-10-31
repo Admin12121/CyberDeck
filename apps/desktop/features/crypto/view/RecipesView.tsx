@@ -63,6 +63,7 @@ export function RecipesView() {
   const wb = useWorkbench();
   const [savingCase, setSavingCase] = useState(false);
   const [caseSaveError, setCaseSaveError] = useState<string | null>(null);
+  const [sourceDescription, setSourceDescription] = useState<string | null>(null);
   const [state, setState] = useState<RecipeState>(initialRecipeState);
   const [search, setSearch] = useState("");
   const [committed, setCommitted] = useState<RecipeResult | null>(null);
@@ -71,6 +72,7 @@ export function RecipesView() {
   useEffect(() => {
     if (!wb.recipeHandoff) return;
     const transfer = wb.recipeHandoff;
+    setSourceDescription(transfer.source);
     setState((previous) => ({ ...previous, input: transfer.input, steps: transfer.steps }));
     wb.consumeRecipeHandoff();
   }, [wb.recipeHandoff, wb.consumeRecipeHandoff]);
@@ -162,7 +164,9 @@ export function RecipesView() {
     setSavingCase(true);
     setCaseSaveError(null);
     try {
-      const record = await fileImportDerived(wb.caseId, "recipe-output.bin", result.outputBytes);
+      const steps = state.steps.filter((step) => step.enabled).map((step) => step.opId).join(" > ");
+      const source = (sourceDescription ?? "Manual input") + (steps ? " | steps: " + steps : "");
+      const record = await fileImportDerived(wb.caseId, "recipe-output.bin", result.outputBytes, source.slice(0, 500));
       wb.logConsole("saved derived evidence to case " + wb.caseId + ": " + record.sha256);
       wb.selectTool("forensics.files");
     } catch (error) {
@@ -348,7 +352,7 @@ export function RecipesView() {
           >
             <textarea
               value={state.input}
-              onChange={(e) => setState((s) => setInput(s, e.target.value))}
+              onChange={(e) => { setSourceDescription(null); setState((s) => setInput(s, e.target.value)); }}
               spellCheck={false}
               aria-label="Recipe input"
               className="h-full w-full resize-none bg-app p-2 font-mono text-xs text-fg focus:outline-none"

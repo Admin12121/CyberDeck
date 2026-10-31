@@ -54,6 +54,40 @@ pub struct NewFinding {
     pub details: String,
 }
 
+/// Structured provenance is deliberately append-only at the application API.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CaseEvent {
+    pub id: i64,
+    pub case_id: String,
+    pub source: String,
+    pub action: String,
+    pub artifact_id: Option<String>,
+    pub source_description: String,
+    pub created_ms: i64,
+}
+
+/// A portable case report includes no host-local paths or copied evidence bytes.
+#[derive(Debug, Serialize)]
+pub struct ReportArtifact {
+    pub id: String,
+    pub name: String,
+    pub size: u64,
+    pub sha256: String,
+    pub signature: Option<String>,
+    pub imported_at: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct CaseReport {
+    pub schema_version: u8,
+    pub generated_ms: i64,
+    pub case: CaseRecord,
+    pub artifacts: Vec<ReportArtifact>,
+    pub findings: Vec<FindingRecord>,
+    pub events: Vec<CaseEvent>,
+    pub truncated: bool,
+}
+
 pub fn validate_case_id(id: &str) -> Result<(), String> {
     if id.is_empty()
         || id.len() > 100
@@ -123,6 +157,16 @@ impl ArtifactStore {
                  created_ms INTEGER NOT NULL
              );
              CREATE INDEX IF NOT EXISTS idx_findings_case ON findings(case_id,id);
+             CREATE TABLE IF NOT EXISTS case_events (
+                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                 case_id TEXT NOT NULL REFERENCES cases(id),
+                 source TEXT NOT NULL,
+                 action TEXT NOT NULL,
+                 artifact_id TEXT,
+                 source_description TEXT NOT NULL,
+                 created_ms INTEGER NOT NULL
+             );
+             CREATE INDEX IF NOT EXISTS idx_events_case ON case_events(case_id,id);
              CREATE TABLE IF NOT EXISTS crack_history (
                  id           INTEGER PRIMARY KEY AUTOINCREMENT,
                  algo         TEXT NOT NULL,
@@ -273,6 +317,127 @@ impl ArtifactStore {
             .map_err(|e| e.to_string())?;
         rows.collect::<Result<Vec<_>, _>>()
             .map_err(|e| e.to_string())
+    }
+
+    /// Store one small provenance event, retaining operation/source linkage.
+    /// Callers must not put passwords, session tokens or captured bodies here.
+    pub fn record_event(
+        &self,
+        case_id: &str,
+        source: &str,
+        action: &str,
+        artifact_id: Option<&str>,
+        source_description: &str,
+    ) -> Result<i64, String> {
+        if !self.case_exists(case_id)? {
+            return Err("case not found".into());
+        }
+        if source.is_empty()
+            || source.len() > 80
+            || action.is_empty()
+            || action.len() > 60
+            || source_description.len() > 512
+        {
+            return Err("invalid event metadata length".into());
+        }
+        if let Some(id) = artifact_id {
+            let linked_case: Option<String> = self
+                .conn
+                .query_row(
+                    "SELECT case_id FROM artifacts WHERE id = ?1",
+                    params![id],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(|e| e.to_string())?;
+            if linked_case.as_deref() != Some(case_id) {
+                return Err("event artifact belongs to another case or is missing".into());
+            }
+        }
+        self.conn.execute(
+            "INSERT INTO case_events (case_id,source,action,artifact_id,source_description,created_ms)
+             VALUES (?1,?2,?3,?4,?5,?6)",
+            params![case_id,source,action,artifact_id,source_description,timestamp_ms()],
+        ).map_err(|e| format!("cannot store event: {e}"))?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    pub fn list_events(&self, case_id: &str) -> Result<Vec<CaseEvent>, String> {
+        if !self.case_exists(case_id)? {
+            return Err("case not found".into());
+        }
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT id,case_id,source,action,artifact_id,source_description,created_ms
+             FROM case_events WHERE case_id=?1 ORDER BY id DESC LIMIT 2000",
+            )
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map(params![case_id], |row| {
+                Ok(CaseEvent {
+                    id: row.get(0)?,
+                    case_id: row.get(1)?,
+                    source: row.get(2)?,
+                    action: row.get(3)?,
+                    artifact_id: row.get(4)?,
+                    source_description: row.get(5)?,
+                    created_ms: row.get(6)?,
+                })
+            })
+            .map_err(|e| e.to_string())?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())
+    }
+
+    pub fn export_case_report(&self, case_id: &str) -> Result<CaseReport, String> {
+        let case = self
+            .list_cases()?
+            .into_iter()
+            .find(|item| item.id == case_id)
+            .ok_or_else(|| "case not found".to_string())?;
+        let mut all_artifacts = self.list_artifacts(case_id)?;
+        let mut truncated = all_artifacts.len() > 2000;
+        all_artifacts.truncate(2000);
+        let artifacts = all_artifacts
+            .into_iter()
+            .map(|a| ReportArtifact {
+                id: a.id,
+                name: a.name,
+                size: a.size,
+                sha256: a.sha256,
+                signature: a.signature,
+                imported_at: a.imported_at,
+            })
+            .collect();
+        let findings = self.list_findings(case_id)?;
+        let events = self.list_events(case_id)?;
+        let count_findings: i64 = self
+            .conn
+            .query_row(
+                "SELECT count(*) FROM findings WHERE case_id=?1",
+                params![case_id],
+                |r| r.get(0),
+            )
+            .map_err(|e| e.to_string())?;
+        let count_events: i64 = self
+            .conn
+            .query_row(
+                "SELECT count(*) FROM case_events WHERE case_id=?1",
+                params![case_id],
+                |r| r.get(0),
+            )
+            .map_err(|e| e.to_string())?;
+        truncated |= count_findings > 2000 || count_events > 2000;
+        Ok(CaseReport {
+            schema_version: 1,
+            generated_ms: timestamp_ms(),
+            case,
+            artifacts,
+            findings,
+            events,
+            truncated,
+        })
     }
 
     /// Insert or replace by id (idempotent imports of identical content).
@@ -478,6 +643,51 @@ mod tests {
             entropy: 4.2,
             imported_at: "2026-10-31T00:00:00Z".into(),
         }
+    }
+
+    #[test]
+    fn provenance_and_reports_remain_case_scoped_without_local_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ArtifactStore::open(&dir.path().join("index.db")).unwrap();
+        let alpha = store.create_case("Alpha", "report").unwrap();
+        let beta = store.create_case("Beta", "separate").unwrap();
+        let mut evidence = record("file1");
+        evidence.case_id = alpha.id.clone();
+        evidence.stored_path = "/secrets/home/analyst/file".into();
+        evidence.original_path = Some("/private/input".into());
+        store.upsert_artifact(&evidence).unwrap();
+        assert!(store
+            .record_event(&beta.id, "recipes", "derived", Some("file1"), "wrong")
+            .is_err());
+        store
+            .record_event(&alpha.id, "recipes", "derived", Some("file1"), "packet 8")
+            .unwrap();
+        store
+            .add_findings(
+                &alpha.id,
+                "crypto.recipes",
+                Some("file1"),
+                &[NewFinding {
+                    title: "Sample".into(),
+                    severity: "info".into(),
+                    details: "Decoded sample".into(),
+                }],
+            )
+            .unwrap();
+        let report = store.export_case_report(&alpha.id).unwrap();
+        let json = serde_json::to_string(&report).unwrap();
+        assert!(json.contains("packet 8"));
+        assert!(json.contains("file1"));
+        assert!(!json.contains("/secrets/home"));
+        assert!(!json.contains("/private/input"));
+        assert!(store
+            .export_case_report(&beta.id)
+            .unwrap()
+            .artifacts
+            .is_empty());
+        drop(store);
+        let reopened = ArtifactStore::open(&dir.path().join("index.db")).unwrap();
+        assert_eq!(reopened.list_events(&alpha.id).unwrap().len(), 1);
     }
 
     #[test]

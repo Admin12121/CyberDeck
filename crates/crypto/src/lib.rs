@@ -1,6 +1,7 @@
 //! Native crypto operations with reference test vectors.
 
 pub mod recipes;
+pub mod formats;
 
 use base64::Engine as _;
 use hmac::{Hmac, Mac};

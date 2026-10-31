@@ -155,6 +155,36 @@ export async function caseFindingsAdd(
   return invoke<number>("case_findings_add", { caseId, source, artifactId, findings });
 }
 
+export interface CaseEventWire {
+  id: number;
+  case_id: string;
+  source: string;
+  action: string;
+  artifact_id: string | null;
+  source_description: string;
+  created_ms: number;
+}
+
+export interface CaseReportWire {
+  schema_version: number;
+  generated_ms: number;
+  case: CaseRecordWire;
+  artifacts: Pick<ArtifactRecord, "id" | "name" | "size" | "sha256" | "signature" | "imported_at">[];
+  findings: FindingRecordWire[];
+  events: CaseEventWire[];
+  truncated: boolean;
+}
+
+export async function caseEventsList(caseId: string): Promise<CaseEventWire[]> {
+  if (!inTauri) return [];
+  return invoke<CaseEventWire[]>("case_events_list", { caseId });
+}
+
+export async function caseReport(caseId: string): Promise<CaseReportWire> {
+  if (!inTauri) throw new Error("Case export requires the desktop runtime");
+  return invoke<CaseReportWire>("case_report", { caseId });
+}
+
 // --- evidence ----------------------------------------------------------------
 
 export interface ArtifactRecord {
@@ -203,20 +233,33 @@ export async function fileImportDialog(caseId = "scratchpad"): Promise<ArtifactR
 }
 
 /** Save a derived byte buffer to the selected case, with recorded provenance. */
-export async function fileImportDerived(caseId: string, name: string, bytes: Uint8Array): Promise<ArtifactRecord> {
+export async function fileImportDerived(caseId: string, name: string, bytes: Uint8Array, sourceDescription?: string): Promise<ArtifactRecord> {
   if (!inTauri) throw new Error("Derived evidence import requires the desktop runtime");
   if (bytes.length > 8 * 1024 * 1024) throw new Error("Derived evidence must not exceed 8 MiB");
-  return invoke<ArtifactRecord>("file_import_derived", { caseId, name, dataB64: b64.encode(bytes) });
+  return invoke<ArtifactRecord>("file_import_derived", { caseId, name, dataB64: b64.encode(bytes), sourceDescription: sourceDescription ?? null });
 }
 
-export async function fileHex(id: string, offset: number, len: number): Promise<HexResponseWire> {
-  if (!inTauri) throw new Error("evidence inspection requires the desktop runtime");
-  return invoke<HexResponseWire>("file_hex", { id, offset, len });
+export interface SignatureScanWire {
+  hits: { offset: number; format: string; description: string }[];
+  scanned_bytes: number;
+  file_bytes: number;
+  truncated: boolean;
+  integrity_checked: boolean;
 }
 
-export async function fileStrings(id: string, minLen: number, maxHits: number): Promise<StringHitWire[]> {
+export async function fileSignatureScan(caseId: string, id: string): Promise<SignatureScanWire> {
+  if (!inTauri) throw new Error("Binary scanning requires the native desktop runtime");
+  return invoke<SignatureScanWire>("file_signature_scan", { caseId, id });
+}
+
+export async function fileHex(caseId: string, id: string, offset: number, len: number): Promise<HexResponseWire> {
   if (!inTauri) throw new Error("evidence inspection requires the desktop runtime");
-  return invoke<StringHitWire[]>("file_strings", { id, minLen, maxHits });
+  return invoke<HexResponseWire>("file_hex", { caseId, id, offset, len });
+}
+
+export async function fileStrings(caseId: string, id: string, minLen: number, maxHits: number): Promise<StringHitWire[]> {
+  if (!inTauri) throw new Error("evidence inspection requires the desktop runtime");
+  return invoke<StringHitWire[]>("file_strings", { caseId, id, minLen, maxHits });
 }
 
 // --- captures ----------------------------------------------------------------

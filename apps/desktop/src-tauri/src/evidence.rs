@@ -139,6 +139,17 @@ fn import_bytes(
     };
     let store = ctx.store.lock().expect("artifact store poisoned");
     store.upsert_artifact(&record)?;
+    store.record_event(
+        case_id,
+        if disk_source {
+            "forensics.import"
+        } else {
+            "crypto.recipes"
+        },
+        if disk_source { "import" } else { "derived" },
+        Some(&record.id),
+        &record.name,
+    )?;
     Ok(record)
 }
 
@@ -184,6 +195,7 @@ pub fn file_import_derived(
     case_id: String,
     name: String,
     data_b64: String,
+    source_description: Option<String>,
 ) -> Result<ArtifactRecord, String> {
     validate_case_id(&case_id)?;
     if name.trim().is_empty()
@@ -202,7 +214,21 @@ pub fn file_import_derived(
     if data.len() > MAX_DERIVED_BYTES {
         return Err("derived artifact exceeds 8 MiB limit".into());
     }
+    let source_description = source_description.unwrap_or_else(|| "Manual Recipes input".into());
+    if source_description.len() > 512 {
+        return Err("source description too long".into());
+    }
     let record = import_bytes(&ctx, Path::new(&safe_name), &data, &case_id, false)?;
+    ctx.store
+        .lock()
+        .map_err(|_| "case store unavailable")?
+        .record_event(
+            &case_id,
+            "crypto.recipes",
+            "transformation",
+            Some(&record.id),
+            &source_description,
+        )?;
     let note = NewFinding {
         title: format!("Derived file: {}", record.name),
         severity: "info".to_string(),
@@ -231,12 +257,18 @@ fn list(ctx: &EvidenceCtx, case_id: &str) -> Result<Vec<ArtifactRecord>, String>
     store.list_artifacts(case_id)
 }
 
-fn load_record_bytes(ctx: &EvidenceCtx, id: &str) -> Result<(ArtifactRecord, Vec<u8>), String> {
+fn load_record_bytes(
+    ctx: &EvidenceCtx,
+    case_id: &str,
+    id: &str,
+) -> Result<(ArtifactRecord, Vec<u8>), String> {
+    validate_case_id(case_id)?;
     let record = {
         let store = ctx.store.lock().expect("artifact store poisoned");
         store
             .get_artifact(id)?
-            .ok_or_else(|| format!("unknown artifact id: {id}"))?
+            .filter(|item| item.case_id == case_id)
+            .ok_or_else(|| "artifact not found in selected case".to_string())?
     };
     // stored_path originates from our own index, never from the frontend
     let bytes = std::fs::read(&record.stored_path)
@@ -244,18 +276,88 @@ fn load_record_bytes(ctx: &EvidenceCtx, id: &str) -> Result<(ArtifactRecord, Vec
     Ok((record, bytes))
 }
 
+#[derive(Debug, Serialize)]
+pub struct SignatureScanResponse {
+    pub hits: Vec<cyberdeck_crypto::formats::SignatureHit>,
+    pub scanned_bytes: usize,
+    pub file_bytes: u64,
+    pub truncated: bool,
+    pub integrity_checked: bool,
+}
+
+/// Offline binary format detection. No extraction or external executables.
+/// Only the first 16 MiB is scanned, with a cap on returned signatures.
+#[tauri::command]
+pub fn file_signature_scan(
+    ctx: State<'_, EvidenceCtx>,
+    case_id: String,
+    id: String,
+) -> Result<SignatureScanResponse, String> {
+    signature_scan(&ctx, &case_id, &id)
+}
+
+fn signature_scan(
+    ctx: &EvidenceCtx,
+    case_id: &str,
+    id: &str,
+) -> Result<SignatureScanResponse, String> {
+    use cyberdeck_crypto::formats::{scan_signatures, MAX_SIGNATURE_SCAN_BYTES};
+    use std::io::Read;
+    validate_case_id(case_id)?;
+    let record = ctx
+        .store
+        .lock()
+        .map_err(|_| "case store unavailable")?
+        .get_artifact(id)?
+        .filter(|item| item.case_id == case_id)
+        .ok_or_else(|| "artifact does not belong to the selected case".to_string())?;
+    let source = std::fs::File::open(&record.stored_path)
+        .map_err(|e| format!("cannot open stored evidence: {e}"))?;
+    let file_bytes = source.metadata().map_err(|e| e.to_string())?.len();
+    if file_bytes != record.size {
+        return Err(
+            "evidence integrity failure: stored file size differs from its indexed size".into(),
+        );
+    }
+    let mut bytes = Vec::with_capacity((file_bytes as usize).min(MAX_SIGNATURE_SCAN_BYTES));
+    source
+        .take(MAX_SIGNATURE_SCAN_BYTES as u64)
+        .read_to_end(&mut bytes)
+        .map_err(|e| format!("cannot scan evidence: {e}"))?;
+    let integrity_checked = file_bytes <= MAX_SIGNATURE_SCAN_BYTES as u64;
+    if integrity_checked && digest_of("sha256", &bytes)? != record.sha256 {
+        return Err(
+            "evidence integrity failure: stored SHA256 differs from its indexed hash".into(),
+        );
+    }
+    Ok(SignatureScanResponse {
+        hits: scan_signatures(&bytes, 256),
+        scanned_bytes: bytes.len(),
+        file_bytes,
+        truncated: !integrity_checked,
+        integrity_checked,
+    })
+}
+
 #[tauri::command]
 pub fn file_hex(
     ctx: State<'_, EvidenceCtx>,
+    case_id: String,
     id: String,
     offset: i64,
     len: i64,
 ) -> Result<HexResponse, String> {
-    hex_view(&ctx, &id, offset, len)
+    hex_view(&ctx, &case_id, &id, offset, len)
 }
 
-fn hex_view(ctx: &EvidenceCtx, id: &str, offset: i64, len: i64) -> Result<HexResponse, String> {
-    let (_, bytes) = load_record_bytes(ctx, id)?;
+fn hex_view(
+    ctx: &EvidenceCtx,
+    case_id: &str,
+    id: &str,
+    offset: i64,
+    len: i64,
+) -> Result<HexResponse, String> {
+    let (_, bytes) = load_record_bytes(ctx, case_id, id)?;
     let total = bytes.len() as i64;
     let start = offset.clamp(0, total.max(0)) as usize;
     let wanted = len.clamp(1, MAX_HEX_REQUEST) as usize;
@@ -291,11 +393,12 @@ fn hex_view(ctx: &EvidenceCtx, id: &str, offset: i64, len: i64) -> Result<HexRes
 #[tauri::command]
 pub fn file_strings(
     ctx: State<'_, EvidenceCtx>,
+    case_id: String,
     id: String,
     min_len: i32,
     max_hits: i32,
 ) -> Result<Vec<StringHit>, String> {
-    strings(&ctx, &id, min_len, max_hits)
+    strings(&ctx, &case_id, &id, min_len, max_hits)
 }
 
 #[derive(Debug, Serialize)]
@@ -344,11 +447,12 @@ pub fn digest_file_dialog(app: AppHandle) -> Result<FileDigestsWire, String> {
 
 fn strings(
     ctx: &EvidenceCtx,
+    case_id: &str,
     id: &str,
     min_len: i32,
     max_hits: i32,
 ) -> Result<Vec<StringHit>, String> {
-    let (_, bytes) = load_record_bytes(ctx, id)?;
+    let (_, bytes) = load_record_bytes(ctx, case_id, id)?;
     let scan = &bytes[..bytes.len().min(MAX_STRINGS_SCAN)];
     let min_len = min_len.clamp(2, 128) as usize;
     let max_hits = max_hits.clamp(1, MAX_STRINGS_HITS as i32) as usize;
@@ -436,6 +540,59 @@ mod tests {
     }
 
     #[test]
+    fn signature_scan_is_case_scoped_and_checks_integrity() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = test_ctx(dir.path());
+        let case = ctx
+            .store
+            .lock()
+            .unwrap()
+            .create_case("Analysis", "")
+            .unwrap();
+        let path = Path::new("firmware.bin");
+        let mut data = b"prefix".to_vec();
+        data.extend_from_slice(b"%PDF-1.7\n");
+        let record = import_bytes(&ctx, path, &data, &case.id, false).unwrap();
+        assert!(signature_scan(&ctx, DEFAULT_CASE, &record.id).is_err());
+        let result = signature_scan(&ctx, &case.id, &record.id).unwrap();
+        assert!(result.integrity_checked);
+        assert!(result
+            .hits
+            .iter()
+            .any(|h| h.format == "pdf" && h.offset == 6));
+        std::fs::write(&record.stored_path, b"mismatch").unwrap();
+        assert!(signature_scan(&ctx, &case.id, &record.id)
+            .unwrap_err()
+            .contains("integrity"));
+    }
+
+    #[test]
+    fn hex_and_strings_enforce_case_isolation() {
+        let temp = tempfile::tempdir().unwrap();
+        let ctx = test_ctx(temp.path());
+        let private_case = ctx
+            .store
+            .lock()
+            .unwrap()
+            .create_case("Private", "")
+            .unwrap();
+        let record = import_bytes(
+            &ctx,
+            Path::new("secret.txt"),
+            b"private-data",
+            &private_case.id,
+            true,
+        )
+        .unwrap();
+        assert!(hex_view(&ctx, DEFAULT_CASE, &record.id, 0, 8).is_err());
+        assert!(strings(&ctx, DEFAULT_CASE, &record.id, 3, 20).is_err());
+        assert!(!hex_view(&ctx, &private_case.id, &record.id, 0, 16)
+            .unwrap()
+            .rows
+            .is_empty());
+    }
+
+    #[test]
     fn import_computes_digests_and_signature() {
         let dir = tempfile::tempdir().unwrap();
         let ctx = test_ctx(dir.path());
@@ -470,7 +627,7 @@ mod tests {
         std::fs::write(&src, b"abc").unwrap();
         let bytes = std::fs::read(&src).unwrap();
         let record = import_bytes(&ctx, &src, &bytes, DEFAULT_CASE, true).unwrap();
-        let view = hex_view(&ctx, &record.id, 0, 16).unwrap();
+        let view = hex_view(&ctx, DEFAULT_CASE, &record.id, 0, 16).unwrap();
         assert_eq!(view.rows[0].hex, "61 62 63");
         assert_eq!(view.rows[0].ascii, "abc");
         assert!(view.complete);
@@ -484,7 +641,7 @@ mod tests {
         std::fs::write(&src, b"\x00\x01\x02user=admin\x03\x04path=/bin\x00").unwrap();
         let bytes = std::fs::read(&src).unwrap();
         let record = import_bytes(&ctx, &src, &bytes, DEFAULT_CASE, true).unwrap();
-        let hits = strings(&ctx, &record.id, 4, 100).unwrap();
+        let hits = strings(&ctx, DEFAULT_CASE, &record.id, 4, 100).unwrap();
         let texts: Vec<_> = hits.into_iter().map(|h| h.text).collect();
         assert!(texts.contains(&"user=admin".to_string()));
         assert!(texts.contains(&"path=/bin".to_string()));

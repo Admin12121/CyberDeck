@@ -597,6 +597,81 @@ dependencies = [
 ]
 
 [[package]]
+name = "cyberdeck-core"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "cyberdeck-crypto"
+version = "0.1.0"
+dependencies = [
+ "argon2",
+ "base64 0.22.1",
+ "bcrypt",
+ "crc32fast",
+ "flate2",
+ "hex",
+ "hmac 0.12.1",
+ "md-5",
+ "md4",
+ "pbkdf2 0.12.2",
+ "scrypt",
+ "serde",
+ "serde_json",
+ "sha1",
+ "sha2 0.10.9",
+ "sha3",
+ "yescrypt",
+]
+
+[[package]]
+name = "cyberdeck-desktop"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "cyberdeck-core",
+ "cyberdeck-crypto",
+ "cyberdeck-packet",
+ "cyberdeck-storage",
+ "hex",
+ "rcgen",
+ "reqwest 0.12.28",
+ "rustls",
+ "serde",
+ "serde_json",
+ "tauri",
+ "tauri-build",
+ "tauri-plugin-dialog",
+ "tempfile",
+ "time",
+ "tokio",
+ "tokio-rustls",
+ "tokio-util",
+ "webpki-roots 0.26.11",
+]
+
+[[package]]
+name = "cyberdeck-packet"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "cyberdeck-storage"
+version = "0.1.0"
+dependencies = [
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "darling"
 version = "0.24.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1363,80 +1438,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.119",
-]
-
-[[package]]
-name = "cyberdeck-core"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "cyberdeck-crypto"
-version = "0.1.0"
-dependencies = [
- "argon2",
- "base64 0.22.1",
- "bcrypt",
- "crc32fast",
- "flate2",
- "hex",
- "hmac 0.12.1",
- "md-5",
- "md4",
- "pbkdf2 0.12.2",
- "scrypt",
- "serde",
- "serde_json",
- "sha1",
- "sha2 0.10.9",
- "sha3",
- "yescrypt",
-]
-
-[[package]]
-name = "cyberdeck-desktop"
-version = "0.1.0"
-dependencies = [
- "base64 0.22.1",
- "cyberdeck-core",
- "cyberdeck-crypto",
- "cyberdeck-packet",
- "cyberdeck-storage",
- "hex",
- "rcgen",
- "reqwest 0.12.28",
- "rustls",
- "serde",
- "serde_json",
- "tauri",
- "tauri-build",
- "tauri-plugin-dialog",
- "tempfile",
- "time",
- "tokio",
- "tokio-rustls",
- "tokio-util",
- "webpki-roots 0.26.11",
-]
-
-[[package]]
-name = "cyberdeck-packet"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "cyberdeck-storage"
-version = "0.1.0"
-dependencies = [
- "rusqlite",
- "serde",
- "tempfile",
 ]
 
 [[package]]

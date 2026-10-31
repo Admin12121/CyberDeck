@@ -164,6 +164,7 @@ export function EvidenceTree({ ctx }: { ctx: EvidenceContext }) {
 }
 
 export function useArtifactBytes(ctx: EvidenceContext) {
+  const wb = useWorkbench();
   const id = ctx.selected?.id ?? null;
   const real = ctx.selected?.real ?? false;
   const [hexData, setHexData] = useState<HexResponseWire | null>(null);
@@ -177,7 +178,7 @@ export function useArtifactBytes(ctx: EvidenceContext) {
     if (!id) return;
     let cancelled = false;
     if (real) {
-      fileHex(id, 0, 512)
+      fileHex(wb.caseId, id, 0, 512)
         .then((data) => {
           if (!cancelled) setHexData(data);
         })
@@ -190,7 +191,7 @@ export function useArtifactBytes(ctx: EvidenceContext) {
     return () => {
       cancelled = true;
     };
-  }, [id, real]);
+  }, [id, real, wb.caseId]);
 
   return { hexData, bytes, error };
 }

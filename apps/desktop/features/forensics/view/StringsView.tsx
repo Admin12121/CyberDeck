@@ -17,8 +17,10 @@ import { extractStrings, formatEntropy, shannonEntropy } from "../controller";
 import { SAMPLE_EVIDENCE, sampleContent, sampleMetadata } from "../model";
 
 import { EvidenceTree, useEvidence } from "./shared";
+import { useWorkbench } from "@state/workbench";
 
 export function StringsView() {
+  const wb = useWorkbench();
   const ctx = useEvidence();
   const [minLength, setMinLength] = useState("4");
   const min = Math.max(2, Number.parseInt(minLength, 10) || 4);
@@ -32,7 +34,7 @@ export function StringsView() {
     setError(null);
     if (!id || !real) return;
     let cancelled = false;
-    fileStrings(id, min, 500)
+    fileStrings(wb.caseId, id, min, 500)
       .then((data) => {
         if (!cancelled) setHits(data);
       })
@@ -42,7 +44,7 @@ export function StringsView() {
     return () => {
       cancelled = true;
     };
-  }, [id, real, min]);
+  }, [id, real, min, wb.caseId]);
 
   const localHits = useMemo(() => {
     if (real || !ctx.selectedSample) return null;

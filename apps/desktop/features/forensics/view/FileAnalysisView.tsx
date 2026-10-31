@@ -4,6 +4,8 @@ import { Chip, Field, Pane, TextInput, ToolButton } from "@ds/panes";
 import { hexDump } from "@lib/hex";
 import {
   fileHex,
+  fileSignatureScan,
+  type SignatureScanWire,
   fileImportDialog,
   fileList,
   fileStrings,
@@ -17,9 +19,24 @@ import { extractStrings, formatEntropy, shannonEntropy } from "../controller";
 import { SAMPLE_EVIDENCE, sampleContent, sampleMetadata } from "../model";
 
 import { EvidenceTree, HexBody, useArtifactBytes, useEvidence } from "./shared";
+import { useWorkbench } from "@state/workbench";
 
 export function FileAnalysisView() {
   const ctx = useEvidence();
+  const wb = useWorkbench();
+  const [scan, setScan] = useState<SignatureScanWire | null>(null);
+  const [scanBusy, setScanBusy] = useState(false);
+  const [scanError, setScanError] = useState<string | null>(null);
+  useEffect(() => { setScan(null); setScanError(null); }, [ctx.selectedArtifact?.id, wb.caseId]);
+  const runScan = async () => {
+    const artifact = ctx.selectedArtifact;
+    if (!artifact) return;
+    setScanBusy(true);
+    setScanError(null);
+    try { setScan(await fileSignatureScan(wb.caseId, artifact.id)); }
+    catch (cause) { setScanError(String(cause)); }
+    finally { setScanBusy(false); }
+  };
   const highEntropy =
     ctx.selectedArtifact
       ? ctx.selectedArtifact.entropy > 7.5
@@ -57,7 +74,27 @@ export function FileAnalysisView() {
             <Chip tone="orange">high entropy; compressed or encrypted?</Chip>
           </div>
         ) : null}
-        <div className="border-t border-line p-2">
+        <div className="border-t border-line p-2 space-y-2">
+          <ToolButton onClick={() => void runScan()} disabled={!ctx.selectedArtifact || !ctx.desktop || scanBusy}
+            title="Native Rust scan of the first 16 MiB; includes SHA-256 verification for smaller evidence">
+            {scanBusy ? "Scanning…" : "Scan Embedded Formats"}
+          </ToolButton>
+          {scanError ? <div className="text-xs text-err">{scanError}</div> : null}
+          {scan ? (
+            <div className="space-y-1 font-mono text-[10px] text-fg-dim">
+              <div>{scan.hits.length} signatures · {scan.scanned_bytes} bytes scanned
+                {scan.truncated ? " (first 16 MiB only)" : ""}
+                {scan.integrity_checked ? " · SHA-256 verified" : ""}
+              </div>
+              {scan.hits.map((hit, index) => (
+                <div key={index} className="flex gap-2 border-t border-line py-1">
+                  <span className="shrink-0 text-orange">0x{hit.offset.toString(16)}</span>
+                  <span>{hit.format}: {hit.description}</span>
+                </div>
+              ))}
+              {scan.hits.length === 0 ? <div>No known signatures detected.</div> : null}
+            </div>
+          ) : null}
           <ToolButton disabled title="Extraction with path safety and decompression-bomb guards, arc 3">Extract…</ToolButton>
           <div className="mt-1" />
           <ToolButton disabled title="YARA-X rules, arc 3">YARA scan</ToolButton>
