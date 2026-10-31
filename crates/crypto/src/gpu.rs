@@ -77,6 +77,296 @@ pub fn recover_sha256(target_hex: &str, candidates: &[&[u8]]) -> Result<Vec<usiz
         Err("GPU feature not enabled; use the native CPU recovery path".into())
     }
 }
+
+/// Native OpenCL MD5 matching. Positive GPU results are rechecked with Rust MD5.
+pub fn recover_md5(target_hex: &str, candidates: &[&[u8]]) -> Result<Vec<usize>, String> {
+    let target = hex::decode(target_hex).map_err(|_| "MD5 target must be hex")?;
+    if target.len() != 16 {
+        return Err("MD5 target must be 16 bytes".into());
+    }
+    if candidates.is_empty() {
+        return Ok(Vec::new());
+    }
+    if candidates.len() > MAX_GPU_BATCH {
+        return Err("GPU batch exceeds bound".into());
+    }
+    if candidates.iter().any(|c| c.len() > MAX_GPU_CANDIDATE_BYTES) {
+        return Err("GPU MD5 supports only 0..=55-byte candidates".into());
+    }
+    #[cfg(feature = "gpu")]
+    {
+        native::execute_md5(&target, candidates)
+    }
+    #[cfg(not(feature = "gpu"))]
+    {
+        Err("GPU feature not enabled; use native CPU recovery".into())
+    }
+}
+
+pub const GPU_STREAM_BATCH: usize = 4096;
+pub const MAX_GPU_STREAM_CANDIDATES: u64 = 10_000_000;
+pub const MAX_GPU_STREAM_MATCHES: usize = 100;
+
+#[derive(Debug, Clone, serde::Serialize, PartialEq, Eq)]
+pub struct GpuStreamHit {
+    pub index: u64,
+    pub candidate: Vec<u8>,
+}
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct GpuStreamResult {
+    pub engine: &'static str,
+    /// Number of candidates actually dispatched to the GPU and checked.
+    pub tried: u64,
+    pub batches: u64,
+    pub hits: Vec<GpuStreamHit>,
+    pub cancelled: bool,
+    pub limit_reached: bool,
+}
+/// Lazy, bounded SHA-256 GPU candidate streaming with exact processed counts.
+/// Does not silently switch to CPU when OpenCL fails.
+pub fn recover_sha256_stream<I, B, F>(
+    target_hex: &str,
+    candidates: I,
+    max_attempts: u64,
+    max_matches: usize,
+    cancel: F,
+) -> Result<GpuStreamResult, String>
+where
+    I: IntoIterator<Item = B>,
+    B: AsRef<[u8]>,
+    F: FnMut() -> bool,
+{
+    #[cfg(feature = "gpu")]
+    {
+        let mut session: Option<native::Session> = None;
+        return stream_with(
+            target_hex,
+            candidates,
+            max_attempts,
+            max_matches,
+            cancel,
+            |hash, batch| {
+                let target = hex::decode(hash).map_err(|_| "invalid SHA-256 target")?;
+                if session.is_none() {
+                    session = Some(native::Session::new(GPU_STREAM_BATCH)?);
+                }
+                session
+                    .as_mut()
+                    .expect("initialized GPU session")
+                    .execute(&target, batch)
+            },
+        );
+    }
+    #[cfg(not(feature = "gpu"))]
+    {
+        stream_with(
+            target_hex,
+            candidates,
+            max_attempts,
+            max_matches,
+            cancel,
+            recover_sha256,
+        )
+    }
+}
+
+/// Run bounded MD5 GPU recovery using one native OpenCL session per stream.
+pub fn recover_md5_stream<I, B, F>(
+    target_hex: &str,
+    candidates: I,
+    max_attempts: u64,
+    max_matches: usize,
+    cancel: F,
+) -> Result<GpuStreamResult, String>
+where
+    I: IntoIterator<Item = B>,
+    B: AsRef<[u8]>,
+    F: FnMut() -> bool,
+{
+    #[cfg(feature = "gpu")]
+    {
+        let mut session: Option<native::Session> = None;
+        return stream_with_checked(
+            target_hex,
+            candidates,
+            max_attempts,
+            max_matches,
+            16,
+            "cyberdeck-crypto-opencl-md5",
+            cancel,
+            |hash, batch| {
+                let target = hex::decode(hash).map_err(|_| "invalid MD5 target")?;
+                if session.is_none() {
+                    session = Some(native::Session::new_for(
+                        GPU_STREAM_BATCH,
+                        native::Algorithm::Md5,
+                    )?);
+                }
+                session
+                    .as_mut()
+                    .expect("MD5 session initialized")
+                    .execute(&target, batch)
+            },
+        );
+    }
+    #[cfg(not(feature = "gpu"))]
+    {
+        stream_with_checked(
+            target_hex,
+            candidates,
+            max_attempts,
+            max_matches,
+            16,
+            "cyberdeck-crypto-opencl-md5",
+            cancel,
+            recover_md5,
+        )
+    }
+}
+
+fn dispatch_batch<E>(
+    target_hex: &str,
+    batch: &mut Vec<Vec<u8>>,
+    result: &mut GpuStreamResult,
+    max_matches: usize,
+    executor: &mut E,
+) -> Result<(), String>
+where
+    E: FnMut(&str, &[&[u8]]) -> Result<Vec<usize>, String>,
+{
+    if batch.is_empty() {
+        return Ok(());
+    }
+    let refs: Vec<&[u8]> = batch.iter().map(Vec::as_slice).collect();
+    let hits = executor(target_hex, &refs)?;
+    for index in hits {
+        if index >= batch.len() {
+            return Err("GPU returned an invalid match index".into());
+        }
+        if result.hits.len() < max_matches {
+            result.hits.push(GpuStreamHit {
+                index: result.tried + index as u64,
+                candidate: batch[index].clone(),
+            });
+        }
+    }
+    result.tried += batch.len() as u64;
+    result.batches += 1;
+    batch.clear();
+    Ok(())
+}
+fn stream_with<I, B, F, E>(
+    target_hex: &str,
+    candidates: I,
+    max_attempts: u64,
+    max_matches: usize,
+    cancel: F,
+    executor: E,
+) -> Result<GpuStreamResult, String>
+where
+    I: IntoIterator<Item = B>,
+    B: AsRef<[u8]>,
+    F: FnMut() -> bool,
+    E: FnMut(&str, &[&[u8]]) -> Result<Vec<usize>, String>,
+{
+    stream_with_checked(
+        target_hex,
+        candidates,
+        max_attempts,
+        max_matches,
+        32,
+        "cyberdeck-crypto-opencl-sha256",
+        cancel,
+        executor,
+    )
+}
+
+fn stream_with_checked<I, B, F, E>(
+    target_hex: &str,
+    candidates: I,
+    max_attempts: u64,
+    max_matches: usize,
+    digest_bytes: usize,
+    engine: &'static str,
+    mut cancel: F,
+    mut executor: E,
+) -> Result<GpuStreamResult, String>
+where
+    I: IntoIterator<Item = B>,
+    B: AsRef<[u8]>,
+    F: FnMut() -> bool,
+    E: FnMut(&str, &[&[u8]]) -> Result<Vec<usize>, String>,
+{
+    if hex::decode(target_hex)
+        .map_err(|_| "invalid GPU digest")?
+        .len()
+        != digest_bytes
+    {
+        return Err("GPU digest has incorrect size".into());
+    }
+    if max_attempts == 0
+        || max_attempts > MAX_GPU_STREAM_CANDIDATES
+        || max_matches == 0
+        || max_matches > MAX_GPU_STREAM_MATCHES
+    {
+        return Err("invalid streaming GPU limits".into());
+    }
+    let mut result = GpuStreamResult {
+        engine,
+        tried: 0,
+        batches: 0,
+        hits: Vec::new(),
+        cancelled: false,
+        limit_reached: false,
+    };
+    let mut batch: Vec<Vec<u8>> = Vec::with_capacity(GPU_STREAM_BATCH);
+    let mut generated = 0u64;
+    let mut source = candidates.into_iter();
+    loop {
+        // Cancellation discards queued but undispatched candidates; 'tried'
+        // only includes candidates actually checked on the GPU.
+        if cancel() {
+            result.cancelled = true;
+            break;
+        }
+        if generated >= max_attempts {
+            result.limit_reached = true;
+            break;
+        }
+        let Some(candidate) = source.next() else {
+            break;
+        };
+        let candidate = candidate.as_ref();
+        if candidate.len() > MAX_GPU_CANDIDATE_BYTES {
+            return Err("GPU streaming candidate exceeds 55-byte SHA-256 limit".into());
+        }
+        batch.push(candidate.to_vec());
+        generated += 1;
+        if batch.len() >= GPU_STREAM_BATCH {
+            dispatch_batch(
+                target_hex,
+                &mut batch,
+                &mut result,
+                max_matches,
+                &mut executor,
+            )?;
+            if result.hits.len() >= max_matches {
+                return Ok(result);
+            }
+        }
+    }
+    if !result.cancelled {
+        dispatch_batch(
+            target_hex,
+            &mut batch,
+            &mut result,
+            max_matches,
+            &mut executor,
+        )?;
+    }
+    Ok(result)
+}
+
 #[cfg(feature = "gpu")]
 mod native {
     use super::*;
@@ -145,7 +435,6 @@ mod native {
     const DRIVER_VERSION: u32 = 0x102D;
     const MEM_READ_ONLY: u64 = 1 << 2;
     const MEM_WRITE_ONLY: u64 = 1 << 1;
-    const MEM_COPY_HOST_PTR: u64 = 1 << 5;
 
     struct Api {
         library: Library,
@@ -305,206 +594,140 @@ mod native {
                 .collect())
         }
     }
+    // Session keeps the OpenCL program, kernel, queue and buffers alive.
+    include!("gpu_session.rs");
     pub(super) fn execute(target: &[u8], candidates: &[&[u8]]) -> Result<Vec<usize>, String> {
-        let api = Api::load()?;
-        // All allocated handles are RAII-released on any early return. The
-        // Api library outlives them because it is declared first.
-        unsafe {
-            let (_, device) = select_devices(&api)?
-                .into_iter()
-                .next()
-                .ok_or("No OpenCL GPU device detected")?;
-            let create_context: FContext = api.symbol(b"clCreateContext")?;
-            let create_queue: FQueue = api.symbol(b"clCreateCommandQueue")?;
-            let create_program: FProgram = api.symbol(b"clCreateProgramWithSource")?;
-            let build: FBuild = api.symbol(b"clBuildProgram")?;
-            let create_kernel: FKernel = api.symbol(b"clCreateKernel")?;
-            let create_buffer: FBuffer = api.symbol(b"clCreateBuffer")?;
-            let set_arg: FArg = api.symbol(b"clSetKernelArg")?;
-            let enqueue: FEnqueue = api.symbol(b"clEnqueueNDRangeKernel")?;
-            let read: FRead = api.symbol(b"clEnqueueReadBuffer")?;
-            let release_context: FRelease = api.symbol(b"clReleaseContext")?;
-            let release_queue: FRelease = api.symbol(b"clReleaseCommandQueue")?;
-            let release_program: FRelease = api.symbol(b"clReleaseProgram")?;
-            let release_kernel: FRelease = api.symbol(b"clReleaseKernel")?;
-            let release_buffer: FRelease = api.symbol(b"clReleaseMemObject")?;
-
-            let mut rc = 0i32;
-            let context = Owned {
-                value: create_context(
-                    ptr::null(),
-                    1,
-                    &device,
-                    ptr::null_mut(),
-                    ptr::null_mut(),
-                    &mut rc,
-                ),
-                release: release_context,
-            };
-            status(rc, "creating OpenCL context")?;
-            if context.value.is_null() {
-                return Err("null OpenCL context".into());
-            }
-            let queue = Owned {
-                value: create_queue(context.value, device, 0, &mut rc),
-                release: release_queue,
-            };
-            status(rc, "creating OpenCL queue")?;
-            if queue.value.is_null() {
-                return Err("null OpenCL queue".into());
-            }
-
-            let source = include_str!("sha256.cl");
-            let source_ptr = source.as_ptr().cast::<c_char>();
-            let source_len = source.len();
-            let program = Owned {
-                value: create_program(context.value, 1, &source_ptr, &source_len, &mut rc),
-                release: release_program,
-            };
-            status(rc, "creating OpenCL program")?;
-            if program.value.is_null() {
-                return Err("null OpenCL program".into());
-            }
-            status(
-                build(
-                    program.value,
-                    1,
-                    &device,
-                    ptr::null(),
-                    ptr::null_mut(),
-                    ptr::null_mut(),
-                ),
-                "compiling native SHA-256 OpenCL kernel",
-            )?;
-            let kernel_name = CString::new("sha256_match").expect("constant kernel name");
-            let kernel = Owned {
-                value: create_kernel(program.value, kernel_name.as_ptr(), &mut rc),
-                release: release_kernel,
-            };
-            status(rc, "creating OpenCL kernel")?;
-            if kernel.value.is_null() {
-                return Err("null OpenCL kernel".into());
-            }
-
-            let mut packed = vec![0u8; candidates.len() * 64];
-            let mut lengths = Vec::<u32>::with_capacity(candidates.len());
-            for (i, candidate) in candidates.iter().enumerate() {
-                packed[i * 64..i * 64 + candidate.len()].copy_from_slice(candidate);
-                lengths.push(candidate.len() as u32);
-            }
-            let words: Vec<u32> = target
-                .chunks_exact(4)
-                .map(|chunk| u32::from_be_bytes(chunk.try_into().expect("fixed 4 bytes")))
-                .collect();
-            let mut output = vec![0u32; candidates.len()];
-
-            let buffer = |data: *mut c_void, size: usize, flags: u64| -> Result<Owned, String> {
-                let mut e = 0;
-                let value = create_buffer(context.value, flags, size, data, &mut e);
-                status(e, "allocating OpenCL buffer")?;
-                if value.is_null() {
-                    return Err("null OpenCL buffer".into());
-                }
-                Ok(Owned {
-                    value,
-                    release: release_buffer,
-                })
-            };
-            let input = buffer(
-                packed.as_mut_ptr().cast(),
-                packed.len(),
-                MEM_READ_ONLY | MEM_COPY_HOST_PTR,
-            )?;
-            let len_bytes = lengths.len() * std::mem::size_of::<u32>();
-            let len_buffer = buffer(
-                lengths.as_mut_ptr().cast(),
-                len_bytes,
-                MEM_READ_ONLY | MEM_COPY_HOST_PTR,
-            )?;
-            let words_bytes = words.len() * std::mem::size_of::<u32>();
-            let mut words = words;
-            let target_buffer = buffer(
-                words.as_mut_ptr().cast(),
-                words_bytes,
-                MEM_READ_ONLY | MEM_COPY_HOST_PTR,
-            )?;
-            let output_buffer = buffer(
-                ptr::null_mut(),
-                output.len() * std::mem::size_of::<u32>(),
-                MEM_WRITE_ONLY,
-            )?;
-            for (i, mem) in [&input, &len_buffer, &target_buffer, &output_buffer]
-                .iter()
-                .enumerate()
-            {
-                status(
-                    set_arg(
-                        kernel.value,
-                        i as u32,
-                        std::mem::size_of::<Handle>(),
-                        (&mem.value as *const Handle).cast(),
-                    ),
-                    "setting OpenCL buffer argument",
-                )?;
-            }
-            let count = candidates.len() as u32;
-            status(
-                set_arg(
-                    kernel.value,
-                    4,
-                    std::mem::size_of::<u32>(),
-                    (&count as *const u32).cast(),
-                ),
-                "setting OpenCL count argument",
-            )?;
-            let global = [candidates.len()];
-            status(
-                enqueue(
-                    queue.value,
-                    kernel.value,
-                    1,
-                    ptr::null(),
-                    global.as_ptr(),
-                    ptr::null(),
-                    0,
-                    ptr::null(),
-                    ptr::null_mut(),
-                ),
-                "launching OpenCL SHA-256 kernel",
-            )?;
-            status(
-                read(
-                    queue.value,
-                    output_buffer.value,
-                    1,
-                    0,
-                    output.len() * std::mem::size_of::<u32>(),
-                    output.as_mut_ptr().cast(),
-                    0,
-                    ptr::null(),
-                    ptr::null_mut(),
-                ),
-                "reading GPU results",
-            )?;
-
-            // Verify positives on the CPU; never return an unconfirmed recovery.
-            Ok(output
-                .iter()
-                .enumerate()
-                .filter_map(|(i, flag)| {
-                    if *flag != 0 && Sha256::digest(candidates[i]).as_slice() == target {
-                        Some(i)
-                    } else {
-                        None
-                    }
-                })
-                .collect())
-        }
+        Session::new(candidates.len())?.execute(target, candidates)
+    }
+    pub(super) fn execute_md5(target: &[u8], candidates: &[&[u8]]) -> Result<Vec<usize>, String> {
+        Session::new_for(candidates.len(), Algorithm::Md5)?.execute(target, candidates)
     }
 }
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lazy_gpu_stream_counts_only_verified_batches() {
+        let mut batches = 0;
+        let run = stream_with(
+            &"00".repeat(32),
+            std::iter::repeat(b"bad".to_vec())
+                .take(GPU_STREAM_BATCH)
+                .chain(std::iter::once(b"hit".to_vec())),
+            10_000,
+            1,
+            || false,
+            |_, list| {
+                batches += 1;
+                Ok(list
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(i, c)| if *c == b"hit" { Some(i) } else { None })
+                    .collect())
+            },
+        )
+        .unwrap();
+        assert_eq!(batches, 2);
+        assert_eq!(run.tried, (GPU_STREAM_BATCH + 1) as u64);
+        assert_eq!(run.hits[0].index, GPU_STREAM_BATCH as u64);
+        assert_eq!(run.hits[0].candidate, b"hit");
+    }
+    #[test]
+    fn gpu_stream_limit_cancel_and_bad_return_indices() {
+        let target = "00".repeat(32);
+        let run = stream_with(
+            &target,
+            std::iter::repeat(b"x".to_vec()).take(9),
+            3,
+            1,
+            || false,
+            |_, _| Ok(vec![]),
+        )
+        .unwrap();
+        assert_eq!(run.tried, 3);
+        assert!(run.limit_reached);
+        let mut polls = 0;
+        let cancelled = stream_with(
+            &target,
+            [b"hello", b"world"],
+            10,
+            1,
+            || {
+                polls += 1;
+                polls > 1
+            },
+            |_, _| Ok(vec![]),
+        )
+        .unwrap();
+        assert!(cancelled.cancelled);
+        assert_eq!(cancelled.tried, 0);
+        assert!(stream_with(&target, [b"x"], 10, 1, || false, |_, _| Ok(vec![2])).is_err());
+    }
+
+    #[test]
+    fn md5_gpu_rejects_invalid_digest_and_candidate_size() {
+        assert!(recover_md5("zz", &[b"x"]).is_err());
+        assert!(recover_md5("ab", &[b"x"]).is_err());
+        assert!(recover_md5(&"00".repeat(16), &[&[b'x'; 56]]).is_err());
+        let too_many = vec![b"x".as_slice(); MAX_GPU_BATCH + 1];
+        assert!(recover_md5(&"00".repeat(16), &too_many).is_err());
+    }
+    #[test]
+    fn md5_mock_stream_preserves_global_match_index() {
+        use md5::Digest;
+        let target = hex::encode(md5::Md5::digest(b"found"));
+        let words = std::iter::repeat(b"bad".to_vec())
+            .take(GPU_STREAM_BATCH)
+            .chain(std::iter::once(b"found".to_vec()));
+        let result = stream_with_checked(
+            &target,
+            words,
+            10_000,
+            1,
+            16,
+            "cyberdeck-crypto-opencl-md5",
+            || false,
+            |_, items| {
+                Ok(items
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(i, c)| if *c == b"found" { Some(i) } else { None })
+                    .collect())
+            },
+        )
+        .unwrap();
+        assert_eq!(result.tried, (GPU_STREAM_BATCH + 1) as u64);
+        assert_eq!(result.hits[0].index, GPU_STREAM_BATCH as u64);
+        assert_eq!(result.engine, "cyberdeck-crypto-opencl-md5");
+    }
+    #[test]
+    fn md5_hardware_reference_vectors_if_available() {
+        #[cfg(feature = "gpu")]
+        if probe().available {
+            use md5::{Digest, Md5};
+            let inputs = vec![
+                vec![],
+                b"a".to_vec(),
+                b"abc".to_vec(),
+                vec![0xff, 0x00],
+                vec![b'x'; 54],
+                vec![b'x'; 55],
+            ];
+            let refs: Vec<&[u8]> = inputs.iter().map(Vec::as_slice).collect();
+            for (index, input) in inputs.iter().enumerate() {
+                let target = hex::encode(Md5::digest(input));
+                assert_eq!(recover_md5(&target, &refs).unwrap(), vec![index]);
+            }
+            let mut words = vec![b"not-match".to_vec(); GPU_STREAM_BATCH + 2];
+            words[GPU_STREAM_BATCH] = b"hello".to_vec();
+            let target = hex::encode(Md5::digest(b"hello"));
+            let result = recover_md5_stream(&target, words, 10_000, 1, || false).unwrap();
+            assert_eq!(result.hits[0].index, GPU_STREAM_BATCH as u64);
+            assert_eq!(result.batches, 2);
+        }
+    }
+
     #[test]
     fn unsupported_gpu_inputs_are_rejected_before_driver_access() {
         assert!(recover_sha256("xx", &[b"abc"]).is_err());
@@ -518,16 +741,27 @@ mod tests {
         #[cfg(feature = "gpu")]
         if probe().available {
             use sha2::{Digest, Sha256};
-            let candidates: Vec<Vec<u8>> = vec![
+            let candidates = vec![
                 vec![],
-                b"incorrect".to_vec(),
+                b"a".to_vec(),
                 b"hello".to_vec(),
-                vec![b'x'; 55],
                 vec![b'x'; 54],
+                vec![b'x'; 55],
             ];
             let refs: Vec<&[u8]> = candidates.iter().map(Vec::as_slice).collect();
-            let hash = hex::encode(Sha256::digest(&candidates[3]));
-            assert_eq!(recover_sha256(&hash, &refs).unwrap(), vec![3]);
+            for (index, candidate) in candidates.iter().enumerate() {
+                let digest = hex::encode(Sha256::digest(candidate));
+                assert_eq!(recover_sha256(&digest, &refs).unwrap(), vec![index]);
+            }
+
+            let mut words = vec![b"incorrect".to_vec(); GPU_STREAM_BATCH + 3];
+            words[GPU_STREAM_BATCH + 1] = b"known-target".to_vec();
+            let digest = hex::encode(Sha256::digest(b"known-target"));
+            let run = recover_sha256_stream(&digest, words, 10_000, 1, || false).unwrap();
+            assert_eq!(run.batches, 2);
+            assert_eq!(run.tried, (GPU_STREAM_BATCH + 3) as u64);
+            assert_eq!(run.hits[0].index, (GPU_STREAM_BATCH + 1) as u64);
+            assert_eq!(run.hits[0].candidate, b"known-target");
         }
     }
     #[test]

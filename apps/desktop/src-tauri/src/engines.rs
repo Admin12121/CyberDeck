@@ -28,7 +28,11 @@ pub struct EngineStatus {
 /// Where a binary may live: the bundled resource directory first, then PATH.
 fn candidate_paths(app: &AppHandle, binary: &str) -> Vec<PathBuf> {
     let mut candidates = Vec::new();
-    let exe = if cfg!(windows) { format!("{binary}.exe") } else { binary.to_string() };
+    let exe = if cfg!(windows) {
+        format!("{binary}.exe")
+    } else {
+        binary.to_string()
+    };
     if let Ok(resource_dir) = app.path().resource_dir() {
         candidates.push(resource_dir.join("engines").join(&exe));
     }
@@ -36,9 +40,17 @@ fn candidate_paths(app: &AppHandle, binary: &str) -> Vec<PathBuf> {
     candidates
 }
 
-fn run_with_timeout(mut command: Command, timeout: Duration) -> Result<(std::process::ExitStatus, Vec<u8>, Vec<u8>), String> {
-    command.stdout(Stdio::piped()).stderr(Stdio::piped()).stdin(Stdio::null());
-    let mut child = command.spawn().map_err(|e| format!("cannot start process: {e}"))?;
+fn run_with_timeout(
+    mut command: Command,
+    timeout: Duration,
+) -> Result<(std::process::ExitStatus, Vec<u8>, Vec<u8>), String> {
+    command
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .stdin(Stdio::null());
+    let mut child = command
+        .spawn()
+        .map_err(|e| format!("cannot start process: {e}"))?;
     let started = Instant::now();
     loop {
         match child.try_wait().map_err(|e| e.to_string())? {
@@ -57,7 +69,10 @@ fn run_with_timeout(mut command: Command, timeout: Duration) -> Result<(std::pro
             }
             None if started.elapsed() > timeout => {
                 let _ = child.kill();
-                return Err(format!("engine exceeded the {}s timeout; output discarded", timeout.as_secs()));
+                return Err(format!(
+                    "engine exceeded the {}s timeout; output discarded",
+                    timeout.as_secs()
+                ));
             }
             None => std::thread::sleep(Duration::from_millis(100)),
         }
@@ -71,8 +86,7 @@ pub fn parse_hashcat_version(output: &str) -> Option<String> {
             let trimmed = line.trim().trim_start_matches('v');
             let mut split = trimmed.split(|c: char| !c.is_ascii_digit() && c != '.');
             let head = split.next()?.to_string();
-            head.contains('.')
-            .then_some(head)
+            head.contains('.').then_some(head)
         })
         .map(|v| format!("v{v}"))
 }
@@ -81,18 +95,37 @@ pub fn parse_john_version(output: &str) -> Option<String> {
     output
         .lines()
         .find(|l| l.contains("John the Ripper"))
-        .map(|l| l.trim().split_whitespace().take(4).collect::<Vec<_>>().join(" "))
+        .map(|l| {
+            l.trim()
+                .split_whitespace()
+                .take(4)
+                .collect::<Vec<_>>()
+                .join(" ")
+        })
 }
 
-fn version_of(app: &AppHandle, binary: &str, version_args: &[&str], parse: fn(&str) -> Option<String>) -> Option<(String, String)> {
+fn version_of(
+    app: &AppHandle,
+    binary: &str,
+    version_args: &[&str],
+    parse: fn(&str) -> Option<String>,
+) -> Option<(String, String)> {
     for candidate in candidate_paths(app, binary) {
         let mut command = Command::new(&candidate);
         command.args(version_args);
         if let Ok((status, stdout, stderr)) = run_with_timeout(command, Duration::from_secs(10)) {
             if status.success() {
-                let text = format!("{}{}", String::from_utf8_lossy(&stdout), String::from_utf8_lossy(&stderr));
+                let text = format!(
+                    "{}{}",
+                    String::from_utf8_lossy(&stdout),
+                    String::from_utf8_lossy(&stderr)
+                );
                 if let Some(version) = parse(&text) {
-                    let source = if candidate.is_absolute() { "bundled resource" } else { "system PATH" };
+                    let source = if candidate.is_absolute() {
+                        "bundled resource"
+                    } else {
+                        "system PATH"
+                    };
                     return Some((version, source.to_string()));
                 }
             }
@@ -113,7 +146,8 @@ pub fn engines_detect(app: AppHandle) -> Vec<EngineStatus> {
             available: hashcat.is_some(),
             version: hashcat.as_ref().map(|(v, _)| v.clone()).unwrap_or_default(),
             source: hashcat.map(|(_, s)| s).unwrap_or_default(),
-            note: "GPU when vendor drivers are present; MIT license approved for bundling".to_string(),
+            note: "GPU when vendor drivers are present; MIT license approved for bundling"
+                .to_string(),
         },
         EngineStatus {
             id: "john".to_string(),
@@ -176,7 +210,10 @@ pub fn parse_hashcat_outfile(text: &str) -> Vec<AttackMatch> {
     text.lines()
         .filter_map(|line| {
             let (hash, plain) = line.split_once(':')?;
-            (!hash.is_empty() && !plain.is_empty()).then(|| AttackMatch { line_no: 0, password: plain.trim().to_string() })
+            (!hash.is_empty() && !plain.is_empty()).then(|| AttackMatch {
+                line_no: 0,
+                password: plain.trim().to_string(),
+            })
         })
         .collect()
 }
@@ -184,10 +221,15 @@ pub fn parse_hashcat_outfile(text: &str) -> Vec<AttackMatch> {
 /// Collect hash:plain pairs from `john --show`.
 pub fn parse_john_show(text: &str) -> Vec<AttackMatch> {
     text.lines()
-        .filter(|line| line.contains(':') && !line.contains("password hashes") && !line.starts_with('\''))
+        .filter(|line| {
+            line.contains(':') && !line.contains("password hashes") && !line.starts_with('\'')
+        })
         .filter_map(|line| {
             let (hash, plain) = line.split_once(':')?;
-            (!hash.trim().is_empty() && !plain.trim().is_empty()).then(|| AttackMatch { line_no: 0, password: plain.trim().to_string() })
+            (!hash.trim().is_empty() && !plain.trim().is_empty()).then(|| AttackMatch {
+                line_no: 0,
+                password: plain.trim().to_string(),
+            })
         })
         .collect()
 }
@@ -203,8 +245,12 @@ fn scratch_dir(app: &AppHandle) -> Result<PathBuf, String> {
 }
 
 fn write_hash_file(dir: &Path, algo: &str, hash: &str, engine: &str) -> Result<PathBuf, String> {
-    let file = dir.join(format!("{engine}-{algo}-{}.txt", &hash[..hash.len().min(12)]));
-    std::fs::write(&file, format!("{hash}\n")).map_err(|e| format!("cannot write hash file: {e}"))?;
+    let file = dir.join(format!(
+        "{engine}-{algo}-{}.txt",
+        &hash[..hash.len().min(12)]
+    ));
+    std::fs::write(&file, format!("{hash}\n"))
+        .map_err(|e| format!("cannot write hash file: {e}"))?;
     Ok(file)
 }
 
@@ -245,8 +291,13 @@ pub fn engine_attack(
     let scratch = scratch_dir(&app)?;
     match engine.as_str() {
         "hashcat" => {
-            let hash_mode = hashcat_mode(&algo).ok_or_else(|| format!("hashcat has no -m mode for {algo}"))?;
-            let binary = if cfg!(windows) { "hashcat.exe" } else { "hashcat" };
+            let hash_mode =
+                hashcat_mode(&algo).ok_or_else(|| format!("hashcat has no -m mode for {algo}"))?;
+            let binary = if cfg!(windows) {
+                "hashcat.exe"
+            } else {
+                "hashcat"
+            };
             let bin_path = candidate_paths(&app, "hashcat")
                 .into_iter()
                 .find(|p| p.is_absolute() || which_exists(binary))
@@ -256,9 +307,11 @@ pub fn engine_attack(
             let _ = std::fs::remove_file(&out_file);
             let mut command = Command::new(bin_path);
             command
-                .arg("-m").arg(hash_mode.to_string())
+                .arg("-m")
+                .arg(hash_mode.to_string())
                 .arg("--potfile-disable")
-                .arg("-o").arg(&out_file);
+                .arg("-o")
+                .arg(&out_file);
             if mode == "mask" {
                 let mask = mask.clone().unwrap_or_default();
                 if mask.is_empty() {
@@ -266,8 +319,15 @@ pub fn engine_attack(
                 }
                 command.arg("-a").arg("3").arg(&hash_file).arg(mask);
             } else {
-                let picked = app.dialog().file().blocking_pick_file().ok_or("cancelled")?;
-                let wordlist = picked.as_path().ok_or("unsupported file location")?.to_path_buf();
+                let picked = app
+                    .dialog()
+                    .file()
+                    .blocking_pick_file()
+                    .ok_or("cancelled")?;
+                let wordlist = picked
+                    .as_path()
+                    .ok_or("unsupported file location")?
+                    .to_path_buf();
                 command.arg("-a").arg("0").arg(&hash_file).arg(wordlist);
             }
             let (status, stdout, stderr) = run_with_timeout(command, PROCESS_TIMEOUT)?;
@@ -275,7 +335,11 @@ pub fn engine_attack(
             let mut matches = parse_hashcat_outfile(&outfile_text);
             matches.truncate(MAX_REPORTED_MATCHES);
             crate::attack::record_history(&ctx, &algo, &target, "hashcat", &matches);
-            let mut raw = format!("{}{}", String::from_utf8_lossy(&stdout), String::from_utf8_lossy(&stderr));
+            let mut raw = format!(
+                "{}{}",
+                String::from_utf8_lossy(&stdout),
+                String::from_utf8_lossy(&stderr)
+            );
             raw.truncate(4000);
             let engine_version = version_of(&app, "hashcat", &["--version"], parse_hashcat_version)
                 .map(|(v, _)| v)
@@ -285,7 +349,12 @@ pub fn engine_attack(
                 engine_version,
                 algo,
                 mode,
-                tried_note: if status.success() { "completed" } else { "engine returned nonzero; see raw output" }.to_string(),
+                tried_note: if status.success() {
+                    "completed"
+                } else {
+                    "engine returned nonzero; see raw output"
+                }
+                .to_string(),
                 matches,
                 duration_ms: started.elapsed().as_millis() as u64,
                 raw_tail: raw,
@@ -299,10 +368,20 @@ pub fn engine_attack(
                 .find(|p| p.is_absolute() || which_exists(binary))
                 .ok_or("john is not detected on this machine")?;
             if mode == "mask" {
-                return Err("john mask mode arrives with the mask engine arc; use wordlist or native".to_string());
+                return Err(
+                    "john mask mode arrives with the mask engine arc; use wordlist or native"
+                        .to_string(),
+                );
             }
-            let picked = app.dialog().file().blocking_pick_file().ok_or("cancelled")?;
-            let wordlist = picked.as_path().ok_or("unsupported file location")?.to_path_buf();
+            let picked = app
+                .dialog()
+                .file()
+                .blocking_pick_file()
+                .ok_or("cancelled")?;
+            let wordlist = picked
+                .as_path()
+                .ok_or("unsupported file location")?
+                .to_path_buf();
             let hash_file = write_hash_file(&scratch, &algo, &target, "john")?;
             let mut command = Command::new(&bin_path);
             command
@@ -312,12 +391,18 @@ pub fn engine_attack(
             let (status, stdout, stderr) = run_with_timeout(command, PROCESS_TIMEOUT)?;
             // secrets live in john's pot; --show reads them back
             let mut show = Command::new(bin_path);
-            show.arg("--show").arg(format!("--format={fmt}")).arg(&hash_file);
+            show.arg("--show")
+                .arg(format!("--format={fmt}"))
+                .arg(&hash_file);
             let (_, show_out, _) = run_with_timeout(show, Duration::from_secs(30))?;
             let mut matches = parse_john_show(&String::from_utf8_lossy(&show_out));
             matches.truncate(MAX_REPORTED_MATCHES);
             crate::attack::record_history(&ctx, &algo, &target, "john", &matches);
-            let mut raw = format!("{}{}", String::from_utf8_lossy(&stdout), String::from_utf8_lossy(&stderr));
+            let mut raw = format!(
+                "{}{}",
+                String::from_utf8_lossy(&stdout),
+                String::from_utf8_lossy(&stderr)
+            );
             raw.truncate(4000);
             let engine_version = version_of(&app, "john", &["--version"], parse_john_version)
                 .map(|(v, _)| v)
@@ -340,9 +425,18 @@ pub fn engine_attack(
 
 pub fn which_exists(binary: &str) -> bool {
     if cfg!(windows) {
-        std::process::Command::new("where").arg(binary).output().map(|o| o.status.success()).unwrap_or(false)
+        std::process::Command::new("where")
+            .arg(binary)
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
     } else {
-        std::process::Command::new("sh").arg("-c").arg(format!("command -v {binary}")).output().map(|o| o.status.success()).unwrap_or(false)
+        std::process::Command::new("sh")
+            .arg("-c")
+            .arg(format!("command -v {binary}"))
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
     }
 }
 
@@ -371,7 +465,10 @@ mod tests {
 
     #[test]
     fn parses_hashcat_version() {
-        assert_eq!(parse_hashcat_version("v6.2.6\nsome build info"), Some("v6.2.6".to_string()));
+        assert_eq!(
+            parse_hashcat_version("v6.2.6\nsome build info"),
+            Some("v6.2.6".to_string())
+        );
         assert_eq!(parse_hashcat_version("6.2.6"), Some("v6.2.6".to_string()));
         assert_eq!(parse_hashcat_version("no version here"), None);
     }
@@ -379,7 +476,10 @@ mod tests {
     #[test]
     fn parses_john_version() {
         let banner = "John the Ripper 1.9.0-jumbo-1+ bleeding [windows-x86_64 AVX2]";
-        assert_eq!(parse_john_version(banner).unwrap(), "John the Ripper 1.9.0-jumbo-1+");
+        assert_eq!(
+            parse_john_version(banner).unwrap(),
+            "John the Ripper 1.9.0-jumbo-1+"
+        );
     }
 
     #[test]

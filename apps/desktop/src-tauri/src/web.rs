@@ -45,8 +45,14 @@ impl ProxyStream {
     async fn write_all(&mut self, bytes: &[u8]) -> std::io::Result<()> {
         use tokio::io::AsyncWriteExt;
         match self {
-            Self::Plain(stream) => stream.write_all(bytes).await,
-            Self::Tls(stream) => stream.write_all(bytes).await,
+            Self::Plain(stream) => {
+                stream.write_all(bytes).await?;
+                stream.flush().await
+            }
+            Self::Tls(stream) => {
+                stream.write_all(bytes).await?;
+                stream.flush().await
+            }
         }
     }
 }
@@ -96,6 +102,9 @@ pub struct HttpResponseWire {
     pub status: u16,
     pub headers: Vec<(String, String)>,
     pub body: String,
+    /// Exact bytes of the bounded response for hex/repeater tooling.
+    pub body_base64: String,
+    pub body_is_utf8: bool,
     pub body_truncated: bool,
     pub size: usize,
     pub duration_ms: u64,
@@ -130,25 +139,50 @@ pub fn parse_raw_request(
     let mut parts = request_line.split_whitespace();
     let method = parts.next().ok_or("missing method")?.to_uppercase();
     let target = parts.next().ok_or("missing path")?.to_string();
+    if reqwest::Method::from_bytes(method.as_bytes()).is_err() {
+        return Err("invalid HTTP request method".to_string());
+    }
+    if parts.next().is_none() || parts.next().is_some() {
+        return Err("invalid HTTP request line".to_string());
+    }
     let mut host = String::new();
     let mut headers = Vec::new();
     for line in lines {
-        if let Some((name, value)) = line.split_once(':') {
-            let name = name.trim().to_string();
-            let value = value.trim().to_string();
-            if name.eq_ignore_ascii_case("host") {
-                host = value.clone();
-            }
-            headers.push((name, value));
+        if line.starts_with(' ') || line.starts_with('\t') {
+            return Err("folded HTTP headers are unsupported".to_string());
         }
+        let (name, value) = line.split_once(':').ok_or("malformed HTTP header")?;
+        if name.is_empty()
+            || !name
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&b))
+        {
+            return Err("invalid HTTP header name".to_string());
+        }
+        let value = value.trim().to_string();
+        if name.eq_ignore_ascii_case("host") {
+            if !host.is_empty() {
+                return Err("duplicate Host header".to_string());
+            }
+            host = value.clone();
+        }
+        headers.push((name.to_string(), value));
     }
     let url = if target.starts_with("http://") || target.starts_with("https://") {
         target
-    } else if !host.is_empty() {
+    } else if !host.is_empty() && target.starts_with('/') {
         format!("{scheme}://{host}{target}")
     } else {
-        return Err("request needs a Host header or absolute URL".to_string());
+        return Err("request needs a Host and origin-form path or absolute URL".to_string());
     };
+    let parsed = reqwest::Url::parse(&url).map_err(|e| format!("invalid request URL: {e}"))?;
+    if !matches!(parsed.scheme(), "http" | "https")
+        || parsed.host_str().is_none()
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+    {
+        return Err("request target must be HTTP(S) without URL credentials".to_string());
+    }
     Ok((method, url, headers, body))
 }
 
@@ -161,7 +195,10 @@ pub async fn http_send(request_raw: String) -> Result<HttpResponseWire, String> 
         reqwest::Method::from_bytes(method.as_bytes()).map_err(|e| format!("bad method: {e}"))?;
     let mut request = client.request(method_req, &url);
     for (name, value) in &headers {
-        if name.eq_ignore_ascii_case("host") || name.eq_ignore_ascii_case("content-length") {
+        if name.eq_ignore_ascii_case("host")
+            || name.eq_ignore_ascii_case("content-length")
+            || is_hop_header_for_message(name, &headers)
+        {
             continue;
         }
         request = request.header(name, value);
@@ -204,11 +241,16 @@ pub async fn http_send(request_raw: String) -> Result<HttpResponseWire, String> 
     } else {
         body_bytes.len()
     };
+    use base64::Engine as _;
     let body_text = String::from_utf8_lossy(&body_bytes).to_string();
+    let body_is_utf8 = std::str::from_utf8(&body_bytes).is_ok();
+    let body_base64 = base64::engine::general_purpose::STANDARD.encode(&body_bytes);
     Ok(HttpResponseWire {
         status,
         headers: resp_headers,
         body: body_text,
+        body_base64,
+        body_is_utf8,
         body_truncated: truncated,
         size,
         duration_ms: started.elapsed().as_millis() as u64,
@@ -289,9 +331,12 @@ pub async fn web_scan(target_url: String, authorized: bool) -> Result<Vec<Findin
             if *header == "strict-transport-security" && origin.scheme() != "https" {
                 continue;
             }
-            if *header == "x-frame-options" && headers.iter().any(|(k, v)| {
-                k == "content-security-policy" && v.to_ascii_lowercase().contains("frame-ancestors")
-            }) {
+            if *header == "x-frame-options"
+                && headers.iter().any(|(k, v)| {
+                    k == "content-security-policy"
+                        && v.to_ascii_lowercase().contains("frame-ancestors")
+                })
+            {
                 continue;
             }
             if !headers.iter().any(|(k, _)| k == header) {
@@ -303,6 +348,11 @@ pub async fn web_scan(target_url: String, authorized: bool) -> Result<Vec<Findin
                 });
             }
         }
+        findings.extend(session_cookie_findings(
+            headers,
+            origin.scheme() == "https",
+            &base,
+        ));
         if let Some((_, server)) = headers.iter().find(|(k, _)| k == "server") {
             findings.push(Finding {
                 severity: "info".to_string(),
@@ -345,10 +395,73 @@ pub async fn web_scan(target_url: String, authorized: bool) -> Result<Vec<Findin
     Ok(findings)
 }
 
+/// Report cookie hardening only for likely authentication cookies. Values
+/// are never written to findings, history, or debug output.
+fn session_cookie_findings(
+    headers: &[(String, String)],
+    https: bool,
+    endpoint: &str,
+) -> Vec<Finding> {
+    let mut findings = Vec::new();
+    for (_, value) in headers.iter().filter(|(key, _)| key == "set-cookie") {
+        let Some((raw_name, _)) = value.split_once('=') else {
+            continue;
+        };
+        let name = raw_name.trim();
+        let normalized = name.to_ascii_lowercase();
+        if !matches!(
+            normalized.as_str(),
+            "session"
+                | "sessionid"
+                | "jsessionid"
+                | "phpsessid"
+                | "connect.sid"
+                | "sid"
+                | "auth"
+                | "jwt"
+                | "access_token"
+                | "id_token"
+        ) && !normalized.ends_with("_session")
+        {
+            continue;
+        }
+        let attributes: Vec<&str> = value.split(';').skip(1).map(str::trim).collect();
+        for (required, reason) in [
+            ("httponly", "session cookie accessible to browser scripts"),
+            ("secure", "session cookie may be sent over unencrypted HTTP"),
+            (
+                "samesite",
+                "session cookie lacks explicit cross-site request policy",
+            ),
+        ] {
+            if required == "secure" && !https {
+                continue;
+            }
+            if attributes.iter().any(|attr| {
+                attr.eq_ignore_ascii_case(required)
+                    || attr
+                        .to_ascii_lowercase()
+                        .starts_with(&format!("{required}="))
+            }) {
+                continue;
+            }
+            findings.push(Finding {
+                severity: "low".to_string(),
+                title: format!("session cookie missing {required}"),
+                detail: reason.to_string(),
+                evidence: format!("{endpoint} — cookie {name} (value redacted)"),
+            });
+        }
+    }
+    findings
+}
+
 /// A generic HTTP 200 response is frequently an SPA fallback.
 /// Recognize actual sensitive-file contents before reporting high severity.
 fn confirmed_exposure(path: &str, body: &[u8]) -> bool {
-    let Ok(text) = std::str::from_utf8(body) else { return false; };
+    let Ok(text) = std::str::from_utf8(body) else {
+        return false;
+    };
     match path {
         "/.git/HEAD" => {
             let value = text.trim();
@@ -356,16 +469,125 @@ fn confirmed_exposure(path: &str, body: &[u8]) -> bool {
                 || (value.len() == 40 && value.bytes().all(|b| b.is_ascii_hexdigit()))
         }
         "/.env" => {
-            if text.to_ascii_lowercase().contains("<html") { return false; }
+            if text.to_ascii_lowercase().contains("<html") {
+                return false;
+            }
             text.lines().any(|line| {
-                let Some((name, _)) = line.trim().split_once('=') else { return false };
-                matches!(name, "APP_KEY" | "APP_SECRET" | "DB_PASSWORD" |
-                    "DATABASE_URL" | "AWS_SECRET_ACCESS_KEY" | "SECRET_KEY" |
-                    "DB_HOST" | "DB_DATABASE" | "APP_ENV")
+                let Some((name, _)) = line.trim().split_once('=') else {
+                    return false;
+                };
+                matches!(
+                    name,
+                    "APP_KEY"
+                        | "APP_SECRET"
+                        | "DB_PASSWORD"
+                        | "DATABASE_URL"
+                        | "AWS_SECRET_ACCESS_KEY"
+                        | "SECRET_KEY"
+                        | "DB_HOST"
+                        | "DB_DATABASE"
+                        | "APP_ENV"
+                )
             })
         }
         _ => false,
     }
+}
+
+/// Extract href values from bounded HTML, recognizing single, double and
+/// unquoted forms. Comment/script/style content is ignored by the crawler.
+fn extract_hrefs(html: &str) -> Vec<&str> {
+    let bytes = html.as_bytes();
+    let mut links = Vec::new();
+    let mut i = 0;
+    while i < bytes.len() && links.len() < 1000 {
+        let Some(pos) = bytes[i..].iter().position(|&b| b == b'<') else {
+            break;
+        };
+        i += pos + 1;
+        if bytes[i..].starts_with(b"!--") {
+            if let Some(end) = html[i..].find("-->") {
+                i += end + 3;
+            } else {
+                break;
+            }
+            continue;
+        }
+        let name_start = i;
+        while i < bytes.len() && bytes[i].is_ascii_alphabetic() {
+            i += 1;
+        }
+        let tag = &html[name_start..i];
+        if tag.eq_ignore_ascii_case("script") || tag.eq_ignore_ascii_case("style") {
+            if let Some(end) = html[i..]
+                .to_ascii_lowercase()
+                .find(&format!("</{}", tag.to_ascii_lowercase()))
+            {
+                i += end + tag.len() + 2;
+            }
+            continue;
+        }
+        if !(tag.eq_ignore_ascii_case("a")
+            || tag.eq_ignore_ascii_case("link")
+            || tag.eq_ignore_ascii_case("area"))
+        {
+            continue;
+        }
+        while i < bytes.len() && bytes[i] != b'>' {
+            while i < bytes.len() && (bytes[i].is_ascii_whitespace() || bytes[i] == b'/') {
+                i += 1;
+            }
+            let key_start = i;
+            while i < bytes.len()
+                && (bytes[i].is_ascii_alphanumeric() || matches!(bytes[i], b'-' | b'_' | b':'))
+            {
+                i += 1;
+            }
+            if i == key_start {
+                i += 1;
+                continue;
+            }
+            let is_href = bytes[key_start..i].eq_ignore_ascii_case(b"href");
+            while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+                i += 1;
+            }
+            if bytes.get(i) != Some(&b'=') {
+                continue;
+            }
+            i += 1;
+            while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+                i += 1;
+            }
+            let quote = if matches!(bytes.get(i), Some(b'\'' | b'"')) {
+                let q = bytes[i];
+                i += 1;
+                Some(q)
+            } else {
+                None
+            };
+            let start = i;
+            while i < bytes.len() {
+                if quote.is_some_and(|q| bytes[i] == q) {
+                    break;
+                }
+                if quote.is_none() && (bytes[i].is_ascii_whitespace() || bytes[i] == b'>') {
+                    break;
+                }
+                i += 1;
+            }
+            if is_href {
+                if let Some(href) = html.get(start..i) {
+                    if !href.is_empty() {
+                        links.push(href);
+                    }
+                }
+            }
+            if quote.is_some() && i < bytes.len() {
+                i += 1;
+            }
+        }
+    }
+    links
 }
 
 /// Resolve a link only if its parsed origin matches the authorized origin.
@@ -441,10 +663,8 @@ pub async fn spider_scan(
         let Some(html) = fetch_crawl_page(&client, &url).await else {
             continue;
         };
-        // A deliberate first-stage parser: full HTML tokenization is a later native port.
-        for chunk in html.split("href=\"").skip(1) {
-            let Some(end) = chunk.find('"') else { continue };
-            let Some(absolute) = resolve_scoped_link(&base, &url, &chunk[..end]) else {
+        for href in extract_hrefs(&html) {
+            let Some(absolute) = resolve_scoped_link(&base, &url, href) else {
                 continue;
             };
             if absolute.query().is_some() {
@@ -485,10 +705,23 @@ mod scope_tests {
 
     #[test]
     fn connect_target_requires_unambiguous_authority() {
-        assert_eq!(parse_connect_target("example.com:443").unwrap(), ("example.com".to_string(), 443));
-        assert_eq!(parse_connect_target("[::1]:8443").unwrap(), ("::1".to_string(), 8443));
-        for bad in ["example.com", "example.com:0", "example.com:abc", "::1:443",
-                    "user@example.com:443", "https://example.com:443", "example.com:65536"] {
+        assert_eq!(
+            parse_connect_target("example.com:443").unwrap(),
+            ("example.com".to_string(), 443)
+        );
+        assert_eq!(
+            parse_connect_target("[::1]:8443").unwrap(),
+            ("::1".to_string(), 8443)
+        );
+        for bad in [
+            "example.com",
+            "example.com:0",
+            "example.com:abc",
+            "::1:443",
+            "user@example.com:443",
+            "https://example.com:443",
+            "example.com:65536",
+        ] {
             assert!(parse_connect_target(bad).is_err(), "{bad}");
         }
     }
@@ -499,23 +732,85 @@ mod scope_tests {
         assert!(tls_host_matches(&headers, "example.com", 8443));
         assert!(!tls_host_matches(&headers, "example.com", 443));
         assert!(!tls_host_matches(&headers, "other.example", 8443));
-        assert!(!tls_host_matches(&[("Host".into(), "example.com".into()),
-                ("host".into(), "evil.invalid".into())], "example.com", 443));
+        assert!(!tls_host_matches(
+            &[
+                ("Host".into(), "example.com".into()),
+                ("host".into(), "evil.invalid".into())
+            ],
+            "example.com",
+            443
+        ));
+    }
+
+    #[test]
+    fn nominated_connection_headers_are_hop_by_hop() {
+        let headers = vec![
+            ("Connection".into(), "keep-alive, X-Internal-Relay".into()),
+            ("X-Internal-Relay".into(), "metadata".into()),
+            ("X-Application".into(), "retained".into()),
+        ];
+        assert!(is_hop_header_for_message("Connection", &headers));
+        assert!(is_hop_header_for_message("x-internal-relay", &headers));
+        assert!(!is_hop_header_for_message("X-Application", &headers));
     }
 
     #[test]
     fn rules_preserve_non_utf8_payloads() {
         let source = vec![0xff, 0x00, b'A', b'B', 0xfe];
-        assert_eq!(replace_bytes_limited(source, b"AB", b"XYZ"),
-                   vec![0xff, 0x00, b'X', b'Y', b'Z', 0xfe]);
+        assert_eq!(
+            replace_bytes_limited(source, b"AB", b"XYZ"),
+            vec![0xff, 0x00, b'X', b'Y', b'Z', 0xfe]
+        );
+    }
+
+    #[test]
+    fn session_cookie_audit_redacts_values_and_respects_attributes() {
+        let headers = vec![(
+            "set-cookie".to_string(),
+            "session=top-secret; Path=/; Secure; HttpOnly; SameSite=Lax".to_string(),
+        )];
+        assert!(session_cookie_findings(&headers, true, "https://example.test").is_empty());
+        let insecure = vec![("set-cookie".into(), "session=top-secret; Path=/".into())];
+        let result = session_cookie_findings(&insecure, true, "https://example.test");
+        assert_eq!(result.len(), 3);
+        assert!(result.iter().all(|f| !f.evidence.contains("top-secret")));
     }
 
     #[test]
     fn generic_spa_fallbacks_are_not_sensitive_exposures() {
         assert!(!confirmed_exposure("/.env", b"<html>index.html</html>"));
-        assert!(!confirmed_exposure("/.git/HEAD", b"<html>index.html</html>"));
+        assert!(!confirmed_exposure(
+            "/.git/HEAD",
+            b"<html>index.html</html>"
+        ));
         assert!(confirmed_exposure("/.env", b"APP_KEY=sample-value\n"));
         assert!(confirmed_exposure("/.git/HEAD", b"ref: refs/heads/main\n"));
+    }
+
+    #[test]
+    fn raw_request_rejects_ambiguous_host_and_malformed_headers() {
+        assert!(parse_raw_request(
+            "GET / HTTP/1.1\r\nHost: a.test\r\nhost: b.test\r\n\r\n",
+            "http"
+        )
+        .is_err());
+        assert!(parse_raw_request(
+            "GET / HTTP/1.1\r\nHost: a.test\r\n Invalid: x\r\n\r\n",
+            "http"
+        )
+        .is_err());
+        assert!(
+            parse_raw_request("GET / HTTP/1.1\r\nHost: a.test\r\nBroken\r\n\r\n", "http").is_err()
+        );
+        assert!(parse_raw_request("GET / HTTP/1.1\r\nHost: a.test\r\n\r\n", "http").is_ok());
+    }
+
+    #[test]
+    fn spider_finds_multiple_href_forms_without_script_noise() {
+        let html = "<a href='one'>x</a><A HREF = \"/two\">x</A><link href=/three>\
+                    <script>const s = \"<a href='bad'>\";</script>\
+                    <!-- <a href='comment'> --><a data-x='href=wrong' href=/four>x</a>";
+        assert_eq!(extract_hrefs(html), vec!["one", "/two", "/three", "/four"]);
     }
 
     #[test]
@@ -536,14 +831,17 @@ pub async fn proxy_start(
     port: u16,
     ctx: State<'_, WebCtx>,
 ) -> Result<ProxyStatusWire, String> {
-    // CA is initialized with the proxy so HTTPS interception is ready at once
+    if port == 0 {
+        return Err("proxy port must be between 1 and 65535".to_string());
+    }
+    if ctx.shared.running.load(Ordering::Relaxed) {
+        return Err("proxy already running; stop it first".to_string());
+    }
+    // CA is initialized with the proxy so HTTPS interception is ready at once.
     let ca_dir = crate::storage_paths::data_dir(&app)?;
     let ca = crate::webtls::init_ca(&ca_dir)?;
     *ctx.shared.ca.lock().expect("ca poisoned") = Some(Arc::clone(&ca));
     *ctx.ca.lock().expect("ca poisoned") = Some(ca);
-    if ctx.shared.running.load(Ordering::Relaxed) {
-        return Err("proxy already running; stop it first".to_string());
-    }
     let addr: SocketAddr = format!("127.0.0.1:{port}")
         .parse()
         .map_err(|e| format!("bad port: {e}"))?;
@@ -556,17 +854,35 @@ pub async fn proxy_start(
     ctx.proxy_port.store(port, Ordering::Relaxed);
     let shared = Arc::clone(&ctx.shared);
     let handle = tokio::spawn(async move {
+        let mut expiry = tokio::time::interval(Duration::from_secs(5));
         loop {
             if !shared.running.load(Ordering::Relaxed) {
                 break;
             }
-            let Ok((stream, _)) = listener.accept().await else {
-                continue;
-            };
-            let shared = Arc::clone(&shared);
-            tokio::spawn(async move {
-                let _ = handle_conn(stream, shared).await;
-            });
+            tokio::select! {
+                accepted = listener.accept() => {
+                    let Ok((stream, _)) = accepted else { continue };
+                    let shared = Arc::clone(&shared);
+                    tokio::spawn(async move {
+                        let _ = handle_conn(stream, shared).await;
+                    });
+                }
+                _ = expiry.tick() => {
+                    let expired = {
+                        let mut pending = shared.pending.lock().expect("pending poisoned");
+                        let now = now_ms();
+                        let ids: Vec<u64> = pending.iter()
+                            .filter(|(_, entry)| now.saturating_sub(entry.info.at_ms) > 120_000)
+                            .map(|(id, _)| *id).collect();
+                        ids.into_iter().filter_map(|id| pending.remove(&id)).collect::<Vec<_>>()
+                    };
+                    for mut request in expired {
+                        let _ = request.stream.write_all(
+                            b"HTTP/1.1 408 Request Timeout\r\ncontent-length: 0\r\nconnection: close\r\n\r\n"
+                        ).await;
+                    }
+                }
+            }
         }
     });
     *ctx.proxy_handle.lock().expect("proxy handle poisoned") = Some(handle);
@@ -593,8 +909,12 @@ async fn handle_conn(mut stream: TcpStream, shared: Arc<ProxyShared>) -> std::io
     let Ok((method, url, headers, _)) = parse_raw_request(&head, "http") else {
         return Ok(());
     };
-    let Ok(parsed) = reqwest::Url::parse(&url) else { return Ok(()); };
-    if !matches!(parsed.scheme(), "http" | "https") { return Ok(()); }
+    let Ok(parsed) = reqwest::Url::parse(&url) else {
+        return Ok(());
+    };
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return Ok(());
+    }
     let host = parsed.host_str().unwrap_or_default().to_string();
     let path = match parsed.query() {
         Some(query) => format!("{}?{query}", parsed.path()),
@@ -660,7 +980,7 @@ async fn handle_conn(mut stream: TcpStream, shared: Arc<ProxyShared>) -> std::io
         reason = reason_phrase(status)
     );
     for (name, value) in &resp_headers {
-        if name.eq_ignore_ascii_case("content-length") || is_hop_header(name) {
+        if name.eq_ignore_ascii_case("content-length") || is_hop_header_for_message(name, &resp_headers) {
             continue;
         }
         response.push_str(&format!("{name}: {value}\r\n"));
@@ -691,10 +1011,13 @@ async fn connect_tunnel(
     if !intercepting || ca.is_none() {
         // honest passthrough: relay raw bytes to the upstream host
         let mut upstream = tokio::time::timeout(
-            Duration::from_secs(15), TcpStream::connect((host.as_str(), port)),
+            Duration::from_secs(15),
+            TcpStream::connect((host.as_str(), port)),
         )
         .await
-        .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "upstream CONNECT timed out"))??;
+        .map_err(|_| {
+            std::io::Error::new(std::io::ErrorKind::TimedOut, "upstream CONNECT timed out")
+        })??;
         stream
             .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
             .await?;
@@ -731,20 +1054,26 @@ async fn connect_tunnel(
     let body = body_bytes;
 
     // Refuse authority mismatches inside an authenticated CONNECT tunnel.
-    if !path.starts_with('/') || path.starts_with("//")
-        || !tls_host_matches(&headers, &host, port)
+    if !path.starts_with('/') || path.starts_with("//") || !tls_host_matches(&headers, &host, port)
     {
-        tls_stream.write_all(b"HTTP/1.1 400 Bad Request\r\ncontent-length: 0\r\nconnection: close\r\n\r\n").await?;
+        tls_stream
+            .write_all(
+                b"HTTP/1.1 400 Bad Request\r\ncontent-length: 0\r\nconnection: close\r\n\r\n",
+            )
+            .await?;
         return Ok(());
     }
 
     // Only treat a properly declared WebSocket upgrade as a raw duplex stream.
-    if headers.iter().any(|(k, v)| {
-        k.eq_ignore_ascii_case("upgrade") && v.eq_ignore_ascii_case("websocket")
-    }) && headers.iter().any(|(k, v)| {
-        k.eq_ignore_ascii_case("connection") &&
-            v.split(',').any(|token| token.trim().eq_ignore_ascii_case("upgrade"))
-    }) {
+    if headers
+        .iter()
+        .any(|(k, v)| k.eq_ignore_ascii_case("upgrade") && v.eq_ignore_ascii_case("websocket"))
+        && headers.iter().any(|(k, v)| {
+            k.eq_ignore_ascii_case("connection")
+                && v.split(',')
+                    .any(|token| token.trim().eq_ignore_ascii_case("upgrade"))
+        })
+    {
         let tcp = TcpStream::connect((host.as_str(), port))
             .await
             .map_err(|e| std::io::Error::other(format!("ws upstream connect failed: {e}")))?;
@@ -762,7 +1091,9 @@ async fn connect_tunnel(
         let started = now_ms();
         {
             let mut ws = shared.ws.lock().expect("ws poisoned");
-            if ws.len() >= 1000 { ws.remove(0); }
+            if ws.len() >= 1000 {
+                ws.remove(0);
+            }
             ws.push(crate::webtls::WsConnection {
                 host: host.clone(),
                 bytes_client_to_server: 0,
@@ -775,7 +1106,11 @@ async fn connect_tunnel(
             tokio::io::copy(&mut u_read, &mut c_write)
         );
         let mut ws = shared.ws.lock().expect("ws poisoned");
-        if let Some(record) = ws.iter_mut().rev().find(|w| w.at_ms == started && w.host == host) {
+        if let Some(record) = ws
+            .iter_mut()
+            .rev()
+            .find(|w| w.at_ms == started && w.host == host)
+        {
             record.bytes_client_to_server = c2u.unwrap_or(0);
             record.bytes_server_to_client = u2c.unwrap_or(0);
         }
@@ -788,12 +1123,21 @@ async fn connect_tunnel(
     if shared.intercept.load(Ordering::Relaxed) {
         let id = shared.next_id.fetch_add(1, Ordering::Relaxed);
         let info = CapturedRequest {
-            id, method: method.clone(), host: host.clone(), path: path.clone(),
-            status: 0, size: body.len(), at_ms: now_ms(),
+            id,
+            method: method.clone(),
+            host: host.clone(),
+            path: path.clone(),
+            status: 0,
+            size: body.len(),
+            at_ms: now_ms(),
         };
         let request = PendingRequest {
             stream: ProxyStream::Tls(tls_stream),
-            method, url, headers, body, info,
+            method,
+            url,
+            headers,
+            body,
+            info,
         };
         let rejected = {
             let mut pending = shared.pending.lock().expect("pending poisoned");
@@ -812,13 +1156,8 @@ async fn connect_tunnel(
 
     // plain HTTP inside TLS: same rules + capture path as plain proxying
     let rules = shared.rules.lock().expect("rules poisoned").clone();
-    let (r_method, r_url, r_headers, r_body) = apply_rules(
-        method.clone(),
-        url,
-        headers,
-        body,
-        &rules,
-    );
+    let (r_method, r_url, r_headers, r_body) =
+        apply_rules(method.clone(), url, headers, body, &rules);
     let (status, resp_headers, resp_body) =
         execute_request(&r_method, &r_url, &r_headers, &r_body).await;
     let id = shared.next_id.fetch_add(1, Ordering::Relaxed);
@@ -839,7 +1178,7 @@ async fn connect_tunnel(
         reason = reason_phrase(status)
     );
     for (name, value) in &resp_headers {
-        if name.eq_ignore_ascii_case("content-length") || is_hop_header(name) {
+        if name.eq_ignore_ascii_case("content-length") || is_hop_header_for_message(name, &resp_headers) {
             continue;
         }
         response.push_str(&format!("{name}: {value}\r\n"));
@@ -850,24 +1189,32 @@ async fn connect_tunnel(
     ));
     tls_stream.write_all(response.as_bytes()).await?;
     tls_stream.write_all(&resp_body).await?;
+    tls_stream.flush().await?;
     Ok(())
 }
 
 /// CONNECT authority must contain an explicit valid TCP port. Splitting on
 /// the first colon is incorrect for bracketed IPv6 literals.
 fn parse_connect_target(authority: &str) -> Result<(String, u16), String> {
-    let (raw_host, raw_port) = authority.rsplit_once(':')
+    let (raw_host, raw_port) = authority
+        .rsplit_once(':')
         .ok_or("CONNECT target must include host:port")?;
-    let port = raw_port.parse::<u16>()
+    let port = raw_port
+        .parse::<u16>()
         .map_err(|_| "invalid CONNECT port")?;
-    if port == 0 { return Err("CONNECT port must not be zero".to_string()); }
+    if port == 0 {
+        return Err("CONNECT port must not be zero".to_string());
+    }
     let host = if raw_host.starts_with('[') && raw_host.ends_with(']') {
-        let inner = &raw_host[1..raw_host.len()-1];
-        inner.parse::<std::net::Ipv6Addr>()
+        let inner = &raw_host[1..raw_host.len() - 1];
+        inner
+            .parse::<std::net::Ipv6Addr>()
             .map_err(|_| "invalid CONNECT IPv6 literal")?;
         inner.to_string()
     } else {
-        if raw_host.contains(':') { return Err("IPv6 CONNECT host must be bracketed".to_string()); }
+        if raw_host.contains(':') {
+            return Err("IPv6 CONNECT host must be bracketed".to_string());
+        }
         raw_host.to_string()
     };
     if host.is_empty() || host.chars().any(|c| matches!(c, '/' | '@' | '#' | '?')) {
@@ -884,41 +1231,87 @@ fn parse_connect_target(authority: &str) -> Result<(String, u16), String> {
 /// Match the inner Host authority against the CONNECT destination. Without
 /// this guard a TLS tunnel for one hostname could proxy an unrelated origin.
 fn tls_host_matches(headers: &[(String, String)], host: &str, port: u16) -> bool {
-    let hosts: Vec<&str> = headers.iter()
+    let hosts: Vec<&str> = headers
+        .iter()
         .filter(|(name, _)| name.eq_ignore_ascii_case("host"))
-        .map(|(_, value)| value.as_str()).collect();
-    if hosts.len() != 1 { return false; }
-    let authority = hosts[0].trim();
-    if authority.contains(['/', '@', '#', '?', ' ', '\t', '\r', '\n']) {
+        .map(|(_, value)| value.as_str())
+        .collect();
+    if hosts.len() != 1 {
         return false;
     }
-    let Ok(url) = reqwest::Url::parse(&format!("https://{authority}/")) else { return false; };
-    let Some(actual_host) = url.host_str() else { return false; };
-    actual_host.eq_ignore_ascii_case(host) && url.port_or_known_default() == Some(port)
+    let authority = hosts[0].trim();
+    if authority
+        .chars()
+        .any(|c| matches!(c, '/' | '@' | '#' | '?' | ' ' | '\t' | '\r' | '\n'))
+    {
+        return false;
+    }
+    let Ok(url) = reqwest::Url::parse(&format!("https://{authority}/")) else {
+        return false;
+    };
+    let Some(actual_host) = url.host_str() else {
+        return false;
+    };
+    actual_host
+        .trim_start_matches('[')
+        .trim_end_matches(']')
+        .eq_ignore_ascii_case(host)
+        && url.port_or_known_default() == Some(port)
 }
 
 fn is_hop_header(name: &str) -> bool {
-    ["connection", "proxy-connection", "keep-alive", "transfer-encoding",
-     "te", "trailer", "upgrade", "proxy-authorization", "proxy-authenticate"]
-    .iter().any(|header| name.eq_ignore_ascii_case(header))
+    [
+        "connection",
+        "proxy-connection",
+        "keep-alive",
+        "transfer-encoding",
+        "te",
+        "trailer",
+        "upgrade",
+        "proxy-authorization",
+        "proxy-authenticate",
+    ]
+    .iter()
+    .any(|header| name.eq_ignore_ascii_case(header))
+}
+
+/// Strip both standard hop-by-hop headers and names nominated by Connection.
+fn is_hop_header_for_message(name: &str, headers: &[(String, String)]) -> bool {
+    is_hop_header(name)
+        || headers.iter()
+            .filter(|(key, _)| key.eq_ignore_ascii_case("connection")
+                || key.eq_ignore_ascii_case("proxy-connection"))
+            .any(|(_, value)| value.split(',').any(|token| token.trim().eq_ignore_ascii_case(name)))
 }
 
 /// Text match-and-replace must preserve bytes outside the matched byte ranges.
 /// If a rule would expand a body beyond the bounded proxy limit, do not apply it.
 fn replace_bytes_limited(source: Vec<u8>, find: &[u8], replace: &[u8]) -> Vec<u8> {
-    if find.is_empty() || find == replace { return source; }
+    if find.is_empty() || find == replace {
+        return source;
+    }
     let mut output = Vec::with_capacity(source.len().min(MAX_PROXY_BODY));
     let mut cursor = 0;
-    while let Some(pos) = source[cursor..].windows(find.len()).position(|slice| slice == find) {
+    while let Some(pos) = source[cursor..]
+        .windows(find.len())
+        .position(|slice| slice == find)
+    {
         let start = cursor + pos;
-        if output.len().saturating_add(start - cursor).saturating_add(replace.len()) > MAX_PROXY_BODY {
+        if output
+            .len()
+            .saturating_add(start - cursor)
+            .saturating_add(replace.len())
+            > MAX_PROXY_BODY
+        {
             return source;
         }
         output.extend_from_slice(&source[cursor..start]);
         output.extend_from_slice(replace);
         cursor = start + find.len();
     }
-    if output.len().saturating_add(source.len() - cursor) > MAX_PROXY_BODY { return source; }
+    if output.len().saturating_add(source.len() - cursor) > MAX_PROXY_BODY {
+        return source;
+    }
     output.extend_from_slice(&source[cursor..]);
     output
 }
@@ -989,7 +1382,7 @@ async fn execute_request(
     for (name, value) in headers {
         if name.eq_ignore_ascii_case("host")
             || name.eq_ignore_ascii_case("content-length")
-            || is_hop_header(name)
+            || is_hop_header_for_message(name, &headers)
         {
             continue;
         }
@@ -1038,7 +1431,15 @@ async fn execute_request(
 pub async fn proxy_stop(ctx: State<'_, WebCtx>) -> Result<ProxyStatusWire, String> {
     ctx.shared.running.store(false, Ordering::Relaxed);
     ctx.proxy_running.store(false, Ordering::Relaxed);
-    ctx.shared.pending.lock().expect("pending poisoned").clear();
+    let held = {
+        let mut pending = ctx.shared.pending.lock().expect("pending poisoned");
+        std::mem::take(&mut *pending)
+    };
+    for (_, mut request) in held {
+        let _ = request.stream.write_all(
+            b"HTTP/1.1 503 Service Unavailable\r\ncontent-length: 0\r\nconnection: close\r\n\r\n"
+        ).await;
+    }
     if let Some(handle) = ctx
         .proxy_handle
         .lock()
@@ -1103,7 +1504,7 @@ pub fn proxy_pending(ctx: State<'_, WebCtx>) -> Vec<PendingWire> {
             url: p.url.clone(),
             host: p.info.host.clone(),
             path: p.info.path.clone(),
-            body_preview: p.body.chars().take(200).collect(),
+            body_preview: String::from_utf8_lossy(&p.body[..p.body.len().min(200)]).into_owned(),
         })
         .collect()
 }
@@ -1137,7 +1538,7 @@ pub async fn proxy_forward(id: u64, ctx: State<'_, WebCtx>) -> Result<u16, Strin
         reason = reason_phrase(status)
     );
     for (name, value) in &resp_headers {
-        if name.eq_ignore_ascii_case("content-length") || is_hop_header(name) {
+        if name.eq_ignore_ascii_case("content-length") || is_hop_header_for_message(name, &resp_headers) {
             continue;
         }
         response.push_str(&format!("{name}: {value}\r\n"));
@@ -1238,7 +1639,13 @@ pub struct WebEngineStatus {
 
 #[tauri::command]
 pub async fn web_engines_detect() -> Vec<WebEngineStatus> {
-    let mut out = Vec::new();
+    let mut out = vec![WebEngineStatus {
+        id: "cyberdeck-native".to_string(),
+        label: "CyberDeck Native Web Scanner".to_string(),
+        license: "MIT".to_string(),
+        available: true,
+        version: "0.1".to_string(),
+    }];
     for (id, label, license, version_args) in [
         ("nikto", "Nikto", "GPL-2.0-only", vec!["-Version"]),
         ("sqlmap", "sqlmap", "GPL-2.0-only", vec!["--version"]),
@@ -1288,10 +1695,27 @@ pub async fn engine_scan(
 ) -> Result<EngineScanResult, String> {
     require_authorization(authorized)?;
     let target = target.trim().to_string();
-    if !target.starts_with("http") {
-        return Err("target must start with http:// or https://".to_string());
+    let started = Instant::now();
+    if tool == "cyberdeck-native" {
+        let findings = web_scan(target, true).await?;
+        return Ok(EngineScanResult {
+            tool,
+            raw: serde_json::to_string_pretty(&findings)
+                .map_err(|e| format!("cannot encode scanner result: {e}"))?,
+            duration_ms: started.elapsed().as_millis() as u64,
+        });
+    }
+    let checked =
+        reqwest::Url::parse(&target).map_err(|e| format!("invalid scan target URL: {e}"))?;
+    if !matches!(checked.scheme(), "http" | "https")
+        || checked.host_str().is_none()
+        || !checked.username().is_empty()
+        || checked.password().is_some()
+    {
+        return Err("target must be HTTP(S) without URL credentials".to_string());
     }
     let mut command = tokio::process::Command::new(&tool);
+    command.kill_on_drop(true);
     match tool.as_str() {
         "nikto" => {
             command.args(["-h", &target, "-Format", "txt"]);
@@ -1304,10 +1728,14 @@ pub async fn engine_scan(
         }
         other => return Err(format!("unknown engine: {other}")),
     }
-    let started = Instant::now();
-    let output = command.output().await.map_err(|e| {
-        format!("{tool} is not available on PATH ({e}); bundled sidecars arrive with the installer")
-    })?;
+    let output = tokio::time::timeout(Duration::from_secs(90), command.output())
+        .await
+        .map_err(|_| format!("{tool} exceeded 90-second execution limit"))?
+        .map_err(|e| {
+            format!(
+                "{tool} is not available on PATH ({e}); bundled sidecars arrive with the installer"
+            )
+        })?;
     let mut raw = format!(
         "{}{}",
         String::from_utf8_lossy(&output.stdout),

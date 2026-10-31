@@ -556,6 +556,93 @@ fn strings(
     Ok(hits)
 }
 
+/// Extract regular files from a validated ZIP or ustar TAR into this case.
+/// The parser never writes archive-controlled paths; imported evidence is
+/// content-addressed and every output is linked back to its source artifact.
+#[tauri::command]
+pub fn file_extract_archive(
+    ctx: State<'_, EvidenceCtx>,
+    case_id: String,
+    id: String,
+    format: String,
+    offset: usize,
+) -> Result<Vec<ArtifactRecord>, String> {
+    extract_archive_from_evidence(&ctx, &case_id, &id, &format, offset)
+}
+
+fn extract_archive_from_evidence(
+    ctx: &EvidenceCtx,
+    case_id: &str,
+    id: &str,
+    format: &str,
+    offset: usize,
+) -> Result<Vec<ArtifactRecord>, String> {
+    use cyberdeck_crypto::extraction::{
+        extract_tar_limited, extract_zip_limited, MAX_ARCHIVE_INPUT_BYTES, MAX_ARCHIVE_OUTPUT_BYTES,
+    };
+    validate_case_id(case_id)?;
+    if format != "zip" && format != "tar" {
+        return Err("only ZIP and TAR native extraction is supported".into());
+    }
+    let record = ctx
+        .store
+        .lock()
+        .map_err(|_| "case store unavailable")?
+        .get_artifact(id)?
+        .filter(|item| item.case_id == case_id)
+        .ok_or("source evidence does not belong to the selected case")?;
+    if record.size > MAX_ARCHIVE_INPUT_BYTES as u64 {
+        return Err("archive source is larger than the 16 MiB limit".into());
+    }
+    let source = std::fs::read(&record.stored_path)
+        .map_err(|e| format!("cannot read archive evidence: {e}"))?;
+    if source.len() as u64 != record.size || digest_of("sha256", &source)? != record.sha256 {
+        return Err("source archive evidence integrity failure".into());
+    }
+    // Parse and verify *every* entry before saving any result into the case.
+    let entries = match format {
+        "zip" => extract_zip_limited(&source, offset, MAX_ARCHIVE_OUTPUT_BYTES)?,
+        _ => extract_tar_limited(&source, offset, MAX_ARCHIVE_OUTPUT_BYTES)?,
+    };
+    let mut imported = Vec::with_capacity(entries.len());
+    for (index, entry) in entries.into_iter().enumerate() {
+        // Keep a short, synthetic filename to avoid Windows path-length limits.
+        // The full archive-relative original name belongs in provenance events.
+        let base = entry.path.rsplit('/').next().unwrap_or("file");
+        let base = sanitize_file_name(base);
+        let short = base.chars().take(48).collect::<String>();
+        let name = format!("{format}-{index:03}-{short}");
+        let artifact = import_bytes(ctx, Path::new(&name), &entry.bytes, case_id, false)?;
+        let lineage = format!(
+            "Source: {} (sha256 {}) | Format: {} | Archive offset: 0x{:x} | \
+             Entry: {} | Header offset: 0x{:x}",
+            record.id, record.sha256, format, offset, entry.path, entry.source_offset
+        );
+        {
+            let store = ctx.store.lock().map_err(|_| "case store unavailable")?;
+            store.record_event(
+                case_id,
+                "forensics.archive",
+                "extract",
+                Some(&artifact.id),
+                &lineage,
+            )?;
+            store.add_findings(
+                case_id,
+                "forensics.archive",
+                Some(&artifact.id),
+                &[NewFinding {
+                    title: format!("Extracted {format} entry: {}", entry.path),
+                    severity: "info".into(),
+                    details: format!("{lineage}\nDerived SHA-256: {}", artifact.sha256),
+                }],
+            )?;
+        }
+        imported.push(artifact);
+    }
+    Ok(imported)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

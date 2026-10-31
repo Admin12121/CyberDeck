@@ -6,6 +6,7 @@ import {
   fileHex,
   fileSignatureScan,
   fileExtractGzip,
+  fileExtractArchive,
   type SignatureScanWire,
   fileImportDialog,
   fileList,
@@ -40,6 +41,19 @@ export function FileAnalysisView() {
     try {
       const output = await fileExtractGzip(wb.caseId, artifact.id, offset);
       setExtractNote("Extracted into this case: " + output.name);
+      await ctx.refresh();
+    } catch (cause) { setScanError(String(cause)); }
+    finally { setExtracting(null); }
+  };
+  const extractArchive = async (format: "zip" | "tar", offset: number) => {
+    const artifact = ctx.selectedArtifact;
+    if (!artifact || extracting !== null) return;
+    setExtracting(offset);
+    setScanError(null);
+    setExtractNote(null);
+    try {
+      const outputs = await fileExtractArchive(wb.caseId, artifact.id, format, offset);
+      setExtractNote(`Extracted ${outputs.length} ${format.toUpperCase()} files into this case`);
       await ctx.refresh();
     } catch (cause) { setScanError(String(cause)); }
     finally { setExtracting(null); }
@@ -107,6 +121,15 @@ export function FileAnalysisView() {
                 <div key={index} className="flex gap-2 border-t border-line py-1">
                   <span className="shrink-0 text-orange">0x{hit.offset.toString(16)}</span>
                   <span className="flex-1">{hit.format}: {hit.description}</span>
+                  {(hit.format === "zip" || hit.format === "tar") && (
+                    <ToolButton
+                      onClick={() => void extractArchive(hit.format as "zip" | "tar", hit.offset)}
+                      disabled={extracting !== null || !ctx.desktop}
+                      title="Native Rust extraction: validates paths, CRC/checksums, 128-entry and 16 MiB limits"
+                    >
+                      {extracting === hit.offset ? "Extracting…" : `Extract ${hit.format.toUpperCase()}`}
+                    </ToolButton>
+                  )}
                   {hit.format === "gzip" && (
                     <ToolButton
                       onClick={() => void extract(hit.offset)}
@@ -121,7 +144,7 @@ export function FileAnalysisView() {
               {scan.hits.length === 0 ? <div>No known signatures detected.</div> : null}
             </div>
           ) : null}
-          <ToolButton disabled title="Other archive extractors require size, integrity and traversal guards">Other extraction pending</ToolButton>
+          <ToolButton disabled title="Additional archive parsers under development">Other archive formats pending</ToolButton>
           <div className="mt-1" />
           <ToolButton disabled title="YARA-X rules, arc 3">YARA scan</ToolButton>
         </div>

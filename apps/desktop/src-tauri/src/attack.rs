@@ -42,7 +42,13 @@ struct AttackSession {
 
 impl AttackSession {
     fn new(target: &str) -> Self {
-        Self { target: target.to_lowercase(), tried: 0, generated: 0, matches: Vec::new(), cap_reached: false }
+        Self {
+            target: target.to_lowercase(),
+            tried: 0,
+            generated: 0,
+            matches: Vec::new(),
+            cap_reached: false,
+        }
     }
 
     /// Hash one candidate and record a hit. Returns false when the cap stops
@@ -56,7 +62,10 @@ impl AttackSession {
         self.tried += 1;
         if let Ok(digest) = cyberdeck_crypto::apply_op(algo, candidate.as_bytes(), None) {
             if hex::encode(digest) == self.target {
-                self.matches.push(AttackMatch { line_no, password: candidate.to_string() });
+                self.matches.push(AttackMatch {
+                    line_no,
+                    password: candidate.to_string(),
+                });
                 if self.matches.len() >= MAX_REPORTED_MATCHES {
                     self.cap_reached = true;
                     return false;
@@ -110,7 +119,10 @@ fn rule_variants(word: &str) -> Vec<String> {
         .replace(['o', 'O'], "0")
         .replace(['s', 'S'], "5")
         .replace(['t', 'T'], "7");
-    let leet_vowels = word.replace(['a', 'A'], "4").replace(['e', 'E'], "3").replace(['o', 'O'], "0");
+    let leet_vowels = word
+        .replace(['a', 'A'], "4")
+        .replace(['e', 'E'], "3")
+        .replace(['o', 'O'], "0");
 
     let mut out: Vec<String> = vec![
         word.to_string(),
@@ -141,7 +153,7 @@ fn rule_variants(word: &str) -> Vec<String> {
         out.push(format!("{word}{suffix}"));
     }
     out.push(format!("{word}{word}")); // dup (kept: differs from base when short)
-    // prepend digits and specials
+                                       // prepend digits and specials
     for d in 0..=9 {
         out.push(format!("{d}{word}"));
     }
@@ -176,7 +188,10 @@ fn run_rules(algo: &str, target: &str, words: impl Iterator<Item = String>) -> A
         .map(|w| w.trim_end_matches('\r').to_string())
         .filter(|w| !w.is_empty())
         .collect();
-    let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1).clamp(1, 32);
+    let threads = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1)
+        .clamp(1, 32);
     let chunk_size = (words.len() + threads - 1) / threads.max(1);
     let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let generated = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
@@ -191,8 +206,10 @@ fn run_rules(algo: &str, target: &str, words: impl Iterator<Item = String>) -> A
                 let mut session = AttackSession::new(&target);
                 'outer: for (i, word) in chunk.iter().enumerate() {
                     for (variant_no, candidate) in rule_variants(word).into_iter().enumerate() {
-                        let id = ((chunk_index * chunk_size.max(1) + i) as u64) * 1000 + variant_no as u64;
-                        let total = generated.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                        let id = ((chunk_index * chunk_size.max(1) + i) as u64) * 1000
+                            + variant_no as u64;
+                        let total =
+                            generated.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
                         if total > MAX_CANDIDATES {
                             session.cap_reached = true;
                             stop.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -210,7 +227,10 @@ fn run_rules(algo: &str, target: &str, words: impl Iterator<Item = String>) -> A
                 session
             }));
         }
-        partials = handles.into_iter().map(|h| h.join().unwrap_or_else(|_| AttackSession::new(target))).collect();
+        partials = handles
+            .into_iter()
+            .map(|h| h.join().unwrap_or_else(|_| AttackSession::new(target)))
+            .collect();
     });
     merge_sessions(partials)
 }
@@ -222,7 +242,9 @@ fn merge_sessions(partials: Vec<AttackSession>) -> AttackSession {
         merged.generated += partial.generated;
         merged.cap_reached |= partial.cap_reached;
         let room = MAX_REPORTED_MATCHES.saturating_sub(merged.matches.len());
-        merged.matches.extend(partial.matches.into_iter().take(room));
+        merged
+            .matches
+            .extend(partial.matches.into_iter().take(room));
     }
     merged.target = String::new();
     merged
@@ -267,7 +289,10 @@ fn plan_mask(mask: &str) -> Result<MaskPlan, String> {
     for size in &sizes {
         count = count.saturating_mul(*size as u64);
     }
-    Ok(MaskPlan { candidate_count: count, charset_sizes: sizes })
+    Ok(MaskPlan {
+        candidate_count: count,
+        charset_sizes: sizes,
+    })
 }
 
 #[derive(Clone)]
@@ -309,7 +334,10 @@ fn run_mask(algo: &str, target: &str, mask: &str) -> Result<AttackSession, Strin
     // Slot index (used to slice the charset), not the class index the
     // odometer counts in: literals such as a leading 'a' occupy slots too.
     let first_class_slot = slots.iter().position(|s| matches!(s, Slot::Class(_)));
-    let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1).clamp(1, 32);
+    let threads = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1)
+        .clamp(1, 32);
     let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let mut partials: Vec<AttackSession> = Vec::new();
     std::thread::scope(|scope| {
@@ -333,7 +361,14 @@ fn run_mask(algo: &str, target: &str, mask: &str) -> Result<AttackSession, Strin
                                 break;
                             }
                             // The first class slot is always class 0 for the odometer.
-                            run_mask_odometer(algo, &mut session, slots.as_slice(), 0, first_value, &stop);
+                            run_mask_odometer(
+                                algo,
+                                &mut session,
+                                slots.as_slice(),
+                                0,
+                                first_value,
+                                &stop,
+                            );
                         }
                         session
                     }));
@@ -351,15 +386,31 @@ fn run_mask(algo: &str, target: &str, mask: &str) -> Result<AttackSession, Strin
                 }));
             }
         }
-        partials = handles.into_iter().map(|h| h.join().unwrap_or_else(|_| AttackSession::new(target))).collect();
+        partials = handles
+            .into_iter()
+            .map(|h| h.join().unwrap_or_else(|_| AttackSession::new(target)))
+            .collect();
     });
     Ok(merge_sessions(partials))
 }
 
 /// One odometer pass. `pinned_class` fixes the given class to `pinned_value`
 /// (the parallel slice); usize::MAX means run free.
-fn run_mask_odometer(algo: &str, session: &mut AttackSession, slots: &[Slot], pinned_class: usize, pinned_value: usize, stop: &std::sync::atomic::AtomicBool) {
-    let class_sets: Vec<&Vec<char>> = slots.iter().filter_map(|s| match s { Slot::Class(set) => Some(set), Slot::Literal(_) => None }).collect();
+fn run_mask_odometer(
+    algo: &str,
+    session: &mut AttackSession,
+    slots: &[Slot],
+    pinned_class: usize,
+    pinned_value: usize,
+    stop: &std::sync::atomic::AtomicBool,
+) {
+    let class_sets: Vec<&Vec<char>> = slots
+        .iter()
+        .filter_map(|s| match s {
+            Slot::Class(set) => Some(set),
+            Slot::Literal(_) => None,
+        })
+        .collect();
     let class_count = class_sets.len();
     let mut counters = vec![0usize; class_count];
     if pinned_class != usize::MAX {
@@ -367,7 +418,17 @@ fn run_mask_odometer(algo: &str, session: &mut AttackSession, slots: &[Slot], pi
             *counter = pinned_value;
         }
     }
-    let total: u64 = class_sets.iter().enumerate().map(|(i, set)| if i == pinned_class { 1 } else { set.len() as u64 }).product();
+    let total: u64 = class_sets
+        .iter()
+        .enumerate()
+        .map(|(i, set)| {
+            if i == pinned_class {
+                1
+            } else {
+                set.len() as u64
+            }
+        })
+        .product();
     for _ in 0..total {
         if stop.load(std::sync::atomic::Ordering::Relaxed) {
             break;
@@ -401,8 +462,6 @@ fn run_mask_odometer(algo: &str, session: &mut AttackSession, slots: &[Slot], pi
     }
 }
 
-
-
 fn guard(algo: &str, target: &str) -> Result<String, String> {
     if cyberdeck_crypto::kdf_format(target).is_some() {
         return Err("KDF hashes (bcrypt/argon2) crack at password-hashing speed; use the wordlist recovery mode, rules and masks would run for years".to_string());
@@ -417,7 +476,14 @@ fn guard(algo: &str, target: &str) -> Result<String, String> {
     Ok(target)
 }
 
-fn wire(mode: &str, algo: String, target: String, source: String, session: AttackSession, duration_ms: u64) -> AttackResultWire {
+fn wire(
+    mode: &str,
+    algo: String,
+    target: String,
+    source: String,
+    session: AttackSession,
+    duration_ms: u64,
+) -> AttackResultWire {
     AttackResultWire {
         mode: mode.to_string(),
         algo,
@@ -428,7 +494,10 @@ fn wire(mode: &str, algo: String, target: String, source: String, session: Attac
         cap_reached: session.cap_reached,
         matches: session.matches,
         duration_ms,
-        threads: std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1).clamp(1, 32),
+        threads: std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(1)
+            .clamp(1, 32),
         engine: "cyberdeck-crypto".to_string(),
         engine_version: cyberdeck_crypto::ENGINE_VERSION.to_string(),
     }
@@ -441,7 +510,14 @@ pub fn rules_over_bytes(algo: &str, target: &str, body: &[u8]) -> Result<AttackR
     let started = Instant::now();
     let text = String::from_utf8_lossy(body);
     let session = run_rules(algo, &target, text.lines().map(str::to_string));
-    Ok(wire("rules", algo.to_string(), target, "wordlist + built-in rules".to_string(), session, started.elapsed().as_millis() as u64))
+    Ok(wire(
+        "rules",
+        algo.to_string(),
+        target,
+        "wordlist + built-in rules".to_string(),
+        session,
+        started.elapsed().as_millis() as u64,
+    ))
 }
 
 #[tauri::command]
@@ -453,9 +529,17 @@ pub fn crack_rules_dialog(
 ) -> Result<AttackResultWire, String> {
     use tauri_plugin_dialog::DialogExt;
     let target = guard(&algo, &target_hash)?;
-    let picked = app.dialog().file().blocking_pick_file().ok_or("cancelled")?;
-    let path = picked.as_path().ok_or("unsupported file location")?.to_path_buf();
-    let meta = std::fs::metadata(&path).map_err(|e| format!("cannot read wordlist metadata: {e}"))?;
+    let picked = app
+        .dialog()
+        .file()
+        .blocking_pick_file()
+        .ok_or("cancelled")?;
+    let path = picked
+        .as_path()
+        .ok_or("unsupported file location")?
+        .to_path_buf();
+    let meta =
+        std::fs::metadata(&path).map_err(|e| format!("cannot read wordlist metadata: {e}"))?;
     if meta.len() > MAX_IMPORT_BYTES {
         return Err(format!(
             "wordlist is {} MB; the limit this arc is {} MB",
@@ -465,7 +549,12 @@ pub fn crack_rules_dialog(
     }
     let body = std::fs::read(&path).map_err(|e| format!("cannot read wordlist: {e}"))?;
     let mut result = rules_over_bytes(&algo, &target, &body)?;
-    result.source = format!("{} + built-in rules", path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default());
+    result.source = format!(
+        "{} + built-in rules",
+        path.file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default()
+    );
     record_history(&ctx, &algo, &target, &result.source, &result.matches);
     Ok(result)
 }
@@ -479,7 +568,13 @@ pub fn crack_mask(
     ctx: tauri::State<'_, crate::evidence::EvidenceCtx>,
 ) -> Result<AttackResultWire, String> {
     let result = mask_attack(&algo, &target_hash, &mask)?;
-    record_history(&ctx, &result.algo, &result.target_hash, &format!("native mask ({})", result.source), &result.matches);
+    record_history(
+        &ctx,
+        &result.algo,
+        &result.target_hash,
+        &format!("native mask ({})", result.source),
+        &result.matches,
+    );
     Ok(result)
 }
 
@@ -487,7 +582,14 @@ fn mask_attack(algo: &str, target_hash: &str, mask: &str) -> Result<AttackResult
     let target = guard(algo, target_hash)?;
     let started = Instant::now();
     let session = run_mask(algo, &target, mask)?;
-    Ok(wire("mask", algo.to_string(), target, mask.to_string(), session, started.elapsed().as_millis() as u64))
+    Ok(wire(
+        "mask",
+        algo.to_string(),
+        target,
+        mask.to_string(),
+        session,
+        started.elapsed().as_millis() as u64,
+    ))
 }
 
 /// Expand a validated mask into up to `limit` concrete strings in odometer
@@ -551,7 +653,12 @@ fn words_from_bytes(body: &[u8], limit: usize) -> Vec<String> {
 
 /// Hybrid attack: every wordlist word (capped) + mask suffix.
 /// Word list arrives as raw bytes so the dialog read stays testable.
-pub fn hybrid_over_bytes(algo: &str, target: &str, mask: &str, body: &[u8]) -> Result<AttackResultWire, String> {
+pub fn hybrid_over_bytes(
+    algo: &str,
+    target: &str,
+    mask: &str,
+    body: &[u8],
+) -> Result<AttackResultWire, String> {
     let t = guard(algo, target)?;
     let suffixes = mask_expansions(mask)?;
     let words = words_from_bytes(body, 500); // word cap keeps the product bounded
@@ -565,11 +672,23 @@ pub fn hybrid_over_bytes(algo: &str, target: &str, mask: &str, body: &[u8]) -> R
             }
         }
     }
-    Ok(wire("hybrid", algo.to_string(), t, format!("wordlist + {mask}"), session, started.elapsed().as_millis() as u64))
+    Ok(wire(
+        "hybrid",
+        algo.to_string(),
+        t,
+        format!("wordlist + {mask}"),
+        session,
+        started.elapsed().as_millis() as u64,
+    ))
 }
 
 /// Reverse hybrid: mask prefix + every wordlist word (capped).
-pub fn hybrid_reverse_over_bytes(algo: &str, target: &str, mask: &str, body: &[u8]) -> Result<AttackResultWire, String> {
+pub fn hybrid_reverse_over_bytes(
+    algo: &str,
+    target: &str,
+    mask: &str,
+    body: &[u8],
+) -> Result<AttackResultWire, String> {
     let t = guard(algo, target)?;
     let prefixes = mask_expansions(mask)?;
     let words = words_from_bytes(body, 500);
@@ -583,11 +702,23 @@ pub fn hybrid_reverse_over_bytes(algo: &str, target: &str, mask: &str, body: &[u
             }
         }
     }
-    Ok(wire("hybrid-reverse", algo.to_string(), t, format!("{mask} + wordlist"), session, started.elapsed().as_millis() as u64))
+    Ok(wire(
+        "hybrid-reverse",
+        algo.to_string(),
+        t,
+        format!("{mask} + wordlist"),
+        session,
+        started.elapsed().as_millis() as u64,
+    ))
 }
 
 /// Full combinator: first wordlist x second wordlist, both capped at 500.
-pub fn combinator_over_bytes(algo: &str, target: &str, first_body: &[u8], second_body: &[u8]) -> Result<AttackResultWire, String> {
+pub fn combinator_over_bytes(
+    algo: &str,
+    target: &str,
+    first_body: &[u8],
+    second_body: &[u8],
+) -> Result<AttackResultWire, String> {
     let t = guard(algo, target)?;
     let first = words_from_bytes(first_body, 500);
     let second = words_from_bytes(second_body, 500);
@@ -626,7 +757,13 @@ pub fn crack_hybrid_dialog(
     let body = std::fs::read(&path).map_err(|e| format!("cannot read wordlist: {e}"))?;
     let mut result = hybrid_over_bytes(&algo, &target, &mask, &body)?;
     result.source = format!("{name} + {mask}");
-    record_history(&ctx, &algo, &target, &format!("hybrid wordlist + {mask}"), &result.matches);
+    record_history(
+        &ctx,
+        &algo,
+        &target,
+        &format!("hybrid wordlist + {mask}"),
+        &result.matches,
+    );
     Ok(result)
 }
 
@@ -644,7 +781,13 @@ pub fn crack_hybrid_reverse_dialog(
     let body = std::fs::read(&path).map_err(|e| format!("cannot read wordlist: {e}"))?;
     let mut result = hybrid_reverse_over_bytes(&algo, &target, &mask, &body)?;
     result.source = format!("{mask} + {name}");
-    record_history(&ctx, &algo, &target, &format!("hybrid mask + wordlist ({mask})"), &result.matches);
+    record_history(
+        &ctx,
+        &algo,
+        &target,
+        &format!("hybrid mask + wordlist ({mask})"),
+        &result.matches,
+    );
     Ok(result)
 }
 
@@ -661,8 +804,10 @@ pub fn crack_combinator_dialog(
     let (first_path, first_name) = crate::crack::resolved_wordlist(&app, wordlist_path.as_deref())?;
     let (second_path, second_name) =
         crate::crack::resolved_wordlist(&app, second_wordlist_path.as_deref())?;
-    let first_body = std::fs::read(&first_path).map_err(|e| format!("cannot read first wordlist: {e}"))?;
-    let second_body = std::fs::read(&second_path).map_err(|e| format!("cannot read second wordlist: {e}"))?;
+    let first_body =
+        std::fs::read(&first_path).map_err(|e| format!("cannot read first wordlist: {e}"))?;
+    let second_body =
+        std::fs::read(&second_path).map_err(|e| format!("cannot read second wordlist: {e}"))?;
     let mut result = combinator_over_bytes(&algo, &target, &first_body, &second_body)?;
     result.source = format!("{first_name} x {second_name}");
     record_history(
@@ -778,7 +923,9 @@ fn detect_gpus() -> Vec<GpuDevice> {
 
 #[tauri::command]
 pub fn device_info() -> DeviceInfoWire {
-    let cpu_cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
+    let cpu_cores = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1);
     let gpu_devices = detect_gpus();
     let planner_note = if gpu_devices.is_empty() {
         "No NVIDIA GPU detected via nvidia-smi. CyberDeck native recovery currently runs on the CPU."
@@ -878,7 +1025,8 @@ mod tests {
     fn rules_handle_non_ascii_wordlist_entries() {
         // Multi-byte words used to panic on byte-index slicing inside the rules.
         let target = cyberdeck_crypto::apply_op("sha256", "Café123".as_bytes(), None).unwrap();
-        let result = rules_over_bytes("sha256", &hex::encode(target), "é\n日本\ncafé\n".as_bytes()).unwrap();
+        let result =
+            rules_over_bytes("sha256", &hex::encode(target), "é\n日本\ncafé\n".as_bytes()).unwrap();
         assert_eq!(result.matches.len(), 1);
         assert_eq!(result.matches[0].password, "Café123");
         assert!(result.tried > 0);
@@ -889,7 +1037,13 @@ mod tests {
         // "a?d?d" yields 100 suffixes despite the leading literal, and the
         // non-ASCII wordlist words must survive byte handling intact.
         let target = cyberdeck_crypto::apply_op("sha256", "caféa99".as_bytes(), None).unwrap();
-        let result = hybrid_over_bytes("sha256", &hex::encode(target), "a?d?d", "café\n日本\n".as_bytes()).unwrap();
+        let result = hybrid_over_bytes(
+            "sha256",
+            &hex::encode(target),
+            "a?d?d",
+            "café\n日本\n".as_bytes(),
+        )
+        .unwrap();
         assert_eq!(result.matches.len(), 1);
         assert_eq!(result.matches[0].password, "caféa99");
         assert_eq!(result.tried, 200); // 2 words x 100 suffixes
@@ -899,7 +1053,9 @@ mod tests {
     #[test]
     fn reverse_hybrid_finds_mask_prefixed_word() {
         let target = cyberdeck_crypto::apply_op("sha256", b"42hello", None).unwrap();
-        let result = hybrid_reverse_over_bytes("sha256", &hex::encode(target), "?d?d", b"hello\nworld\n").unwrap();
+        let result =
+            hybrid_reverse_over_bytes("sha256", &hex::encode(target), "?d?d", b"hello\nworld\n")
+                .unwrap();
         assert_eq!(result.matches.len(), 1);
         assert_eq!(result.matches[0].password, "42hello");
         assert_eq!(result.tried, 200); // 100 prefixes x 2 words
@@ -908,7 +1064,13 @@ mod tests {
     #[test]
     fn combinator_finds_joined_words() {
         let target = cyberdeck_crypto::apply_op("sha256", b"helloworld", None).unwrap();
-        let result = combinator_over_bytes("sha256", &hex::encode(target), b"hello\nfoo\n", b"world\nbar\n").unwrap();
+        let result = combinator_over_bytes(
+            "sha256",
+            &hex::encode(target),
+            b"hello\nfoo\n",
+            b"world\nbar\n",
+        )
+        .unwrap();
         assert_eq!(result.matches.len(), 1);
         assert_eq!(result.matches[0].password, "helloworld");
         assert_eq!(result.tried, 4);

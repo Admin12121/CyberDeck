@@ -21,8 +21,11 @@ pub struct CaState {
 }
 
 fn ca_params() -> Result<CertificateParams, String> {
-    let mut params = CertificateParams::new(Vec::new()).map_err(|e| format!("CA params failed: {e}"))?;
-    params.distinguished_name.push(rcgen::DnType::CommonName, "CyberDeck Root CA");
+    let mut params =
+        CertificateParams::new(Vec::new()).map_err(|e| format!("CA params failed: {e}"))?;
+    params
+        .distinguished_name
+        .push(rcgen::DnType::CommonName, "CyberDeck Root CA");
     params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
     params.key_usages = vec![
         rcgen::KeyUsagePurpose::KeyCertSign,
@@ -49,7 +52,9 @@ pub fn init_ca(dir: &std::path::Path) -> Result<Arc<CaState>, String> {
         let now = time::OffsetDateTime::now_utc();
         params.not_before = now - time::Duration::days(1);
         params.not_after = now + time::Duration::days(3650);
-        let cert = params.self_signed(&key).map_err(|e| format!("CA cert failed: {e}"))?;
+        let cert = params
+            .self_signed(&key)
+            .map_err(|e| format!("CA cert failed: {e}"))?;
         let cert_pem = cert.pem();
         let key_pem = key.serialize_pem();
         std::fs::write(&cert_path, &cert_pem).map_err(|e| format!("cannot write CA cert: {e}"))?;
@@ -59,9 +64,14 @@ pub fn init_ca(dir: &std::path::Path) -> Result<Arc<CaState>, String> {
             use std::io::Write;
             use std::os::unix::fs::OpenOptionsExt;
             let mut file = std::fs::OpenOptions::new()
-                .write(true).create(true).truncate(true).mode(0o600)
-                .open(&key_path).map_err(|e| format!("cannot create CA key: {e}"))?;
-            file.write_all(key_pem.as_bytes()).map_err(|e| format!("cannot write CA key: {e}"))?;
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .mode(0o600)
+                .open(&key_path)
+                .map_err(|e| format!("cannot create CA key: {e}"))?;
+            file.write_all(key_pem.as_bytes())
+                .map_err(|e| format!("cannot write CA key: {e}"))?;
         }
         #[cfg(not(unix))]
         std::fs::write(&key_path, &key_pem).map_err(|e| format!("cannot write CA key: {e}"))?;
@@ -96,13 +106,18 @@ pub fn acceptor_for_host(ca: &Arc<CaState>, host: &str) -> Result<Arc<ServerConf
         }
     }
     let leaf_key = KeyPair::generate().map_err(|e| format!("leaf key failed: {e}"))?;
-    let mut params = CertificateParams::new(Vec::new()).map_err(|e| format!("leaf params failed: {e}"))?;
+    let mut params =
+        CertificateParams::new(Vec::new()).map_err(|e| format!("leaf params failed: {e}"))?;
     if let Ok(ip) = host.parse::<std::net::IpAddr>() {
         params.subject_alt_names = vec![rcgen::SanType::IpAddress(ip)];
     } else {
-        params.subject_alt_names = vec![rcgen::SanType::DnsName(rcgen::Ia5String::try_from(host).map_err(|e| format!("bad san: {e}"))?)];
+        params.subject_alt_names = vec![rcgen::SanType::DnsName(
+            rcgen::Ia5String::try_from(host).map_err(|e| format!("bad san: {e}"))?,
+        )];
     }
-    params.distinguished_name.push(rcgen::DnType::CommonName, host);
+    params
+        .distinguished_name
+        .push(rcgen::DnType::CommonName, host);
     let leaf = params
         .signed_by(&leaf_key, &ca.ca_cert, &ca.key_pair)
         .map_err(|e| format!("leaf signing failed: {e}"))?;
@@ -146,32 +161,47 @@ fn request_body_length(head: &str, max_body: usize) -> std::io::Result<usize> {
     let invalid = |s| Error::new(ErrorKind::InvalidData, s);
     let mut length = None;
     for line in head.split("\r\n").skip(1) {
-        if line.is_empty() { break; }
+        if line.is_empty() {
+            break;
+        }
         if line.starts_with(' ') || line.starts_with('\t') {
             return Err(invalid("ambiguous transfer framing: folded header"));
         }
         let Some((name, value)) = line.split_once(':') else {
             return Err(invalid("malformed HTTP header"));
         };
-        if name.is_empty() || !name.bytes().all(|b| b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&b)) {
+        if name.is_empty()
+            || !name
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&b))
+        {
             return Err(invalid("invalid HTTP header name"));
         }
         if name.eq_ignore_ascii_case("transfer-encoding") {
-            return Err(invalid("ambiguous transfer framing: transfer-encoding unsupported"));
+            return Err(invalid(
+                "ambiguous transfer framing: transfer-encoding unsupported",
+            ));
         }
         if name.eq_ignore_ascii_case("content-length") {
             if length.is_some() {
-                return Err(invalid("ambiguous transfer framing: repeated content-length"));
+                return Err(invalid(
+                    "ambiguous transfer framing: repeated content-length",
+                ));
             }
             let v = value.trim();
             if v.is_empty() || !v.bytes().all(|b| b.is_ascii_digit()) {
                 return Err(invalid("invalid content-length"));
             }
-            length = Some(v.parse::<usize>().map_err(|_| invalid("invalid content-length"))?);
+            length = Some(
+                v.parse::<usize>()
+                    .map_err(|_| invalid("invalid content-length"))?,
+            );
         }
     }
     let n = length.unwrap_or(0);
-    if n > max_body { return Err(invalid("HTTP body limit exceeded")); }
+    if n > max_body {
+        return Err(invalid("HTTP body limit exceeded"));
+    }
     Ok(n)
 }
 
@@ -190,13 +220,21 @@ where
     let mut byte = [0u8; 1];
     loop {
         if head.len() >= MAX_HEADERS {
-            return Err(Error::new(ErrorKind::InvalidData, "HTTP header limit exceeded"));
+            return Err(Error::new(
+                ErrorKind::InvalidData,
+                "HTTP header limit exceeded",
+            ));
         }
         if reader.read(&mut byte).await? == 0 {
-            return Err(Error::new(ErrorKind::UnexpectedEof, "incomplete HTTP headers"));
+            return Err(Error::new(
+                ErrorKind::UnexpectedEof,
+                "incomplete HTTP headers",
+            ));
         }
         head.push(byte[0]);
-        if head.ends_with(b"\r\n\r\n") { break; }
+        if head.ends_with(b"\r\n\r\n") {
+            break;
+        }
     }
     let head_text = String::from_utf8(head)
         .map_err(|_| Error::new(ErrorKind::InvalidData, "non-UTF8 HTTP headers"))?;
@@ -214,7 +252,9 @@ mod framing_tests {
     #[tokio::test]
     async fn bounded_request_body_roundtrip() {
         let (mut tx, mut rx) = duplex(256);
-        tx.write_all(b"POST / HTTP/1.1\r\nHost: local\r\nContent-Length: 4\r\n\r\ntest").await.unwrap();
+        tx.write_all(b"POST / HTTP/1.1\r\nHost: local\r\nContent-Length: 4\r\n\r\ntest")
+            .await
+            .unwrap();
         let (head, body) = read_http_message(&mut rx).await.unwrap();
         assert!(head.starts_with("POST / HTTP/1.1"));
         assert_eq!(body, b"test");
@@ -235,7 +275,14 @@ mod framing_tests {
             let head = format!("POST / HTTP/1.1\r\nHost: local\r\n{header}\r\n\r\n");
             assert!(request_body_length(&head, 1024).is_err(), "{header}");
         }
-        assert_eq!(request_body_length("POST / HTTP/1.1\r\nHost: local\r\nContent-Length: 4\r\n\r\n", 1024).unwrap(), 4);
+        assert_eq!(
+            request_body_length(
+                "POST / HTTP/1.1\r\nHost: local\r\nContent-Length: 4\r\n\r\n",
+                1024
+            )
+            .unwrap(),
+            4
+        );
     }
 
     #[tokio::test]
@@ -246,7 +293,9 @@ mod framing_tests {
             "Content-Length: nope",
         ] {
             let (mut tx, mut rx) = duplex(256);
-            tx.write_all(format!("POST / HTTP/1.1\r\nHost: local\r\n{header}\r\n\r\n").as_bytes()).await.unwrap();
+            tx.write_all(format!("POST / HTTP/1.1\r\nHost: local\r\n{header}\r\n\r\n").as_bytes())
+                .await
+                .unwrap();
             assert!(read_http_message(&mut rx).await.is_err());
         }
     }

@@ -5,6 +5,7 @@ use serde::Serialize;
 
 pub mod application;
 pub mod dns;
+pub mod fragments;
 pub mod pcapng;
 pub mod streams;
 
@@ -79,6 +80,8 @@ pub struct PcapFile {
     pub endianness: Endianness,
     pub nanosecond: bool,
     pub packets: Vec<PacketMeta>,
+    /// Derived, bounded IP fragment results; original frames are never rewritten.
+    pub reassembly: fragments::ReassemblyReport,
     /// Records skipped because their length fields were implausible.
     pub malformed_tail: bool,
 }
@@ -155,6 +158,7 @@ pub fn parse_pcap(data: &[u8]) -> Result<PcapFile, String> {
         big_endian,
     };
     let mut packets = Vec::new();
+    let mut assembler = fragments::FragmentReassembler::new();
     let mut malformed_tail = false;
     while reader.pos < data.len() {
         if packets.len() >= MAX_CAPTURE_PACKETS {
@@ -184,6 +188,7 @@ pub fn parse_pcap(data: &[u8]) -> Result<PcapFile, String> {
         let offset = reader.pos;
         let bytes = reader.bytes(incl_len as usize).unwrap_or(&[]);
         let dissected = dissect(linktype, bytes);
+        assembler.push_frame(linktype, bytes, packets.len());
         packets.push(PacketMeta {
             offset,
             incl_len: incl_len as usize,
@@ -202,6 +207,7 @@ pub fn parse_pcap(data: &[u8]) -> Result<PcapFile, String> {
         },
         nanosecond,
         packets,
+        reassembly: assembler.finish(),
         malformed_tail,
     })
 }
@@ -435,13 +441,15 @@ fn dissect_ipv4(payload: &[u8], parent_layers: &[Layer]) -> Dissected {
     }
     let effective_end = total_length.min(payload.len());
     let transport = &payload[ihl..effective_end];
-    let fragment_offset = u16::from_be_bytes([payload[6], payload[7]]) & 0x1fff;
-    if fragment_offset != 0 {
+    let fragment_bits = u16::from_be_bytes([payload[6], payload[7]]);
+    let fragment_offset = (fragment_bits & 0x1fff) as usize * 8;
+    let more_fragments = fragment_bits & 0x2000 != 0;
+    if fragment_offset != 0 || more_fragments {
         return Dissected {
             source,
             destination,
             protocol: "IPv4-fragment".into(),
-            info: format!("noninitial IP fragment offset {}", fragment_offset * 8),
+            info: format!("IPv4 fragment offset {fragment_offset}, more={more_fragments}"),
             color_hint: color_for("other"),
             layers,
             stream_id: None,
@@ -564,12 +572,12 @@ fn dissect_ipv6(payload: &[u8], parent_layers: &[Layer]) -> Dissected {
                     label: "IPv6 fragment".into(),
                     value: format!("offset {offset} byte(s), more={}", raw & 1 == 1),
                 });
-                if offset != 0 {
+                if offset != 0 || raw & 1 != 0 {
                     return Dissected {
                         source,
                         destination,
                         protocol: "IPv6-fragment".into(),
-                        info: format!("noninitial IPv6 fragment offset {offset}"),
+                        info: format!("IPv6 fragment offset {offset}, more={}", raw & 1 != 0),
                         color_hint: color_for("IPv6"),
                         layers,
                         stream_id: None,
@@ -1105,6 +1113,29 @@ mod tests {
     }
 
     #[test]
+    fn ipv4_initial_fragment_with_more_flag_is_not_a_transport_packet() {
+        let mut ip = vec![0x45, 0, 0, 28, 0, 1, 0x20, 0, 64, 17, 0, 0];
+        ip.extend_from_slice(&[192, 0, 2, 1, 192, 0, 2, 2]);
+        ip.extend_from_slice(&[0x04, 0xd2, 0, 53, 0, 16, 0, 0]);
+        let parsed = dissect(101, &ip);
+        assert_eq!(parsed.protocol, "IPv4-fragment");
+        assert!(parsed.stream_id.is_none());
+        assert!(parsed.payload.is_empty());
+    }
+
+    #[test]
+    fn ipv6_initial_fragment_with_more_flag_is_not_a_transport_packet() {
+        let mut ip = vec![0x60, 0, 0, 0, 0, 16, 44, 64];
+        ip.extend_from_slice(&[0; 32]);
+        ip.extend_from_slice(&[17, 0, 0, 1, 0, 0, 0, 1]);
+        ip.extend_from_slice(&[0x04, 0xd2, 0, 53, 0, 16, 0, 0]);
+        let parsed = dissect(101, &ip);
+        assert_eq!(parsed.protocol, "IPv6-fragment");
+        assert!(parsed.stream_id.is_none());
+        assert!(parsed.payload.is_empty());
+    }
+
+    #[test]
     fn ipv6_noninitial_fragment_is_not_mistaken_for_udp() {
         let mut ip = vec![0x60, 0, 0, 0, 0, 16, 44, 64];
         ip.extend_from_slice(&[0; 32]);
@@ -1232,5 +1263,48 @@ mod tests {
         );
         assert_eq!(first_transcript.conflicts, 0);
         assert_eq!(second_transcript.conflicts, 0);
+    }
+
+    #[test]
+    fn classic_pcap_keeps_fragment_rows_but_reports_derived_datagram() {
+        fn ethernet_ipv4_fragment(id: u16, offset: usize, more: bool, part: &[u8]) -> Vec<u8> {
+            let mut frame = vec![0xff; 6];
+            frame.extend_from_slice(&[2, 0, 0, 0, 0, 1]);
+            frame.extend_from_slice(&0x0800u16.to_be_bytes());
+            let mut ip = vec![0x45, 0];
+            ip.extend_from_slice(&((20 + part.len()) as u16).to_be_bytes());
+            ip.extend_from_slice(&id.to_be_bytes());
+            ip.extend_from_slice(
+                &(((offset / 8) as u16) | if more { 0x2000 } else { 0 }).to_be_bytes(),
+            );
+            ip.extend_from_slice(&[64, 17, 0, 0]);
+            ip.extend_from_slice(&[192, 0, 2, 1, 192, 0, 2, 2]);
+            ip.extend_from_slice(part);
+            frame.extend(ip);
+            frame
+        }
+        let mut udp = vec![0x04, 0xd2, 0, 53, 0, 24, 0, 0];
+        udp.extend_from_slice(&[0x42; 16]);
+        let capture = build_pcap(&[
+            (1, ethernet_ipv4_fragment(771, 16, false, &udp[16..])),
+            (2, ethernet_ipv4_fragment(771, 0, true, &udp[..16])),
+        ]);
+        let parsed = parse_capture(&capture).unwrap();
+        assert_eq!(parsed.packets.len(), 2);
+        assert!(parsed
+            .packets
+            .iter()
+            .all(|p| p.dissected.protocol == "IPv4-fragment"));
+        assert!(parsed
+            .packets
+            .iter()
+            .all(|p| p.dissected.stream_id.is_none()));
+        assert_eq!(parsed.reassembly.completed.len(), 1);
+        let derived = &parsed.reassembly.completed[0];
+        assert_eq!(derived.identification, 771);
+        assert_eq!(derived.first_packet_index, 0);
+        assert_eq!(derived.last_packet_index, 1);
+        assert_eq!(derived.dissected.protocol, "DNS");
+        assert_eq!(&derived.ip_packet[20..], &udp);
     }
 }

@@ -69,20 +69,27 @@ pub async fn job_start(
 ) -> Result<u64, String> {
     let job_id = manager.next_id.fetch_add(1, Ordering::Relaxed);
     let cancel = CancellationToken::new();
-    manager
-        .jobs
-        .lock()
-        .expect("job registry poisoned")
-        .insert(job_id, JobHandle { cancel: cancel.clone() });
+    manager.jobs.lock().expect("job registry poisoned").insert(
+        job_id,
+        JobHandle {
+            cancel: cancel.clone(),
+        },
+    );
 
     let registry = manager.jobs.clone();
     tokio::spawn(async move {
         let total_steps = 50u32;
-        let _ = on_event.send(JobEvent::Started { job_id, total_steps });
+        let _ = on_event.send(JobEvent::Started {
+            job_id,
+            total_steps,
+        });
         for step in 1..=total_steps {
             if cancel.is_cancelled() {
                 let _ = on_event.send(JobEvent::Cancelled { job_id });
-                registry.lock().expect("job registry poisoned").remove(&job_id);
+                registry
+                    .lock()
+                    .expect("job registry poisoned")
+                    .remove(&job_id);
                 return;
             }
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
@@ -98,7 +105,10 @@ pub async fn job_start(
             job_id,
             message: format!("demo job finished ({total_steps} units)"),
         });
-        registry.lock().expect("job registry poisoned").remove(&job_id);
+        registry
+            .lock()
+            .expect("job registry poisoned")
+            .remove(&job_id);
     });
 
     match kind {

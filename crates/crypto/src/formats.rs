@@ -24,7 +24,12 @@ fn matched(tail: &[u8]) -> Option<(&'static str, &'static str)> {
     if tail.starts_with(b"%PDF-") {
         return Some(("pdf", "PDF document header"));
     }
-    if tail.starts_with(b"\x7fELF") && tail.len() >= 16 && matches!(tail[4], 1 | 2) {
+    if tail.starts_with(b"\x7fELF")
+        && tail.len() >= 16
+        && matches!(tail[4], 1 | 2)
+        && matches!(tail[5], 1 | 2)
+        && tail[6] == 1
+    {
         return Some(("elf", "ELF executable header"));
     }
     if tail.starts_with(b"PK\x03\x04") && tail.len() >= 30 {
@@ -33,7 +38,7 @@ fn matched(tail: &[u8]) -> Option<(&'static str, &'static str)> {
     if tail.starts_with(b"PK\x05\x06") && tail.len() >= 22 {
         return Some(("zip-eocd", "ZIP end-of-central-directory record"));
     }
-    if tail.starts_with(b"\x1f\x8b\x08") {
+    if tail.len() >= 10 && tail.starts_with(b"\x1f\x8b\x08") && tail[3] & 0xe0 == 0 {
         return Some(("gzip", "Gzip compressed stream"));
     }
     if tail.starts_with(b"\xfd7zXZ\x00") {
@@ -86,6 +91,7 @@ pub fn scan_signatures(bytes: &[u8], max_hits: usize) -> Vec<SignatureHit> {
     if limit == 0 {
         return found;
     }
+    let bytes = &bytes[..bytes.len().min(MAX_SIGNATURE_SCAN_BYTES)];
     for offset in 0..bytes.len() {
         if found.len() >= limit {
             break;
@@ -123,7 +129,10 @@ pub fn scan_signatures(bytes: &[u8], max_hits: usize) -> Vec<SignatureHit> {
         }
         // TAR's "ustar" identifier is *not* at the file start. Verify the
         // candidate contains a complete 512-byte header before reporting it.
-        if tail.len() >= 512 && tail[257..262] == *b"ustar" {
+        if tail.len() >= 512
+            && tail[257..262] == *b"ustar"
+            && crate::extraction::tar_header_checksum_valid(&tail[..512])
+        {
             found.push(SignatureHit {
                 offset: offset as u64,
                 format: "tar",
@@ -164,6 +173,9 @@ mod tests {
         assert_eq!(scan_signatures(&exe, 5)[0].format, "pe");
         let mut tar = vec![0u8; 512];
         tar[257..262].copy_from_slice(b"ustar");
+        tar[148..156].fill(b' ');
+        let sum = tar.iter().map(|b| *b as usize).sum::<usize>();
+        tar[148..156].copy_from_slice(format!("{sum:06o}\0 ").as_bytes());
         assert!(scan_signatures(&tar, 5)
             .iter()
             .any(|h| h.format == "tar" && h.offset == 0));
@@ -179,6 +191,10 @@ mod tests {
         assert!(scan_signatures(b"MZ", 4).is_empty());
         assert!(scan_signatures(b"garbage\x1f\x8b", 4).is_empty());
         assert!(scan_signatures(b"\x89PNG", 0).is_empty());
+        assert!(scan_signatures(b"\x1f\x8b\x08", 4).is_empty());
+        let mut fake_tar = vec![0u8; 512];
+        fake_tar[257..262].copy_from_slice(b"ustar");
+        assert!(scan_signatures(&fake_tar, 4).is_empty());
     }
     #[test]
     fn results_are_bounded() {

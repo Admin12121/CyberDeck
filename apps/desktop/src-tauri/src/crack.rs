@@ -47,9 +47,17 @@ pub struct WordlistInfoWire {
 /// re-validate it (paths originate from our own dialog, never typed by the UI).
 #[tauri::command]
 pub fn pick_wordlist(app: AppHandle) -> Result<WordlistInfoWire, String> {
-    let picked = app.dialog().file().blocking_pick_file().ok_or("cancelled")?;
-    let path = picked.as_path().ok_or("unsupported file location")?.to_path_buf();
-    let meta = std::fs::metadata(&path).map_err(|e| format!("cannot read wordlist metadata: {e}"))?;
+    let picked = app
+        .dialog()
+        .file()
+        .blocking_pick_file()
+        .ok_or("cancelled")?;
+    let path = picked
+        .as_path()
+        .ok_or("unsupported file location")?
+        .to_path_buf();
+    let meta =
+        std::fs::metadata(&path).map_err(|e| format!("cannot read wordlist metadata: {e}"))?;
     if meta.len() > MAX_IMPORT_BYTES {
         return Err(format!(
             "wordlist is {} MB; the limit this arc is {} MB",
@@ -74,7 +82,8 @@ pub(crate) fn resolved_wordlist(
     match wordlist_path {
         Some(path) => {
             let path = PathBuf::from(path);
-            let meta = std::fs::metadata(&path).map_err(|e| format!("selected wordlist is unreadable: {e}"))?;
+            let meta = std::fs::metadata(&path)
+                .map_err(|e| format!("selected wordlist is unreadable: {e}"))?;
             if meta.len() > MAX_IMPORT_BYTES {
                 return Err(format!(
                     "wordlist is {} MB; the limit this arc is {} MB",
@@ -89,9 +98,17 @@ pub(crate) fn resolved_wordlist(
             Ok((path, name))
         }
         None => {
-            let picked = app.dialog().file().blocking_pick_file().ok_or("cancelled")?;
-            let path = picked.as_path().ok_or("unsupported file location")?.to_path_buf();
-            let meta = std::fs::metadata(&path).map_err(|e| format!("cannot read wordlist metadata: {e}"))?;
+            let picked = app
+                .dialog()
+                .file()
+                .blocking_pick_file()
+                .ok_or("cancelled")?;
+            let path = picked
+                .as_path()
+                .ok_or("unsupported file location")?
+                .to_path_buf();
+            let meta = std::fs::metadata(&path)
+                .map_err(|e| format!("cannot read wordlist metadata: {e}"))?;
             if meta.len() > MAX_IMPORT_BYTES {
                 return Err(format!(
                     "wordlist is {} MB; the limit this arc is {} MB",
@@ -109,7 +126,10 @@ pub(crate) fn resolved_wordlist(
 }
 
 fn thread_count() -> usize {
-    std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1).clamp(1, 32)
+    std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1)
+        .clamp(1, 32)
 }
 
 /// Persist recovered pairs into the crack history (deduped by the store).
@@ -148,7 +168,10 @@ where
             let base = (chunk_index * chunk_size.max(1)) as u64;
             handles.push(scope.spawn(move || worker(chunk, base, stop)));
         }
-        partials = handles.into_iter().map(|h| h.join().unwrap_or((0, Vec::new()))).collect();
+        partials = handles
+            .into_iter()
+            .map(|h| h.join().unwrap_or((0, Vec::new())))
+            .collect();
     });
     partials
 }
@@ -202,11 +225,18 @@ pub fn crack_wordlist_dialog(
                 tried += 1;
                 if tried % 25 == 0 {
                     let done = (base + tried).min(total);
-                    let _ = progress.send(CrackProgress { tried: done, total, percent: (done * 100 / total.max(1)) as u32 });
+                    let _ = progress.send(CrackProgress {
+                        tried: done,
+                        total,
+                        percent: (done * 100 / total.max(1)) as u32,
+                    });
                 }
                 let candidate = line.strip_suffix('\r').unwrap_or(line);
                 if cyberdeck_crypto::verify_kdf(&target_ref, candidate).unwrap_or(false) {
-                    matches.push(CrackMatch { line_no: base + i as u64 + 1, password: candidate.to_string() });
+                    matches.push(CrackMatch {
+                        line_no: base + i as u64 + 1,
+                        password: candidate.to_string(),
+                    });
                     stop.store(true, Ordering::Relaxed);
                     break;
                 }
@@ -216,7 +246,14 @@ pub fn crack_wordlist_dialog(
         let tried: u64 = parts.iter().map(|(t, _)| t).sum();
         let mut matches: Vec<CrackMatch> = parts.into_iter().flat_map(|(_, m)| m).collect();
         matches.truncate(MAX_REPORTED_MATCHES);
-        record_history(&ctx, &format, &target, "cyberdeck-crypto", &wordlist_name, &matches);
+        record_history(
+            &ctx,
+            &format,
+            &target,
+            "cyberdeck-crypto",
+            &wordlist_name,
+            &matches,
+        );
         return Ok(CrackResultWire {
             algo: format.to_string(),
             target_hash: target,
@@ -231,7 +268,10 @@ pub fn crack_wordlist_dialog(
     }
 
     if !SUPPORTED.contains(&algo.as_str()) {
-        return Err(format!("wordlist recovery supports {} this arc", SUPPORTED.join(", ")));
+        return Err(format!(
+            "wordlist recovery supports {} this arc",
+            SUPPORTED.join(", ")
+        ));
     }
     let target = target.to_lowercase();
     let total = lines.len() as u64;
@@ -248,12 +288,19 @@ pub fn crack_wordlist_dialog(
             tried += 1;
             if tried % 50_000 == 0 {
                 let done = (base + tried).min(total);
-                let _ = progress.send(CrackProgress { tried: done, total, percent: (done * 100 / total.max(1)) as u32 });
+                let _ = progress.send(CrackProgress {
+                    tried: done,
+                    total,
+                    percent: (done * 100 / total.max(1)) as u32,
+                });
             }
             let candidate = line.strip_suffix('\r').unwrap_or(line);
             if let Ok(digest) = cyberdeck_crypto::apply_op(&algo_ref, candidate.as_bytes(), None) {
                 if hex::encode(digest) == *target_ref {
-                    matches.push(CrackMatch { line_no: base + i as u64 + 1, password: candidate.to_string() });
+                    matches.push(CrackMatch {
+                        line_no: base + i as u64 + 1,
+                        password: candidate.to_string(),
+                    });
                     if matches.len() >= MAX_REPORTED_MATCHES {
                         stop.store(true, Ordering::Relaxed);
                         break;
@@ -266,7 +313,14 @@ pub fn crack_wordlist_dialog(
     let tried: u64 = parts.iter().map(|(t, _)| t).sum();
     let mut matches: Vec<CrackMatch> = parts.into_iter().flat_map(|(_, m)| m).collect();
     matches.truncate(MAX_REPORTED_MATCHES);
-    record_history(&ctx, &algo, &target, "cyberdeck-crypto", &wordlist_name, &matches);
+    record_history(
+        &ctx,
+        &algo,
+        &target,
+        "cyberdeck-crypto",
+        &wordlist_name,
+        &matches,
+    );
     Ok(CrackResultWire {
         algo,
         target_hash: target,
@@ -279,4 +333,3 @@ pub fn crack_wordlist_dialog(
         engine_version: cyberdeck_crypto::ENGINE_VERSION.to_string(),
     })
 }
-

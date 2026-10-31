@@ -1,9 +1,9 @@
 //! Native crypto ops over IPC; results carry Base64, hex and provenance (§6).
 
 use base64::Engine as _;
+use cyberdeck_crypto::recipes::{execute_recipe, NativeRecipeResult, RecipeStep};
 use cyberdeck_crypto::{apply_op, catalog, OpInfo, ENGINE_ID, ENGINE_VERSION};
 use serde::Serialize;
-use cyberdeck_crypto::recipes::{execute_recipe, NativeRecipeResult, RecipeStep};
 
 #[derive(Debug, Serialize)]
 pub struct OpResult {
@@ -14,7 +14,11 @@ pub struct OpResult {
 }
 
 #[tauri::command]
-pub fn crypto_op(op: String, data_b64: String, key_b64: Option<String>) -> Result<OpResult, String> {
+pub fn crypto_op(
+    op: String,
+    data_b64: String,
+    key_b64: Option<String>,
+) -> Result<OpResult, String> {
     let data = base64::engine::general_purpose::STANDARD
         .decode(data_b64.as_bytes())
         .map_err(|e| format!("invalid input encoding: {e}"))?;
@@ -57,8 +61,16 @@ mod tests {
 
     #[test]
     fn crypto_op_hashes_and_reports_provenance() {
-        let result = crypto_op("sha256".into(), base64::engine::general_purpose::STANDARD.encode(b"abc"), None).unwrap();
-        assert_eq!(result.output_hex, "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+        let result = crypto_op(
+            "sha256".into(),
+            base64::engine::general_purpose::STANDARD.encode(b"abc"),
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            result.output_hex,
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
         assert_eq!(result.engine, "cyberdeck-crypto");
         assert!(!result.engine_version.is_empty());
     }

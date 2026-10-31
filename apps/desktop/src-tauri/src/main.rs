@@ -18,8 +18,8 @@ mod webtls;
 
 use std::sync::Mutex;
 
-use evidence::EvidenceCtx;
 use cyberdeck_storage::ArtifactStore;
+use evidence::EvidenceCtx;
 use tauri::Manager;
 
 fn main() {
@@ -27,7 +27,9 @@ fn main() {
         .plugin(tauri_plugin_dialog::init())
         .manage(jobs::JobManager::new())
         .manage(netscan::ScanCtx::default())
-        .manage(pcap::PcapCtx { current: std::sync::Mutex::new(None) })
+        .manage(pcap::PcapCtx {
+            current: std::sync::Mutex::new(None),
+        })
         .manage(web::WebCtx {
             proxy_running: std::sync::atomic::AtomicBool::new(false),
             proxy_port: std::sync::atomic::AtomicU16::new(8080),
@@ -49,8 +51,8 @@ fn main() {
             // Case store lives under the OS app-data directory; the SQLite
             // index and artifact copies are created on first launch (§8.4).
             let data_dir = storage_paths::data_dir(app.handle()).map_err(std::io::Error::other)?;
-            let store = ArtifactStore::open(&data_dir.join("cases.db"))
-                .map_err(std::io::Error::other)?;
+            let store =
+                ArtifactStore::open(&data_dir.join("cases.db")).map_err(std::io::Error::other)?;
             app.manage(EvidenceCtx {
                 store: Mutex::new(store),
                 artifacts_dir: data_dir.join("artifacts"),
@@ -76,6 +78,7 @@ fn main() {
             evidence::file_hex,
             evidence::file_signature_scan,
             evidence::file_extract_gzip,
+            evidence::file_extract_archive,
             evidence::file_strings,
             evidence::digest_file_dialog,
             pcap::pcap_open_dialog,

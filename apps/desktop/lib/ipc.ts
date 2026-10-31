@@ -253,6 +253,12 @@ export async function fileExtractGzip(caseId: string, id: string, offset: number
   return invoke<ArtifactRecord>("file_extract_gzip", { caseId, id, offset });
 }
 
+/** Native ZIP/TAR extraction into case evidence, preserving source provenance. */
+export async function fileExtractArchive(caseId: string, id: string, format: "zip" | "tar", offset: number): Promise<ArtifactRecord[]> {
+  if (!inTauri) throw new Error("Archive extraction requires the desktop runtime");
+  return invoke<ArtifactRecord[]>("file_extract_archive", { caseId, id, format, offset });
+}
+
 export async function fileSignatureScan(caseId: string, id: string): Promise<SignatureScanWire> {
   if (!inTauri) throw new Error("Binary scanning requires the native desktop runtime");
   return invoke<SignatureScanWire>("file_signature_scan", { caseId, id });
