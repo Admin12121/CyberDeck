@@ -256,6 +256,130 @@ where
     }
 }
 
+/// Recover a bounded wordlist on an explicitly selected OpenCL GPU,
+/// propagating file-read and overlength-line failures without materializing
+/// the wordlist. Only the algorithms and candidate lengths supported by the
+/// native GPU session can be used; no silent CPU fallback is performed.
+/// Fallible candidate API for reproducible GPU rule/wordlist streams.
+/// OpenCL failure is returned, not disguised as CPU execution.
+pub fn recover_results_on_device_with_batch<I, B, F>(
+    algorithm: GpuHash,
+    device_index: usize,
+    batch_size: usize,
+    target_hex: &str,
+    candidates: I,
+    max_attempts: u64,
+    max_matches: usize,
+    cancel: F,
+) -> Result<GpuStreamResult, String>
+where
+    I: IntoIterator<Item = Result<B, String>>,
+    B: AsRef<[u8]>,
+    F: FnMut() -> bool,
+{
+    #[cfg(feature = "gpu")]
+    {
+        let mut session: Option<native::Session> = None;
+        stream_with_batch_results(
+            target_hex,
+            candidates,
+            max_attempts,
+            max_matches,
+            batch_size,
+            algorithm.digest_bytes(),
+            algorithm.engine(),
+            cancel,
+            |hash, batch| {
+                let target = hex::decode(hash).map_err(|_| "invalid GPU target hex")?;
+                if session.is_none() {
+                    session = Some(native::Session::new_for_device(
+                        batch_size,
+                        algorithm.native(),
+                        device_index,
+                    )?);
+                }
+                session
+                    .as_mut()
+                    .expect("GPU session initialized")
+                    .execute(&target, batch)
+            },
+        )
+    }
+    #[cfg(not(feature = "gpu"))]
+    {
+        let _ = device_index;
+        stream_with_batch_results(
+            target_hex,
+            candidates,
+            max_attempts,
+            max_matches,
+            batch_size,
+            algorithm.digest_bytes(),
+            algorithm.engine(),
+            cancel,
+            |_, _| Err("GPU feature not enabled; no OpenCL work was performed".into()),
+        )
+    }
+}
+
+/// Streams binary/CRLF-safe wordlists directly to the selected GPU.
+pub fn recover_wordlist_on_device_with_batch<R, F>(
+    algorithm: GpuHash,
+    device_index: usize,
+    batch_size: usize,
+    target_hex: &str,
+    reader: R,
+    max_attempts: u64,
+    max_matches: usize,
+    cancel: F,
+) -> Result<GpuStreamResult, String>
+where
+    R: std::io::BufRead,
+    F: FnMut() -> bool,
+{
+    recover_results_on_device_with_batch(
+        algorithm,
+        device_index,
+        batch_size,
+        target_hex,
+        crate::candidates::WordlistCandidates::new(reader),
+        max_attempts,
+        max_matches,
+        cancel,
+    )
+}
+
+/// Streams bounded compiled-rule variants directly into OpenCL, without
+/// collecting a generated dictionary or silently falling back to CPU.
+pub fn recover_rule_wordlist_on_device_with_batch<R, F>(
+    algorithm: GpuHash,
+    device_index: usize,
+    batch_size: usize,
+    target_hex: &str,
+    reader: R,
+    rules: Vec<crate::recovery::CompiledRule>,
+    max_attempts: u64,
+    max_matches: usize,
+    cancel: F,
+) -> Result<GpuStreamResult, String>
+where
+    R: std::io::BufRead,
+    F: FnMut() -> bool,
+{
+    let source = crate::candidates::WordlistCandidates::new(reader);
+    let stream = crate::candidates::RuleCandidates::new(source, rules)?;
+    recover_results_on_device_with_batch(
+        algorithm,
+        device_index,
+        batch_size,
+        target_hex,
+        stream,
+        max_attempts,
+        max_matches,
+        cancel,
+    )
+}
+
 /// Native GPU NTLM matching (MD4 of UTF-16LE).
 /// This optimized single-block implementation is intentionally ASCII-only:
 /// 0..=27 bytes. Use native CPU recovery for Unicode or longer candidates.
@@ -576,11 +700,41 @@ fn stream_with_batch<I, B, F, E>(
     batch_size: usize,
     digest_bytes: usize,
     engine: &'static str,
+    cancel: F,
+    executor: E,
+) -> Result<GpuStreamResult, String>
+where
+    I: IntoIterator<Item = B>,
+    B: AsRef<[u8]>,
+    F: FnMut() -> bool,
+    E: FnMut(&str, &[&[u8]]) -> Result<Vec<usize>, String>,
+{
+    stream_with_batch_results(
+        target_hex,
+        candidates.into_iter().map(Ok::<B, String>),
+        max_attempts,
+        max_matches,
+        batch_size,
+        digest_bytes,
+        engine,
+        cancel,
+        executor,
+    )
+}
+
+fn stream_with_batch_results<I, B, F, E>(
+    target_hex: &str,
+    candidates: I,
+    max_attempts: u64,
+    max_matches: usize,
+    batch_size: usize,
+    digest_bytes: usize,
+    engine: &'static str,
     mut cancel: F,
     mut executor: E,
 ) -> Result<GpuStreamResult, String>
 where
-    I: IntoIterator<Item = B>,
+    I: IntoIterator<Item = Result<B, String>>,
     B: AsRef<[u8]>,
     F: FnMut() -> bool,
     E: FnMut(&str, &[&[u8]]) -> Result<Vec<usize>, String>,
@@ -627,6 +781,7 @@ where
         let Some(candidate) = source.next() else {
             break;
         };
+        let candidate = candidate?;
         let candidate = candidate.as_ref();
         if candidate.len() > MAX_GPU_CANDIDATE_BYTES {
             return Err("GPU streaming candidate exceeds 55-byte SHA-256 limit".into());
@@ -1111,6 +1266,93 @@ mod tests {
             assert_eq!(result.hits[0].index, GPU_STREAM_BATCH as u64);
             assert_eq!(result.batches, 2);
         }
+    }
+
+    #[test]
+    fn gpu_fallible_candidate_stream_propagates_errors_and_respects_limit() {
+        let hash = "00".repeat(32);
+        let input: Vec<Result<Vec<u8>, String>> = vec![
+            Ok(b"a".to_vec()),
+            Ok(b"b".to_vec()),
+            Err("disk read failed".into()),
+        ];
+        assert!(stream_with_batch_results(
+            &hash,
+            input.clone(),
+            3,
+            1,
+            2,
+            32,
+            "test",
+            || false,
+            |_, _| Ok(vec![]),
+        )
+        .unwrap_err()
+        .contains("disk read failed"));
+        let mut sent = Vec::new();
+        let result = stream_with_batch_results(
+            &hash,
+            input,
+            2,
+            1,
+            2,
+            32,
+            "test",
+            || false,
+            |_, batch| {
+                sent.push(batch.len());
+                Ok(vec![])
+            },
+        )
+        .unwrap();
+        assert_eq!(result.tried, 2);
+        assert!(result.limit_reached);
+        assert_eq!(sent, vec![2]);
+    }
+
+    #[test]
+    fn gpu_rule_wordlist_errors_are_explicit_before_device_access() {
+        use crate::recovery::CompiledRule;
+        let rule = CompiledRule::parse("c$1").unwrap();
+        let result = recover_rule_wordlist_on_device_with_batch(
+            GpuHash::Sha256,
+            0,
+            128,
+            "invalid",
+            std::io::Cursor::new(b"test\n".as_slice()),
+            vec![rule],
+            10,
+            1,
+            || false,
+        );
+        assert!(result.is_err());
+        let result = recover_rule_wordlist_on_device_with_batch(
+            GpuHash::Sha256,
+            0,
+            0,
+            &"00".repeat(32),
+            std::io::Cursor::new(b"test\n".as_slice()),
+            vec![CompiledRule::parse(":").unwrap()],
+            10,
+            1,
+            || false,
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn gpu_wordlist_api_rejects_invalid_hash_without_driver_access() {
+        let result = recover_wordlist_on_device_with_batch(
+            GpuHash::Sha256,
+            0,
+            4,
+            "invalid",
+            std::io::Cursor::new(b"candidate\n".as_slice()),
+            10,
+            1,
+            || false,
+        );
+        assert!(result.is_err());
     }
 
     #[test]

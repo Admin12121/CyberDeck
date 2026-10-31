@@ -6,6 +6,7 @@ use serde::Serialize;
 pub mod application;
 pub mod dns;
 pub mod fragments;
+pub mod inventory;
 pub mod pcapng;
 pub mod streams;
 
@@ -152,6 +153,11 @@ pub fn parse_pcap(data: &[u8]) -> Result<PcapFile, String> {
         other => return Err(format!("not a pcap capture (magic 0x{other:08x})")),
     };
 
+    let snaplen = if big_endian {
+        u32::from_be_bytes([data[16], data[17], data[18], data[19]])
+    } else {
+        u32::from_le_bytes([data[16], data[17], data[18], data[19]])
+    };
     let mut reader = Reader {
         data,
         pos: 24,
@@ -181,7 +187,13 @@ pub fn parse_pcap(data: &[u8]) -> Result<PcapFile, String> {
             malformed_tail = true;
             break;
         };
-        if incl_len as usize > MAX_PACKET_BYTES || reader.pos + incl_len as usize > data.len() {
+        // The capture cannot contain more bytes than existed on the wire.
+        // Reject inconsistent evidence length metadata before dissection.
+        if incl_len > orig_len
+            || (snaplen != 0 && incl_len > snaplen)
+            || incl_len as usize > MAX_PACKET_BYTES
+            || reader.pos + incl_len as usize > data.len()
+        {
             malformed_tail = true;
             break;
         }
@@ -410,7 +422,9 @@ fn well_known_name(proto: u8, src_port: u16, dst_port: u16) -> &'static str {
 }
 
 fn dissect_ipv4(payload: &[u8], parent_layers: &[Layer]) -> Dissected {
-    if payload.len() < 20 {
+    // An Ethernet/SLL ethertype is not proof that the IP header version matches.
+    // Do not interpret version-mismatched bytes as valid transport traffic.
+    if payload.len() < 20 || payload[0] >> 4 != 4 {
         return empty_frame();
     }
     let ihl = (payload[0] & 0x0f) as usize * 4;

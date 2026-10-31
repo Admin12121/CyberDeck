@@ -11,6 +11,9 @@ use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 use rustls::ServerConfig;
 use tokio_rustls::{TlsAcceptor, TlsConnector};
 
+#[path = "webframing.rs"]
+mod webframing;
+
 pub struct CaState {
     pub cert_pem: String,
     /// Rebuilt each session from the persisted key; leaves chain to the
@@ -154,59 +157,8 @@ pub fn tls_client() -> Result<TlsConnector, String> {
     Ok(TlsConnector::from(Arc::new(config)))
 }
 
-/// Never accept ambiguous request framing that an upstream HTTP parser could
-/// interpret differently. Unsupported transfer encodings fail closed.
-fn request_body_length(head: &str, max_body: usize) -> std::io::Result<usize> {
-    use std::io::{Error, ErrorKind};
-    let invalid = |s| Error::new(ErrorKind::InvalidData, s);
-    let mut length = None;
-    for line in head.split("\r\n").skip(1) {
-        if line.is_empty() {
-            break;
-        }
-        if line.starts_with(' ') || line.starts_with('\t') {
-            return Err(invalid("ambiguous transfer framing: folded header"));
-        }
-        let Some((name, value)) = line.split_once(':') else {
-            return Err(invalid("malformed HTTP header"));
-        };
-        if name.is_empty()
-            || !name
-                .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&b))
-        {
-            return Err(invalid("invalid HTTP header name"));
-        }
-        if name.eq_ignore_ascii_case("transfer-encoding") {
-            return Err(invalid(
-                "ambiguous transfer framing: transfer-encoding unsupported",
-            ));
-        }
-        if name.eq_ignore_ascii_case("content-length") {
-            if length.is_some() {
-                return Err(invalid(
-                    "ambiguous transfer framing: repeated content-length",
-                ));
-            }
-            let v = value.trim();
-            if v.is_empty() || !v.bytes().all(|b| b.is_ascii_digit()) {
-                return Err(invalid("invalid content-length"));
-            }
-            length = Some(
-                v.parse::<usize>()
-                    .map_err(|_| invalid("invalid content-length"))?,
-            );
-        }
-    }
-    let n = length.unwrap_or(0);
-    if n > max_body {
-        return Err(invalid("HTTP body limit exceeded"));
-    }
-    Ok(n)
-}
-
-/// Read a bounded HTTP/1.1 message. Unsupported request transfer encodings
-/// fail closed rather than forwarding a truncated or incorrectly framed body.
+/// Read a bounded HTTP/1.1 request and decode chunked bodies before forwarding.
+/// The upstream executor strips Transfer-Encoding and emits new framing.
 pub async fn read_http_message<R>(reader: &mut R) -> std::io::Result<(String, Vec<u8>)>
 where
     R: tokio::io::AsyncRead + Unpin,
@@ -238,9 +190,14 @@ where
     }
     let head_text = String::from_utf8(head)
         .map_err(|_| Error::new(ErrorKind::InvalidData, "non-UTF8 HTTP headers"))?;
-    let content_length = request_body_length(&head_text, MAX_BODY)?;
-    let mut body = vec![0u8; content_length];
-    reader.read_exact(&mut body).await?;
+    let body = match webframing::parse_framing(&head_text, MAX_BODY)? {
+        webframing::BodyFraming::Fixed(content_length) => {
+            let mut body = vec![0u8; content_length];
+            reader.read_exact(&mut body).await?;
+            body
+        }
+        webframing::BodyFraming::Chunked => webframing::read_chunked(reader, MAX_BODY).await?,
+    };
     Ok((head_text, body))
 }
 
@@ -262,7 +219,7 @@ mod framing_tests {
 
     #[test]
     fn rejects_ambiguous_framing() {
-        use super::request_body_length;
+        use super::webframing::{parse_framing, BodyFraming};
         for header in [
             "Content-Length: 4\r\nContent-Length: 4",
             "Transfer-Encoding: identity",
@@ -273,23 +230,34 @@ mod framing_tests {
             "BrokenHeader",
         ] {
             let head = format!("POST / HTTP/1.1\r\nHost: local\r\n{header}\r\n\r\n");
-            assert!(request_body_length(&head, 1024).is_err(), "{header}");
+            assert!(parse_framing(&head, 1024).is_err(), "{header}");
         }
         assert_eq!(
-            request_body_length(
+            parse_framing(
                 "POST / HTTP/1.1\r\nHost: local\r\nContent-Length: 4\r\n\r\n",
                 1024
             )
             .unwrap(),
-            4
+            BodyFraming::Fixed(4)
         );
     }
 
     #[tokio::test]
-    async fn rejects_oversized_or_chunked_requests() {
+    async fn reads_chunked_binary_request() {
+        let (mut tx, mut rx) = duplex(256);
+        tx.write_all(b"POST /binary HTTP/1.1\r\nHost: local\r\nTransfer-Encoding: chunked\r\n\r\n3\r\n\xff\x00\x7f\r\n0\r\n\r\n")
+            .await
+            .unwrap();
+        let (head, body) = read_http_message(&mut rx).await.unwrap();
+        assert!(head.contains("Transfer-Encoding: chunked"));
+        assert_eq!(body, [0xff, 0x00, 0x7f]);
+    }
+
+    #[tokio::test]
+    async fn rejects_oversized_or_invalid_requests() {
         for header in [
             "Content-Length: 5000000",
-            "Transfer-Encoding: chunked",
+            "Transfer-Encoding: gzip",
             "Content-Length: nope",
         ] {
             let (mut tx, mut rx) = duplex(256);

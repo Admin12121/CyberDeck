@@ -13,6 +13,9 @@ use tauri::State;
 
 use crate::engines::which_exists;
 
+#[path = "webhistory.rs"]
+mod webhistory;
+
 const MAX_BODY_BYTES: usize = 512 * 1024;
 const MAX_CAPTURED_REQUESTS: usize = 10_000;
 const MAX_PENDING_REQUESTS: usize = 100;
@@ -32,6 +35,9 @@ pub struct PendingRequest {
     pub headers: Vec<(String, String)>,
     pub body: Vec<u8>,
     pub info: CapturedRequest,
+    /// Original HTTP request header (before user match/replace rules).
+    pub original_head: String,
+    pub history_stamp: Option<u64>,
 }
 
 /// A waiting browser connection may be plaintext HTTP or an intercepted TLS
@@ -872,6 +878,8 @@ pub async fn proxy_start(
     if ctx.shared.running.load(Ordering::Relaxed) {
         return Err("proxy already running; stop it first".to_string());
     }
+    // Starting a new proxy session cannot inherit sensitive captures/consent.
+    webhistory::clear_session();
     // CA is initialized with the proxy so HTTPS interception is ready at once.
     let ca_dir = crate::storage_paths::data_dir(&app)?;
     let ca = crate::webtls::init_ca(&ca_dir)?;
@@ -930,6 +938,9 @@ pub async fn proxy_start(
 
 async fn handle_conn(mut stream: TcpStream, shared: Arc<ProxyShared>) -> std::io::Result<()> {
     use tokio::io::AsyncWriteExt;
+    // Stamp before reading bytes: a case switch during a slow request body
+    // must never attribute this connection to the newly selected case.
+    let history_stamp = webhistory::capture_generation();
     let (head, body_bytes) = tokio::time::timeout(
         Duration::from_secs(15),
         crate::webtls::read_http_message(&mut stream),
@@ -937,7 +948,7 @@ async fn handle_conn(mut stream: TcpStream, shared: Arc<ProxyShared>) -> std::io
     .await
     .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "HTTP request timed out"))??;
     if head.starts_with("CONNECT ") {
-        return connect_tunnel(stream, shared, &head).await;
+        return connect_tunnel(stream, shared, &head, history_stamp).await;
     }
     // Headers are textual; bodies are arbitrary bytes and must never undergo
     // lossy UTF-8 decoding when forwarded or intercepted.
@@ -972,6 +983,8 @@ async fn handle_conn(mut stream: TcpStream, shared: Arc<ProxyShared>) -> std::io
         };
         let request = PendingRequest {
             stream: ProxyStream::Plain(stream),
+            original_head: head.clone(),
+            history_stamp,
             method,
             url,
             headers,
@@ -997,6 +1010,7 @@ async fn handle_conn(mut stream: TcpStream, shared: Arc<ProxyShared>) -> std::io
     let (method, url, headers, body) = apply_rules(method, url, headers, body, &rules);
     let (status, resp_headers, resp_body) = execute_request(&method, &url, &headers, &body).await;
     let id = shared.next_id.fetch_add(1, Ordering::Relaxed);
+    webhistory::capture(history_stamp, id, &url, &head, &body, status, &resp_headers, &resp_body);
     push_capture(
         &shared,
         CapturedRequest {
@@ -1034,9 +1048,23 @@ async fn handle_conn(mut stream: TcpStream, shared: Arc<ProxyShared>) -> std::io
 /// CONNECT tunnel: raw TCP passthrough when interception is off; full TLS
 /// MITM (per-host leaf certs, rules, history, WS relay) when on.
 async fn connect_tunnel(
+    stream: TcpStream,
+    shared: Arc<ProxyShared>,
+    head_text: &str,
+    history_stamp: Option<u64>,
+) -> std::io::Result<()> {
+    connect_tunnel_with_ws_connector(stream, shared, head_text, history_stamp, None).await
+}
+
+/// A test-injected connector permits deterministic, fully authenticated WSS
+/// localhost fixtures without replacing production root stores or bypassing
+/// upstream TLS certificate validation.
+async fn connect_tunnel_with_ws_connector(
     mut stream: TcpStream,
     shared: Arc<ProxyShared>,
     head_text: &str,
+    history_stamp: Option<u64>,
+    ws_connector: Option<tokio_rustls::TlsConnector>,
 ) -> std::io::Result<()> {
     use tokio::io::AsyncWriteExt;
     let target = head_text.split_whitespace().nth(1).unwrap_or_default();
@@ -1117,7 +1145,10 @@ async fn connect_tunnel(
             .await
             .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "ws upstream connect timed out"))?
             .map_err(|e| std::io::Error::other(format!("ws upstream connect failed: {e}")))?;
-        let connector = crate::webtls::tls_client().map_err(|e| std::io::Error::other(e))?;
+        let connector = match ws_connector {
+            Some(connector) => connector,
+            None => crate::webtls::tls_client().map_err(std::io::Error::other)?,
+        };
         let server_name = rustls::pki_types::ServerName::try_from(host.clone())
             .map_err(|e| std::io::Error::other(format!("bad sni: {e}")))?;
         let mut upstream = tokio::time::timeout(
@@ -1189,6 +1220,8 @@ async fn connect_tunnel(
         };
         let request = PendingRequest {
             stream: ProxyStream::Tls(tls_stream),
+            original_head: head_text.clone(),
+            history_stamp,
             method,
             url,
             headers,
@@ -1217,6 +1250,7 @@ async fn connect_tunnel(
     let (status, resp_headers, resp_body) =
         execute_request(&r_method, &r_url, &r_headers, &r_body).await;
     let id = shared.next_id.fetch_add(1, Ordering::Relaxed);
+    webhistory::capture(history_stamp, id, &r_url, &head_text, &r_body, status, &resp_headers, &resp_body);
     push_capture(
         &shared,
         CapturedRequest {
@@ -1423,7 +1457,12 @@ fn replace_bytes_limited(source: Vec<u8>, find: &[u8], replace: &[u8]) -> Vec<u8
     output
 }
 
-fn push_capture(shared: &ProxyShared, request: CapturedRequest) {
+fn push_capture(shared: &ProxyShared, mut request: CapturedRequest) {
+    // Summary history is visible without revealing full capture data.
+    // A query string may contain passwords, API keys or access tokens.
+    if let Some((path, _)) = request.path.split_once('?') {
+        request.path = format!("{path}?[query withheld]");
+    }
     let mut captured = shared.captured.lock().expect("captured poisoned");
     if captured.len() >= MAX_CAPTURED_REQUESTS {
         let remove = captured.len() - MAX_CAPTURED_REQUESTS + 1;
@@ -1542,6 +1581,7 @@ async fn execute_request_with_client(
 
 #[tauri::command]
 pub async fn proxy_stop(ctx: State<'_, WebCtx>) -> Result<ProxyStatusWire, String> {
+    webhistory::clear_session();
     ctx.shared.running.store(false, Ordering::Relaxed);
     ctx.proxy_running.store(false, Ordering::Relaxed);
     let held = {
@@ -1575,6 +1615,37 @@ fn proxy_status_inner(ctx: &WebCtx) -> ProxyStatusWire {
 #[tauri::command]
 pub fn proxy_status(ctx: State<'_, WebCtx>) -> ProxyStatusWire {
     proxy_status_inner(&ctx)
+}
+
+/// Capture is disabled by default. The integration owner must verify
+/// the active case and collect consent before registering this IPC command.
+#[tauri::command]
+pub fn proxy_history_capture_configure(
+    case_id: Option<String>,
+    consent: bool,
+) -> Result<bool, String> {
+    if !consent {
+        webhistory::clear_session();
+        return Ok(false);
+    }
+    let case_id = case_id.as_deref().ok_or("selected case required for capture")?;
+    webhistory::configure_session(Some(case_id))?;
+    Ok(true)
+}
+
+/// Full headers and bodies require a separate reveal confirmation. Integration
+/// must verify active case selection before registering this IPC command.
+#[tauri::command]
+pub fn proxy_history_detail(
+    case_id: String,
+    id: u64,
+    reveal_sensitive: bool,
+    confirm_sensitive: bool,
+) -> Result<Option<webhistory::Detail>, String> {
+    if reveal_sensitive && !confirm_sensitive {
+        return Err("sensitive history reveal requires explicit confirmation".to_string());
+    }
+    Ok(webhistory::read_detail(&case_id, id, reveal_sensitive))
 }
 
 #[tauri::command]
@@ -1617,7 +1688,9 @@ pub fn proxy_pending(ctx: State<'_, WebCtx>) -> Vec<PendingWire> {
             url: p.url.clone(),
             host: p.info.host.clone(),
             path: p.info.path.clone(),
-            body_preview: String::from_utf8_lossy(&p.body[..p.body.len().min(200)]).into_owned(),
+            // POST/JSON/form bodies may contain credentials; never preview them
+            // without a separate explicit sensitive-data reveal action.
+            body_preview: format!("[request body withheld: {} bytes]", p.body.len()),
         })
         .collect()
 }
@@ -1643,8 +1716,10 @@ pub async fn proxy_forward(id: u64, ctx: State<'_, WebCtx>) -> Result<u16, Strin
         pending.body,
         &rules,
     );
+    let history_stamp = pending.history_stamp;
     let mut stream = pending.stream;
     let (status, resp_headers, resp_body) = execute_request(&method, &url, &headers, &body).await;
+    webhistory::capture(history_stamp, id, &url, &pending.original_head, &body, status, &resp_headers, &resp_body);
     let mut response = format!(
         "HTTP/1.1 {status} {reason}\r\n",
         reason = reason_phrase(status)
@@ -1916,6 +1991,42 @@ mod local_wire_tests {
             assert_eq!(body, vec![0xff, 0x00, 0x01]);
             server.await.unwrap();
         }).await.expect("verified upstream HTTPS request timed out");
+    }
+
+    #[tokio::test]
+    async fn chunked_binary_request_roundtrips_through_http_proxy() {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            let upstream_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let backend_port = upstream_listener.local_addr().unwrap().port();
+            let backend = tokio::spawn(async move {
+                let (mut server, _) = upstream_listener.accept().await.unwrap();
+                let (request_head, body) = crate::webtls::read_http_message(&mut server).await.unwrap();
+                assert!(request_head.starts_with("POST /binary HTTP/1.1"));
+                assert_eq!(body, [0xff, 0x00, 0x7f]);
+                server.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 3\r\nConnection: close\r\n\r\nACK").await.unwrap();
+            });
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let state = shared(false, None);
+            let worker_state = Arc::clone(&state);
+            let worker = tokio::spawn(async move {
+                let (client, _) = listener.accept().await.unwrap();
+                handle_conn(client, worker_state).await.unwrap();
+            });
+            let mut browser = TcpStream::connect(address).await.unwrap();
+            let head = format!(
+                "POST http://127.0.0.1:{backend_port}/binary HTTP/1.1\r\nHost: 127.0.0.1:{backend_port}\r\nTransfer-Encoding: chunked\r\n\r\n"
+            );
+            browser.write_all(head.as_bytes()).await.unwrap();
+            browser.write_all(b"3\r\n\xff\x00\x7f\r\n0\r\n\r\n").await.unwrap();
+            let mut response = Vec::new();
+            browser.read_to_end(&mut response).await.unwrap();
+            assert!(response.starts_with(b"HTTP/1.1 200"), "{response:?}");
+            assert!(response.ends_with(b"ACK"), "{response:?}");
+            worker.await.unwrap();
+            backend.await.unwrap();
+            assert_eq!(state.captured.lock().unwrap()[0].status, 200);
+        }).await.expect("chunked proxy fixture timed out");
     }
 
     #[tokio::test]

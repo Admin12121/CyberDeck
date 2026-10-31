@@ -7,6 +7,8 @@
 
 #[path = "binary.rs"]
 pub mod binary;
+#[path = "forensic_native.rs"]
+pub mod forensic_native;
 
 use serde::Serialize;
 

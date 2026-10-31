@@ -42,6 +42,7 @@ pub struct HexResponse {
     pub offset: i64,
     pub total_size: u64,
     pub complete: bool,
+    pub integrity_checked: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -378,23 +379,37 @@ fn list(ctx: &EvidenceCtx, case_id: &str) -> Result<Vec<ArtifactRecord>, String>
     store.list_artifacts(case_id)
 }
 
-fn load_record_bytes(
+/// Resolve case membership, validate the storage path and read a small window
+/// from the same file handle on which the complete SHA-256 is verified.
+/// Retains a bounded memory footprint even for large evidence objects.
+fn verified_record_window(
     ctx: &EvidenceCtx,
     case_id: &str,
     id: &str,
+    offset: u64,
+    len: usize,
+    max: usize,
 ) -> Result<(ArtifactRecord, Vec<u8>), String> {
     validate_case_id(case_id)?;
-    let record = {
-        let store = ctx.store.lock().expect("artifact store poisoned");
-        store
-            .get_artifact(id)?
-            .filter(|item| item.case_id == case_id)
-            .ok_or_else(|| "artifact not found in selected case".to_string())?
-    };
-    // stored_path originates from our own index, never from the frontend
-    let bytes = std::fs::read(&record.stored_path)
-        .map_err(|e| format!("cannot read stored evidence: {e}"))?;
-    Ok((record, bytes))
+    let record = ctx
+        .store
+        .lock()
+        .map_err(|_| "case store unavailable")?
+        .get_artifact(id)?
+        .filter(|item| item.case_id == case_id)
+        .ok_or("artifact not found in selected case")?;
+    cyberdeck_storage::verify_artifact_file(&record, &ctx.artifacts_dir)?;
+    let mut file = std::fs::File::open(&record.stored_path)
+        .map_err(|e| format!("cannot open case evidence: {e}"))?;
+    let data = cyberdeck_crypto::formats::forensic_native::verified_window(
+        &mut file,
+        record.size,
+        &record.sha256,
+        offset,
+        len,
+        max,
+    )?;
+    Ok((record, data))
 }
 
 /// Inspect one case artifact without executing it. Limited to 16 MiB; every
@@ -440,6 +455,7 @@ pub struct SignatureScanResponse {
     pub file_bytes: u64,
     pub truncated: bool,
     pub integrity_checked: bool,
+    pub hit_cap_reached: bool,
 }
 
 /// Offline binary format detection. No extraction or external executables.
@@ -459,40 +475,23 @@ fn signature_scan(
     id: &str,
 ) -> Result<SignatureScanResponse, String> {
     use cyberdeck_crypto::formats::{scan_signatures, MAX_SIGNATURE_SCAN_BYTES};
-    use std::io::Read;
-    validate_case_id(case_id)?;
-    let record = ctx
-        .store
-        .lock()
-        .map_err(|_| "case store unavailable")?
-        .get_artifact(id)?
-        .filter(|item| item.case_id == case_id)
-        .ok_or_else(|| "artifact does not belong to the selected case".to_string())?;
-    let source = std::fs::File::open(&record.stored_path)
-        .map_err(|e| format!("cannot open stored evidence: {e}"))?;
-    let file_bytes = source.metadata().map_err(|e| e.to_string())?.len();
-    if file_bytes != record.size {
-        return Err(
-            "evidence integrity failure: stored file size differs from its indexed size".into(),
-        );
-    }
-    let mut bytes = Vec::with_capacity((file_bytes as usize).min(MAX_SIGNATURE_SCAN_BYTES));
-    source
-        .take(MAX_SIGNATURE_SCAN_BYTES as u64)
-        .read_to_end(&mut bytes)
-        .map_err(|e| format!("cannot scan evidence: {e}"))?;
-    let integrity_checked = file_bytes <= MAX_SIGNATURE_SCAN_BYTES as u64;
-    if integrity_checked && digest_of("sha256", &bytes)? != record.sha256 {
-        return Err(
-            "evidence integrity failure: stored SHA256 differs from its indexed hash".into(),
-        );
-    }
+    let (record, bytes) = verified_record_window(
+        ctx,
+        case_id,
+        id,
+        0,
+        MAX_SIGNATURE_SCAN_BYTES,
+        MAX_SIGNATURE_SCAN_BYTES,
+    )?;
+    let hits = scan_signatures(&bytes, 256);
+    let hit_cap_reached = hits.len() == 256;
     Ok(SignatureScanResponse {
-        hits: scan_signatures(&bytes, 256),
+        hits,
         scanned_bytes: bytes.len(),
-        file_bytes,
-        truncated: !integrity_checked,
-        integrity_checked,
+        file_bytes: record.size,
+        truncated: record.size > bytes.len() as u64,
+        integrity_checked: true,
+        hit_cap_reached,
     })
 }
 
@@ -590,14 +589,20 @@ fn hex_view(
     offset: i64,
     len: i64,
 ) -> Result<HexResponse, String> {
-    let (_, bytes) = load_record_bytes(ctx, case_id, id)?;
-    let total = bytes.len() as i64;
-    let start = offset.clamp(0, total.max(0)) as usize;
     let wanted = len.clamp(1, MAX_HEX_REQUEST) as usize;
-    let end = (start + wanted).min(bytes.len());
-    let slice = &bytes[start..end];
-    let mut rows = Vec::with_capacity((slice.len() + 15) / 16);
-    for (i, chunk) in slice.chunks(16).enumerate() {
+    let requested_offset = offset.max(0) as u64;
+    let (record, bytes) = verified_record_window(
+        ctx,
+        case_id,
+        id,
+        requested_offset,
+        wanted,
+        MAX_HEX_REQUEST as usize,
+    )?;
+    let start = requested_offset.min(record.size) as usize;
+    let end = (start as u64) + bytes.len() as u64;
+    let mut rows = Vec::with_capacity(bytes.len().div_ceil(16));
+    for (i, chunk) in bytes.chunks(16).enumerate() {
         let hex_str: String = chunk.iter().map(|b| format!("{b:02x} ")).collect();
         let ascii: String = chunk
             .iter()
@@ -616,9 +621,10 @@ fn hex_view(
         });
     }
     Ok(HexResponse {
-        complete: end >= bytes.len(),
+        complete: end >= record.size,
+        integrity_checked: true,
         offset: start as i64,
-        total_size: total as u64,
+        total_size: record.size,
         rows,
     })
 }
@@ -685,8 +691,9 @@ fn strings(
     min_len: i32,
     max_hits: i32,
 ) -> Result<Vec<StringHit>, String> {
-    let (_, bytes) = load_record_bytes(ctx, case_id, id)?;
-    let scan = &bytes[..bytes.len().min(MAX_STRINGS_SCAN)];
+    let (_, bytes) =
+        verified_record_window(ctx, case_id, id, 0, MAX_STRINGS_SCAN, MAX_STRINGS_SCAN)?;
+    let scan = bytes.as_slice();
     let min_len = min_len.clamp(2, 128) as usize;
     let max_hits = max_hits.clamp(1, MAX_STRINGS_HITS as i32) as usize;
     let mut hits = Vec::new();
@@ -717,6 +724,145 @@ fn strings(
         }
     }
     Ok(hits)
+}
+
+/// An explicitly bounded forensic read. The entire selected evidence is SHA-256
+/// verified on the same handle first; coverage is distinct from integrity.
+#[derive(Debug, Serialize)]
+pub struct ForensicStringsResponse {
+    pub hits: Vec<cyberdeck_crypto::formats::forensic_native::StringMatch>,
+    pub analyzed_offset: u64,
+    pub analyzed_bytes: usize,
+    pub file_bytes: u64,
+    pub integrity_checked: bool,
+    pub coverage_truncated: bool,
+    pub hit_limit_reached: bool,
+}
+#[derive(Debug, Serialize)]
+pub struct ForensicEntropyResponse {
+    pub regions: Vec<cyberdeck_crypto::formats::forensic_native::EntropyRegion>,
+    pub analyzed_offset: u64,
+    pub analyzed_bytes: usize,
+    pub file_bytes: u64,
+    pub integrity_checked: bool,
+    pub coverage_truncated: bool,
+    pub block_size: usize,
+}
+#[derive(Debug, Serialize)]
+pub struct ForensicMetadataResponse {
+    pub report: cyberdeck_crypto::formats::forensic_native::MetadataReport,
+    pub analyzed_offset: u64,
+    pub analyzed_bytes: usize,
+    pub file_bytes: u64,
+    pub integrity_checked: bool,
+    pub coverage_truncated: bool,
+}
+#[tauri::command]
+pub fn file_strings_scan(
+    ctx: State<'_, EvidenceCtx>,
+    case_id: String,
+    id: String,
+    offset: u64,
+    len: usize,
+    min_len: i32,
+    max_hits: i32,
+) -> Result<ForensicStringsResponse, String> {
+    strings_scan(&ctx, &case_id, &id, offset, len, min_len, max_hits)
+}
+fn strings_scan(
+    ctx: &EvidenceCtx,
+    case_id: &str,
+    id: &str,
+    offset: u64,
+    len: usize,
+    min_len: i32,
+    max_hits: i32,
+) -> Result<ForensicStringsResponse, String> {
+    use cyberdeck_crypto::formats::forensic_native::{strings, MAX_STRING_HITS, MAX_WINDOW};
+    if len == 0 || len > MAX_WINDOW {
+        return Err("forensic strings window must be 1..8MiB".into());
+    }
+    let min_len = min_len.clamp(2, 128) as usize;
+    let max_hits = max_hits.clamp(1, MAX_STRING_HITS as i32) as usize;
+    let (record, bytes) = verified_record_window(ctx, case_id, id, offset, len, MAX_WINDOW)?;
+    let (hits, hit_limit_reached) = strings(&bytes, offset.min(record.size), min_len, max_hits)?;
+    let analyzed_offset = offset.min(record.size);
+    let coverage_truncated =
+        analyzed_offset != 0 || analyzed_offset + (bytes.len() as u64) < record.size;
+    Ok(ForensicStringsResponse {
+        hits,
+        analyzed_offset,
+        analyzed_bytes: bytes.len(),
+        file_bytes: record.size,
+        integrity_checked: true,
+        coverage_truncated,
+        hit_limit_reached,
+    })
+}
+#[tauri::command]
+pub fn file_entropy_regions(
+    ctx: State<'_, EvidenceCtx>,
+    case_id: String,
+    id: String,
+    offset: u64,
+    len: usize,
+    block_size: usize,
+) -> Result<ForensicEntropyResponse, String> {
+    entropy_scan(&ctx, &case_id, &id, offset, len, block_size)
+}
+fn entropy_scan(
+    ctx: &EvidenceCtx,
+    case_id: &str,
+    id: &str,
+    offset: u64,
+    len: usize,
+    block_size: usize,
+) -> Result<ForensicEntropyResponse, String> {
+    use cyberdeck_crypto::formats::forensic_native::{entropy_regions, MAX_WINDOW};
+    if len == 0 || len > MAX_WINDOW {
+        return Err("entropy window must be 1..8MiB".into());
+    }
+    let (record, bytes) = verified_record_window(ctx, case_id, id, offset, len, MAX_WINDOW)?;
+    let analyzed_offset = offset.min(record.size);
+    let regions = entropy_regions(&bytes, analyzed_offset, block_size)?;
+    let coverage_truncated =
+        analyzed_offset != 0 || analyzed_offset + (bytes.len() as u64) < record.size;
+    Ok(ForensicEntropyResponse {
+        regions,
+        analyzed_offset,
+        analyzed_bytes: bytes.len(),
+        file_bytes: record.size,
+        integrity_checked: true,
+        coverage_truncated,
+        block_size,
+    })
+}
+#[tauri::command]
+pub fn file_metadata_scan(
+    ctx: State<'_, EvidenceCtx>,
+    case_id: String,
+    id: String,
+) -> Result<ForensicMetadataResponse, String> {
+    metadata_scan(&ctx, &case_id, &id)
+}
+fn metadata_scan(
+    ctx: &EvidenceCtx,
+    case_id: &str,
+    id: &str,
+) -> Result<ForensicMetadataResponse, String> {
+    use cyberdeck_crypto::formats::forensic_native::{metadata, MAX_METADATA_INPUT};
+    let (record, bytes) =
+        verified_record_window(ctx, case_id, id, 0, MAX_METADATA_INPUT, MAX_METADATA_INPUT)?;
+    let report = metadata(&bytes, 0)?;
+    let coverage_truncated = bytes.len() as u64 != record.size;
+    Ok(ForensicMetadataResponse {
+        report,
+        analyzed_offset: 0,
+        analyzed_bytes: bytes.len(),
+        file_bytes: record.size,
+        integrity_checked: true,
+        coverage_truncated,
+    })
 }
 
 /// Extract regular files from a validated ZIP or ustar TAR into this case.
@@ -1003,6 +1149,55 @@ mod tests {
             store: Mutex::new(ArtifactStore::open(&dir.join("index.db")).unwrap()),
             artifacts_dir: dir.to_path_buf(),
         }
+    }
+
+    #[test]
+    fn verified_paged_hex_and_utf16_offsets_preserve_case_scope() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = test_ctx(dir.path());
+        let mut bytes = vec![0u8; 4096];
+        let utf16 = "Forensic 世界"
+            .encode_utf16()
+            .flat_map(|v| v.to_le_bytes())
+            .collect::<Vec<_>>();
+        bytes[101..101 + utf16.len()].copy_from_slice(&utf16);
+        let artifact =
+            import_bytes(&ctx, Path::new("sample.bin"), &bytes, DEFAULT_CASE, true).unwrap();
+        let response = hex_view(&ctx, DEFAULT_CASE, &artifact.id, 96, 32).unwrap();
+        assert_eq!(response.offset, 96);
+        assert_eq!(response.total_size, 4096);
+        assert_eq!(response.rows[0].offset, 96);
+        assert!(!response.complete);
+        let scanned = strings_scan(&ctx, DEFAULT_CASE, &artifact.id, 96, 512, 4, 100).unwrap();
+        assert!(scanned.integrity_checked);
+        assert!(scanned.coverage_truncated);
+        assert_eq!(scanned.analyzed_offset, 96);
+        assert!(scanned.hits.iter().any(|h| h.encoding == "utf16le"
+            && h.text.contains("Forensic 世界")
+            && h.offset <= 101));
+        let regions = entropy_scan(&ctx, DEFAULT_CASE, &artifact.id, 0, 1024, 256).unwrap();
+        assert_eq!(regions.regions.len(), 4);
+        assert_eq!(regions.regions[0].offset, 0);
+        assert!(hex_view(&ctx, "other-case", &artifact.id, 0, 16).is_err());
+        assert!(strings_scan(&ctx, "other-case", &artifact.id, 0, 512, 4, 10).is_err());
+    }
+
+    #[test]
+    fn large_signature_scan_verifies_full_sha256_not_only_prefix() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = test_ctx(dir.path());
+        let mut bytes = vec![0u8; 16 * 1024 * 1024 + 17];
+        bytes[..8].copy_from_slice(b"%PDF-1.7");
+        let artifact =
+            import_bytes(&ctx, Path::new("large.bin"), &bytes, DEFAULT_CASE, true).unwrap();
+        let result = signature_scan(&ctx, DEFAULT_CASE, &artifact.id).unwrap();
+        assert!(result.truncated);
+        assert!(result.integrity_checked);
+        assert!(result.hits.iter().any(|h| h.format == "pdf"));
+        bytes[16 * 1024 * 1024 + 16] = 5;
+        std::fs::write(&artifact.stored_path, &bytes).unwrap();
+        assert!(signature_scan(&ctx, DEFAULT_CASE, &artifact.id).is_err());
+        assert!(hex_view(&ctx, DEFAULT_CASE, &artifact.id, 0, 16).is_err());
     }
 
     #[test]
