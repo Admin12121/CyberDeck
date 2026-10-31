@@ -1,11 +1,14 @@
 //! Evidence import and inspection (§5.6). Files enter only via these commands;
 //! originals are copied immutably and indexed with full digests.
 
+use base64::Engine as _;
 use std::path::Path;
 use std::sync::Mutex;
 
 use cyberdeck_crypto::{apply_op, detect_signature, entropy};
-use cyberdeck_storage::{ArtifactRecord, ArtifactStore, DEFAULT_CASE};
+use cyberdeck_storage::{
+    validate_case_id, ArtifactRecord, ArtifactStore, NewFinding, DEFAULT_CASE,
+};
 use serde::Serialize;
 use tauri::{AppHandle, State};
 use tauri_plugin_dialog::DialogExt;
@@ -16,6 +19,7 @@ pub(crate) const MAX_IMPORT_BYTES: u64 = 256 * 1024 * 1024;
 const MAX_HEX_REQUEST: i64 = 4096;
 const MAX_STRINGS_SCAN: usize = 8 * 1024 * 1024;
 const MAX_STRINGS_HITS: usize = 2000;
+const MAX_DERIVED_BYTES: usize = 8 * 1024 * 1024;
 
 pub struct EvidenceCtx {
     pub store: Mutex<ArtifactStore>,
@@ -50,25 +54,44 @@ fn digest_of(op: &str, bytes: &[u8]) -> Result<String, String> {
 
 fn sanitize_file_name(name: &str) -> String {
     name.chars()
-        .map(|c| if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') { c } else { '_' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect()
 }
 
-fn import_bytes(ctx: &EvidenceCtx, source: &Path, bytes: &[u8]) -> Result<ArtifactRecord, String> {
+fn import_bytes(
+    ctx: &EvidenceCtx,
+    source: &Path,
+    bytes: &[u8],
+    case_id: &str,
+    disk_source: bool,
+) -> Result<ArtifactRecord, String> {
+    validate_case_id(case_id)?;
+    if !ctx
+        .store
+        .lock()
+        .map_err(|_| "case store unavailable")?
+        .case_exists(case_id)?
+    {
+        return Err("selected case does not exist".into());
+    }
     let sha256 = digest_of("sha256", bytes)?;
     let md5 = digest_of("md5", bytes)?;
     let sha1 = digest_of("sha1", bytes)?;
     let crc32 = digest_of("crc32", bytes)?;
-    let signature = detect_signature(bytes)
-        .map(str::to_string)
-        .or_else(|| {
-            // printable-dominant content reads as text
-            let printable = bytes
-                .iter()
-                .filter(|&&b| b == b'\t' || b == b'\n' || b == b'\r' || (0x20..=0x7e).contains(&b))
-                .count();
-            (!bytes.is_empty() && printable * 100 / bytes.len() >= 95).then(|| "ASCII text".to_string())
-        });
+    let signature = detect_signature(bytes).map(str::to_string).or_else(|| {
+        // printable-dominant content reads as text
+        let printable = bytes
+            .iter()
+            .filter(|&&b| b == b'\t' || b == b'\n' || b == b'\r' || (0x20..=0x7e).contains(&b))
+            .count();
+        (!bytes.is_empty() && printable * 100 / bytes.len() >= 95).then(|| "ASCII text".to_string())
+    });
     let entropy_value = entropy(bytes);
     let imported_at = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -76,25 +99,35 @@ fn import_bytes(ctx: &EvidenceCtx, source: &Path, bytes: &[u8]) -> Result<Artifa
         .unwrap_or_else(|_| "0".to_string());
 
     // content-addressed identity: re-importing identical bytes replaces the record
-    let id = format!("sha256-{}", &sha256[..16]);
+    let kind = if disk_source {
+        "sha256"
+    } else {
+        "derived-sha256"
+    };
+    let id = if case_id == DEFAULT_CASE {
+        format!("{kind}-{}", &sha256[..16])
+    } else {
+        format!("{case_id}:{kind}-{}", &sha256[..16])
+    };
     let original_name = source
         .file_name()
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_else(|| "evidence.bin".to_string());
     let stored_name = format!("{sha256}_{}", sanitize_file_name(&original_name));
-    let case_dir = ctx.artifacts_dir.join(DEFAULT_CASE);
+    let case_dir = ctx.artifacts_dir.join(case_id);
     std::fs::create_dir_all(&case_dir).map_err(|e| format!("cannot create case directory: {e}"))?;
     let stored_path = case_dir.join(&stored_name);
     if !stored_path.exists() {
-        std::fs::write(&stored_path, bytes).map_err(|e| format!("cannot store evidence copy: {e}"))?;
+        std::fs::write(&stored_path, bytes)
+            .map_err(|e| format!("cannot store evidence copy: {e}"))?;
     }
 
     let record = ArtifactRecord {
         id: id.clone(),
-        case_id: DEFAULT_CASE.to_string(),
+        case_id: case_id.to_string(),
         name: original_name,
         stored_path: stored_path.to_string_lossy().to_string(),
-        original_path: Some(source.to_string_lossy().to_string()),
+        original_path: disk_source.then(|| source.to_string_lossy().to_string()),
         size: bytes.len() as u64,
         sha256,
         md5,
@@ -110,9 +143,20 @@ fn import_bytes(ctx: &EvidenceCtx, source: &Path, bytes: &[u8]) -> Result<Artifa
 }
 
 #[tauri::command]
-pub fn file_import_dialog(app: AppHandle, ctx: State<'_, EvidenceCtx>) -> Result<ArtifactRecord, String> {
-    let picked = app.dialog().file().blocking_pick_file().ok_or("cancelled")?;
-    let path = picked.as_path().ok_or("unsupported file location")?.to_path_buf();
+pub fn file_import_dialog(
+    app: AppHandle,
+    ctx: State<'_, EvidenceCtx>,
+    case_id: Option<String>,
+) -> Result<ArtifactRecord, String> {
+    let picked = app
+        .dialog()
+        .file()
+        .blocking_pick_file()
+        .ok_or("cancelled")?;
+    let path = picked
+        .as_path()
+        .ok_or("unsupported file location")?
+        .to_path_buf();
     let meta = std::fs::metadata(&path).map_err(|e| format!("cannot read file metadata: {e}"))?;
     if meta.len() > MAX_IMPORT_BYTES {
         return Err(format!(
@@ -122,11 +166,63 @@ pub fn file_import_dialog(app: AppHandle, ctx: State<'_, EvidenceCtx>) -> Result
         ));
     }
     let bytes = std::fs::read(&path).map_err(|e| format!("cannot read file: {e}"))?;
-    import_bytes(&ctx, &path, &bytes)
+    import_bytes(
+        &ctx,
+        &path,
+        &bytes,
+        case_id.as_deref().unwrap_or(DEFAULT_CASE),
+        true,
+    )
+}
+
+/// Promote an explicitly selected recipe output into immutable case evidence.
+/// The untrusted IPC payload has a strict decoded-byte limit and cannot choose
+/// a filesystem path. A corresponding finding links the generated artifact.
+#[tauri::command]
+pub fn file_import_derived(
+    ctx: State<'_, EvidenceCtx>,
+    case_id: String,
+    name: String,
+    data_b64: String,
+) -> Result<ArtifactRecord, String> {
+    validate_case_id(&case_id)?;
+    if name.trim().is_empty()
+        || name.len() > 100
+        || data_b64.len() > (MAX_DERIVED_BYTES + 2) / 3 * 4 + 8
+    {
+        return Err("invalid derived artifact name or payload size".into());
+    }
+    let safe_name = sanitize_file_name(name.trim());
+    if safe_name.is_empty() || safe_name == "." || safe_name == ".." {
+        return Err("invalid derived artifact name".into());
+    }
+    let data = base64::engine::general_purpose::STANDARD
+        .decode(&data_b64)
+        .map_err(|e| format!("invalid derived artifact encoding: {e}"))?;
+    if data.len() > MAX_DERIVED_BYTES {
+        return Err("derived artifact exceeds 8 MiB limit".into());
+    }
+    let record = import_bytes(&ctx, Path::new(&safe_name), &data, &case_id, false)?;
+    let note = NewFinding {
+        title: format!("Derived file: {}", record.name),
+        severity: "info".to_string(),
+        details: format!(
+            "Saved from CyberDeck Recipes into case {}\nSHA256: {}\nSize: {} bytes",
+            case_id, record.sha256, record.size
+        ),
+    };
+    ctx.store
+        .lock()
+        .map_err(|_| "case store unavailable")?
+        .add_findings(&case_id, "crypto.recipes", Some(&record.id), &[note])?;
+    Ok(record)
 }
 
 #[tauri::command]
-pub fn file_list(ctx: State<'_, EvidenceCtx>, case: Option<String>) -> Result<Vec<ArtifactRecord>, String> {
+pub fn file_list(
+    ctx: State<'_, EvidenceCtx>,
+    case: Option<String>,
+) -> Result<Vec<ArtifactRecord>, String> {
     list(&ctx, case.as_deref().unwrap_or(DEFAULT_CASE))
 }
 
@@ -143,12 +239,18 @@ fn load_record_bytes(ctx: &EvidenceCtx, id: &str) -> Result<(ArtifactRecord, Vec
             .ok_or_else(|| format!("unknown artifact id: {id}"))?
     };
     // stored_path originates from our own index, never from the frontend
-    let bytes = std::fs::read(&record.stored_path).map_err(|e| format!("cannot read stored evidence: {e}"))?;
+    let bytes = std::fs::read(&record.stored_path)
+        .map_err(|e| format!("cannot read stored evidence: {e}"))?;
     Ok((record, bytes))
 }
 
 #[tauri::command]
-pub fn file_hex(ctx: State<'_, EvidenceCtx>, id: String, offset: i64, len: i64) -> Result<HexResponse, String> {
+pub fn file_hex(
+    ctx: State<'_, EvidenceCtx>,
+    id: String,
+    offset: i64,
+    len: i64,
+) -> Result<HexResponse, String> {
     hex_view(&ctx, &id, offset, len)
 }
 
@@ -164,7 +266,13 @@ fn hex_view(ctx: &EvidenceCtx, id: &str, offset: i64, len: i64) -> Result<HexRes
         let hex_str: String = chunk.iter().map(|b| format!("{b:02x} ")).collect();
         let ascii: String = chunk
             .iter()
-            .map(|&b| if (0x20..=0x7e).contains(&b) { b as char } else { '.' })
+            .map(|&b| {
+                if (0x20..=0x7e).contains(&b) {
+                    b as char
+                } else {
+                    '.'
+                }
+            })
             .collect();
         rows.push(HexRow {
             offset: start + i * 16,
@@ -181,7 +289,12 @@ fn hex_view(ctx: &EvidenceCtx, id: &str, offset: i64, len: i64) -> Result<HexRes
 }
 
 #[tauri::command]
-pub fn file_strings(ctx: State<'_, EvidenceCtx>, id: String, min_len: i32, max_hits: i32) -> Result<Vec<StringHit>, String> {
+pub fn file_strings(
+    ctx: State<'_, EvidenceCtx>,
+    id: String,
+    min_len: i32,
+    max_hits: i32,
+) -> Result<Vec<StringHit>, String> {
     strings(&ctx, &id, min_len, max_hits)
 }
 
@@ -198,8 +311,15 @@ pub struct FileDigestsWire {
 /// Digest a picked file without importing it into the case store.
 #[tauri::command]
 pub fn digest_file_dialog(app: AppHandle) -> Result<FileDigestsWire, String> {
-    let picked = app.dialog().file().blocking_pick_file().ok_or("cancelled")?;
-    let path = picked.as_path().ok_or("unsupported file location")?.to_path_buf();
+    let picked = app
+        .dialog()
+        .file()
+        .blocking_pick_file()
+        .ok_or("cancelled")?;
+    let path = picked
+        .as_path()
+        .ok_or("unsupported file location")?
+        .to_path_buf();
     let meta = std::fs::metadata(&path).map_err(|e| format!("cannot read file metadata: {e}"))?;
     if meta.len() > MAX_IMPORT_BYTES {
         return Err(format!(
@@ -222,14 +342,23 @@ pub fn digest_file_dialog(app: AppHandle) -> Result<FileDigestsWire, String> {
     })
 }
 
-fn strings(ctx: &EvidenceCtx, id: &str, min_len: i32, max_hits: i32) -> Result<Vec<StringHit>, String> {
+fn strings(
+    ctx: &EvidenceCtx,
+    id: &str,
+    min_len: i32,
+    max_hits: i32,
+) -> Result<Vec<StringHit>, String> {
     let (_, bytes) = load_record_bytes(ctx, id)?;
     let scan = &bytes[..bytes.len().min(MAX_STRINGS_SCAN)];
     let min_len = min_len.clamp(2, 128) as usize;
     let max_hits = max_hits.clamp(1, MAX_STRINGS_HITS as i32) as usize;
     let mut hits = Vec::new();
     let mut start: Option<usize> = None;
-    let indexed = scan.iter().copied().enumerate().chain(std::iter::once((scan.len(), 0u8)));
+    let indexed = scan
+        .iter()
+        .copied()
+        .enumerate()
+        .chain(std::iter::once((scan.len(), 0u8)));
     for (i, b) in indexed {
         let printable = i < scan.len() && (0x20..=0x7e).contains(&b);
         if printable && start.is_none() {
@@ -265,22 +394,72 @@ mod tests {
     }
 
     #[test]
+    fn derived_artifact_is_isolated_to_selected_case() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = test_ctx(dir.path());
+        let new_case = ctx
+            .store
+            .lock()
+            .unwrap()
+            .create_case("Analysis Lab", "")
+            .unwrap();
+        let source = Path::new("recipe-output.bin");
+        let derived = import_bytes(&ctx, source, b"hello", &new_case.id, false).unwrap();
+        assert_eq!(derived.case_id, new_case.id);
+        assert!(derived.original_path.is_none());
+        assert!(derived.stored_path.contains(&new_case.id));
+        let scratch = import_bytes(&ctx, source, b"hello", DEFAULT_CASE, true).unwrap();
+        let generated_in_scratch =
+            import_bytes(&ctx, source, b"hello", DEFAULT_CASE, false).unwrap();
+        assert_ne!(scratch.id, generated_in_scratch.id);
+        assert_eq!(scratch.original_path.as_deref(), Some("recipe-output.bin"));
+        assert!(generated_in_scratch.original_path.is_none());
+        assert_ne!(derived.id, scratch.id);
+        assert_eq!(
+            ctx.store
+                .lock()
+                .unwrap()
+                .list_artifacts(&new_case.id)
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            ctx.store
+                .lock()
+                .unwrap()
+                .list_artifacts(DEFAULT_CASE)
+                .unwrap()
+                .len(),
+            2
+        );
+    }
+
+    #[test]
     fn import_computes_digests_and_signature() {
         let dir = tempfile::tempdir().unwrap();
         let ctx = test_ctx(dir.path());
         let src = dir.path().join("sample.zip");
         std::fs::write(&src, b"PK\x03\x04 fake zip body").unwrap();
         let bytes = std::fs::read(&src).unwrap();
-        let record = import_bytes(&ctx, &src, &bytes).unwrap();
+        let record = import_bytes(&ctx, &src, &bytes, DEFAULT_CASE, true).unwrap();
         assert_eq!(record.signature.as_deref(), Some("ZIP archive"));
         assert_eq!(record.sha256.len(), 64);
         assert_eq!(record.md5.len(), 32);
         assert!(record.entropy > 0.0);
         assert!(record.stored_path.contains(&record.sha256));
         // content-addressed: re-import replaces, not duplicates
-        let again = import_bytes(&ctx, &src, &bytes).unwrap();
+        let again = import_bytes(&ctx, &src, &bytes, DEFAULT_CASE, true).unwrap();
         assert_eq!(again.id, record.id);
-        assert_eq!(ctx.store.lock().unwrap().list_artifacts(DEFAULT_CASE).unwrap().len(), 1);
+        assert_eq!(
+            ctx.store
+                .lock()
+                .unwrap()
+                .list_artifacts(DEFAULT_CASE)
+                .unwrap()
+                .len(),
+            1
+        );
     }
 
     #[test]
@@ -290,7 +469,7 @@ mod tests {
         let src = dir.path().join("abc.txt");
         std::fs::write(&src, b"abc").unwrap();
         let bytes = std::fs::read(&src).unwrap();
-        let record = import_bytes(&ctx, &src, &bytes).unwrap();
+        let record = import_bytes(&ctx, &src, &bytes, DEFAULT_CASE, true).unwrap();
         let view = hex_view(&ctx, &record.id, 0, 16).unwrap();
         assert_eq!(view.rows[0].hex, "61 62 63");
         assert_eq!(view.rows[0].ascii, "abc");
@@ -304,7 +483,7 @@ mod tests {
         let src = dir.path().join("bin.dat");
         std::fs::write(&src, b"\x00\x01\x02user=admin\x03\x04path=/bin\x00").unwrap();
         let bytes = std::fs::read(&src).unwrap();
-        let record = import_bytes(&ctx, &src, &bytes).unwrap();
+        let record = import_bytes(&ctx, &src, &bytes, DEFAULT_CASE, true).unwrap();
         let hits = strings(&ctx, &record.id, 4, 100).unwrap();
         let texts: Vec<_> = hits.into_iter().map(|h| h.text).collect();
         assert!(texts.contains(&"user=admin".to_string()));

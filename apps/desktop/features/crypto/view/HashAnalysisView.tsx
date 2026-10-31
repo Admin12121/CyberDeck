@@ -581,16 +581,16 @@ export function HashAnalysisView() {
               </div>
               {devices?.gpu_devices.map((gpu) => (
                 <div key={gpu.name} className="border border-line bg-app px-2 py-1">
-                  <div className="text-fg">{gpu.name} <span className="text-ok">ready via hashcat</span></div>
+                  <div className="text-fg">{gpu.name} <span className="text-warn">native GPU engine pending</span></div>
                   <div className="text-fg-muted">driver {gpu.driver_version} · vram {gpu.memory_total} · compute cap {gpu.compute_cap}</div>
                   <div className="text-fg-muted">{gpu.backend}</div>
                 </div>
               ))}
-              {devices && devices.gpu_devices.length === 0 ? <div>gpu: no driver detected <span className="text-warn">activates when installed</span></div> : null}
+              {devices && devices.gpu_devices.length === 0 ? <div>gpu: not detected via NVIDIA tooling <span className="text-warn">native GPU engine pending</span></div> : null}
               {engines.map((engine) => (
                 <div key={engine.id}>
                   engine: {engine.label} {engine.version || "—"} · {engine.license} · {engine.available ? `available (${engine.source})` : "not detected"}{" "}
-                  {engine.available ? <span className="text-ok">ready</span> : <span className="text-warn">bundles with installer</span>}
+                  {engine.available ? <span className="text-warn">optional external adapter</span> : <span className="text-fg-muted">not installed</span>}
                 </div>
               ))}
               {devices ? <div className="text-fg-muted">{devices.planner_note}</div> : null}

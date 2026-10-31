@@ -9,7 +9,8 @@ fn select_data_dir(new_app_dir: &Path) -> PathBuf {
     let fresh = new_app_dir.join("cyberdeck");
     // Tauri keys app_data_dir by application identifier. For an upgraded app,
     // the previous identifier used the adjacent "dev.hacktool.workbench" path.
-    let legacy = new_app_dir.parent()
+    let legacy = new_app_dir
+        .parent()
         .unwrap_or(new_app_dir)
         .join("dev.hacktool.workbench")
         .join("hacktool");
@@ -40,6 +41,9 @@ mod tests {
         let fresh = tmp.path().join("dev.cyberdeck.workbench/cyberdeck");
         std::fs::create_dir_all(&fresh).unwrap();
         std::fs::write(fresh.join("cases.db"), b"new").unwrap();
-        assert_eq!(select_data_dir(&tmp.path().join("dev.cyberdeck.workbench")), fresh);
+        assert_eq!(
+            select_data_dir(&tmp.path().join("dev.cyberdeck.workbench")),
+            fresh
+        );
     }
 }

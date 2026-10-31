@@ -14,6 +14,7 @@ import {
   type ScanEntryWire,
   type ScanHistoryItemWire,
   type ScanProgressWire,
+  type NetscanStatusWire,
 } from "@lib/ipc";
 import { useWorkbench } from "@state/workbench";
 
@@ -33,7 +34,7 @@ export function ScanView() {
   const [progress, setProgress] = useState<ScanProgressWire | null>(null);
   const [results, setResults] = useState<ScanEntryWire[]>([]);
   const [error, setError] = useState<string | null>(null);
-  const [status, setStatus] = useState<{ running: boolean; results: number }>({ running: false, results: 0 });
+  const [status, setStatus] = useState<NetscanStatusWire>({ running: false, results: 0, saved_findings: 0, save_error: null });
   const [history, setHistory] = useState<ScanHistoryItemWire[]>([]);
 
   const poll = useCallback(() => {
@@ -54,7 +55,7 @@ export function ScanView() {
     setResults([]);
     setProgress({ tried: 0, total: 0, percent: 0 });
     try {
-      await netscanStart(target, ports, authorized, (p) => setProgress(p));
+      await netscanStart(target, ports, wb.caseId, authorized, (p) => setProgress(p));
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -196,8 +197,9 @@ export function ScanView() {
             our own code.
           </div>
           <div className="border-t border-line px-2 py-1.5 font-mono text-[10px] text-fg-muted">
-            status: {status.running ? "scan running" : "idle"} · {status.results} stored results
+            status: {status.running ? "scan running" : "idle"} · {status.results} stored results · {status.saved_findings} case findings
           </div>
+          {status.save_error ? <div className="border-t border-line p-2 text-xs text-err">Case save failed: {status.save_error}</div> : null}
           <div className="border-t border-line p-2">
             <ToolButton onClick={() => wb.runDemoJob()} title="Queue the shared pipeline demo job">Demo job</ToolButton>
           </div>

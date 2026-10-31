@@ -1,6 +1,6 @@
 "use client";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { ArrowDown, ArrowUp, Copy, FileDown, Play, Wand2, X } from "lucide-react";
+import { ArrowDown, ArrowUp, Copy, FileDown, Play, Save, Wand2, X } from "lucide-react";
 import { Chip, EmptyState, Pane, Resizer, Select, TextInput, ToolButton } from "@ds/panes";
 import {
   OPERATIONS,
@@ -24,7 +24,7 @@ import {
   setStepParam,
   toggleStep,
 } from "../controller";
-import { b64, isDesktop, recipeRun, type RecipeRunWire } from "@lib/ipc";
+import { b64, fileImportDerived, isDesktop, recipeRun, type RecipeRunWire } from "@lib/ipc";
 import { useWorkbench } from "@state/workbench";
 
 /** Recipes: four-column pipeline with drag-and-drop, params, image preview. */
@@ -61,6 +61,8 @@ function nativeUiResult(wire: RecipeRunWire): RecipeResult {
 
 export function RecipesView() {
   const wb = useWorkbench();
+  const [savingCase, setSavingCase] = useState(false);
+  const [caseSaveError, setCaseSaveError] = useState<string | null>(null);
   const [state, setState] = useState<RecipeState>(initialRecipeState);
   const [search, setSearch] = useState("");
   const [committed, setCommitted] = useState<RecipeResult | null>(null);
@@ -155,6 +157,21 @@ export function RecipesView() {
   const imageSrc = decodedImage
     ? `data:${decodedImage.mime};base64,${b64.encode(decodedImage.bytes)}`
     : null;
+  const saveToCase = async () => {
+    if (!result || result.error) return;
+    setSavingCase(true);
+    setCaseSaveError(null);
+    try {
+      const record = await fileImportDerived(wb.caseId, "recipe-output.bin", result.outputBytes);
+      wb.logConsole("saved derived evidence to case " + wb.caseId + ": " + record.sha256);
+      wb.selectTool("forensics.files");
+    } catch (error) {
+      setCaseSaveError(String(error));
+    } finally {
+      setSavingCase(false);
+    }
+  };
+
   const downloadOutput = () => {
     if (!result) return;
     const bytes = outMode === "image" && decodedImage ? decodedImage.bytes : result.outputBytes;
@@ -374,6 +391,10 @@ export function RecipesView() {
                   {mode}
                 </button>
               ))}
+              <ToolButton onClick={() => void saveToCase()} disabled={!isDesktop() || !result || !!result.error || savingCase}
+                title="Save derived bytes with provenance to the selected case">
+                <Save size={11} /> {savingCase ? "Saving" : "To Case"}
+              </ToolButton>
               <ToolButton onClick={downloadOutput} disabled={!result} title="Save output as file">
                 <FileDown size={11} />
               </ToolButton>
@@ -421,6 +442,7 @@ export function RecipesView() {
               <EmptyState title={state.autoBake && eligibleForNative ? "Processing in Rust…" : "No result yet"} detail={state.autoBake && eligibleForNative ? "Evaluating the recipe in the native engine." : "Enable auto-bake or press Bake to evaluate the recipe."} badge="recipes" />
             </div>
           )}
+          {caseSaveError ? <div className="border-t border-err/50 px-2 py-1 text-xs text-err">{caseSaveError}</div> : null}
           <div className="shrink-0 border-t border-line px-2 py-0.5 font-mono text-[10px] text-fg-muted">
             {result ? `${result.byteLength} bytes out${mounted ? ` · ${result.elapsedMs.toFixed(1)} ms` : ""} · ${nativeResult ? "Rust engine" : "TypeScript engine"}` : "n/a"}
           </div>

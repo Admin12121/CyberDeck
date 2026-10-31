@@ -17,6 +17,7 @@ export type ToolId =
   | "network.scan"
   | "web.studio"
   | "reverse.workbench"
+  | "forensics.findings"
   | "forensics.files"
   | "forensics.metadata"
   | "forensics.strings";
@@ -121,6 +122,7 @@ export const CATEGORIES: CategoryDescriptor[] = [
     label: "Forensics",
     icon: FileSearch,
     tools: [
+      { id: "forensics.findings", category: "forensics", label: "Case Findings", hint: "Persistent case-scoped security findings and provenance" },
       { id: "forensics.files", category: "forensics", label: "File Analysis", hint: "Evidence tree, hex, signatures, extraction with path safety" },
       { id: "forensics.metadata", category: "forensics", label: "Metadata", hint: "Exif-compatible metadata inspection" },
       { id: "forensics.strings", category: "forensics", label: "Strings & Entropy", hint: "String extraction and entropy profiling across evidence" },

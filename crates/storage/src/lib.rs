@@ -55,7 +55,12 @@ pub struct NewFinding {
 }
 
 pub fn validate_case_id(id: &str) -> Result<(), String> {
-    if id.is_empty() || id.len() > 100 || !id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_') {
+    if id.is_empty()
+        || id.len() > 100
+        || !id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+    {
         return Err("invalid case identifier".to_string());
     }
     Ok(())
@@ -76,9 +81,11 @@ impl ArtifactStore {
     /// Open (creating if needed) the index database at `path`.
     pub fn open(path: &std::path::Path) -> Result<Self, String> {
         if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| format!("cannot create store directory: {e}"))?;
+            std::fs::create_dir_all(parent)
+                .map_err(|e| format!("cannot create store directory: {e}"))?;
         }
-        let conn = Connection::open(path).map_err(|e| format!("cannot open artifact index: {e}"))?;
+        let conn =
+            Connection::open(path).map_err(|e| format!("cannot open artifact index: {e}"))?;
         conn.execute_batch(
             "PRAGMA journal_mode = WAL;
              CREATE TABLE IF NOT EXISTS artifacts (
@@ -132,20 +139,35 @@ impl ArtifactStore {
     }
 
     pub fn list_cases(&self) -> Result<Vec<CaseRecord>, String> {
-        let mut statement = self.conn
-            .prepare("SELECT id,title,description,created_ms FROM cases ORDER BY created_ms DESC,id")
+        let mut statement = self
+            .conn
+            .prepare(
+                "SELECT id,title,description,created_ms FROM cases ORDER BY created_ms DESC,id",
+            )
             .map_err(|e| e.to_string())?;
-        let rows = statement.query_map([], |row| Ok(CaseRecord {
-            id: row.get(0)?, title: row.get(1)?, description: row.get(2)?,
-            created_ms: row.get(3)?,
-        })).map_err(|e| e.to_string())?;
-        rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
+        let rows = statement
+            .query_map([], |row| {
+                Ok(CaseRecord {
+                    id: row.get(0)?,
+                    title: row.get(1)?,
+                    description: row.get(2)?,
+                    created_ms: row.get(3)?,
+                })
+            })
+            .map_err(|e| e.to_string())?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())
     }
 
     pub fn case_exists(&self, case_id: &str) -> Result<bool, String> {
         validate_case_id(case_id)?;
-        self.conn.query_row("SELECT EXISTS(SELECT 1 FROM cases WHERE id=?1)",
-            params![case_id], |r| r.get::<_, bool>(0)).map_err(|e| e.to_string())
+        self.conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM cases WHERE id=?1)",
+                params![case_id],
+                |r| r.get::<_, bool>(0),
+            )
+            .map_err(|e| e.to_string())
     }
 
     pub fn create_case(&self, title: &str, description: &str) -> Result<CaseRecord, String> {
@@ -155,36 +177,61 @@ impl ArtifactStore {
             return Err("case title (1-120 bytes) or description (0-2048 bytes) is invalid".into());
         }
         // SQLite rejects ID collisions, even if calls occur in the same nanosecond.
-        let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
-            .map_err(|e| e.to_string())?.as_nanos();
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|e| e.to_string())?
+            .as_nanos();
         let case = CaseRecord {
             id: format!("case-{nanos:x}-{:x}", std::process::id()),
-            title: title.to_string(), description: description.to_string(),
+            title: title.to_string(),
+            description: description.to_string(),
             created_ms: timestamp_ms(),
         };
-        self.conn.execute("INSERT INTO cases (id,title,description,created_ms) VALUES (?1,?2,?3,?4)",
-            params![case.id,case.title,case.description,case.created_ms])
+        self.conn
+            .execute(
+                "INSERT INTO cases (id,title,description,created_ms) VALUES (?1,?2,?3,?4)",
+                params![case.id, case.title, case.description, case.created_ms],
+            )
             .map_err(|e| format!("cannot create case: {e}"))?;
         Ok(case)
     }
 
-    pub fn add_findings(&self, case_id: &str, source: &str, artifact_id: Option<&str>,
-        findings: &[NewFinding]) -> Result<usize, String> {
-        if !self.case_exists(case_id)? { return Err("case not found".into()); }
+    pub fn add_findings(
+        &self,
+        case_id: &str,
+        source: &str,
+        artifact_id: Option<&str>,
+        findings: &[NewFinding],
+    ) -> Result<usize, String> {
+        if !self.case_exists(case_id)? {
+            return Err("case not found".into());
+        }
         if source.trim().is_empty() || source.len() > 80 || findings.len() > 128 {
             return Err("invalid source or too many findings".into());
         }
         if let Some(id) = artifact_id {
-            let existing_case: Option<String> = self.conn.query_row(
-                "SELECT case_id FROM artifacts WHERE id=?1",params![id],|r|r.get(0)
-            ).optional().map_err(|e|e.to_string())?;
+            let existing_case: Option<String> = self
+                .conn
+                .query_row(
+                    "SELECT case_id FROM artifacts WHERE id=?1",
+                    params![id],
+                    |r| r.get(0),
+                )
+                .optional()
+                .map_err(|e| e.to_string())?;
             if existing_case.as_deref() != Some(case_id) {
                 return Err("artifact does not belong to the selected case".into());
             }
         }
         for f in findings {
-            if f.title.is_empty() || f.title.len() > 200 || f.details.len() > 8192
-                || !matches!(f.severity.as_str(), "info"|"low"|"medium"|"high"|"critical") {
+            if f.title.is_empty()
+                || f.title.len() > 200
+                || f.details.len() > 8192
+                || !matches!(
+                    f.severity.as_str(),
+                    "info" | "low" | "medium" | "high" | "critical"
+                )
+            {
                 return Err("finding exceeds limits or has invalid severity".into());
             }
         }
@@ -200,21 +247,39 @@ impl ArtifactStore {
     }
 
     pub fn list_findings(&self, case_id: &str) -> Result<Vec<FindingRecord>, String> {
-        if !self.case_exists(case_id)? { return Err("case not found".into()); }
-        let mut stmt = self.conn.prepare(
-            "SELECT id,case_id,source,title,severity,details,artifact_id,created_ms
-             FROM findings WHERE case_id=?1 ORDER BY id DESC LIMIT 2000"
-        ).map_err(|e|e.to_string())?;
-        let rows = stmt.query_map(params![case_id], |r| Ok(FindingRecord {
-            id:r.get(0)?,case_id:r.get(1)?,source:r.get(2)?,title:r.get(3)?,
-            severity:r.get(4)?,details:r.get(5)?,artifact_id:r.get(6)?,created_ms:r.get(7)?,
-        })).map_err(|e|e.to_string())?;
-        rows.collect::<Result<Vec<_>,_>>().map_err(|e|e.to_string())
+        if !self.case_exists(case_id)? {
+            return Err("case not found".into());
+        }
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT id,case_id,source,title,severity,details,artifact_id,created_ms
+             FROM findings WHERE case_id=?1 ORDER BY id DESC LIMIT 2000",
+            )
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map(params![case_id], |r| {
+                Ok(FindingRecord {
+                    id: r.get(0)?,
+                    case_id: r.get(1)?,
+                    source: r.get(2)?,
+                    title: r.get(3)?,
+                    severity: r.get(4)?,
+                    details: r.get(5)?,
+                    artifact_id: r.get(6)?,
+                    created_ms: r.get(7)?,
+                })
+            })
+            .map_err(|e| e.to_string())?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())
     }
 
     /// Insert or replace by id (idempotent imports of identical content).
     pub fn upsert_artifact(&self, record: &ArtifactRecord) -> Result<(), String> {
-        if !self.case_exists(&record.case_id)? { return Err("case not found".into()); }
+        if !self.case_exists(&record.case_id)? {
+            return Err("case not found".into());
+        }
         self.conn
             .execute(
                 "INSERT INTO artifacts (id, case_id, name, stored_path, original_path, size,
@@ -246,7 +311,9 @@ impl ArtifactStore {
     }
 
     pub fn list_artifacts(&self, case_id: &str) -> Result<Vec<ArtifactRecord>, String> {
-        if !self.case_exists(case_id)? { return Err("case not found".into()); }
+        if !self.case_exists(case_id)? {
+            return Err("case not found".into());
+        }
         let mut stmt = self
             .conn
             .prepare(
@@ -274,14 +341,12 @@ impl ArtifactStore {
                 })
             })
             .map_err(|e| e.to_string())?;
-        rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())
     }
 
     pub fn get_artifact(&self, id: &str) -> Result<Option<ArtifactRecord>, String> {
-        Ok(self
-            .list_all()?
-            .into_iter()
-            .find(|record| record.id == id))
+        Ok(self.list_all()?.into_iter().find(|record| record.id == id))
     }
 
     fn list_all(&self) -> Result<Vec<ArtifactRecord>, String> {
@@ -312,7 +377,8 @@ impl ArtifactStore {
                 })
             })
             .map_err(|e| e.to_string())?;
-        rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())
     }
 
     // --- crack history: recovered pairs persist until the user deletes them ---
@@ -361,7 +427,8 @@ impl ArtifactStore {
                 })
             })
             .map_err(|e| e.to_string())?;
-        rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())
     }
 
     pub fn delete_crack_entry(&self, id: i64) -> Result<(), String> {
@@ -427,15 +494,38 @@ mod tests {
         store.upsert_artifact(&evidence).unwrap();
         assert_eq!(store.list_artifacts(&a.id).unwrap().len(), 1);
         assert!(store.list_artifacts(&b.id).unwrap().is_empty());
-        assert!(store.add_findings(&b.id, "scan", Some(&evidence.id),
-            &[NewFinding { title:"Example".into(), severity:"low".into(),details:"Test".into() }]).is_err());
-        assert_eq!(store.add_findings(&a.id, "scan", Some(&evidence.id),
-            &[NewFinding { title:"Example".into(), severity:"low".into(),details:"Test".into() }]).unwrap(),1);
-        assert_eq!(store.list_findings(&a.id).unwrap().len(),1);
+        assert!(store
+            .add_findings(
+                &b.id,
+                "scan",
+                Some(&evidence.id),
+                &[NewFinding {
+                    title: "Example".into(),
+                    severity: "low".into(),
+                    details: "Test".into()
+                }]
+            )
+            .is_err());
+        assert_eq!(
+            store
+                .add_findings(
+                    &a.id,
+                    "scan",
+                    Some(&evidence.id),
+                    &[NewFinding {
+                        title: "Example".into(),
+                        severity: "low".into(),
+                        details: "Test".into()
+                    }]
+                )
+                .unwrap(),
+            1
+        );
+        assert_eq!(store.list_findings(&a.id).unwrap().len(), 1);
         drop(store);
         let reopened = ArtifactStore::open(&db).unwrap();
-        assert_eq!(reopened.list_cases().unwrap().len(),3);
-        assert_eq!(reopened.list_findings(&a.id).unwrap().len(),1);
+        assert_eq!(reopened.list_cases().unwrap().len(), 3);
+        assert_eq!(reopened.list_findings(&a.id).unwrap().len(), 1);
         assert!(reopened.list_findings(&b.id).unwrap().is_empty());
     }
 
@@ -444,10 +534,19 @@ mod tests {
         assert!(validate_case_id("../escape").is_err());
         let dir = tempfile::tempdir().unwrap();
         let store = ArtifactStore::open(&dir.path().join("index.db")).unwrap();
-        assert!(store.create_case("   ","").is_err());
-        assert!(store.add_findings(DEFAULT_CASE,"web",None,&[NewFinding {
-            title:"Invalid".into(), severity:"unknown".into(),details:"ignored".into()
-        }]).is_err());
+        assert!(store.create_case("   ", "").is_err());
+        assert!(store
+            .add_findings(
+                DEFAULT_CASE,
+                "web",
+                None,
+                &[NewFinding {
+                    title: "Invalid".into(),
+                    severity: "unknown".into(),
+                    details: "ignored".into()
+                }]
+            )
+            .is_err());
     }
 
     #[test]
@@ -499,9 +598,15 @@ mod tests {
     fn crack_history_roundtrip_and_dedup() {
         let dir = tempfile::tempdir().unwrap();
         let store = ArtifactStore::open(&dir.path().join("index.db")).unwrap();
-        store.add_crack_entry("md5", "aaa", "hello", "native", Some("rockyou.txt")).unwrap();
-        store.add_crack_entry("md5", "aaa", "hello", "native", Some("rockyou.txt")).unwrap();
-        store.add_crack_entry("sha256", "bbb", "world", "hashcat", None).unwrap();
+        store
+            .add_crack_entry("md5", "aaa", "hello", "native", Some("rockyou.txt"))
+            .unwrap();
+        store
+            .add_crack_entry("md5", "aaa", "hello", "native", Some("rockyou.txt"))
+            .unwrap();
+        store
+            .add_crack_entry("sha256", "bbb", "world", "hashcat", None)
+            .unwrap();
         let list = store.list_crack_entries().unwrap();
         assert_eq!(list.len(), 2);
         assert_eq!(list[0].password, "world"); // newest first
@@ -512,8 +617,12 @@ mod tests {
     fn crack_history_delete_and_clear() {
         let dir = tempfile::tempdir().unwrap();
         let store = ArtifactStore::open(&dir.path().join("index.db")).unwrap();
-        store.add_crack_entry("md5", "a", "x", "native", None).unwrap();
-        store.add_crack_entry("md5", "b", "y", "native", None).unwrap();
+        store
+            .add_crack_entry("md5", "a", "x", "native", None)
+            .unwrap();
+        store
+            .add_crack_entry("md5", "b", "y", "native", None)
+            .unwrap();
         let id = store.list_crack_entries().unwrap()[0].id;
         store.delete_crack_entry(id).unwrap();
         assert_eq!(store.list_crack_entries().unwrap().len(), 1);

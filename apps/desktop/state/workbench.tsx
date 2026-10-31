@@ -25,6 +25,8 @@ export interface RecipeHandoff {
 }
 
 interface WorkbenchApi {
+  caseId: string;
+  setCaseId: (id: string) => void;
   recipeHandoff: RecipeHandoff | null;
   sendToRecipes: (input: string, source: string, steps?: RecipeStep[]) => void;
   consumeRecipeHandoff: () => void;
@@ -73,7 +75,7 @@ function loadPanelSizes(): PanelSizes {
   };
   if (typeof window === "undefined") return fallback;
   try {
-    const raw = window.localStorage.getItem(STORAGE_KEY);
+    const raw = window.localStorage.getItem(STORAGE_KEY) ?? window.localStorage.getItem("hacktool.panel-sizes");
     if (!raw) return fallback;
     const parsed = JSON.parse(raw) as Partial<PanelSizes>;
     return {
@@ -91,6 +93,7 @@ function firstToolOf(category: CategoryId): ToolId {
 }
 
 export function WorkbenchProvider({ children }: { children: React.ReactNode }) {
+  const [caseId, setCaseId] = useState("scratchpad");
   const [category, setCategory] = useState<CategoryId>("crypto");
   const [tool, setTool] = useState<ToolId>("crypto.recipes");
   const [jobs, setJobs] = useState<Record<number, JobView>>({});
@@ -112,10 +115,14 @@ export function WorkbenchProvider({ children }: { children: React.ReactNode }) {
 
   useEffect(() => {
     setPanels(loadPanelSizes());
+    try {
+      const savedCase = window.localStorage.getItem("cyberdeck.case-id");
+      if (savedCase && /^[a-zA-Z0-9_-]{1,100}$/.test(savedCase)) setCaseId(savedCase);
+    } catch { /* optional persistence */ }
     setPanelsLoaded(true);
     // restore last workspace location
     try {
-      const raw = window.localStorage.getItem("cyberdeck.location");
+      const raw = window.localStorage.getItem("cyberdeck.location") ?? window.localStorage.getItem("hacktool.location");
       if (raw) {
         const loc = JSON.parse(raw) as { category?: CategoryId; tool?: ToolId };
         if (loc.category) setCategory(loc.category);
@@ -126,6 +133,11 @@ export function WorkbenchProvider({ children }: { children: React.ReactNode }) {
     }
     setLocationLoaded(true);
   }, []);
+
+  useEffect(() => {
+    if (!locationLoaded) return;
+    try { window.localStorage.setItem("cyberdeck.case-id", caseId); } catch { /* optional */ }
+  }, [caseId, locationLoaded]);
 
   useEffect(() => {
     if (!locationLoaded) return;
@@ -224,6 +236,8 @@ export function WorkbenchProvider({ children }: { children: React.ReactNode }) {
     () => ({
       category,
       tool,
+      caseId,
+      setCaseId,
       jobs,
       paletteOpen,
       dockOpen,
@@ -250,6 +264,7 @@ export function WorkbenchProvider({ children }: { children: React.ReactNode }) {
     [
       category,
       tool,
+      caseId,
       jobs,
       paletteOpen,
       dockOpen,

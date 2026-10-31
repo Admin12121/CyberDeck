@@ -3,6 +3,7 @@ import { useCallback, useEffect, useState } from "react";
 import { Globe, Play, PlayCircle, Square } from "lucide-react";
 import { Chip, EmptyState, Pane, Select, TextInput, ToolButton } from "@ds/panes";
 import {
+  caseFindingsAdd,
   engineScan,
   httpSend,
   isDesktop,
@@ -21,14 +22,17 @@ import {
   type WebFindingWire,
 } from "@lib/ipc";
 import { buildSitesTree, filterCaptured, useTarget } from "../controller";
+import { useWorkbench } from "@state/workbench";
 
 // ---------------------------------------------------------------- scanner ---
 
 export function ScannerView() {
   const desktop = isDesktop();
+  const wb = useWorkbench();
   const { target, setTarget, normalized } = useTarget();
   const [findings, setFindings] = useState<WebFindingWire[]>([]);
   const [busy, setBusy] = useState(false);
+  const [savedCount, setSavedCount] = useState(0);
   const [authorized, setAuthorized] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [engines, setEngines] = useState<WebEngineStatusWire[]>([]);
@@ -44,8 +48,22 @@ export function ScannerView() {
     setBusy(true);
     setError(null);
     setFindings([]);
+    setSavedCount(0);
+    const caseId = wb.caseId;
     try {
-      setFindings(await webScan(normalized, authorized));
+      const found = await webScan(normalized, authorized);
+      setFindings(found);
+      if (found.length > 0) {
+        try {
+          const saved = await caseFindingsAdd(caseId, "web.native", found.slice(0, 128).map((f) => ({
+            title: f.title.slice(0, 200),
+            severity: ["info", "low", "medium", "high", "critical"].includes(f.severity)
+              ? f.severity as "info" | "low" | "medium" | "high" | "critical" : "info",
+            details: `Target: ${normalized}\n${f.detail}\nEvidence: ${f.evidence}`.slice(0, 8192),
+          })));
+          setSavedCount(saved);
+        } catch (error) { setError(`Scan completed, but findings were not saved: ${String(error)}`); }
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -75,7 +93,7 @@ export function ScannerView() {
         <ToolButton tone="primary" onClick={() => void scan()} disabled={busy || !desktop || !normalized || !authorized} title={desktop ? "Native review: paths, headers, banners" : "Scanning requires the desktop runtime"}>
           <Play size={11} /> {busy ? "scanning…" : "Native scan"}
         </ToolButton>
-        <span className="ml-auto font-mono text-[10px] text-fg-muted">{findings.length} findings</span>
+        <span className="ml-auto font-mono text-[10px] text-fg-muted">{findings.length} findings · {savedCount} saved to case</span>
       </div>
       {error ? <div className="border-b border-err/50 bg-err/10 px-2 py-1 font-mono text-[10px] text-err">{error}</div> : null}
       <label className="flex items-center gap-2 border-b border-line bg-panel px-3 py-2 text-xs text-fg-dim">

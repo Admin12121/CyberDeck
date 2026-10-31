@@ -1,6 +1,7 @@
 "use client";
 /** Thin dispatcher: all forensics tools stay mounted; hidden views keep state. */
 import { FileAnalysisView } from "./FileAnalysisView";
+import { CaseFindingsView } from "./CaseFindingsView";
 import { MetadataView } from "./MetadataView";
 import { StringsView } from "./StringsView";
 import { ToolTabs } from "@shell/ToolTabs";
@@ -13,6 +14,7 @@ export function ForensicsWorkspace({ tool }: { tool: ToolId }) {
       <ToolTabs category="forensics" active={tool} />
       <div className="min-h-0 flex-1">
 
+      <div className={show("forensics.findings")}><CaseFindingsView /></div>
       <div className={show("forensics.files")}><FileAnalysisView /></div>
       <div className={show("forensics.metadata")}><MetadataView /></div>
       <div className={show("forensics.strings")}><StringsView /></div>

@@ -13,6 +13,7 @@ import {
   type StringHitWire,
 } from "@lib/ipc";
 import type { ToolId } from "@features/registry";
+import { useWorkbench } from "@state/workbench";
 import { extractStrings, formatEntropy, shannonEntropy } from "../controller";
 import { SAMPLE_EVIDENCE, sampleContent, sampleMetadata } from "../model";
 
@@ -24,6 +25,7 @@ interface Selected {
 
 export function useEvidence() {
   const desktop = isDesktop();
+  const wb = useWorkbench();
   const [artifacts, setArtifacts] = useState<ArtifactRecord[]>([]);
   const [selected, setSelected] = useState<Selected | null>(null);
   const [query, setQuery] = useState("");
@@ -33,7 +35,7 @@ export function useEvidence() {
   const refresh = useCallback(async () => {
     if (!desktop) return;
     try {
-      const list = await fileList();
+      const list = await fileList(wb.caseId);
       setArtifacts(list);
       setSelected((prev) => {
         if (prev?.real && list.some((a) => a.id === prev.id)) return prev;
@@ -42,17 +44,17 @@ export function useEvidence() {
     } catch (err) {
       setImportError(err instanceof Error ? err.message : String(err));
     }
-  }, [desktop]);
+  }, [desktop, wb.caseId]);
 
   useEffect(() => {
-    void refresh();
-  }, [refresh]);
+    if (wb.tool.startsWith("forensics.")) void refresh();
+  }, [refresh, wb.tool]);
 
   const importEvidence = useCallback(async () => {
     setBusy(true);
     setImportError(null);
     try {
-      await fileImportDialog();
+      await fileImportDialog(wb.caseId);
       await refresh();
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -60,7 +62,7 @@ export function useEvidence() {
     } finally {
       setBusy(false);
     }
-  }, [refresh]);
+  }, [refresh, wb.caseId]);
 
   const selectedArtifact = useMemo(
     () => artifacts.find((a) => a.id === selected?.id) ?? null,
@@ -83,6 +85,7 @@ export function useEvidence() {
     importError,
     busy,
     importEvidence,
+    refresh,
   };
 }
 

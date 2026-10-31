@@ -1,11 +1,33 @@
 "use client";
 /** Status bar: transport, workspace, job state, engine status (§3.5). */
-import { isDesktop } from "@lib/ipc";
+import { caseCreate, caseList, isDesktop, type CaseRecordWire } from "@lib/ipc";
+import { useEffect, useState } from "react";
 import { useWorkbench } from "@state/workbench";
 import { toolById } from "@features/registry";
 
 export function StatusBar() {
   const wb = useWorkbench();
+  const [cases, setCases] = useState<CaseRecordWire[]>([]);
+  const [creating, setCreating] = useState(false);
+  const [caseTitle, setCaseTitle] = useState("");
+  const [caseError, setCaseError] = useState<string | null>(null);
+  useEffect(() => {
+    let active = true;
+    void caseList().then((list) => { if (active) setCases(list); })
+      .catch((error: unknown) => { if (active) setCaseError(String(error)); });
+    return () => { active = false; };
+  }, []);
+  const createCase = async () => {
+    if (!caseTitle.trim()) return;
+    try {
+      const created = await caseCreate(caseTitle.trim());
+      setCases((previous) => [created, ...previous]);
+      wb.setCaseId(created.id);
+      setCaseTitle("");
+      setCreating(false);
+      setCaseError(null);
+    } catch (error) { setCaseError(String(error)); }
+  };
   const tool = toolById(wb.tool);
   const running = Object.values(wb.jobs).filter((j) => j.status === "running").length;
 
@@ -13,6 +35,30 @@ export function StatusBar() {
     <footer className="flex h-6 shrink-0 items-center gap-3 border-t border-line bg-sidebar px-2 font-mono text-[10px] text-fg-muted">
       <span className={isDesktop() ? "text-ok" : "text-warn"}>{isDesktop() ? "ipc: tauri" : "ipc: browser fallback"}</span>
       <span>workspace: {tool ? `${tool.category} / ${tool.label}` : wb.tool}</span>
+      <label className="flex items-center gap-1" title="Active evidence case">
+        case
+        <select
+          aria-label="Active case"
+          value={wb.caseId}
+          onChange={(event) => wb.setCaseId(event.target.value)}
+          className="max-w-44 border border-line bg-sidebar px-1 text-[10px] text-fg"
+        >
+          {cases.map((item) => <option key={item.id} value={item.id}>{item.title}</option>)}
+          {cases.length === 0 ? <option value="scratchpad">Scratchpad</option> : null}
+        </select>
+      </label>
+      {creating ? (
+        <form onSubmit={(e) => { e.preventDefault(); void createCase(); }} className="flex items-center gap-1">
+          <input value={caseTitle} onChange={(e) => setCaseTitle(e.target.value)} maxLength={120}
+            aria-label="New case title" placeholder="Case title" className="w-28 border border-line bg-app px-1 text-[10px]" />
+          <button type="submit" disabled={!caseTitle.trim() || !isDesktop()} className="text-orange disabled:opacity-40">save</button>
+          <button type="button" onClick={() => setCreating(false)}>cancel</button>
+        </form>
+      ) : (
+        <button type="button" disabled={!isDesktop()} onClick={() => setCreating(true)}
+          title="Create a new case" className="border border-line px-1 disabled:opacity-40">+ case</button>
+      )}
+      {caseError ? <span className="max-w-44 truncate text-err" title={caseError}>case error</span> : null}
       <span className={running > 0 ? "text-orange" : ""}>jobs: {running > 0 ? `${running} running` : "idle"}</span>
       <span className="ml-auto flex items-center gap-3">
         <button
@@ -25,7 +71,7 @@ export function StatusBar() {
         >
           console (Ctrl+`)
         </button>
-        <span>cyberdeck 0.1.0 · 46 native commands · darkmatter</span>
+        <span>CyberDeck v0.1.0 · native Rust · local</span>
       </span>
     </footer>
   );

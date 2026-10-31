@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 use tokio::net::TcpStream;
 
 use serde::Serialize;
-use tauri::{Manager, State};
+use tauri::State;
 
 use crate::engines::which_exists;
 

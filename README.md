@@ -9,7 +9,7 @@ Integrated desktop security workbench: **Tauri 2 + Rust** native core, **Next.js
 Full product and engineering specification: [Master Plan.md](./Master Plan.md). Per-engine capability review and improvement backlog: [docs/engine-review.md](./docs/engine-review.md).
 Upstream sources for study and future engine packaging live in `reference/` (never committed, never shipped as-is).
 
-## Status: Arc 3 (recipes suite + packet engine)
+## Status: Local development — native Rust workbench
 
 - Monorepo: bun workspace (frontend) + Cargo workspace (native).
 - Desktop shell: title bar (logo), category rail (Crypto / Network / Web / Reverse / Forensics), navigator, workspace host, inspector, jobs dock (Ctrl+J), status bar, command palette (Ctrl+K). All sections resizable with clamped drag handles; sizes persist.
@@ -17,7 +17,9 @@ Upstream sources for study and future engine packaging live in `reference/` (nev
 - Feature-MVC structure under `apps/desktop/features/<feature>/{model,controller,view}`.
 - Shared job pipeline: typed Tauri IPC (`Channel<JobEvent>`), tokio workers, safe cancellation; browser fallback for UI development without the desktop shell.
 - **Native crypto engine (`crates/crypto`)**: MD5, SHA-1/224/256/384/512, HMAC-SHA256, CRC32, Base64/hex, URL encode/decode, XOR, ROT13, gzip, entropy, magic-byte signatures; reference test vectors in tests.
-- **Artifact store (`crates/storage`)**: SQLite (bundled) index of imported evidence; immutable copies under the OS app-data directory, content-addressed by SHA-256.
+- **Artifact store (`crates/storage`)**: SQLite (bundled) case and findings records; imported evidence is stored under the selected case with SHA-256 based IDs. Existing pre-rename evidence uses a backward-compatible storage location.
+- **Unified case workflow**: create/select persistent cases; forensics imports and web/native TCP scanner findings use the active case. PCAP frame bytes can be transferred into Recipes without reimporting; Recipes output can be saved directly as derived case evidence with a provenance record.
+- **GPU recovery**: CyberDeck has its own Rust CPU engine but does not yet have native GPU kernels; NVIDIA inventory and optional external Hashcat adapters are not equivalent to native GPU support.
 - **Console dock**: operation log plus a command line (scan / spider / get / crack / status) under Ctrl+`.
 - **Cracked history**: every recovered pair persists in SQLite until the user deletes it, listed beside the hash input with infinite scroll, click-to-expand details (cracked value, full hash, engine, wordlist, time), per-row delete and clear-all.
 - **Native coverage growth**: NTLM (MD4 over UTF-16LE), MD4, SHA-224/384 recovery; scrypt and pbkdf2 PHC verification/cracking via RustCrypto crates; SHA3-256/512 in Crypto Ops. Native wordlist runs stream live progress (candidates tried / total, percent).

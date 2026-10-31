@@ -108,6 +108,53 @@ export async function recipeRun(input: string, steps: RecipeStepWire[]): Promise
   return invoke<RecipeRunWire>("recipe_run", { input, steps });
 }
 
+// --- unified cases and findings ------------------------------------------------
+
+export interface CaseRecordWire {
+  id: string;
+  title: string;
+  description: string;
+  created_ms: number;
+}
+
+export interface FindingRecordWire {
+  id: number;
+  case_id: string;
+  source: string;
+  title: string;
+  severity: "info" | "low" | "medium" | "high" | "critical";
+  details: string;
+  artifact_id: string | null;
+  created_ms: number;
+}
+
+export type NewFindingWire = Pick<FindingRecordWire, "title" | "severity" | "details">;
+
+export async function caseList(): Promise<CaseRecordWire[]> {
+  if (!inTauri) return [{ id: "scratchpad", title: "Scratchpad", description: "Default working case", created_ms: 0 }];
+  return invoke<CaseRecordWire[]>("case_list");
+}
+
+export async function caseCreate(title: string, description = ""): Promise<CaseRecordWire> {
+  if (!inTauri) throw new Error("Creating cases requires the desktop runtime");
+  return invoke<CaseRecordWire>("case_create", { title, description });
+}
+
+export async function caseFindingsList(caseId: string): Promise<FindingRecordWire[]> {
+  if (!inTauri) return [];
+  return invoke<FindingRecordWire[]>("case_findings_list", { caseId });
+}
+
+export async function caseFindingsAdd(
+  caseId: string,
+  source: string,
+  findings: NewFindingWire[],
+  artifactId: string | null = null,
+): Promise<number> {
+  if (!inTauri) throw new Error("Saving findings requires the desktop runtime");
+  return invoke<number>("case_findings_add", { caseId, source, artifactId, findings });
+}
+
 // --- evidence ----------------------------------------------------------------
 
 export interface ArtifactRecord {
@@ -145,14 +192,21 @@ export interface StringHitWire {
   text: string;
 }
 
-export async function fileList(): Promise<ArtifactRecord[]> {
+export async function fileList(caseId = "scratchpad"): Promise<ArtifactRecord[]> {
   if (!inTauri) return [];
-  return invoke<ArtifactRecord[]>("file_list", { case: null });
+  return invoke<ArtifactRecord[]>("file_list", { case: caseId });
 }
 
-export async function fileImportDialog(): Promise<ArtifactRecord> {
+export async function fileImportDialog(caseId = "scratchpad"): Promise<ArtifactRecord> {
   if (!inTauri) throw new Error("evidence import requires the desktop runtime");
-  return invoke<ArtifactRecord>("file_import_dialog", {});
+  return invoke<ArtifactRecord>("file_import_dialog", { caseId });
+}
+
+/** Save a derived byte buffer to the selected case, with recorded provenance. */
+export async function fileImportDerived(caseId: string, name: string, bytes: Uint8Array): Promise<ArtifactRecord> {
+  if (!inTauri) throw new Error("Derived evidence import requires the desktop runtime");
+  if (bytes.length > 8 * 1024 * 1024) throw new Error("Derived evidence must not exceed 8 MiB");
+  return invoke<ArtifactRecord>("file_import_derived", { caseId, name, dataB64: b64.encode(bytes) });
 }
 
 export async function fileHex(id: string, offset: number, len: number): Promise<HexResponseWire> {
@@ -643,18 +697,21 @@ export interface ScanSummaryWire {
 export interface NetscanStatusWire {
   running: boolean;
   results: number;
+  saved_findings: number;
+  save_error: string | null;
 }
 
 export async function netscanStart(
   targets: string,
   ports: string,
+  caseId: string,
   authorized: boolean,
   onProgress?: (p: ScanProgressWire) => void,
 ): Promise<ScanSummaryWire> {
   if (!inTauri) throw new Error("network scanning requires the desktop runtime");
   const channel = new Channel<ScanProgressWire>();
   if (onProgress) channel.onmessage = onProgress;
-  return invoke<ScanSummaryWire>("netscan_start", { targets, ports, authorized, onProgress: channel });
+  return invoke<ScanSummaryWire>("netscan_start", { targets, ports, caseId, authorized, onProgress: channel });
 }
 
 export async function netscanResults(): Promise<ScanEntryWire[]> {
@@ -668,7 +725,7 @@ export async function netscanStop(): Promise<void> {
 }
 
 export async function netscanStatus(): Promise<NetscanStatusWire> {
-  if (!inTauri) return { running: false, results: 0 };
+  if (!inTauri) return { running: false, results: 0, saved_findings: 0, save_error: null };
   return invoke<NetscanStatusWire>("netscan_status", {});
 }
 

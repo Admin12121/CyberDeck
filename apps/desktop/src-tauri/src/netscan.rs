@@ -8,9 +8,11 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
 
+use crate::evidence::EvidenceCtx;
+use cyberdeck_storage::NewFinding;
 use serde::Serialize;
 use tauri::ipc::Channel;
-use tauri::{AppHandle, State};
+use tauri::{AppHandle, Manager, State};
 use tauri_plugin_dialog::DialogExt;
 
 const CONNECT_TIMEOUT: Duration = Duration::from_millis(900);
@@ -54,6 +56,8 @@ pub struct ScanCtx {
     pub stop: Arc<AtomicBool>,
     pub history: Arc<StdMutex<Vec<ScanHistoryItem>>>,
     pub next_id: Arc<AtomicU64>,
+    pub last_save_error: Arc<StdMutex<Option<String>>>,
+    pub saved_findings: Arc<AtomicU64>,
 }
 
 impl Default for ScanCtx {
@@ -64,6 +68,8 @@ impl Default for ScanCtx {
             stop: Arc::new(AtomicBool::new(false)),
             history: Arc::new(StdMutex::new(Vec::new())),
             next_id: Arc::new(AtomicU64::new(1)),
+            last_save_error: Arc::new(StdMutex::new(None)),
+            saved_findings: Arc::new(AtomicU64::new(0)),
         }
     }
 }
@@ -86,7 +92,9 @@ pub fn parse_targets(spec: &str) -> Result<Vec<IpAddr>, String> {
             let ip: IpAddr = ip_str
                 .parse()
                 .map_err(|_| format!("bad address in target: {ip_str}"))?;
-            let mask: u8 = mask_str.parse().map_err(|_| format!("bad mask: {mask_str}"))?;
+            let mask: u8 = mask_str
+                .parse()
+                .map_err(|_| format!("bad mask: {mask_str}"))?;
             match ip {
                 IpAddr::V4(v4) => {
                     if mask > 32 {
@@ -97,7 +105,9 @@ pub fn parse_targets(spec: &str) -> Result<Vec<IpAddr>, String> {
                     let base = bits & (!0u32 << suffix);
                     let count = 1u64 << suffix;
                     if count > MAX_HOSTS as u64 {
-                        return Err(format!("/{mask} expands to {count} hosts; the cap this arc is {MAX_HOSTS}"));
+                        return Err(format!(
+                            "/{mask} expands to {count} hosts; the cap this arc is {MAX_HOSTS}"
+                        ));
                     }
                     for i in 0..count {
                         hosts.push(IpAddr::V4(std::net::Ipv4Addr::from(base + i as u32)));
@@ -120,7 +130,9 @@ pub fn parse_targets(spec: &str) -> Result<Vec<IpAddr>, String> {
             hosts.extend(resolved);
         }
         if hosts.len() > MAX_HOSTS {
-            return Err(format!("target expands past {MAX_HOSTS} hosts; narrow the scope"));
+            return Err(format!(
+                "target expands past {MAX_HOSTS} hosts; narrow the scope"
+            ));
         }
     }
     if hosts.is_empty() {
@@ -168,7 +180,10 @@ pub fn parse_ports(spec: &str) -> Result<Vec<u16>, String> {
         return Err("no ports parsed".to_string());
     }
     if ports.len() > MAX_PORTS {
-        return Err(format!("{} ports exceed the cap of {MAX_PORTS}", ports.len()));
+        return Err(format!(
+            "{} ports exceed the cap of {MAX_PORTS}",
+            ports.len()
+        ));
     }
     Ok(ports)
 }
@@ -256,7 +271,10 @@ pub fn run_scan(
         }
     }
     let total = jobs.len() as u64;
-    let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1).clamp(1, 64);
+    let threads = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1)
+        .clamp(1, 64);
     let chunk_size = (jobs.len() + threads - 1) / threads.max(1);
     let found = Arc::new(AtomicU64::new(0));
     let mut partials: Vec<Vec<ScanEntry>> = Vec::new();
@@ -293,7 +311,11 @@ pub fn run_scan(
                             host: host.to_string(),
                             port: *port,
                             state,
-                            service: if service.is_empty() { "unknown".to_string() } else { service },
+                            service: if service.is_empty() {
+                                "unknown".to_string()
+                            } else {
+                                service
+                            },
                             banner,
                         });
                     }
@@ -301,7 +323,10 @@ pub fn run_scan(
                 (tried, out)
             }));
         }
-        partials = handles.into_iter().map(|h| h.join().unwrap_or_default().1).collect();
+        partials = handles
+            .into_iter()
+            .map(|h| h.join().unwrap_or_default().1)
+            .collect();
     });
     partials.into_iter().flatten().collect()
 }
@@ -317,6 +342,12 @@ fn status_inner(ctx: &ScanCtx) -> NetscanStatusWire {
     NetscanStatusWire {
         running: ctx.running.load(Ordering::Relaxed),
         results: ctx.results.lock().expect("scan results poisoned").len(),
+        saved_findings: ctx.saved_findings.load(Ordering::Relaxed) as usize,
+        save_error: ctx
+            .last_save_error
+            .lock()
+            .expect("scan error state poisoned")
+            .clone(),
     }
 }
 
@@ -324,6 +355,8 @@ fn status_inner(ctx: &ScanCtx) -> NetscanStatusWire {
 pub struct NetscanStatusWire {
     pub running: bool,
     pub results: usize,
+    pub saved_findings: usize,
+    pub save_error: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -351,16 +384,32 @@ pub fn netscan_start(
     ports: String,
     on_progress: Channel<ScanProgress>,
     authorized: bool,
+    case_id: String,
+    app: AppHandle,
+    evidence: State<'_, EvidenceCtx>,
     ctx: State<'_, ScanCtx>,
 ) -> Result<ScanSummaryWire, String> {
-    if !authorized { return Err("explicit scan authorization acknowledgment required".to_string()); }
-    if ctx.running.load(Ordering::Relaxed) {
-        return Err("a scan is already running; stop it first".to_string());
+    if !authorized {
+        return Err("explicit scan authorization acknowledgment required".to_string());
+    }
+    if !evidence
+        .store
+        .lock()
+        .map_err(|_| "case store unavailable")?
+        .case_exists(&case_id)?
+    {
+        return Err("selected case does not exist".into());
     }
     let hosts = parse_targets(&targets)?;
     let host_count = hosts.len();
     let port_list = parse_ports(&ports)?;
-    ctx.running.store(true, Ordering::Relaxed);
+    if ctx.running.swap(true, Ordering::AcqRel) {
+        return Err("a scan is already running; stop it first".to_string());
+    }
+    *ctx.last_save_error
+        .lock()
+        .expect("scan error state poisoned") = None;
+    ctx.saved_findings.store(0, Ordering::Relaxed);
     ctx.stop.store(false, Ordering::Relaxed);
     ctx.results.lock().expect("scan results poisoned").clear();
 
@@ -370,6 +419,8 @@ pub fn netscan_start(
     let stop_out = Arc::clone(&ctx.stop);
     let running_out = Arc::clone(&ctx.running);
     let history_out = Arc::clone(&ctx.history);
+    let save_error_out = Arc::clone(&ctx.last_save_error);
+    let saved_out = Arc::clone(&ctx.saved_findings);
     let targets_spec = targets.clone();
     let ports_spec = ports.clone();
 
@@ -377,17 +428,58 @@ pub fn netscan_start(
         let entries = run_scan(hosts, port_list, &stop_out, &on_progress);
         let open = entries.len();
         let duration = started.elapsed().as_millis() as u64;
+        if !entries.is_empty() {
+            let mut findings = entries
+                .iter()
+                .take(256)
+                .map(|entry| NewFinding {
+                    title: format!("Open TCP {}:{}", entry.host, entry.port),
+                    severity: "info".into(),
+                    details: format!(
+                        "Authorized TCP scan #{id}\nHost: {}\nPort: {}\nService: {}\nState: {}",
+                        entry.host, entry.port, entry.service, entry.state
+                    ),
+                })
+                .collect::<Vec<_>>();
+            if open > 256 {
+                findings.push(NewFinding {
+                    title: "Additional open services not indexed".into(),
+                    severity: "info".into(),
+                    details: format!(
+                        "Scan #{id} discovered {open} open services; first 256 saved in the case. Full scan remains in the scan results."
+                    ),
+                });
+            }
+            let outcome = (|| -> Result<usize, String> {
+                let context = app.state::<EvidenceCtx>();
+                let store = context.store.lock().map_err(|_| "case store unavailable")?;
+                let mut count = 0;
+                for batch in findings.chunks(128) {
+                    count += store.add_findings(&case_id, "network.tcp", None, batch)?;
+                }
+                Ok(count)
+            })();
+            match outcome {
+                Ok(count) => saved_out.store(count as u64, Ordering::Relaxed),
+                Err(error) => {
+                    *save_error_out.lock().expect("scan error state poisoned") = Some(error)
+                }
+            }
+        }
         *results_out.lock().expect("scan results poisoned") = entries;
         running_out.store(false, Ordering::Relaxed);
-        history_out.lock().expect("scan history poisoned").push(ScanHistoryItem {
-            id,
-            targets: targets_spec,
-            ports: ports_spec,
-            hosts_scanned: host_count,
-            open_ports: open,
-            duration_ms: duration,
-            at_ms: now_ms(),
-        });
+        history_out
+            .lock()
+            .expect("scan history poisoned")
+            .push(ScanHistoryItem {
+                id,
+                targets: targets_spec,
+                ports: ports_spec,
+                hosts_scanned: host_count,
+                open_ports: open,
+                duration_ms: duration,
+                at_ms: now_ms(),
+            });
     });
 
     Ok(ScanSummaryWire {
@@ -419,7 +511,11 @@ pub fn netscan_history(ctx: State<'_, ScanCtx>) -> Vec<ScanHistoryItem> {
 
 /// Save the current results to a user-chosen file as JSON or CSV.
 #[tauri::command]
-pub fn netscan_export(app: AppHandle, format: String, ctx: State<'_, ScanCtx>) -> Result<String, String> {
+pub fn netscan_export(
+    app: AppHandle,
+    format: String,
+    ctx: State<'_, ScanCtx>,
+) -> Result<String, String> {
     let results = ctx.results.lock().expect("scan results poisoned").clone();
     if results.is_empty() {
         return Err("no results to export".to_string());
@@ -431,12 +527,18 @@ pub fn netscan_export(app: AppHandle, format: String, ctx: State<'_, ScanCtx>) -
         .add_filter("Scan export", &[ext])
         .blocking_save_file()
         .ok_or("cancelled")?;
-    let path = picked.as_path().ok_or("unsupported file location")?.to_path_buf();
+    let path = picked
+        .as_path()
+        .ok_or("unsupported file location")?
+        .to_path_buf();
     let content = if format == "csv" {
         let mut csv = String::from("host,port,state,service,banner\n");
         for r in &results {
             let banner = r.banner.replace('"', "\"\"");
-            csv.push_str(&format!("{},{},{},{},\"{}\"\n", r.host, r.port, r.state, r.service, banner));
+            csv.push_str(&format!(
+                "{},{},{},{},\"{}\"\n",
+                r.host, r.port, r.state, r.service, banner
+            ));
         }
         csv
     } else {
@@ -450,13 +552,19 @@ pub fn netscan_export(app: AppHandle, format: String, ctx: State<'_, ScanCtx>) -
 /// hosts that answered (used to skip clearly-down hosts before a full scan).
 #[tauri::command]
 pub fn netscan_discover_hosts(targets: String, authorized: bool) -> Result<Vec<String>, String> {
-    if !authorized { return Err("explicit scan authorization acknowledgment required".to_string()); }
+    if !authorized {
+        return Err("explicit scan authorization acknowledgment required".to_string());
+    }
     let hosts = parse_targets(&targets)?;
     let discovery_ports: &[u16] = &[80, 443, 22, 445, 3389];
     let mut up = Vec::new();
     for host in hosts {
         let alive = discovery_ports.iter().any(|p| {
-            TcpStream::connect_timeout(&std::net::SocketAddr::new(host, *p), Duration::from_millis(500)).is_ok()
+            TcpStream::connect_timeout(
+                &std::net::SocketAddr::new(host, *p),
+                Duration::from_millis(500),
+            )
+            .is_ok()
         });
         if alive {
             up.push(host.to_string());
@@ -496,6 +604,9 @@ mod tests {
 
     #[test]
     fn banner_summary_keeps_first_line_for_non_http() {
-        assert_eq!(summarize_banner("SSH-2.0-OpenSSH_9.6\r\n"), "SSH-2.0-OpenSSH_9.6");
+        assert_eq!(
+            summarize_banner("SSH-2.0-OpenSSH_9.6\r\n"),
+            "SSH-2.0-OpenSSH_9.6"
+        );
     }
 }

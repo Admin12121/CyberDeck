@@ -65,6 +65,7 @@ fn main() {
             ops::recipe_run,
             ops::kdf_verify,
             evidence::file_import_dialog,
+            evidence::file_import_derived,
             cases::case_list,
             cases::case_create,
             cases::case_findings_list,
