@@ -1,5 +1,5 @@
 [package]
-name = "hacktool-core"
+name = "cyberdeck-core"
 description = "Shared domain types: capabilities, artifacts, jobs (Master Plan section 8)"
 version.workspace = true
 edition.workspace = true

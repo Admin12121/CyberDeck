@@ -1,5 +1,5 @@
 [package]
-name = "hacktool-storage"
+name = "cyberdeck-storage"
 description = "SQLite-backed artifact index and case store (Master Plan section 8.4)"
 version.workspace = true
 edition.workspace = true

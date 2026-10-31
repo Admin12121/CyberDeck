@@ -106,7 +106,7 @@ export function ProxyView() {
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
-      a.download = "hacktool-root-ca.crt";
+      a.download = "cyberdeck-root-ca.crt";
       a.click();
       URL.revokeObjectURL(url);
       setCaSaved(true);
@@ -137,7 +137,7 @@ export function ProxyView() {
               works without warnings.
             </p>
             <div className="flex items-center gap-2">
-              <ToolButton tone="primary" onClick={() => void saveCa()} disabled={!desktop} title="Download hacktool-root-ca.crt">
+              <ToolButton tone="primary" onClick={() => void saveCa()} disabled={!desktop} title="Download cyberdeck-root-ca.crt">
                 <Download size={11} /> {caSaved ? "Download again" : "Download CA cert"}
               </ToolButton>
               <ToolButton onClick={() => void copyCa()} disabled={!desktop} title="Copy the PEM to the clipboard">

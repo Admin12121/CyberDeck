@@ -556,7 +556,7 @@ export function HashAnalysisView() {
           {desktop ? (
             <div className="space-y-0.5 font-mono text-[10px] text-fg-dim">
               <div>
-                cpu: {devices ? `${devices.cpu_cores}× ${devices.cpu_arch}` : "…"} · hacktool-crypto <span className="text-ok">active</span>
+                cpu: {devices ? `${devices.cpu_cores}× ${devices.cpu_arch}` : "…"} · cyberdeck-crypto <span className="text-ok">active</span>
               </div>
               <div className="flex flex-wrap items-center gap-1">
                 <ToolButton

@@ -187,7 +187,7 @@ pub fn crack_wordlist_dialog(
         .map_err(|e| format!("read error: {e}"))?;
 
     // KDF targets (bcrypt/argon2 PHC strings) verify natively, slowly by design.
-    if let Some(format) = hacktool_crypto::kdf_format(&target) {
+    if let Some(format) = cyberdeck_crypto::kdf_format(&target) {
         let total = lines.len() as u64;
         let target_ref = Arc::new(target.clone());
         let progress = Arc::clone(&progress);
@@ -205,7 +205,7 @@ pub fn crack_wordlist_dialog(
                     let _ = progress.send(CrackProgress { tried: done, total, percent: (done * 100 / total.max(1)) as u32 });
                 }
                 let candidate = line.strip_suffix('\r').unwrap_or(line);
-                if hacktool_crypto::verify_kdf(&target_ref, candidate).unwrap_or(false) {
+                if cyberdeck_crypto::verify_kdf(&target_ref, candidate).unwrap_or(false) {
                     matches.push(CrackMatch { line_no: base + i as u64 + 1, password: candidate.to_string() });
                     stop.store(true, Ordering::Relaxed);
                     break;
@@ -216,7 +216,7 @@ pub fn crack_wordlist_dialog(
         let tried: u64 = parts.iter().map(|(t, _)| t).sum();
         let mut matches: Vec<CrackMatch> = parts.into_iter().flat_map(|(_, m)| m).collect();
         matches.truncate(MAX_REPORTED_MATCHES);
-        record_history(&ctx, &format, &target, "hacktool-crypto", &wordlist_name, &matches);
+        record_history(&ctx, &format, &target, "cyberdeck-crypto", &wordlist_name, &matches);
         return Ok(CrackResultWire {
             algo: format.to_string(),
             target_hash: target,
@@ -225,8 +225,8 @@ pub fn crack_wordlist_dialog(
             matches,
             duration_ms: started.elapsed().as_millis() as u64,
             threads,
-            engine: "hacktool-crypto".to_string(),
-            engine_version: hacktool_crypto::ENGINE_VERSION.to_string(),
+            engine: "cyberdeck-crypto".to_string(),
+            engine_version: cyberdeck_crypto::ENGINE_VERSION.to_string(),
         });
     }
 
@@ -251,7 +251,7 @@ pub fn crack_wordlist_dialog(
                 let _ = progress.send(CrackProgress { tried: done, total, percent: (done * 100 / total.max(1)) as u32 });
             }
             let candidate = line.strip_suffix('\r').unwrap_or(line);
-            if let Ok(digest) = hacktool_crypto::apply_op(&algo_ref, candidate.as_bytes(), None) {
+            if let Ok(digest) = cyberdeck_crypto::apply_op(&algo_ref, candidate.as_bytes(), None) {
                 if hex::encode(digest) == *target_ref {
                     matches.push(CrackMatch { line_no: base + i as u64 + 1, password: candidate.to_string() });
                     if matches.len() >= MAX_REPORTED_MATCHES {
@@ -266,7 +266,7 @@ pub fn crack_wordlist_dialog(
     let tried: u64 = parts.iter().map(|(t, _)| t).sum();
     let mut matches: Vec<CrackMatch> = parts.into_iter().flat_map(|(_, m)| m).collect();
     matches.truncate(MAX_REPORTED_MATCHES);
-    record_history(&ctx, &algo, &target, "hacktool-crypto", &wordlist_name, &matches);
+    record_history(&ctx, &algo, &target, "cyberdeck-crypto", &wordlist_name, &matches);
     Ok(CrackResultWire {
         algo,
         target_hash: target,
@@ -275,8 +275,8 @@ pub fn crack_wordlist_dialog(
         matches,
         duration_ms: started.elapsed().as_millis() as u64,
         threads,
-        engine: "hacktool-crypto".to_string(),
-        engine_version: hacktool_crypto::ENGINE_VERSION.to_string(),
+        engine: "cyberdeck-crypto".to_string(),
+        engine_version: cyberdeck_crypto::ENGINE_VERSION.to_string(),
     })
 }
 

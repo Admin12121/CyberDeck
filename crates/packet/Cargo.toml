@@ -1,5 +1,5 @@
 [package]
-name = "hacktool-packet"
+name = "cyberdeck-packet"
 description = "PCAP file parsing and protocol dissection (Master Plan section 5.1)"
 version.workspace = true
 edition.workspace = true

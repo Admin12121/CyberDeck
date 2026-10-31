@@ -1,6 +1,6 @@
 //! SQLite artifact index (§8.4); artifact bytes live in the case directory.
 
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 
 pub const DEFAULT_CASE: &str = "scratchpad";
@@ -23,6 +23,49 @@ pub struct ArtifactRecord {
     pub signature: Option<String>,
     pub entropy: f64,
     pub imported_at: String,
+}
+
+/// A project/case owns evidence and analysis findings; scratchpad remains the
+/// default for existing imports made before case management existed.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CaseRecord {
+    pub id: String,
+    pub title: String,
+    pub description: String,
+    pub created_ms: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FindingRecord {
+    pub id: i64,
+    pub case_id: String,
+    pub source: String,
+    pub title: String,
+    pub severity: String,
+    pub details: String,
+    pub artifact_id: Option<String>,
+    pub created_ms: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NewFinding {
+    pub title: String,
+    pub severity: String,
+    pub details: String,
+}
+
+pub fn validate_case_id(id: &str) -> Result<(), String> {
+    if id.is_empty() || id.len() > 100 || !id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_') {
+        return Err("invalid case identifier".to_string());
+    }
+    Ok(())
+}
+
+fn timestamp_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
 }
 
 pub struct ArtifactStore {
@@ -54,6 +97,25 @@ impl ArtifactStore {
                  imported_at   TEXT NOT NULL
              );
              CREATE INDEX IF NOT EXISTS idx_artifacts_case ON artifacts(case_id);
+             CREATE TABLE IF NOT EXISTS cases (
+                 id         TEXT PRIMARY KEY,
+                 title      TEXT NOT NULL,
+                 description TEXT NOT NULL,
+                 created_ms INTEGER NOT NULL
+             );
+             INSERT OR IGNORE INTO cases (id,title,description,created_ms)
+                 VALUES ('scratchpad','Scratchpad','Default working case',0);
+             CREATE TABLE IF NOT EXISTS findings (
+                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                 case_id TEXT NOT NULL REFERENCES cases(id),
+                 source TEXT NOT NULL,
+                 title TEXT NOT NULL,
+                 severity TEXT NOT NULL,
+                 details TEXT NOT NULL,
+                 artifact_id TEXT,
+                 created_ms INTEGER NOT NULL
+             );
+             CREATE INDEX IF NOT EXISTS idx_findings_case ON findings(case_id,id);
              CREATE TABLE IF NOT EXISTS crack_history (
                  id           INTEGER PRIMARY KEY AUTOINCREMENT,
                  algo         TEXT NOT NULL,
@@ -69,8 +131,90 @@ impl ArtifactStore {
         Ok(Self { conn })
     }
 
+    pub fn list_cases(&self) -> Result<Vec<CaseRecord>, String> {
+        let mut statement = self.conn
+            .prepare("SELECT id,title,description,created_ms FROM cases ORDER BY created_ms DESC,id")
+            .map_err(|e| e.to_string())?;
+        let rows = statement.query_map([], |row| Ok(CaseRecord {
+            id: row.get(0)?, title: row.get(1)?, description: row.get(2)?,
+            created_ms: row.get(3)?,
+        })).map_err(|e| e.to_string())?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
+    }
+
+    pub fn case_exists(&self, case_id: &str) -> Result<bool, String> {
+        validate_case_id(case_id)?;
+        self.conn.query_row("SELECT EXISTS(SELECT 1 FROM cases WHERE id=?1)",
+            params![case_id], |r| r.get::<_, bool>(0)).map_err(|e| e.to_string())
+    }
+
+    pub fn create_case(&self, title: &str, description: &str) -> Result<CaseRecord, String> {
+        let title = title.trim();
+        let description = description.trim();
+        if title.is_empty() || title.len() > 120 || description.len() > 2048 {
+            return Err("case title (1-120 bytes) or description (0-2048 bytes) is invalid".into());
+        }
+        // SQLite rejects ID collisions, even if calls occur in the same nanosecond.
+        let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+            .map_err(|e| e.to_string())?.as_nanos();
+        let case = CaseRecord {
+            id: format!("case-{nanos:x}-{:x}", std::process::id()),
+            title: title.to_string(), description: description.to_string(),
+            created_ms: timestamp_ms(),
+        };
+        self.conn.execute("INSERT INTO cases (id,title,description,created_ms) VALUES (?1,?2,?3,?4)",
+            params![case.id,case.title,case.description,case.created_ms])
+            .map_err(|e| format!("cannot create case: {e}"))?;
+        Ok(case)
+    }
+
+    pub fn add_findings(&self, case_id: &str, source: &str, artifact_id: Option<&str>,
+        findings: &[NewFinding]) -> Result<usize, String> {
+        if !self.case_exists(case_id)? { return Err("case not found".into()); }
+        if source.trim().is_empty() || source.len() > 80 || findings.len() > 128 {
+            return Err("invalid source or too many findings".into());
+        }
+        if let Some(id) = artifact_id {
+            let existing_case: Option<String> = self.conn.query_row(
+                "SELECT case_id FROM artifacts WHERE id=?1",params![id],|r|r.get(0)
+            ).optional().map_err(|e|e.to_string())?;
+            if existing_case.as_deref() != Some(case_id) {
+                return Err("artifact does not belong to the selected case".into());
+            }
+        }
+        for f in findings {
+            if f.title.is_empty() || f.title.len() > 200 || f.details.len() > 8192
+                || !matches!(f.severity.as_str(), "info"|"low"|"medium"|"high"|"critical") {
+                return Err("finding exceeds limits or has invalid severity".into());
+            }
+        }
+        let now = timestamp_ms();
+        for f in findings {
+            self.conn.execute(
+                "INSERT INTO findings (case_id,source,title,severity,details,artifact_id,created_ms)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7)",
+                params![case_id,source,f.title,f.severity,f.details,artifact_id,now],
+            ).map_err(|e| format!("cannot store finding: {e}"))?;
+        }
+        Ok(findings.len())
+    }
+
+    pub fn list_findings(&self, case_id: &str) -> Result<Vec<FindingRecord>, String> {
+        if !self.case_exists(case_id)? { return Err("case not found".into()); }
+        let mut stmt = self.conn.prepare(
+            "SELECT id,case_id,source,title,severity,details,artifact_id,created_ms
+             FROM findings WHERE case_id=?1 ORDER BY id DESC LIMIT 2000"
+        ).map_err(|e|e.to_string())?;
+        let rows = stmt.query_map(params![case_id], |r| Ok(FindingRecord {
+            id:r.get(0)?,case_id:r.get(1)?,source:r.get(2)?,title:r.get(3)?,
+            severity:r.get(4)?,details:r.get(5)?,artifact_id:r.get(6)?,created_ms:r.get(7)?,
+        })).map_err(|e|e.to_string())?;
+        rows.collect::<Result<Vec<_>,_>>().map_err(|e|e.to_string())
+    }
+
     /// Insert or replace by id (idempotent imports of identical content).
     pub fn upsert_artifact(&self, record: &ArtifactRecord) -> Result<(), String> {
+        if !self.case_exists(&record.case_id)? { return Err("case not found".into()); }
         self.conn
             .execute(
                 "INSERT INTO artifacts (id, case_id, name, stored_path, original_path, size,
@@ -102,6 +246,7 @@ impl ArtifactStore {
     }
 
     pub fn list_artifacts(&self, case_id: &str) -> Result<Vec<ArtifactRecord>, String> {
+        if !self.case_exists(case_id)? { return Err("case not found".into()); }
         let mut stmt = self
             .conn
             .prepare(
@@ -266,6 +411,43 @@ mod tests {
             entropy: 4.2,
             imported_at: "2026-10-31T00:00:00Z".into(),
         }
+    }
+
+    #[test]
+    fn creates_cases_and_persists_case_scoped_findings() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("index.db");
+        let store = ArtifactStore::open(&db).unwrap();
+        let a = store.create_case("Lab A", "Private practice").unwrap();
+        let b = store.create_case("Lab B", "").unwrap();
+        assert_ne!(a.id, b.id);
+        assert!(store.case_exists(DEFAULT_CASE).unwrap());
+        let mut evidence = record("artifact-a");
+        evidence.case_id = a.id.clone();
+        store.upsert_artifact(&evidence).unwrap();
+        assert_eq!(store.list_artifacts(&a.id).unwrap().len(), 1);
+        assert!(store.list_artifacts(&b.id).unwrap().is_empty());
+        assert!(store.add_findings(&b.id, "scan", Some(&evidence.id),
+            &[NewFinding { title:"Example".into(), severity:"low".into(),details:"Test".into() }]).is_err());
+        assert_eq!(store.add_findings(&a.id, "scan", Some(&evidence.id),
+            &[NewFinding { title:"Example".into(), severity:"low".into(),details:"Test".into() }]).unwrap(),1);
+        assert_eq!(store.list_findings(&a.id).unwrap().len(),1);
+        drop(store);
+        let reopened = ArtifactStore::open(&db).unwrap();
+        assert_eq!(reopened.list_cases().unwrap().len(),3);
+        assert_eq!(reopened.list_findings(&a.id).unwrap().len(),1);
+        assert!(reopened.list_findings(&b.id).unwrap().is_empty());
+    }
+
+    #[test]
+    fn refuses_invalid_case_identifier_and_finding() {
+        assert!(validate_case_id("../escape").is_err());
+        let dir = tempfile::tempdir().unwrap();
+        let store = ArtifactStore::open(&dir.path().join("index.db")).unwrap();
+        assert!(store.create_case("   ","").is_err());
+        assert!(store.add_findings(DEFAULT_CASE,"web",None,&[NewFinding {
+            title:"Invalid".into(), severity:"unknown".into(),details:"ignored".into()
+        }]).is_err());
     }
 
     #[test]

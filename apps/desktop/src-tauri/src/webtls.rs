@@ -22,7 +22,7 @@ pub struct CaState {
 
 fn ca_params() -> Result<CertificateParams, String> {
     let mut params = CertificateParams::new(Vec::new()).map_err(|e| format!("CA params failed: {e}"))?;
-    params.distinguished_name.push(rcgen::DnType::CommonName, "HackTool Root CA");
+    params.distinguished_name.push(rcgen::DnType::CommonName, "CyberDeck Root CA");
     params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
     params.key_usages = vec![
         rcgen::KeyUsagePurpose::KeyCertSign,

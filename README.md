@@ -1,8 +1,8 @@
-# HackTool: Cybersecurity Workbench
+# CyberDeck: Cybersecurity Workbench
 
 Integrated desktop security workbench: **Tauri 2 + Rust** native core, **Next.js (static export) + TypeScript** interface, **Dark Matter** theme (Zed-style near-black, blue = selection/analysis, orange = active operations).
 
-**License:** [MIT](./LICENSE) for HackTool's own code. Upstream sources retain their own licenses; source-derived Rust ports require attribution and compatibility review. See [source-porting-policy.md](./docs/source-porting-policy.md).
+**License:** [MIT](./LICENSE) for CyberDeck's own code. Upstream sources retain their own licenses; source-derived Rust ports require attribution and compatibility review. See [source-porting-policy.md](./docs/source-porting-policy.md).
 
 **Current engineering status:** [Implementation status and remaining milestones](./docs/implementation-status.md). The product is under active development and is not yet verified as a self-contained, cross-platform release. The primary goal is a unified case workflow and native Rust engines; adapters are transitional, not feature parity. Recipes currently use native Rust for supported steps and the existing TypeScript engine for others. No installer or upstream engine is advertised as shipping until separately verified.
 

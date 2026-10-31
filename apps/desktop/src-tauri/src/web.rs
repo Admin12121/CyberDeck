@@ -89,7 +89,7 @@ fn http_client() -> reqwest::Client {
     reqwest::Client::builder()
         .timeout(Duration::from_secs(15))
         .redirect(reqwest::redirect::Policy::none())
-        .user_agent("HackTool-Workbench/0.1")
+        .user_agent("CyberDeck-Workbench/0.1")
         .build()
         .expect("http client")
 }
@@ -376,11 +376,7 @@ pub async fn proxy_start(
     ctx: State<'_, WebCtx>,
 ) -> Result<ProxyStatusWire, String> {
     // CA is initialized with the proxy so HTTPS interception is ready at once
-    let ca_dir = app
-        .path()
-        .app_data_dir()
-        .map_err(|e| format!("cannot resolve app data dir: {e}"))?
-        .join("hacktool");
+    let ca_dir = crate::storage_paths::data_dir(&app)?;
     let ca = crate::webtls::init_ca(&ca_dir)?;
     *ctx.shared.ca.lock().expect("ca poisoned") = Some(Arc::clone(&ca));
     *ctx.ca.lock().expect("ca poisoned") = Some(ca);
@@ -656,7 +652,7 @@ async fn execute_request(
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(15))
         .redirect(reqwest::redirect::Policy::none())
-        .user_agent("HackTool-Workbench/0.1")
+        .user_agent("CyberDeck-Workbench/0.1")
         .build()
         .expect("http client");
     let Ok(method_req) = reqwest::Method::from_bytes(method.as_bytes()) else {
@@ -676,7 +672,7 @@ async fn execute_request(
         request = request.body(body.to_string());
     }
     let Ok(resp) = request.send().await else {
-        return (502, vec![], b"HackTool: upstream request failed".to_vec());
+        return (502, vec![], b"CyberDeck: upstream request failed".to_vec());
     };
     let status = resp.status().as_u16();
     let resp_headers: Vec<(String, String)> = resp
@@ -690,12 +686,12 @@ async fn execute_request(
         match response.chunk().await {
             Ok(Some(chunk)) => {
                 if bytes.len().saturating_add(chunk.len()) > MAX_PROXY_BODY {
-                    return (502, vec![], b"HackTool: upstream response exceeds proxy body limit".to_vec());
+                    return (502, vec![], b"CyberDeck: upstream response exceeds proxy body limit".to_vec());
                 }
                 bytes.extend_from_slice(&chunk);
             }
             Ok(None) => break,
-            Err(_) => return (502, vec![], b"HackTool: upstream body read failed".to_vec()),
+            Err(_) => return (502, vec![], b"CyberDeck: upstream body read failed".to_vec()),
         }
     }
     (status, resp_headers, bytes)
@@ -846,7 +842,7 @@ pub async fn proxy_drop(id: u64, ctx: State<'_, WebCtx>) -> Result<(), String> {
         use tokio::io::AsyncWriteExt;
         let _ = pending
             .stream
-            .write_all(b"HTTP/1.1 502 HackTool: request dropped by interceptor\r\ncontent-length: 0\r\nconnection: close\r\n\r\n")
+            .write_all(b"HTTP/1.1 502 CyberDeck: request dropped by interceptor\r\ncontent-length: 0\r\nconnection: close\r\n\r\n")
             .await;
     }
     Ok(())
@@ -865,11 +861,7 @@ pub async fn proxy_ca_pem(app: tauri::AppHandle, ctx: State<'_, WebCtx>) -> Resu
     if let Some(ca) = ctx.ca.lock().expect("ca poisoned").as_ref() {
         return Ok(ca.cert_pem.clone());
     }
-    let ca_dir = app
-        .path()
-        .app_data_dir()
-        .map_err(|e| format!("cannot resolve app data dir: {e}"))?
-        .join("hacktool");
+    let ca_dir = crate::storage_paths::data_dir(&app)?;
     let ca = crate::webtls::init_ca(&ca_dir)?;
     *ctx.ca.lock().expect("ca poisoned") = Some(Arc::clone(&ca));
     Ok(ca.cert_pem.clone())

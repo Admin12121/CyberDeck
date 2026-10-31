@@ -60,7 +60,7 @@ export const PANEL_LIMITS = {
 
 type PanelSizes = { navigator: number; dock: number };
 
-const STORAGE_KEY = "hacktool.panel-sizes";
+const STORAGE_KEY = "cyberdeck.panel-sizes";
 
 function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
@@ -115,7 +115,7 @@ export function WorkbenchProvider({ children }: { children: React.ReactNode }) {
     setPanelsLoaded(true);
     // restore last workspace location
     try {
-      const raw = window.localStorage.getItem("hacktool.location");
+      const raw = window.localStorage.getItem("cyberdeck.location");
       if (raw) {
         const loc = JSON.parse(raw) as { category?: CategoryId; tool?: ToolId };
         if (loc.category) setCategory(loc.category);
@@ -130,7 +130,7 @@ export function WorkbenchProvider({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     if (!locationLoaded) return;
     try {
-      window.localStorage.setItem("hacktool.location", JSON.stringify({ category, tool }));
+      window.localStorage.setItem("cyberdeck.location", JSON.stringify({ category, tool }));
     } catch {
       // ignore quota failures
     }

@@ -32,8 +32,8 @@ import { useWorkbench } from "@state/workbench";
 const CATEGORY_ORDER: OperationCategory[] = ["encoding", "transforms", "parsing", "formatting"];
 
 /** MIME types used by drag-and-drop between the catalog and the recipe. */
-const OP_MIME = "application/x-hacktool-op";
-const STEP_MIME = "application/x-hacktool-step";
+const OP_MIME = "application/x-cyberdeck-op";
+const STEP_MIME = "application/x-cyberdeck-step";
 
 const NATIVE_RECIPE_OPS = new Set([
   "to_base64", "from_base64", "to_base64url", "from_base64url",

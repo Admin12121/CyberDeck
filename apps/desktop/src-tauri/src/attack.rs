@@ -1,5 +1,5 @@
-//! Rule-based and mask attacks (§5.5), implemented natively. GPU runs through
-//! hashcat when a driver is present; see docs/engine-licensing.md.
+//! Rule-based and mask attacks (§5.5), implemented in native Rust.
+//! GPU compute is not native; external hashcat is a separate optional adapter.
 
 use serde::Serialize;
 use std::time::{Duration, Instant};
@@ -54,7 +54,7 @@ impl AttackSession {
             return false;
         }
         self.tried += 1;
-        if let Ok(digest) = hacktool_crypto::apply_op(algo, candidate.as_bytes(), None) {
+        if let Ok(digest) = cyberdeck_crypto::apply_op(algo, candidate.as_bytes(), None) {
             if hex::encode(digest) == self.target {
                 self.matches.push(AttackMatch { line_no, password: candidate.to_string() });
                 if self.matches.len() >= MAX_REPORTED_MATCHES {
@@ -404,7 +404,7 @@ fn run_mask_odometer(algo: &str, session: &mut AttackSession, slots: &[Slot], pi
 
 
 fn guard(algo: &str, target: &str) -> Result<String, String> {
-    if hacktool_crypto::kdf_format(target).is_some() {
+    if cyberdeck_crypto::kdf_format(target).is_some() {
         return Err("KDF hashes (bcrypt/argon2) crack at password-hashing speed; use the wordlist recovery mode, rules and masks would run for years".to_string());
     }
     if !SUPPORTED.contains(&algo) {
@@ -429,8 +429,8 @@ fn wire(mode: &str, algo: String, target: String, source: String, session: Attac
         matches: session.matches,
         duration_ms,
         threads: std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1).clamp(1, 32),
-        engine: "hacktool-crypto".to_string(),
-        engine_version: hacktool_crypto::ENGINE_VERSION.to_string(),
+        engine: "cyberdeck-crypto".to_string(),
+        engine_version: cyberdeck_crypto::ENGINE_VERSION.to_string(),
     }
 }
 
@@ -686,10 +686,10 @@ pub struct BenchmarkWire {
 /// Measure the native engine's digest rate for an algorithm.
 #[tauri::command]
 pub fn benchmark(algo: String, duration_ms: Option<u64>) -> Result<BenchmarkWire, String> {
-    if hacktool_crypto::kdf_format(&algo).is_some() {
+    if cyberdeck_crypto::kdf_format(&algo).is_some() {
         return Err("KDF formats are deliberately slow; benchmark a digest instead".to_string());
     }
-    hacktool_crypto::apply_op(&algo, b"bench", None)?; // validate algo
+    cyberdeck_crypto::apply_op(&algo, b"bench", None)?; // validate algo
     let budget = Duration::from_millis(duration_ms.unwrap_or(2000).clamp(200, 10_000));
     let started = Instant::now();
     let mut count: u64 = 0;
@@ -697,7 +697,7 @@ pub fn benchmark(algo: String, duration_ms: Option<u64>) -> Result<BenchmarkWire
     while started.elapsed() < budget {
         for i in 0..1000u32 {
             input[16..20].copy_from_slice(&i.to_be_bytes());
-            let _ = hacktool_crypto::apply_op(&algo, &input, None)?;
+            let _ = cyberdeck_crypto::apply_op(&algo, &input, None)?;
             count += 1;
         }
     }
@@ -767,8 +767,8 @@ fn detect_gpus() -> Vec<GpuDevice> {
                     driver_version: fields.get(1).cloned().unwrap_or_else(|| "n/a".to_string()),
                     memory_total: fields.get(2).cloned().unwrap_or_else(|| "n/a".to_string()),
                     compute_cap: fields.get(3).cloned().unwrap_or_else(|| "n/a".to_string()),
-                    backend: "opencl/cuda via installed driver; hashcat (MIT) runs its own kernels on it".to_string(),
-                    usable: true,
+                    backend: "GPU device detected by NVIDIA tooling; CyberDeck has no native GPU recovery kernel".to_string(),
+                    usable: false,
                 }
             })
             .collect(),
@@ -781,14 +781,14 @@ pub fn device_info() -> DeviceInfoWire {
     let cpu_cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
     let gpu_devices = detect_gpus();
     let planner_note = if gpu_devices.is_empty() {
-        "no GPU driver detected: GPU engines activate automatically when one is installed; CPU engine is active now"
+        "No NVIDIA GPU detected via nvidia-smi. CyberDeck native recovery currently runs on the CPU."
     } else {
-        "GPU driver present: hashcat (MIT, own kernels) is cleared to run on it; no vendor bundling involved"
+        "GPU hardware detected, but CyberDeck does not yet have native GPU recovery. Hashcat is a separate optional executable adapter."
     };
     DeviceInfoWire {
         cpu_arch: std::env::consts::ARCH.to_string(),
         cpu_cores,
-        cpu_engine: "hacktool-crypto (rust)".to_string(),
+        cpu_engine: "cyberdeck-crypto (rust)".to_string(),
         gpu_devices,
         planner_note: planner_note.to_string(),
     }
@@ -804,7 +804,7 @@ mod tests {
     fn rules_find_capitalized_and_suffixed_variants() {
         // "hello" won't match, but "Hello123" will via the rules
         let body = b"hello\nworld\n";
-        let target = hacktool_crypto::apply_op("sha256", b"Hello123", None).unwrap();
+        let target = cyberdeck_crypto::apply_op("sha256", b"Hello123", None).unwrap();
         let result = rules_over_bytes("sha256", &hex::encode(target), body).unwrap();
         assert_eq!(result.mode, "rules");
         assert_eq!(result.matches.len(), 1);
@@ -830,7 +830,7 @@ mod tests {
     #[test]
     fn mask_finds_the_needle() {
         // sha256("42")
-        let target = hacktool_crypto::apply_op("sha256", b"42", None).unwrap();
+        let target = cyberdeck_crypto::apply_op("sha256", b"42", None).unwrap();
         let result = mask_attack("sha256", &hex::encode(target), "?d?d").unwrap();
         assert_eq!(result.matches.len(), 1);
         assert_eq!(result.matches[0].password, "42");
@@ -858,7 +858,7 @@ mod tests {
         // The literal before the classes takes a slot but is not a class; the
         // odometer must index classes, not slots, and still walk the whole space.
         assert_eq!(plan_mask("a?d?d").unwrap().candidate_count, 100);
-        let target = hacktool_crypto::apply_op("sha256", b"a99", None).unwrap();
+        let target = cyberdeck_crypto::apply_op("sha256", b"a99", None).unwrap();
         let result = mask_attack("sha256", &hex::encode(target), "a?d?d").unwrap();
         assert_eq!(result.matches.len(), 1);
         assert_eq!(result.matches[0].password, "a99");
@@ -867,7 +867,7 @@ mod tests {
 
     #[test]
     fn mask_with_non_ascii_literal_finds_the_needle() {
-        let target = hacktool_crypto::apply_op("sha256", "é7".as_bytes(), None).unwrap();
+        let target = cyberdeck_crypto::apply_op("sha256", "é7".as_bytes(), None).unwrap();
         let result = mask_attack("sha256", &hex::encode(target), "é?d").unwrap();
         assert_eq!(result.matches.len(), 1);
         assert_eq!(result.matches[0].password, "é7");
@@ -877,7 +877,7 @@ mod tests {
     #[test]
     fn rules_handle_non_ascii_wordlist_entries() {
         // Multi-byte words used to panic on byte-index slicing inside the rules.
-        let target = hacktool_crypto::apply_op("sha256", "Café123".as_bytes(), None).unwrap();
+        let target = cyberdeck_crypto::apply_op("sha256", "Café123".as_bytes(), None).unwrap();
         let result = rules_over_bytes("sha256", &hex::encode(target), "é\n日本\ncafé\n".as_bytes()).unwrap();
         assert_eq!(result.matches.len(), 1);
         assert_eq!(result.matches[0].password, "Café123");
@@ -888,7 +888,7 @@ mod tests {
     fn hybrid_handles_literal_prefixed_masks_and_non_ascii_words() {
         // "a?d?d" yields 100 suffixes despite the leading literal, and the
         // non-ASCII wordlist words must survive byte handling intact.
-        let target = hacktool_crypto::apply_op("sha256", "caféa99".as_bytes(), None).unwrap();
+        let target = cyberdeck_crypto::apply_op("sha256", "caféa99".as_bytes(), None).unwrap();
         let result = hybrid_over_bytes("sha256", &hex::encode(target), "a?d?d", "café\n日本\n".as_bytes()).unwrap();
         assert_eq!(result.matches.len(), 1);
         assert_eq!(result.matches[0].password, "caféa99");
@@ -898,7 +898,7 @@ mod tests {
 
     #[test]
     fn reverse_hybrid_finds_mask_prefixed_word() {
-        let target = hacktool_crypto::apply_op("sha256", b"42hello", None).unwrap();
+        let target = cyberdeck_crypto::apply_op("sha256", b"42hello", None).unwrap();
         let result = hybrid_reverse_over_bytes("sha256", &hex::encode(target), "?d?d", b"hello\nworld\n").unwrap();
         assert_eq!(result.matches.len(), 1);
         assert_eq!(result.matches[0].password, "42hello");
@@ -907,7 +907,7 @@ mod tests {
 
     #[test]
     fn combinator_finds_joined_words() {
-        let target = hacktool_crypto::apply_op("sha256", b"helloworld", None).unwrap();
+        let target = cyberdeck_crypto::apply_op("sha256", b"helloworld", None).unwrap();
         let result = combinator_over_bytes("sha256", &hex::encode(target), b"hello\nfoo\n", b"world\nbar\n").unwrap();
         assert_eq!(result.matches.len(), 1);
         assert_eq!(result.matches[0].password, "helloworld");
@@ -919,7 +919,7 @@ mod tests {
         let info = device_info();
         assert!(info.cpu_cores >= 1);
         assert!(!info.cpu_arch.is_empty());
-        // GPU devices report as usable through hashcat when a driver is present
-        assert!(info.gpu_devices.iter().all(|g| g.usable));
+        // Hardware detection must never imply an executable native GPU engine.
+        assert!(info.gpu_devices.iter().all(|g| !g.usable));
     }
 }

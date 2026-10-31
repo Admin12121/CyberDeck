@@ -3,7 +3,7 @@
 
 use std::sync::Mutex;
 
-use hacktool_packet::{parse_pcap, PacketMeta};
+use cyberdeck_packet::{parse_pcap, PacketMeta};
 use serde::Serialize;
 use tauri::{AppHandle, State};
 use tauri_plugin_dialog::DialogExt;

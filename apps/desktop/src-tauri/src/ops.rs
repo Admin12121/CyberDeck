@@ -1,9 +1,9 @@
 //! Native crypto ops over IPC; results carry Base64, hex and provenance (§6).
 
 use base64::Engine as _;
-use hacktool_crypto::{apply_op, catalog, OpInfo, ENGINE_ID, ENGINE_VERSION};
+use cyberdeck_crypto::{apply_op, catalog, OpInfo, ENGINE_ID, ENGINE_VERSION};
 use serde::Serialize;
-use hacktool_crypto::recipes::{execute_recipe, NativeRecipeResult, RecipeStep};
+use cyberdeck_crypto::recipes::{execute_recipe, NativeRecipeResult, RecipeStep};
 
 #[derive(Debug, Serialize)]
 pub struct OpResult {
@@ -48,7 +48,7 @@ pub fn crypto_catalog() -> Vec<OpInfo> {
 /// Verify a candidate password against a bcrypt/argon2 PHC string.
 #[tauri::command]
 pub fn kdf_verify(hash: String, candidate: String) -> Result<bool, String> {
-    hacktool_crypto::verify_kdf(hash.trim(), &candidate)
+    cyberdeck_crypto::verify_kdf(hash.trim(), &candidate)
 }
 
 #[cfg(test)]
@@ -59,7 +59,7 @@ mod tests {
     fn crypto_op_hashes_and_reports_provenance() {
         let result = crypto_op("sha256".into(), base64::engine::general_purpose::STANDARD.encode(b"abc"), None).unwrap();
         assert_eq!(result.output_hex, "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
-        assert_eq!(result.engine, "hacktool-crypto");
+        assert_eq!(result.engine, "cyberdeck-crypto");
         assert!(!result.engine_version.is_empty());
     }
 

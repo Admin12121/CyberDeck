@@ -1366,7 +1366,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "hacktool-core"
+name = "cyberdeck-core"
 version = "0.1.0"
 dependencies = [
  "serde",
@@ -1374,7 +1374,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "hacktool-crypto"
+name = "cyberdeck-crypto"
 version = "0.1.0"
 dependencies = [
  "argon2",
@@ -1397,14 +1397,14 @@ dependencies = [
 ]
 
 [[package]]
-name = "hacktool-desktop"
+name = "cyberdeck-desktop"
 version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
- "hacktool-core",
- "hacktool-crypto",
- "hacktool-packet",
- "hacktool-storage",
+ "cyberdeck-core",
+ "cyberdeck-crypto",
+ "cyberdeck-packet",
+ "cyberdeck-storage",
  "hex",
  "rcgen",
  "reqwest 0.12.28",
@@ -1423,7 +1423,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "hacktool-packet"
+name = "cyberdeck-packet"
 version = "0.1.0"
 dependencies = [
  "serde",
@@ -1431,7 +1431,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "hacktool-storage"
+name = "cyberdeck-storage"
 version = "0.1.0"
 dependencies = [
  "rusqlite",

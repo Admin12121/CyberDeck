@@ -4,8 +4,8 @@
 use std::path::Path;
 use std::sync::Mutex;
 
-use hacktool_crypto::{apply_op, detect_signature, entropy};
-use hacktool_storage::{ArtifactRecord, ArtifactStore, DEFAULT_CASE};
+use cyberdeck_crypto::{apply_op, detect_signature, entropy};
+use cyberdeck_storage::{ArtifactRecord, ArtifactStore, DEFAULT_CASE};
 use serde::Serialize;
 use tauri::{AppHandle, State};
 use tauri_plugin_dialog::DialogExt;

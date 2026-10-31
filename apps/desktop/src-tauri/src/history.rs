@@ -1,6 +1,6 @@
 //! Crack history (§5.5): recovered pairs persist until the user deletes them.
 
-use hacktool_storage::CrackEntry;
+use cyberdeck_storage::CrackEntry;
 use tauri::State;
 
 use crate::evidence::EvidenceCtx;

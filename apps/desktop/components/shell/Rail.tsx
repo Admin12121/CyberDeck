@@ -9,7 +9,7 @@ export function Rail() {
   return (
     <nav className="flex w-12 shrink-0 flex-col items-center border-r border-line bg-sidebar" aria-label="Categories">
       <div className="flex h-8 w-full shrink-0 items-center justify-center border-b border-line">
-        <img src="/logo.webp" alt="HackTool" className="h-5 w-5" />
+        <img src="/logo.webp" alt="CyberDeck" className="h-5 w-5" />
       </div>
       <div className="flex w-full flex-1 flex-col items-center gap-1 py-2">
         {CATEGORIES.map((category) => {

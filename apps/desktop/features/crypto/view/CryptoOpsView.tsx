@@ -215,7 +215,7 @@ export function CryptoOpsView() {
         </div>
       </Pane>
       <Pane title="Provenance" className="w-72 shrink-0">
-        <Field label="Engine" value={result?.engine ?? (desktop ? "hacktool-crypto (rust)" : "webcrypto fallback for SHA")} />
+        <Field label="Engine" value={result?.engine ?? (desktop ? "cyberdeck-crypto (rust)" : "webcrypto fallback for SHA")} />
         <Field label="Engine version" value={result?.engine_version ?? (desktop ? "native" : "n/a")} />
         <Field label="Hashing vs encryption" value="digests are one-way; passwords verify against KDF formats" />
         <Field label="Next arc" value="streaming digests, KDF formats, benchmark planner" />

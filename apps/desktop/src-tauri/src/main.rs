@@ -3,6 +3,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod attack;
+mod cases;
 mod crack;
 mod engines;
 mod evidence;
@@ -11,13 +12,14 @@ mod jobs;
 mod netscan;
 mod ops;
 mod pcap;
+mod storage_paths;
 mod web;
 mod webtls;
 
 use std::sync::Mutex;
 
 use evidence::EvidenceCtx;
-use hacktool_storage::ArtifactStore;
+use cyberdeck_storage::ArtifactStore;
 use tauri::Manager;
 
 fn main() {
@@ -46,7 +48,7 @@ fn main() {
         .setup(|app| {
             // Case store lives under the OS app-data directory; the SQLite
             // index and artifact copies are created on first launch (§8.4).
-            let data_dir = app.path().app_data_dir()?.join("hacktool");
+            let data_dir = storage_paths::data_dir(app.handle()).map_err(std::io::Error::other)?;
             let store = ArtifactStore::open(&data_dir.join("cases.db"))
                 .map_err(std::io::Error::other)?;
             app.manage(EvidenceCtx {
@@ -63,6 +65,10 @@ fn main() {
             ops::recipe_run,
             ops::kdf_verify,
             evidence::file_import_dialog,
+            cases::case_list,
+            cases::case_create,
+            cases::case_findings_list,
+            cases::case_findings_add,
             evidence::file_list,
             evidence::file_hex,
             evidence::file_strings,
@@ -109,5 +115,5 @@ fn main() {
             netscan::netscan_discover_hosts,
         ])
         .run(tauri::generate_context!())
-        .expect("HackTool desktop runtime failed to start");
+        .expect("CyberDeck desktop runtime failed to start");
 }

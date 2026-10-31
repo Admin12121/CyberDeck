@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "HackTool",
+  "productName": "CyberDeck",
   "version": "0.1.0",
-  "identifier": "dev.hacktool.workbench",
+  "identifier": "dev.cyberdeck.workbench",
   "build": {
     "beforeDevCommand": "bun run dev",
     "beforeBuildCommand": "bun run build",
@@ -12,7 +12,7 @@
   "app": {
     "windows": [
       {
-        "title": "HackTool — Cybersecurity Workbench",
+        "title": "CyberDeck — Cybersecurity Workbench",
         "width": 1440,
         "height": 900,
         "minWidth": 1100,

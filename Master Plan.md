@@ -485,7 +485,7 @@ A single user-facing module may use several implementation engines. Selection sh
 | Discovery & assessment | Nmap/Zenmap, Nikto, Nuclei, SQLmap | One scan workspace with engine-specific configuration and normalized findings. |
 | Data/crypto recipes | CyberChef, Rust crypto libraries | Preserve full recipe interface and expand with native processing where useful. |
 | Digital forensics | ExifTool, Binwalk, YARA-X | Bundled or linked compatible parsers; one evidence model. |
-| CTF helpers | HackTools, custom Rust utilities | Reimplement general-purpose operations where practical; integrate into existing categories. |
+| CTF helpers | __UPSTREAM_CYBERDECKS__, custom Rust utilities | Reimplement general-purpose operations where practical; integrate into existing categories. |
 | Reverse (future) | Ghidra, Rizin, LIEF, Capstone | Separate deep UI and analysis data model; defer integration. |
 
 ### Integration statuses

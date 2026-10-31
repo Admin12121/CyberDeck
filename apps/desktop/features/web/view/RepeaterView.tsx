@@ -12,7 +12,7 @@ interface RepeaterTab {
   error: string | null;
 }
 
-const SAMPLE_REQUEST = `GET / HTTP/1.1\r\nHost: example.com\r\nUser-Agent: HackTool-Workbench/0.1\r\nAccept: */*\r\n\r\n`;
+const SAMPLE_REQUEST = `GET / HTTP/1.1\r\nHost: example.com\r\nUser-Agent: CyberDeck-Workbench/0.1\r\nAccept: */*\r\n\r\n`;
 
 export function RepeaterView() {
   const desktop = isDesktop();

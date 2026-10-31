@@ -1,5 +1,5 @@
 [package]
-name = "hacktool-crypto"
+name = "cyberdeck-crypto"
 description = "Native crypto and transformation operations (Master Plan section 5.4/5.5)"
 version.workspace = true
 edition.workspace = true

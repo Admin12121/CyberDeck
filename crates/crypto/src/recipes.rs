@@ -1,5 +1,5 @@
 //! The native byte-oriented recipe engine.
-//! This module implements HackTool's existing transformation semantics in Rust.
+//! This module implements CyberDeck's existing transformation semantics in Rust.
 //! Unported operations continue to run in the TypeScript implementation until
 //! reference and parity tests prove their Rust equivalents.
 

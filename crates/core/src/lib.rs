@@ -1,4 +1,4 @@
-//! hacktool-core — shared domain types for the HackTool workbench.
+//! cyberdeck-core — shared domain types for the CyberDeck workbench.
 //!
 //! The canonical capability/artifact/job contracts (Master Plan §8) live here so
 //! the Tauri shell and future engine crates share one vocabulary. Presentation

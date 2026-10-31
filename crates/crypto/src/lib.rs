@@ -7,7 +7,7 @@ use hmac::{Hmac, Mac};
 use sha2::{Digest, Sha224, Sha256, Sha384, Sha512};
 use sha3::Sha3_512;
 
-pub const ENGINE_ID: &str = "hacktool-crypto";
+pub const ENGINE_ID: &str = "cyberdeck-crypto";
 pub const ENGINE_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// Catalog entry mirroring the frontend operation model.
@@ -332,7 +332,7 @@ mod tests {
 
     #[test]
     fn base64_roundtrip() {
-        let data = b"HackTool pipeline \xf0\x9f\x94\xa5";
+        let data = b"CyberDeck pipeline \xf0\x9f\x94\xa5";
         let encoded = apply_op("to_base64", data, None).unwrap();
         let decoded = apply_op("from_base64", &encoded, None).unwrap();
         assert_eq!(decoded, data);

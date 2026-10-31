@@ -1,6 +1,6 @@
 [package]
-name = "hacktool-desktop"
-description = "HackTool desktop shell (Tauri 2) — typed IPC, job manager, packaging"
+name = "cyberdeck-desktop"
+description = "CyberDeck desktop shell (Tauri 2) — typed IPC, job manager, packaging"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -9,10 +9,10 @@ license.workspace = true
 tauri-build = { workspace = true }
 
 [dependencies]
-hacktool-core = { path = "../../../crates/core" }
-hacktool-crypto = { path = "../../../crates/crypto" }
-hacktool-packet = { path = "../../../crates/packet" }
-hacktool-storage = { path = "../../../crates/storage" }
+cyberdeck-core = { path = "../../../crates/core" }
+cyberdeck-crypto = { path = "../../../crates/crypto" }
+cyberdeck-packet = { path = "../../../crates/packet" }
+cyberdeck-storage = { path = "../../../crates/storage" }
 base64 = "0.22"
 hex = "0.4"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }

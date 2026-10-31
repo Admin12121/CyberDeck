@@ -3,13 +3,13 @@
   "configVersion": 1,
   "workspaces": {
     "": {
-      "name": "hacktool",
+      "name": "cyberdeck",
       "devDependencies": {
         "sharp": "^0.35.5",
       },
     },
     "apps/desktop": {
-      "name": "@hacktool/desktop",
+      "name": "@cyberdeck/desktop",
       "version": "0.1.0",
       "dependencies": {
         "@tauri-apps/api": "^2.12.4",
@@ -34,7 +34,7 @@
 
     "@emnapi/runtime": ["@emnapi/runtime@1.11.3", "", { "dependencies": { "tslib": "^2.4.0" } }, "sha512-Xz4Tpyki7XyrpbUK1jR1AhdAdaXyhhY4lZ3neLodmhpuWfy2PAQN5B46sAiU4liOXGLkHypn/qU+jvfWSCYYLA=="],
 
-    "@hacktool/desktop": ["@hacktool/desktop@workspace:apps/desktop"],
+    "@cyberdeck/desktop": ["@cyberdeck/desktop@workspace:apps/desktop"],
 
     "@img/colour": ["@img/colour@1.1.0", "", {}, "sha512-Td76q7j57o/tLVdgS746cYARfSyxk8iEfRxewL9h4OMzYhbW4TAcppl0mT4eyqXddh6L/jwoM75mo7ixa/pCeQ=="],
 
