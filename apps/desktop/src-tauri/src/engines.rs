@@ -1,29 +1,40 @@
 //! External engine adapters (hashcat MIT, john GPLv2 sidecar): process
-//! creation, timeouts and output parsing live here (docs/engine-licensing.md).
+//! process orchestration is here; parsing/capture are feature infrastructure adapters.
 
-use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::path::PathBuf;
+use std::process::Command;
 use std::time::{Duration, Instant};
 
-use serde::Serialize;
 use tauri::{AppHandle, Manager, State};
-use tauri_plugin_dialog::DialogExt;
 
-use crate::attack::AttackMatch;
+#[path = "features/crypto/domain/engines.rs"]
+mod domain;
+pub use domain::{EngineAttackResult, EngineStatus};
 
-const PROCESS_TIMEOUT: Duration = Duration::from_secs(300);
-const MAX_REPORTED_MATCHES: usize = 100;
+#[path = "features/crypto/infrastructure/engine_formats.rs"]
+mod engine_formats;
+pub use engine_formats::{
+    hashcat_mode, john_format, parse_hashcat_outfile, parse_hashcat_version, parse_john_show,
+    parse_john_version,
+};
 
-#[derive(Debug, Clone, Serialize)]
-pub struct EngineStatus {
-    pub id: String,
-    pub label: String,
-    pub license: String,
-    pub available: bool,
-    pub version: String,
-    pub source: String,
-    pub note: String,
-}
+#[path = "features/crypto/application/engines.rs"]
+mod application;
+#[path = "features/crypto/infrastructure/sidecar.rs"]
+mod sidecar;
+
+#[path = "features/crypto/infrastructure/executables.rs"]
+mod executables;
+pub use executables::which_exists;
+
+#[path = "features/crypto/infrastructure/scratch.rs"]
+mod scratch;
+
+#[path = "features/crypto/infrastructure/process.rs"]
+pub(crate) mod process;
+use process::run_with_timeout;
+
+
 
 /// Where a binary may live: the bundled resource directory first, then PATH.
 fn candidate_paths(app: &AppHandle, binary: &str) -> Vec<PathBuf> {
@@ -38,70 +49,6 @@ fn candidate_paths(app: &AppHandle, binary: &str) -> Vec<PathBuf> {
     }
     candidates.push(PathBuf::from(exe)); // resolved from PATH by Command
     candidates
-}
-
-fn run_with_timeout(
-    mut command: Command,
-    timeout: Duration,
-) -> Result<(std::process::ExitStatus, Vec<u8>, Vec<u8>), String> {
-    command
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .stdin(Stdio::null());
-    let mut child = command
-        .spawn()
-        .map_err(|e| format!("cannot start process: {e}"))?;
-    let started = Instant::now();
-    loop {
-        match child.try_wait().map_err(|e| e.to_string())? {
-            Some(status) => {
-                let mut stdout = Vec::new();
-                let mut stderr = Vec::new();
-                if let Some(mut out) = child.stdout.take() {
-                    use std::io::Read as _;
-                    let _ = out.read_to_end(&mut stdout);
-                }
-                if let Some(mut err) = child.stderr.take() {
-                    use std::io::Read as _;
-                    let _ = err.read_to_end(&mut stderr);
-                }
-                return Ok((status, stdout, stderr));
-            }
-            None if started.elapsed() > timeout => {
-                let _ = child.kill();
-                return Err(format!(
-                    "engine exceeded the {}s timeout; output discarded",
-                    timeout.as_secs()
-                ));
-            }
-            None => std::thread::sleep(Duration::from_millis(100)),
-        }
-    }
-}
-
-pub fn parse_hashcat_version(output: &str) -> Option<String> {
-    output
-        .lines()
-        .find_map(|line| {
-            let trimmed = line.trim().trim_start_matches('v');
-            let mut split = trimmed.split(|c: char| !c.is_ascii_digit() && c != '.');
-            let head = split.next()?.to_string();
-            head.contains('.').then_some(head)
-        })
-        .map(|v| format!("v{v}"))
-}
-
-pub fn parse_john_version(output: &str) -> Option<String> {
-    output
-        .lines()
-        .find(|l| l.contains("John the Ripper"))
-        .map(|l| {
-            l.trim()
-                .split_whitespace()
-                .take(4)
-                .collect::<Vec<_>>()
-                .join(" ")
-        })
 }
 
 fn version_of(
@@ -163,109 +110,6 @@ pub fn engines_detect(app: AppHandle) -> Vec<EngineStatus> {
 
 /// hashcat -m mode for a digest family; KDF and crypt formats included so
 /// cracking is reachable through the engine.
-pub fn hashcat_mode(algo: &str) -> Option<u32> {
-    match algo {
-        "md5" => Some(0),
-        "sha1" => Some(100),
-        "sha256" => Some(1400),
-        "sha512" => Some(1700),
-        "ntlm" => Some(1000),
-        "md4" => Some(900),
-        "lm" => Some(3000),
-        "bcrypt" => Some(3200),
-        "sha512crypt" => Some(1800),
-        "sha256crypt" => Some(17400),
-        "md5crypt" => Some(500),
-        "apr1" => Some(1600),
-        "phpass" => Some(400),
-        "mscash2" => Some(2100),
-        "sunmd5" => Some(7400),
-        "yescrypt" => Some(22700),
-        _ => None,
-    }
-}
-
-pub fn john_format(algo: &str) -> Option<&'static str> {
-    match algo {
-        "md5" => Some("raw-md5"),
-        "sha1" => Some("raw-sha1"),
-        "sha256" => Some("raw-sha256"),
-        "sha512" => Some("raw-sha512"),
-        "bcrypt" => Some("bcrypt"),
-        "sha512crypt" => Some("sha512crypt"),
-        "sha256crypt" => Some("sha256crypt"),
-        "md5crypt" => Some("md5crypt"),
-        "apr1" => Some("apr1"),
-        "phpass" => Some("phpass"),
-        "mscash2" => Some("mscash2"),
-        "sunmd5" => Some("sunmd5"),
-        "yescrypt" => Some("yescrypt"),
-        "lm" => Some("LM"),
-        _ => None,
-    }
-}
-
-/// Collect hash:plain pairs from a hashcat -o outfile.
-pub fn parse_hashcat_outfile(text: &str) -> Vec<AttackMatch> {
-    text.lines()
-        .filter_map(|line| {
-            let (hash, plain) = line.split_once(':')?;
-            (!hash.is_empty() && !plain.is_empty()).then(|| AttackMatch {
-                line_no: 0,
-                password: plain.trim().to_string(),
-            })
-        })
-        .collect()
-}
-
-/// Collect hash:plain pairs from `john --show`.
-pub fn parse_john_show(text: &str) -> Vec<AttackMatch> {
-    text.lines()
-        .filter(|line| {
-            line.contains(':') && !line.contains("password hashes") && !line.starts_with('\'')
-        })
-        .filter_map(|line| {
-            let (hash, plain) = line.split_once(':')?;
-            (!hash.trim().is_empty() && !plain.trim().is_empty()).then(|| AttackMatch {
-                line_no: 0,
-                password: plain.trim().to_string(),
-            })
-        })
-        .collect()
-}
-
-fn scratch_dir(app: &AppHandle) -> Result<PathBuf, String> {
-    let dir = app
-        .path()
-        .app_cache_dir()
-        .map_err(|e| format!("cannot resolve cache dir: {e}"))?
-        .join("engine-scratch");
-    std::fs::create_dir_all(&dir).map_err(|e| format!("cannot create engine scratch dir: {e}"))?;
-    Ok(dir)
-}
-
-fn write_hash_file(dir: &Path, algo: &str, hash: &str, engine: &str) -> Result<PathBuf, String> {
-    let file = dir.join(format!(
-        "{engine}-{algo}-{}.txt",
-        &hash[..hash.len().min(12)]
-    ));
-    std::fs::write(&file, format!("{hash}\n"))
-        .map_err(|e| format!("cannot write hash file: {e}"))?;
-    Ok(file)
-}
-
-#[derive(Debug, Serialize)]
-pub struct EngineAttackResult {
-    pub engine: String,
-    pub engine_version: String,
-    pub algo: String,
-    pub mode: String,
-    pub tried_note: String,
-    pub matches: Vec<AttackMatch>,
-    pub duration_ms: u64,
-    pub raw_tail: String,
-}
-
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 pub fn engine_attack(
@@ -277,172 +121,92 @@ pub fn engine_attack(
     mask: Option<String>,
     ctx: State<'_, crate::evidence::EvidenceCtx>,
 ) -> Result<EngineAttackResult, String> {
-    let target = target_hash.trim().to_lowercase();
-    if target.is_empty() {
-        return Err("target hash is empty".to_string());
-    }
-    if !matches!(mode.as_str(), "wordlist" | "mask") {
-        return Err("engine attacks support wordlist and mask modes this arc".to_string());
-    }
-    let started = Instant::now();
+    let target = application::normalized_target(&target_hash)?;
+    application::validate_mode(&engine, &mode, mask.as_deref())?;
 
-    // The attack input (wordlist file) arrives through the dialog; mask needs
-    // no file. Wordlist: pick first.
-    let scratch = scratch_dir(&app)?;
-    match engine.as_str() {
-        "hashcat" => {
-            let hash_mode =
-                hashcat_mode(&algo).ok_or_else(|| format!("hashcat has no -m mode for {algo}"))?;
-            let binary = if cfg!(windows) {
-                "hashcat.exe"
-            } else {
-                "hashcat"
-            };
-            let bin_path = candidate_paths(&app, "hashcat")
-                .into_iter()
-                .find(|p| p.is_absolute() || which_exists(binary))
-                .ok_or("hashcat is not detected on this machine")?;
-            let hash_file = write_hash_file(&scratch, &algo, &target, "hashcat")?;
-            let out_file = scratch.join(format!("hashcat-{}.out", &target[..12.min(target.len())]));
-            let _ = std::fs::remove_file(&out_file);
-            let mut command = Command::new(bin_path);
-            command
-                .arg("-m")
-                .arg(hash_mode.to_string())
-                .arg("--potfile-disable")
-                .arg("-o")
-                .arg(&out_file);
-            if mode == "mask" {
-                let mask = mask.clone().unwrap_or_default();
-                if mask.is_empty() {
-                    return Err("mask attack needs a mask pattern".to_string());
-                }
-                command.arg("-a").arg("3").arg(&hash_file).arg(mask);
-            } else {
-                let picked = app
-                    .dialog()
-                    .file()
-                    .blocking_pick_file()
-                    .ok_or("cancelled")?;
-                let wordlist = picked
-                    .as_path()
-                    .ok_or("unsupported file location")?
-                    .to_path_buf();
-                command.arg("-a").arg("0").arg(&hash_file).arg(wordlist);
-            }
-            let (status, stdout, stderr) = run_with_timeout(command, PROCESS_TIMEOUT)?;
-            let outfile_text = std::fs::read_to_string(&out_file).unwrap_or_default();
-            let mut matches = parse_hashcat_outfile(&outfile_text);
-            matches.truncate(MAX_REPORTED_MATCHES);
-            crate::attack::record_history(&ctx, &algo, &target, "hashcat", &matches);
-            let mut raw = format!(
-                "{}{}",
-                String::from_utf8_lossy(&stdout),
-                String::from_utf8_lossy(&stderr)
-            );
-            raw.truncate(4000);
-            let engine_version = version_of(&app, "hashcat", &["--version"], parse_hashcat_version)
-                .map(|(v, _)| v)
-                .unwrap_or_default();
-            Ok(EngineAttackResult {
-                engine: "hashcat".to_string(),
-                engine_version,
-                algo,
-                mode,
-                tried_note: if status.success() {
-                    "completed"
-                } else {
-                    "engine returned nonzero; see raw output"
-                }
-                .to_string(),
-                matches,
-                duration_ms: started.elapsed().as_millis() as u64,
-                raw_tail: raw,
-            })
-        }
-        "john" => {
-            let fmt = john_format(&algo).ok_or_else(|| format!("john has no format for {algo}"))?;
-            let binary = if cfg!(windows) { "john.exe" } else { "john" };
-            let bin_path = candidate_paths(&app, "john")
-                .into_iter()
-                .find(|p| p.is_absolute() || which_exists(binary))
-                .ok_or("john is not detected on this machine")?;
-            if mode == "mask" {
-                return Err(
-                    "john mask mode arrives with the mask engine arc; use wordlist or native"
-                        .to_string(),
-                );
-            }
-            let picked = app
-                .dialog()
-                .file()
-                .blocking_pick_file()
-                .ok_or("cancelled")?;
-            let wordlist = picked
-                .as_path()
-                .ok_or("unsupported file location")?
-                .to_path_buf();
-            let hash_file = write_hash_file(&scratch, &algo, &target, "john")?;
-            let mut command = Command::new(&bin_path);
-            command
-                .arg(format!("--format={fmt}"))
-                .arg(format!("--wordlist={}", wordlist.display()))
-                .arg(&hash_file);
-            let (status, stdout, stderr) = run_with_timeout(command, PROCESS_TIMEOUT)?;
-            // secrets live in john's pot; --show reads them back
-            let mut show = Command::new(bin_path);
-            show.arg("--show")
-                .arg(format!("--format={fmt}"))
-                .arg(&hash_file);
-            let (_, show_out, _) = run_with_timeout(show, Duration::from_secs(30))?;
-            let mut matches = parse_john_show(&String::from_utf8_lossy(&show_out));
-            matches.truncate(MAX_REPORTED_MATCHES);
-            crate::attack::record_history(&ctx, &algo, &target, "john", &matches);
-            let mut raw = format!(
-                "{}{}",
-                String::from_utf8_lossy(&stdout),
-                String::from_utf8_lossy(&stderr)
-            );
-            raw.truncate(4000);
-            let engine_version = version_of(&app, "john", &["--version"], parse_john_version)
-                .map(|(v, _)| v)
-                .unwrap_or_default();
-            let _ = status;
-            Ok(EngineAttackResult {
-                engine: "john".to_string(),
-                engine_version,
-                algo,
-                mode,
-                tried_note: "wordlist + john pot".to_string(),
-                matches,
-                duration_ms: started.elapsed().as_millis() as u64,
-                raw_tail: raw,
-            })
-        }
-        other => Err(format!("unknown engine: {other}")),
-    }
-}
-
-pub fn which_exists(binary: &str) -> bool {
-    if cfg!(windows) {
-        std::process::Command::new("where")
-            .arg(binary)
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false)
+    // Resolve supported hash formats and sidecar binaries before creating files.
+    let binary_name = if cfg!(windows) {
+        format!("{engine}.exe")
     } else {
-        std::process::Command::new("sh")
-            .arg("-c")
-            .arg(format!("command -v {binary}"))
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false)
+        engine.clone()
+    };
+    let binary = candidate_paths(&app, &engine)
+        .into_iter()
+        .find(|p| {
+            if p.is_absolute() {
+                p.is_file()
+            } else {
+                which_exists(&binary_name)
+            }
+        })
+        .ok_or_else(|| format!("{engine} is not detected on this machine"))?;
+    let hash_mode = if engine == "hashcat" {
+        Some(hashcat_mode(&algo).ok_or_else(|| format!("hashcat has no -m mode for {algo}"))?)
+    } else {
+        None
+    };
+    let john_fmt = if engine == "john" {
+        Some(john_format(&algo).ok_or_else(|| format!("john has no format for {algo}"))?)
+    } else {
+        None
+    };
+    let wordlist = if mode == "wordlist" {
+        Some(crate::crack::resolved_wordlist(&app, None)?.0)
+    } else {
+        None
+    };
+
+    let started = Instant::now();
+    let cache = app.path().app_cache_dir()
+        .map_err(|e| format!("cannot resolve cache dir: {e}"))?;
+    let scratch = scratch::ScratchDir::create(&cache)?;
+    let run = match engine.as_str() {
+        "hashcat" => sidecar::hashcat(
+            &binary,
+            hash_mode.expect("validated hashcat format"),
+            &target,
+            &mode,
+            mask.as_deref(),
+            wordlist.as_deref(),
+            &scratch,
+        )?,
+        "john" => sidecar::john(
+            &binary,
+            john_fmt.expect("validated john format"),
+            &target,
+            wordlist.as_deref().ok_or("wordlist is required")?,
+            &scratch,
+        )?,
+        _ => unreachable!("validated engine"),
+    };
+    let version = match engine.as_str() {
+        "hashcat" => version_of(&app, "hashcat", &["--version"], parse_hashcat_version),
+        _ => version_of(&app, "john", &["--version"], parse_john_version),
     }
+    .map(|(value, _)| value)
+    .unwrap_or_default();
+    let result = application::report(
+        engine,
+        version,
+        algo.clone(),
+        mode,
+        started.elapsed().as_millis() as u64,
+        run,
+    );
+    crate::attack::record_history(&ctx, &algo, &target, &result.engine, &result.matches);
+    Ok(result)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn external_executable_lookup_does_not_invoke_a_shell() {
+        assert!(!which_exists("nonexistent-program-DO-NOT-EXECUTE"));
+        #[cfg(unix)]
+        assert!(which_exists("sh"));
+    }
 
     #[test]
     fn hashcat_mode_map_covers_digests_and_kdf() {

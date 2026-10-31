@@ -59,20 +59,27 @@ pub fn observe(packets: &[PacketMeta]) -> PassiveInventory {
         let bytes = packet.incl_len as u64;
         let mut endpoints_recorded = true;
         for (ip, sending) in [(src, true), (dst, false)] {
-            if !hosts.contains_key(&ip) && hosts.len() == MAX_INVENTORY_HOSTS {
-                hosts_limited = true;
-                endpoints_recorded = false;
-                continue;
-            }
-            let h = hosts.entry(ip).or_insert_with(|| HostObservation {
-                address: ip.to_string(),
-                first_packet_index: index,
-                last_packet_index: index,
-                packets_sent: 0,
-                packets_received: 0,
-                captured_bytes_sent: 0,
-                captured_bytes_received: 0,
-            });
+            // A single tree lookup per endpoint; existing hosts still update at capacity.
+            let at_limit = hosts.len() >= MAX_INVENTORY_HOSTS;
+            let h = match hosts.entry(ip) {
+                std::collections::btree_map::Entry::Occupied(entry) => entry.into_mut(),
+                std::collections::btree_map::Entry::Vacant(entry) => {
+                    if at_limit {
+                        hosts_limited = true;
+                        endpoints_recorded = false;
+                        continue;
+                    }
+                    entry.insert(HostObservation {
+                        address: ip.to_string(),
+                        first_packet_index: index,
+                        last_packet_index: index,
+                        packets_sent: 0,
+                        packets_received: 0,
+                        captured_bytes_sent: 0,
+                        captured_bytes_received: 0,
+                    })
+                }
+            };
             h.last_packet_index = index;
             if sending {
                 h.packets_sent = h.packets_sent.saturating_add(1);
@@ -93,22 +100,27 @@ pub fn observe(packets: &[PacketMeta]) -> PassiveInventory {
         if !stream_id.starts_with("tcp|") && !stream_id.starts_with("udp|") {
             continue;
         }
-        if !flows.contains_key(stream_id) && flows.len() == MAX_INVENTORY_FLOWS {
-            flows_limited = true;
-            continue;
+        // Existing flows update without cloning the stream ID for every packet.
+        if let Some(flow) = flows.get_mut(stream_id) {
+            flow.last_packet_index = index;
+            flow.packet_count = flow.packet_count.saturating_add(1);
+            flow.captured_bytes = flow.captured_bytes.saturating_add(bytes);
+        } else {
+            if flows.len() >= MAX_INVENTORY_FLOWS {
+                flows_limited = true;
+                continue;
+            }
+            flows.insert(
+                stream_id.clone(),
+                FlowObservation {
+                    stream_id: stream_id.clone(),
+                    first_packet_index: index,
+                    last_packet_index: index,
+                    packet_count: 1,
+                    captured_bytes: bytes,
+                },
+            );
         }
-        let flow = flows
-            .entry(stream_id.clone())
-            .or_insert_with(|| FlowObservation {
-                stream_id: stream_id.clone(),
-                first_packet_index: index,
-                last_packet_index: index,
-                packet_count: 0,
-                captured_bytes: 0,
-            });
-        flow.last_packet_index = index;
-        flow.packet_count = flow.packet_count.saturating_add(1);
-        flow.captured_bytes = flow.captured_bytes.saturating_add(bytes);
     }
     PassiveInventory {
         packets_scanned: packets.len(),
@@ -257,8 +269,13 @@ mod tests {
         let observed = observe(&packets);
         assert!(observed.hosts_limited);
         assert_eq!(observed.hosts.len(), MAX_INVENTORY_HOSTS);
-        assert!(observed.flows.iter().all(|flow| flow.stream_id != "udp|orphan"));
-        assert!(observed.flows.iter().any(|flow| flow.stream_id == "udp|existing"));
+        assert!(observed
+            .flows
+            .iter()
+            .all(|flow| flow.stream_id != "udp|orphan"));
+        assert!(observed
+            .flows
+            .iter()
+            .any(|flow| flow.stream_id == "udp|existing"));
     }
-
 }

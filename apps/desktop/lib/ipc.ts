@@ -167,6 +167,8 @@ export interface CaseEventWire {
 
 export interface CaseReportWire {
   schema_version: number;
+  manifest_sha256: string;
+  provenance: ProvenanceVerificationWire;
   generated_ms: number;
   case: CaseRecordWire;
   artifacts: Pick<ArtifactRecord, "id" | "name" | "size" | "sha256" | "signature" | "imported_at">[];
@@ -183,6 +185,43 @@ export async function caseEventsList(caseId: string): Promise<CaseEventWire[]> {
 export async function caseReport(caseId: string): Promise<CaseReportWire> {
   if (!inTauri) throw new Error("Case export requires the desktop runtime");
   return invoke<CaseReportWire>("case_report", { caseId });
+}
+
+export interface ProvenanceVerificationWire {
+  verified_events: number;
+  head_sha256: string;
+}
+
+export interface CaseIntegritySummaryWire {
+  case_id: string;
+  verified_artifacts: number;
+  verified_bytes: number;
+  provenance: ProvenanceVerificationWire;
+}
+
+/** A successful chain check needs a separately retained head to detect rewriting. */
+export async function caseProvenanceVerify(caseId: string): Promise<ProvenanceVerificationWire> {
+  if (!inTauri) throw new Error("Case provenance verification requires the desktop runtime");
+  return invoke<ProvenanceVerificationWire>("case_provenance_verify", { caseId });
+}
+
+/** Compare provenance with a trusted head kept outside this case database. */
+export async function caseProvenanceVerifyAgainst(
+  caseId: string, trustedHeadSha256: string,
+): Promise<ProvenanceVerificationWire> {
+  if (!inTauri) throw new Error("Trusted provenance verification requires the desktop runtime");
+  return invoke<ProvenanceVerificationWire>("case_provenance_verify_against", { caseId, trustedHeadSha256 });
+}
+
+/** Verify all selected-case artifact bytes and the provenance chain. */
+export async function caseIntegrityVerify(caseId: string): Promise<CaseIntegritySummaryWire> {
+  if (!inTauri) throw new Error("Case integrity verification requires the desktop runtime");
+  return invoke<CaseIntegritySummaryWire>("case_integrity_verify", { caseId });
+}
+
+export async function caseArtifactVerify(caseId: string, artifactId: string): Promise<boolean> {
+  if (!inTauri) throw new Error("Artifact integrity verification requires the desktop runtime");
+  return invoke<boolean>("case_artifact_verify", { caseId, artifactId });
 }
 
 // --- evidence ----------------------------------------------------------------
@@ -265,6 +304,7 @@ export interface SignatureScanWire {
   file_bytes: number;
   truncated: boolean;
   integrity_checked: boolean;
+  hit_cap_reached: boolean;
 }
 
 /** Extract a bounded embedded Gzip member to the currently selected case. */
@@ -292,6 +332,87 @@ export async function fileHex(caseId: string, id: string, offset: number, len: n
 export async function fileStrings(caseId: string, id: string, minLen: number, maxHits: number): Promise<StringHitWire[]> {
   if (!inTauri) throw new Error("evidence inspection requires the desktop runtime");
   return invoke<StringHitWire[]>("file_strings", { caseId, id, minLen, maxHits });
+}
+
+export interface ForensicStringMatchWire {
+  offset: number;
+  encoding: "ascii" | "utf16le" | "utf16be";
+  text: string;
+}
+
+export interface ForensicStringsResponseWire {
+  hits: ForensicStringMatchWire[];
+  analyzed_offset: number;
+  analyzed_bytes: number;
+  file_bytes: number;
+  integrity_checked: boolean;
+  coverage_truncated: boolean;
+  hit_limit_reached: boolean;
+}
+
+export interface EntropyRegionWire {
+  offset: number;
+  length: number;
+  entropy: number;
+}
+
+export interface ForensicEntropyResponseWire {
+  regions: EntropyRegionWire[];
+  analyzed_offset: number;
+  analyzed_bytes: number;
+  file_bytes: number;
+  integrity_checked: boolean;
+  coverage_truncated: boolean;
+  block_size: number;
+}
+
+export interface MetadataFieldWire {
+  namespace: string;
+  key: string;
+  value: string;
+  offset: number;
+}
+
+export interface ForensicMetadataResponseWire {
+  report: {
+    format: string;
+    fields: MetadataFieldWire[];
+    parsed_bytes: number;
+    complete: boolean;
+  };
+  analyzed_offset: number;
+  analyzed_bytes: number;
+  file_bytes: number;
+  integrity_checked: boolean;
+  coverage_truncated: boolean;
+}
+
+/** A bounded, SHA-verified evidence window; report scan coverage separately. */
+export async function fileStringsScan(
+  caseId: string, id: string, offset: number, len: number, minLen: number, maxHits: number,
+): Promise<ForensicStringsResponseWire> {
+  if (!inTauri) throw new Error("Forensic string scanning requires the desktop runtime");
+  return invoke<ForensicStringsResponseWire>("file_strings_scan", { caseId, id, offset, len, minLen, maxHits });
+}
+
+export async function fileEntropyRegions(
+  caseId: string, id: string, offset: number, len: number, blockSize: number,
+): Promise<ForensicEntropyResponseWire> {
+  if (!inTauri) throw new Error("Forensic entropy scanning requires the desktop runtime");
+  return invoke<ForensicEntropyResponseWire>("file_entropy_regions", { caseId, id, offset, len, blockSize });
+}
+
+export async function fileMetadataScan(caseId: string, id: string): Promise<ForensicMetadataResponseWire> {
+  if (!inTauri) throw new Error("Forensic metadata scanning requires the desktop runtime");
+  return invoke<ForensicMetadataResponseWire>("file_metadata_scan", { caseId, id });
+}
+
+/** Explicit action, never automatic, for bounded nested archive extraction. */
+export async function fileExtractNestedArchive(
+  caseId: string, id: string, format: "zip" | "tar" | "gzip", offset: number, maxDepth: number,
+): Promise<ArtifactRecord[]> {
+  if (!inTauri) throw new Error("Nested extraction requires the desktop runtime");
+  return invoke<ArtifactRecord[]>("file_extract_nested_archive", { caseId, id, format, offset, maxDepth });
 }
 
 // --- captures ----------------------------------------------------------------

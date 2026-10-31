@@ -1,24 +1,26 @@
-//! Crack history (§5.5): recovered pairs persist until the user deletes them.
-
+//! Stable Tauri crack-history commands; storage access lives in infrastructure.
 use cyberdeck_storage::CrackEntry;
 use tauri::State;
 
 use crate::evidence::EvidenceCtx;
 
+#[path = "features/crypto/infrastructure/history.rs"]
+mod storage;
+#[path = "features/crypto/infrastructure/retention.rs"]
+mod retention;
+pub(crate) use retention::persist;
+
 #[tauri::command]
 pub fn crack_history_list(ctx: State<'_, EvidenceCtx>) -> Result<Vec<CrackEntry>, String> {
-    let store = ctx.store.lock().expect("artifact store poisoned");
-    store.list_crack_entries()
+    storage::list(ctx.inner())
 }
 
 #[tauri::command]
 pub fn crack_history_delete(ctx: State<'_, EvidenceCtx>, id: i64) -> Result<(), String> {
-    let store = ctx.store.lock().expect("artifact store poisoned");
-    store.delete_crack_entry(id)
+    storage::delete(ctx.inner(), id)
 }
 
 #[tauri::command]
 pub fn crack_history_clear(ctx: State<'_, EvidenceCtx>) -> Result<(), String> {
-    let store = ctx.store.lock().expect("artifact store poisoned");
-    store.clear_crack_entries()
+    storage::clear(ctx.inner())
 }

@@ -1,9 +1,9 @@
 "use client";
 /** Case-scoped findings from the shared Rust SQLite evidence store. */
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Download, FileSearch, RefreshCcw } from "lucide-react";
 import { Chip, EmptyState, Pane, TextInput, ToolButton } from "@ds/panes";
-import { caseEventsList, caseFindingsList, caseReport, isDesktop, type CaseEventWire, type FindingRecordWire } from "@lib/ipc";
+import { caseEventsList, caseFindingsList, caseReport, caseIntegrityVerify, isDesktop, type CaseEventWire, type FindingRecordWire, type CaseIntegritySummaryWire } from "@lib/ipc";
 import { useWorkbench } from "@state/workbench";
 
 export function CaseFindingsView() {
@@ -15,6 +15,30 @@ export function CaseFindingsView() {
   const [selected, setSelected] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const [verification, setVerification] = useState<CaseIntegritySummaryWire | null>(null);
+  const [verifying, setVerifying] = useState(false);
+  const verificationSerial = useRef(0);
+
+  useEffect(() => {
+    verificationSerial.current += 1;
+    setVerification(null);
+    setVerifying(false);
+  }, [wb.caseId]);
+
+  const verifyCase = async () => {
+    const ticket = ++verificationSerial.current;
+    setVerification(null);
+    setVerifying(true);
+    setError(null);
+    try {
+      const result = await caseIntegrityVerify(wb.caseId);
+      if (ticket === verificationSerial.current) setVerification(result);
+    } catch (cause) {
+      if (ticket === verificationSerial.current) setError("Integrity verification failed: " + String(cause));
+    } finally {
+      if (ticket === verificationSerial.current) setVerifying(false);
+    }
+  };
 
   const refresh = useCallback(async () => {
     if (!isDesktop()) return;
@@ -74,12 +98,20 @@ export function CaseFindingsView() {
         <ToolButton onClick={() => void refresh()} disabled={loading || !isDesktop()} title="Refresh findings">
           <RefreshCcw size={12} /> {loading ? "Loading…" : "Refresh"}
         </ToolButton>
+        <ToolButton onClick={() => void verifyCase()} disabled={!isDesktop() || verifying}
+          title="Verify case evidence bytes and local provenance; independent chain anchoring requires a retained trusted head">
+          {verifying ? "Verifying…" : "Verify Case"}
+        </ToolButton>
         <ToolButton onClick={() => void exportReport()} disabled={!isDesktop() || exporting} title="Export a portable, path-free JSON report (review before sharing)">
           <Download size={12} /> {exporting ? "Exporting…" : "Export JSON"}
         </ToolButton>
         <span className="ml-auto font-mono text-[10px] text-fg-muted">{filtered.length} of {findings.length} · {events.length} events · {wb.caseId}</span>
       </div>
       {error ? <div className="border-b border-err/50 px-2 py-1 text-xs text-err">{error}</div> : null}
+      {verification ? <div className="border-b border-line bg-raised px-3 py-2 font-mono text-[11px] text-fg-dim" role="status">
+        Verified {verification.verified_artifacts} artifacts, {verification.verified_bytes} bytes, and {verification.provenance.verified_events} local provenance events in case {verification.case_id}.
+        <span className="ml-2 text-fg-muted">Keep the chain head outside the case for independent tamper detection.</span>
+      </div> : null}
       <div className="flex min-h-0 flex-1 gap-px bg-line">
         <Pane title="Findings" className="min-w-0 flex-[2]">
           {filtered.length === 0 ? (

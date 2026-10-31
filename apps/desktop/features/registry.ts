@@ -124,8 +124,8 @@ export const CATEGORIES: CategoryDescriptor[] = [
     tools: [
       { id: "forensics.findings", category: "forensics", label: "Case Findings", hint: "Persistent case-scoped security findings and provenance" },
       { id: "forensics.files", category: "forensics", label: "File Analysis", hint: "Evidence tree, hex, signatures, extraction with path safety" },
-      { id: "forensics.metadata", category: "forensics", label: "Metadata", hint: "Exif-compatible metadata inspection" },
-      { id: "forensics.strings", category: "forensics", label: "Strings & Entropy", hint: "String extraction and entropy profiling across evidence" },
+      { id: "forensics.metadata", category: "forensics", label: "Metadata", hint: "Bounded PNG/JPEG metadata extraction and recorded file properties" },
+      { id: "forensics.strings", category: "forensics", label: "Strings & Entropy", hint: "Native ASCII/UTF-16 extraction and measured regional entropy" },
     ],
   },
 ];

@@ -115,16 +115,17 @@ struct Segment<'a> {
 }
 
 fn hex_bytes(bytes: &[u8]) -> String {
-    use std::fmt::Write;
+    const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut out = String::with_capacity(bytes.len().saturating_mul(2));
     for &byte in bytes {
-        let _ = write!(out, "{byte:02x}");
+        out.push(HEX[usize::from(byte >> 4)] as char);
+        out.push(HEX[usize::from(byte & 0x0f)] as char);
     }
     out
 }
 
 fn display_bytes(bytes: &[u8]) -> String {
-    use std::fmt::Write;
+    const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut out = String::with_capacity(bytes.len());
     for &byte in bytes {
         match byte {
@@ -133,7 +134,10 @@ fn display_bytes(bytes: &[u8]) -> String {
             b'\t' => out.push('\t'),
             0x20..=0x7e => out.push(byte as char),
             other => {
-                let _ = write!(out, "\\x{other:02x}");
+                out.push('\\');
+                out.push('x');
+                out.push(HEX[usize::from(other >> 4)] as char);
+                out.push(HEX[usize::from(other & 0x0f)] as char);
             }
         }
     }
@@ -438,6 +442,21 @@ pub fn follow_stream(packets: &[PacketMeta], stream_id: &str) -> Result<StreamTr
 mod tests {
     use super::*;
     use crate::{Dissected, Layer, TcpMeta};
+
+    #[test]
+    fn byte_rendering_preserves_exact_lowercase_and_escaped_contents() {
+        let all_bytes: Vec<u8> = (0..=255u8).collect();
+        let reference = all_bytes
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        assert_eq!(hex_bytes(&all_bytes), reference);
+        assert_eq!(
+            display_bytes(&[0, 31, 128, 255, b'A']),
+            "\\x00\\x1f\\x80\\xffA"
+        );
+        assert_eq!(display_bytes(b"a\n\r\t"), "a\n\r\t");
+    }
 
     const ID: &str = "tcp|10.0.0.1:1234|10.0.0.2:80";
     fn packet(dir: &str, seq: u32, flags: u8, payload: &[u8]) -> PacketMeta {

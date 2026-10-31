@@ -1,5 +1,5 @@
 "use client";
-import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Chip, Field, Pane, Resizer, TextInput, ToolButton } from "@ds/panes";
 import { hexDump } from "@lib/hex";
 import {
@@ -32,18 +32,37 @@ function useEvidenceState() {
   const [importError, setImportError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [treeWidth, setTreeWidth] = useState(288);
+  const [hexOffset, setHexOffset] = useState(0);
+  const activeCase = useRef(wb.caseId);
+  activeCase.current = wb.caseId;
+  const refreshSequence = useRef(0);
+  useEffect(() => {
+    setHexOffset(0);
+  }, [selected?.id]);
+
+  useEffect(() => {
+    refreshSequence.current += 1;
+    setArtifacts([]);
+    setSelected(null);
+    setHexOffset(0);
+  }, [wb.caseId]);
 
   const refresh = useCallback(async () => {
     if (!desktop) return;
+    const caseId = wb.caseId;
+    const sequence = ++refreshSequence.current;
     try {
-      const list = await fileList(wb.caseId);
+      const list = await fileList(caseId);
+      if (activeCase.current !== caseId || refreshSequence.current !== sequence) return;
       setArtifacts(list);
       setSelected((prev) => {
         if (prev?.real && list.some((a) => a.id === prev.id)) return prev;
         return list[0] ? { id: list[0].id, real: true } : null;
       });
     } catch (err) {
-      setImportError(err instanceof Error ? err.message : String(err));
+      if (activeCase.current === caseId && refreshSequence.current === sequence) {
+        setImportError(err instanceof Error ? err.message : String(err));
+      }
     }
   }, [desktop, wb.caseId]);
 
@@ -55,8 +74,14 @@ function useEvidenceState() {
     setBusy(true);
     setImportError(null);
     try {
-      await fileImportDialog(wb.caseId);
+      const caseId = wb.caseId;
+      const imported = await fileImportDialog(caseId);
+      if (activeCase.current !== caseId) return;
       await refresh();
+      if (activeCase.current === caseId) {
+        setSelected({ id: imported.id, real: true });
+        setHexOffset(0);
+      }
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       if (message !== "cancelled") setImportError(message);
@@ -79,6 +104,8 @@ function useEvidenceState() {
     artifacts,
     selected,
     setSelected,
+    hexOffset,
+    setHexOffset,
     selectedArtifact,
     selectedSample,
     query,
@@ -109,12 +136,11 @@ export function useEvidence(): EvidenceContext {
 export function EvidenceTree({ ctx }: { ctx: EvidenceContext }) {
   const q = ctx.query.trim().toLowerCase();
   const realFiles = ctx.artifacts.filter((a) => !q || a.name.toLowerCase().includes(q));
-  const sampleFiles = SAMPLE_EVIDENCE.filter((f) => !q || f.name.toLowerCase().includes(q));
 
   return (
     <>
     <Pane
-      title={`Evidence${ctx.desktop ? "" : " (samples, browser fallback)"}`}
+      title={`Evidence${ctx.desktop ? "" : " (desktop required)"}`}
       className="shrink-0"
       style={{ width: ctx.treeWidth }}
       bodyClassName="p-1"
@@ -154,27 +180,9 @@ export function EvidenceTree({ ctx }: { ctx: EvidenceContext }) {
           ) : null}
         </>
       ) : (
-        ["samples", "archives", "logs"].map((group) => {
-          const items = sampleFiles.filter((f) => f.group === group);
-          if (items.length === 0) return null;
-          return (
-            <div key={group}>
-              <div className="px-2 py-1 text-[10px] uppercase tracking-wider text-fg-muted">▾ {group}</div>
-              {items.map((file) => (
-                <button
-                  key={file.id}
-                  type="button"
-                  onClick={() => ctx.setSelected({ id: file.id, real: false })}
-                  className={`block w-full truncate px-2 py-1 text-left font-mono text-[11px] ${
-                    ctx.selected?.id === file.id ? "bg-orange-dim text-orange" : "text-fg-dim hover:bg-raised hover:text-fg"
-                  }`}
-                >
-                  {file.name}
-                </button>
-              ))}
-            </div>
-          );
-        })
+        <div className="p-3 font-mono text-[11px] leading-relaxed text-fg-muted">
+          Case evidence requires the native CyberDeck desktop runtime. No synthetic evidence is displayed.
+        </div>
       )}
     </Pane>
     <Resizer direction="horizontal" ariaLabel="Resize evidence tree" value={ctx.treeWidth} onChange={ctx.setTreeWidth} min={192} max={420} />
@@ -182,7 +190,7 @@ export function EvidenceTree({ ctx }: { ctx: EvidenceContext }) {
   );
 }
 
-export function useArtifactBytes(ctx: EvidenceContext) {
+export function useArtifactBytes(ctx: EvidenceContext, enabled = true) {
   const wb = useWorkbench();
   const id = ctx.selected?.id ?? null;
   const real = ctx.selected?.real ?? false;
@@ -194,10 +202,10 @@ export function useArtifactBytes(ctx: EvidenceContext) {
     setHexData(null);
     setBytes(null);
     setError(null);
-    if (!id) return;
+    if (!id || !enabled) return;
     let cancelled = false;
     if (real) {
-      fileHex(wb.caseId, id, 0, 512)
+      fileHex(wb.caseId, id, Math.max(0, Math.floor(ctx.hexOffset / 16) * 16), 512)
         .then((data) => {
           if (!cancelled) setHexData(data);
         })
@@ -210,19 +218,41 @@ export function useArtifactBytes(ctx: EvidenceContext) {
     return () => {
       cancelled = true;
     };
-  }, [id, real, wb.caseId]);
+  }, [id, real, wb.caseId, ctx.hexOffset, enabled]);
 
   return { hexData, bytes, error };
 }
 
-export function HexBody({ ctx }: { ctx: EvidenceContext }) {
-  const { hexData, bytes, error } = useArtifactBytes(ctx);
+export function HexBody({ ctx, enabled = true }: { ctx: EvidenceContext; enabled?: boolean }) {
+  const { hexData, bytes, error } = useArtifactBytes(ctx, enabled);
+  const [offsetInput, setOffsetInput] = useState("0x0");
+  useEffect(() => {
+    setOffsetInput("0x" + ctx.hexOffset.toString(16));
+  }, [ctx.hexOffset]);
+  const jump = () => {
+    const value = offsetInput.trim();
+    const parsed = value.toLowerCase().startsWith("0x")
+      ? Number.parseInt(value.slice(2), 16)
+      : Number.parseInt(value, 10);
+    if (!/^(?:0x[0-9a-f]+|[0-9]+)$/i.test(value) || !Number.isSafeInteger(parsed) || parsed < 0) return;
+    const size = ctx.selectedArtifact?.size ?? 0;
+    ctx.setHexOffset(Math.min(parsed, Math.max(0, size - 1)));
+  };
   if (error) {
     return <div className="m-2 border border-err/50 p-2 font-mono text-[11px] text-err">{error}</div>;
   }
   if (hexData) {
     return (
       <>
+        <div className="flex items-center gap-2 border-b border-line bg-panel px-2 py-1 font-mono text-[11px]">
+          <ToolButton onClick={() => ctx.setHexOffset(Math.max(0, ctx.hexOffset - 512))}
+            disabled={ctx.hexOffset <= 0} title="Previous verified 512-byte window">Previous</ToolButton>
+          <ToolButton onClick={() => ctx.setHexOffset(Math.min(Math.max(0, hexData.total_size - 1), ctx.hexOffset + 512))}
+            disabled={hexData.complete} title="Next verified 512-byte window">Next</ToolButton>
+          <TextInput value={offsetInput} onChange={setOffsetInput} ariaLabel="Hex offset in decimal or 0x notation" className="w-28" />
+          <ToolButton onClick={jump} title="Open file offset">Go</ToolButton>
+          <span className="ml-auto text-fg-muted">Verified byte window</span>
+        </div>
         <pre className="p-1 font-mono text-[11px] leading-relaxed text-fg-dim">
           {hexData.rows.map((row) => (
             <div key={row.offset}>
@@ -235,7 +265,7 @@ export function HexBody({ ctx }: { ctx: EvidenceContext }) {
           ))}
         </pre>
         <div className="sticky bottom-0 border-t border-line bg-panel px-2 py-0.5 font-mono text-[10px] text-fg-muted">
-          {hexData.rows.length} rows from offset 0x0 · {hexData.total_size} bytes total · first 512 bytes this arc
+          {hexData.rows.length} rows from 0x{hexData.offset.toString(16)} · {hexData.total_size} total bytes · {hexData.complete ? "end of artifact" : "more bytes available"}
         </div>
       </>
     );

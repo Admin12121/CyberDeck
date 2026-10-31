@@ -1,17 +1,15 @@
-//! Native crypto ops over IPC; results carry Base64, hex and provenance (§6).
+//! Thin backward-compatible Tauri crypto IPC entry points.
+//! Business logic and wire types are separated by feature-first ownership.
 
-use base64::Engine as _;
-use cyberdeck_crypto::recipes::{execute_recipe, NativeRecipeResult, RecipeStep};
-use cyberdeck_crypto::{apply_op, catalog, OpInfo, ENGINE_ID, ENGINE_VERSION};
-use serde::Serialize;
+#[path = "features/crypto/application/ops.rs"]
+mod application;
+#[path = "features/crypto/domain/ops.rs"]
+mod domain;
 
-#[derive(Debug, Serialize)]
-pub struct OpResult {
-    pub output_b64: String,
-    pub output_hex: String,
-    pub engine: String,
-    pub engine_version: String,
-}
+pub use domain::OpResult;
+
+use cyberdeck_crypto::recipes::{NativeRecipeResult, RecipeStep};
+use cyberdeck_crypto::OpInfo;
 
 #[tauri::command]
 pub fn crypto_op(
@@ -19,45 +17,28 @@ pub fn crypto_op(
     data_b64: String,
     key_b64: Option<String>,
 ) -> Result<OpResult, String> {
-    let data = base64::engine::general_purpose::STANDARD
-        .decode(data_b64.as_bytes())
-        .map_err(|e| format!("invalid input encoding: {e}"))?;
-    let key = match key_b64 {
-        Some(k) => Some(
-            base64::engine::general_purpose::STANDARD
-                .decode(k.as_bytes())
-                .map_err(|e| format!("invalid key encoding: {e}"))?,
-        ),
-        None => None,
-    };
-    let out = apply_op(&op, &data, key.as_deref())?;
-    Ok(OpResult {
-        output_b64: base64::engine::general_purpose::STANDARD.encode(&out),
-        output_hex: hex::encode(&out),
-        engine: ENGINE_ID.to_string(),
-        engine_version: ENGINE_VERSION.to_string(),
-    })
+    application::execute_crypto_op(&op, &data_b64, key_b64.as_deref())
 }
 
 #[tauri::command]
 pub fn recipe_run(input: String, steps: Vec<RecipeStep>) -> NativeRecipeResult {
-    execute_recipe(&input, &steps)
+    application::execute_recipe_steps(&input, &steps)
 }
 
 #[tauri::command]
 pub fn crypto_catalog() -> Vec<OpInfo> {
-    catalog()
+    application::available_ops()
 }
 
-/// Verify a candidate password against a bcrypt/argon2 PHC string.
 #[tauri::command]
 pub fn kdf_verify(hash: String, candidate: String) -> Result<bool, String> {
-    cyberdeck_crypto::verify_kdf(hash.trim(), &candidate)
+    application::verify_password_kdf(&hash, &candidate)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use base64::Engine as _;
 
     #[test]
     fn crypto_op_hashes_and_reports_provenance() {

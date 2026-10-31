@@ -28,3 +28,6 @@ tmp/
 docs/
 .web-bridge-targets/
 target-agent-*
+
+# local Web Bridge recovery folders (purge only after reviewing recovery contents)
+.web-bridge-trash-*

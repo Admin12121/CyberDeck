@@ -16,8 +16,8 @@ export function ForensicsWorkspace({ tool }: { tool: ToolId }) {
       <div className="min-h-0 flex-1">
 
       <div className={show("forensics.findings")}><CaseFindingsView /></div>
-      <div className={show("forensics.files")}><FileAnalysisView /></div>
-      <div className={show("forensics.metadata")}><MetadataView /></div>
+      <div className={show("forensics.files")}><FileAnalysisView active={tool === "forensics.files"} /></div>
+      <div className={show("forensics.metadata")}><MetadataView active={tool === "forensics.metadata"} /></div>
       <div className={show("forensics.strings")}><StringsView /></div>
       </div>
     </div></EvidenceProvider>

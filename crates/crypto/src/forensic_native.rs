@@ -3,6 +3,52 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::io::{Read, Seek, SeekFrom};
 
+/// All four legacy digest values from one bounded stream, without storing
+/// the source in memory. CRC32 retains the existing double-hex wire format.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StreamDigests {
+    pub bytes: u64,
+    pub sha256: String,
+    pub sha1: String,
+    pub md5: String,
+    pub crc32: String,
+}
+
+pub fn digest_stream<R: Read>(mut source: R, max_bytes: u64) -> Result<StreamDigests, String> {
+    use md5::Md5;
+    use sha1::Sha1;
+    let mut sha256 = Sha256::new();
+    let mut sha1 = Sha1::new();
+    let mut md5 = Md5::new();
+    let mut crc = crc32fast::Hasher::new();
+    let mut bytes = 0u64;
+    let mut block = [0u8; 64 * 1024];
+    loop {
+        let n = source
+            .read(&mut block)
+            .map_err(|e| format!("digest read failed: {e}"))?;
+        if n == 0 {
+            break;
+        }
+        bytes = bytes.checked_add(n as u64).ok_or("digest input overflow")?;
+        if bytes > max_bytes {
+            return Err("digest input exceeds byte limit".into());
+        }
+        sha256.update(&block[..n]);
+        sha1.update(&block[..n]);
+        md5.update(&block[..n]);
+        crc.update(&block[..n]);
+    }
+    let crc_text = hex::encode(crc.finalize().to_be_bytes());
+    Ok(StreamDigests {
+        bytes,
+        sha256: hex::encode(sha256.finalize()),
+        sha1: hex::encode(sha1.finalize()),
+        md5: hex::encode(md5.finalize()),
+        crc32: hex::encode(crc_text.as_bytes()),
+    })
+}
+
 pub const MAX_WINDOW: usize = 8 * 1024 * 1024;
 pub const MAX_VERIFIED_READ: usize = 16 * 1024 * 1024;
 pub const MAX_STRING_HITS: usize = 2000;
@@ -584,5 +630,32 @@ mod tests {
             .iter()
             .any(|f| f.key == "make" && f.value == "ACME"));
         assert!(m.complete);
+    }
+}
+
+#[cfg(test)]
+mod stream_digest_regression {
+    use super::*;
+    use std::io::Cursor;
+
+    #[test]
+    fn matches_existing_operations_across_multiple_blocks_and_rejects_limit() {
+        let input = (0..150_003).map(|n| (n % 251) as u8).collect::<Vec<_>>();
+        let digests = digest_stream(Cursor::new(&input), input.len() as u64).unwrap();
+        assert_eq!(digests.bytes, input.len() as u64);
+        for (name, actual) in [
+            ("sha256", &digests.sha256),
+            ("sha1", &digests.sha1),
+            ("md5", &digests.md5),
+            ("crc32", &digests.crc32),
+        ] {
+            assert_eq!(
+                *actual,
+                hex::encode(crate::apply_op(name, &input, None).unwrap())
+            );
+        }
+        assert!(digest_stream(Cursor::new(&input), (input.len() - 1) as u64).is_err());
+        let empty = digest_stream(Cursor::new(&[] as &[u8]), 0).unwrap();
+        assert_eq!(empty.bytes, 0);
     }
 }

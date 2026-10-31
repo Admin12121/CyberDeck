@@ -8,6 +8,7 @@ mod crack;
 mod engines;
 mod evidence;
 mod history;
+#[path = "features/shared/jobs/ipc.rs"]
 mod jobs;
 mod netscan;
 mod ops;
@@ -75,6 +76,8 @@ fn main() {
             cases::case_report,
             cases::case_provenance_verify,
             cases::case_artifact_verify,
+            cases::case_integrity_verify,
+            cases::case_provenance_verify_against,
             cases::case_findings_add,
             evidence::file_list,
             evidence::file_hex,
@@ -82,7 +85,11 @@ fn main() {
             evidence::file_binary_inspect,
             evidence::file_extract_gzip,
             evidence::file_extract_archive,
+            evidence::file_extract_nested_archive,
             evidence::file_strings,
+            evidence::file_strings_scan,
+            evidence::file_entropy_regions,
+            evidence::file_metadata_scan,
             evidence::digest_file_dialog,
             pcap::pcap_open_dialog,
             pcap::pcap_packet_bytes,

@@ -1,5 +1,5 @@
 "use client";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Chip, Field, Pane, Resizer, TextInput, ToolButton } from "@ds/panes";
 import { hexDump } from "@lib/hex";
 import {
@@ -7,6 +7,7 @@ import {
   fileSignatureScan,
   fileExtractGzip,
   fileExtractArchive,
+  fileExtractNestedArchive,
   fileBinaryInspect,
   type BinaryInfoWire,
   type SignatureScanWire,
@@ -25,7 +26,7 @@ import { SAMPLE_EVIDENCE, sampleContent, sampleMetadata } from "../model";
 import { EvidenceTree, HexBody, useArtifactBytes, useEvidence } from "./shared";
 import { useWorkbench } from "@state/workbench";
 
-export function FileAnalysisView() {
+export function FileAnalysisView({ active }: { active: boolean }) {
   const ctx = useEvidence();
   const wb = useWorkbench();
   const [scan, setScan] = useState<SignatureScanWire | null>(null);
@@ -36,51 +37,101 @@ export function FileAnalysisView() {
   const [inspectorWidth, setInspectorWidth] = useState(320);
   const [extracting, setExtracting] = useState<number | null>(null);
   const [extractNote, setExtractNote] = useState<string | null>(null);
-  useEffect(() => { setScan(null); setBinary(null); setScanError(null); setExtractNote(null); }, [ctx.selectedArtifact?.id, wb.caseId]);
+  const activeScope = useRef("");
+  activeScope.current = wb.caseId + ":" + (ctx.selectedArtifact?.id ?? "");
+  const stillActive = (scope: string) => activeScope.current === scope;
+
+  useEffect(() => {
+    setScan(null);
+    setBinary(null);
+    setScanError(null);
+    setExtractNote(null);
+    setExtracting(null);
+    setScanBusy(false);
+    setBinaryBusy(false);
+  }, [ctx.selectedArtifact?.id, wb.caseId]);
   const extract = async (offset: number) => {
     const artifact = ctx.selectedArtifact;
     if (!artifact || extracting !== null) return;
+    const scope = activeScope.current;
     setExtracting(offset);
     setScanError(null);
     setExtractNote(null);
     try {
       const output = await fileExtractGzip(wb.caseId, artifact.id, offset);
+      if (!stillActive(scope)) return;
       setExtractNote("Extracted into this case: " + output.name);
       await ctx.refresh();
-    } catch (cause) { setScanError(String(cause)); }
-    finally { setExtracting(null); }
+      ctx.setSelected({ id: output.id, real: true });
+      ctx.setHexOffset(0);
+    } catch (cause) { if (stillActive(scope)) setScanError(String(cause)); }
+    finally { if (stillActive(scope)) setExtracting(null); }
   };
   const extractArchive = async (format: "zip" | "tar", offset: number) => {
     const artifact = ctx.selectedArtifact;
     if (!artifact || extracting !== null) return;
+    const scope = activeScope.current;
     setExtracting(offset);
     setScanError(null);
     setExtractNote(null);
     try {
       const outputs = await fileExtractArchive(wb.caseId, artifact.id, format, offset);
+      if (!stillActive(scope)) return;
       setExtractNote(`Extracted ${outputs.length} ${format.toUpperCase()} files into this case`);
       await ctx.refresh();
-    } catch (cause) { setScanError(String(cause)); }
-    finally { setExtracting(null); }
+      if (outputs[0]) {
+        ctx.setSelected({ id: outputs[0].id, real: true });
+        ctx.setHexOffset(0);
+      }
+    } catch (cause) { if (stillActive(scope)) setScanError(String(cause)); }
+    finally { if (stillActive(scope)) setExtracting(null); }
+  };
+  const extractNested = async (format: "zip" | "tar" | "gzip", offset: number) => {
+    const artifact = ctx.selectedArtifact;
+    if (!artifact || extracting !== null) return;
+    if (!window.confirm("Extract up to two nested archive levels as derived case evidence?")) return;
+    const scope = activeScope.current;
+    setExtracting(offset);
+    setScanError(null);
+    setExtractNote(null);
+    try {
+      const children = await fileExtractNestedArchive(wb.caseId, artifact.id, format, offset, 2);
+      if (!stillActive(scope)) return;
+      setExtractNote("Extracted " + children.length + " nested members into this case");
+      await ctx.refresh();
+      if (children[0]) {
+        ctx.setSelected({ id: children[0].id, real: true });
+        ctx.setHexOffset(0);
+      }
+    } catch (cause) { if (stillActive(scope)) setScanError(String(cause)); }
+    finally { if (stillActive(scope)) setExtracting(null); }
   };
   const inspectBinary = async () => {
     const selected = ctx.selectedArtifact;
     if (!selected) return;
+    const scope = activeScope.current;
     setBinaryBusy(true);
     setScanError(null);
     setBinary(null);
-    try { setBinary(await fileBinaryInspect(wb.caseId, selected.id)); }
-    catch (cause) { setScanError(String(cause)); }
-    finally { setBinaryBusy(false); }
+    try {
+      const inspected = await fileBinaryInspect(wb.caseId, selected.id);
+      if (stillActive(scope)) setBinary(inspected);
+    } catch (cause) {
+      if (stillActive(scope)) setScanError(String(cause));
+    } finally { if (stillActive(scope)) setBinaryBusy(false); }
   };
   const runScan = async () => {
     const artifact = ctx.selectedArtifact;
     if (!artifact) return;
+    const scope = activeScope.current;
     setScanBusy(true);
     setScanError(null);
-    try { setScan(await fileSignatureScan(wb.caseId, artifact.id)); }
-    catch (cause) { setScanError(String(cause)); }
-    finally { setScanBusy(false); }
+    try {
+      const result = await fileSignatureScan(wb.caseId, artifact.id);
+      if (stillActive(scope)) setScan(result);
+    } catch (cause) {
+      if (stillActive(scope)) setScanError(String(cause));
+    } finally { if (stillActive(scope)) setScanBusy(false); }
   };
   const highEntropy =
     ctx.selectedArtifact
@@ -93,7 +144,7 @@ export function FileAnalysisView() {
     <div className="flex h-full min-h-0 gap-px bg-line">
       <EvidenceTree ctx={ctx} />
       <Pane title={`Hex: ${ctx.selectedArtifact?.name ?? ctx.selectedSample?.name ?? "no selection"}`} className="min-w-0 flex-1" bodyClassName="relative">
-        <HexBody ctx={ctx} />
+        <HexBody ctx={ctx} enabled={active} />
       </Pane>
       <Resizer direction="horizontal" flip ariaLabel="Resize file inspector" value={inspectorWidth} onChange={setInspectorWidth} min={240} max={520} />
       <Pane title="Inspector" className="shrink-0" style={{ width: inspectorWidth }}>
@@ -122,7 +173,7 @@ export function FileAnalysisView() {
         ) : null}
         <div className="border-t border-line p-2 space-y-2">
           <ToolButton onClick={() => void runScan()} disabled={!ctx.selectedArtifact || !ctx.desktop || scanBusy}
-            title="Native Rust scan of the first 16 MiB; includes SHA-256 verification for smaller evidence">
+            title="Native signature scan of up to 16 MiB; verifies SHA-256 of the entire stored evidence file">
             {scanBusy ? "Scanning…" : "Scan Embedded Formats"}
           </ToolButton>
           <ToolButton onClick={() => void inspectBinary()} disabled={!ctx.selectedArtifact || !ctx.desktop || binaryBusy}
@@ -150,13 +201,15 @@ export function FileAnalysisView() {
           {extractNote ? <div className="text-xs text-fg">{extractNote}</div> : null}
           {scan ? (
             <div className="space-y-1 font-mono text-[10px] text-fg-dim">
-              <div>{scan.hits.length} signatures · {scan.scanned_bytes} bytes scanned
-                {scan.truncated ? " (first 16 MiB only)" : ""}
-                {scan.integrity_checked ? " · SHA-256 verified" : ""}
+              <div>{scan.hits.length} candidate signatures · {scan.scanned_bytes} of {scan.file_bytes} bytes scanned
+                {scan.truncated ? " · partial coverage" : ""}
+                {scan.integrity_checked ? " · full-source SHA-256 verified" : ""}
+                {scan.hit_cap_reached ? " · hit limit reached" : ""}
               </div>
               {scan.hits.map((hit, index) => (
                 <div key={index} className="flex gap-2 border-t border-line py-1">
-                  <span className="shrink-0 text-orange">0x{hit.offset.toString(16)}</span>
+                  <button type="button" className="shrink-0 text-orange hover:underline" title="Open signature offset in hex"
+                    onClick={() => ctx.setHexOffset(hit.offset)}>0x{hit.offset.toString(16)}</button>
                   <span className="flex-1">{hit.format}: {hit.description}</span>
                   {(hit.format === "zip" || hit.format === "tar") && (
                     <ToolButton
@@ -165,6 +218,13 @@ export function FileAnalysisView() {
                       title="Native Rust extraction: validates paths, CRC/checksums, 128-entry and 16 MiB limits"
                     >
                       {extracting === hit.offset ? "Extracting…" : `Extract ${hit.format.toUpperCase()}`}
+                    </ToolButton>
+                  )}
+                  {(hit.format === "zip" || hit.format === "tar" || hit.format === "gzip") && (
+                    <ToolButton onClick={() => void extractNested(hit.format as "zip" | "tar" | "gzip", hit.offset)}
+                      disabled={extracting !== null || !ctx.desktop}
+                      title="Explicitly extract up to two nested archive levels into immutable case evidence">
+                      {extracting === hit.offset ? "Extracting…" : "Extract Nested"}
                     </ToolButton>
                   )}
                   {hit.format === "gzip" && (
@@ -181,9 +241,7 @@ export function FileAnalysisView() {
               {scan.hits.length === 0 ? <div>No known signatures detected.</div> : null}
             </div>
           ) : null}
-          <ToolButton disabled title="Additional archive parsers under development">Other archive formats pending</ToolButton>
-          <div className="mt-1" />
-          <ToolButton disabled title="YARA-X rules, arc 3">YARA scan</ToolButton>
+
         </div>
       </Pane>
     </div>
