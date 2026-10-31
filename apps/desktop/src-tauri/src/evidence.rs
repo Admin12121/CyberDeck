@@ -2,12 +2,15 @@
 //! originals are copied immutably and indexed with full digests.
 
 use base64::Engine as _;
+use std::io::Write;
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 
 use cyberdeck_crypto::{apply_op, detect_signature, entropy};
 use cyberdeck_storage::{
-    validate_case_id, ArtifactRecord, ArtifactStore, NewFinding, DEFAULT_CASE,
+    validate_case_id, ArtifactRecord, ArtifactStore, ImportBatchItem, ImportEvent, NewFinding,
+    DEFAULT_CASE,
 };
 use serde::Serialize;
 use tauri::{AppHandle, State};
@@ -64,6 +67,69 @@ fn sanitize_file_name(name: &str) -> String {
         .collect()
 }
 
+static NEXT_EVIDENCE_TEMP: AtomicU64 = AtomicU64::new(0);
+
+/// Never trust an already-present destination merely because it exists:
+/// reject symlinks/special files and compare the complete stored bytes.
+fn verify_existing_evidence(path: &Path, expected: &[u8]) -> Result<(), String> {
+    let meta = std::fs::symlink_metadata(path)
+        .map_err(|e| format!("cannot stat existing evidence: {e}"))?;
+    if !meta.file_type().is_file() || meta.len() != expected.len() as u64 {
+        return Err("existing evidence is not a regular file of the expected size".into());
+    }
+    let existing =
+        std::fs::read(path).map_err(|e| format!("cannot verify existing evidence: {e}"))?;
+    if existing != expected {
+        return Err("existing evidence content integrity failure".into());
+    }
+    Ok(())
+}
+
+/// Write to an exclusive temporary file in the case directory, sync it, then
+/// publish with an atomic no-clobber hard link. Rename alone can overwrite
+/// an existing destination on some platforms and is therefore not suitable.
+/// No archive-controlled filename reaches this path.
+fn publish_evidence(case_dir: &Path, stored_path: &Path, bytes: &[u8]) -> Result<(), String> {
+    if std::fs::symlink_metadata(stored_path).is_ok() {
+        return verify_existing_evidence(stored_path, bytes);
+    }
+    let mut temporary = None;
+    for _ in 0..16 {
+        let nonce = NEXT_EVIDENCE_TEMP.fetch_add(1, Ordering::Relaxed);
+        let path = case_dir.join(format!(".evidence-{}-{nonce}.tmp", std::process::id()));
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+        {
+            Ok(file) => {
+                temporary = Some((path, file));
+                break;
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(format!("cannot create evidence temporary file: {e}")),
+        }
+    }
+    let (temp_path, mut file) =
+        temporary.ok_or_else(|| "cannot reserve a unique evidence temporary path".to_string())?;
+    let result = (|| {
+        file.write_all(bytes)
+            .map_err(|e| format!("cannot write evidence: {e}"))?;
+        file.sync_all()
+            .map_err(|e| format!("cannot sync evidence: {e}"))?;
+        drop(file);
+        match std::fs::hard_link(&temp_path, stored_path) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                verify_existing_evidence(stored_path, bytes)
+            }
+            Err(e) => Err(format!("cannot publish immutable evidence: {e}")),
+        }
+    })();
+    let _ = std::fs::remove_file(&temp_path);
+    result
+}
+
 fn import_bytes(
     ctx: &EvidenceCtx,
     source: &Path,
@@ -71,21 +137,56 @@ fn import_bytes(
     case_id: &str,
     disk_source: bool,
 ) -> Result<ArtifactRecord, String> {
+    let description = source
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "evidence.bin".into());
+    let events = [ImportEvent {
+        source: if disk_source {
+            "forensics.import"
+        } else {
+            "crypto.recipes"
+        },
+        action: if disk_source { "import" } else { "derived" },
+        description: &description,
+    }];
+    import_bytes_with_events(ctx, source, bytes, case_id, disk_source, &events, &[])
+}
+
+fn import_bytes_with_events(
+    ctx: &EvidenceCtx,
+    source: &Path,
+    bytes: &[u8],
+    case_id: &str,
+    disk_source: bool,
+    events: &[ImportEvent<'_>],
+    findings: &[NewFinding],
+) -> Result<ArtifactRecord, String> {
+    let store = ctx.store.lock().map_err(|_| "case store unavailable")?;
+    let record = prepare_import_record(ctx, &store, source, bytes, case_id, disk_source)?;
+    store.commit_artifact_import_with_events(&record, &ctx.artifacts_dir, events, findings)?;
+    Ok(record)
+}
+
+/// Publish evidence safely but defer database changes to the caller. The
+/// caller holds the case store lock throughout preparation and commit.
+fn prepare_import_record(
+    ctx: &EvidenceCtx,
+    store: &ArtifactStore,
+    source: &Path,
+    bytes: &[u8],
+    case_id: &str,
+    disk_source: bool,
+) -> Result<ArtifactRecord, String> {
     validate_case_id(case_id)?;
-    if !ctx
-        .store
-        .lock()
-        .map_err(|_| "case store unavailable")?
-        .case_exists(case_id)?
-    {
-        return Err("selected case does not exist".into());
+    if bytes.len() as u64 > MAX_IMPORT_BYTES {
+        return Err("evidence exceeds the import size limit".into());
     }
     let sha256 = digest_of("sha256", bytes)?;
     let md5 = digest_of("md5", bytes)?;
     let sha1 = digest_of("sha1", bytes)?;
     let crc32 = digest_of("crc32", bytes)?;
     let signature = detect_signature(bytes).map(str::to_string).or_else(|| {
-        // printable-dominant content reads as text
         let printable = bytes
             .iter()
             .filter(|&&b| b == b'\t' || b == b'\n' || b == b'\r' || (0x20..=0x7e).contains(&b))
@@ -97,8 +198,6 @@ fn import_bytes(
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis().to_string())
         .unwrap_or_else(|_| "0".to_string());
-
-    // content-addressed identity: re-importing identical bytes replaces the record
     let kind = if disk_source {
         "sha256"
     } else {
@@ -111,19 +210,46 @@ fn import_bytes(
     };
     let original_name = source
         .file_name()
-        .map(|n| n.to_string_lossy().to_string())
-        .unwrap_or_else(|| "evidence.bin".to_string());
-    let stored_name = format!("{sha256}_{}", sanitize_file_name(&original_name));
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "evidence.bin".into());
+
+    if !store.case_exists(case_id)? {
+        return Err("selected case does not exist".into());
+    }
+    let prior = store.get_artifact(&id)?;
+    if let Some(old) = prior.as_ref() {
+        if old.case_id != case_id || old.sha256 != sha256 || old.size != bytes.len() as u64 {
+            return Err("immutable evidence identity conflict".into());
+        }
+    }
     let case_dir = ctx.artifacts_dir.join(case_id);
     std::fs::create_dir_all(&case_dir).map_err(|e| format!("cannot create case directory: {e}"))?;
-    let stored_path = case_dir.join(&stored_name);
-    if !stored_path.exists() {
-        std::fs::write(&stored_path, bytes)
-            .map_err(|e| format!("cannot store evidence copy: {e}"))?;
+    let case_meta = std::fs::symlink_metadata(&case_dir)
+        .map_err(|e| format!("cannot inspect case directory: {e}"))?;
+    if !case_meta.file_type().is_dir() || case_meta.file_type().is_symlink() {
+        return Err("case evidence directory is a symlink or non-directory".into());
     }
-
-    let record = ArtifactRecord {
-        id: id.clone(),
+    let root = std::fs::canonicalize(&ctx.artifacts_dir)
+        .map_err(|e| format!("cannot resolve evidence root: {e}"))?;
+    let resolved_case = std::fs::canonicalize(&case_dir)
+        .map_err(|e| format!("cannot resolve case evidence directory: {e}"))?;
+    if resolved_case == root || !resolved_case.starts_with(root) {
+        return Err("case evidence directory escapes evidence root".into());
+    }
+    let stored_path = prior
+        .as_ref()
+        .map(|old| std::path::PathBuf::from(&old.stored_path))
+        .unwrap_or_else(|| case_dir.join(format!("{sha256}.evidence")));
+    // Existing historical names remain unchanged; new storage names are
+    // digest-only, independent of the source filename.
+    if let Some(old) = prior.as_ref() {
+        cyberdeck_storage::verify_artifact_file(old, &ctx.artifacts_dir)?;
+        verify_existing_evidence(&stored_path, bytes)?;
+    } else {
+        publish_evidence(&case_dir, &stored_path, bytes)?;
+    }
+    let record = prior.unwrap_or_else(|| ArtifactRecord {
+        id,
         case_id: case_id.to_string(),
         name: original_name,
         stored_path: stored_path.to_string_lossy().to_string(),
@@ -136,20 +262,7 @@ fn import_bytes(
         signature,
         entropy: entropy_value,
         imported_at,
-    };
-    let store = ctx.store.lock().expect("artifact store poisoned");
-    store.upsert_artifact(&record)?;
-    store.record_event(
-        case_id,
-        if disk_source {
-            "forensics.import"
-        } else {
-            "crypto.recipes"
-        },
-        if disk_source { "import" } else { "derived" },
-        Some(&record.id),
-        &record.name,
-    )?;
+    });
     Ok(record)
 }
 
@@ -218,30 +331,38 @@ pub fn file_import_derived(
     if source_description.len() > 512 {
         return Err("source description too long".into());
     }
-    let record = import_bytes(&ctx, Path::new(&safe_name), &data, &case_id, false)?;
-    ctx.store
-        .lock()
-        .map_err(|_| "case store unavailable")?
-        .record_event(
-            &case_id,
-            "crypto.recipes",
-            "transformation",
-            Some(&record.id),
-            &source_description,
-        )?;
-    let note = NewFinding {
-        title: format!("Derived file: {}", record.name),
-        severity: "info".to_string(),
+    let derived_hash = digest_of("sha256", &data)?;
+    let events = [
+        ImportEvent {
+            source: "crypto.recipes",
+            action: "derived",
+            description: &safe_name,
+        },
+        ImportEvent {
+            source: "crypto.recipes",
+            action: "transformation",
+            description: &source_description,
+        },
+    ];
+    let findings = [NewFinding {
+        title: format!("Derived file: {safe_name}"),
+        severity: "info".into(),
         details: format!(
             "Saved from CyberDeck Recipes into case {}\nSHA256: {}\nSize: {} bytes",
-            case_id, record.sha256, record.size
+            case_id,
+            derived_hash,
+            data.len()
         ),
-    };
-    ctx.store
-        .lock()
-        .map_err(|_| "case store unavailable")?
-        .add_findings(&case_id, "crypto.recipes", Some(&record.id), &[note])?;
-    Ok(record)
+    }];
+    import_bytes_with_events(
+        &ctx,
+        Path::new(&safe_name),
+        &data,
+        &case_id,
+        false,
+        &events,
+        &findings,
+    )
 }
 
 #[tauri::command]
@@ -407,6 +528,7 @@ fn extract_gzip_from_evidence(
     if record.size > MAX_GZIP_INPUT_BYTES as u64 {
         return Err("gzip extraction limited to stored files of at most 16 MiB".into());
     }
+    cyberdeck_storage::verify_artifact_file(&record, &ctx.artifacts_dir)?;
     let data = std::fs::read(&record.stored_path)
         .map_err(|e| format!("cannot read stored source: {e}"))?;
     if data.len() as u64 != record.size || digest_of("sha256", &data)? != record.sha256 {
@@ -414,35 +536,40 @@ fn extract_gzip_from_evidence(
     }
     let output = extract_gzip_limited(&data, offset, MAX_GZIP_OUTPUT_BYTES)?;
     let name = format!("gzip-offset-{offset:x}.bin");
-    let extracted = import_bytes(ctx, Path::new(&name), &output, case_id, false)?;
+    let derived_hash = digest_of("sha256", &output)?;
     let description = format!("Source artifact {} gzip offset 0x{offset:x}", record.id);
-    ctx.store
-        .lock()
-        .map_err(|_| "case store unavailable")?
-        .record_event(
-            case_id,
-            "forensics.gzip",
-            "extract",
-            Some(&extracted.id),
-            &description,
-        )?;
-    ctx.store
-        .lock()
-        .map_err(|_| "case store unavailable")?
-        .add_findings(
-            case_id,
-            "forensics.gzip",
-            Some(&extracted.id),
-            &[NewFinding {
-                title: format!("Extracted Gzip member at 0x{offset:x}"),
-                severity: "info".into(),
-                details: format!(
-                    "Source: {} (sha256 {})\nDerived: {} (sha256 {})\nUncompressed length: {}",
-                    record.id, record.sha256, extracted.id, extracted.sha256, extracted.size,
-                ),
-            }],
-        )?;
-    Ok(extracted)
+    let events = [
+        ImportEvent {
+            source: "forensics.gzip",
+            action: "derived",
+            description: &name,
+        },
+        ImportEvent {
+            source: "forensics.gzip",
+            action: "extract",
+            description: &description,
+        },
+    ];
+    let findings = [NewFinding {
+        title: format!("Extracted Gzip member at 0x{offset:x}"),
+        severity: "info".into(),
+        details: format!(
+            "Source: {} (sha256 {})\nDerived SHA-256: {}\nUncompressed length: {}",
+            record.id,
+            record.sha256,
+            derived_hash,
+            output.len(),
+        ),
+    }];
+    import_bytes_with_events(
+        ctx,
+        Path::new(&name),
+        &output,
+        case_id,
+        false,
+        &events,
+        &findings,
+    )
 }
 
 #[tauri::command]
@@ -593,6 +720,110 @@ fn strings(
 }
 
 /// Extract regular files from a validated ZIP or ustar TAR into this case.
+struct PlannedArchiveEntry {
+    name: String,
+    bytes: Vec<u8>,
+    provenance: String,
+    title: String,
+}
+
+/// Plan and validate every member first; publish immutable bytes under the
+/// case store lock, then atomically commit all unique artifact indexes, events
+/// and findings in a single storage transaction. File publication itself is
+/// not part of the SQLite transaction, so a failed DB commit can leave
+/// unindexed bytes for a later integrity/recovery scan.
+fn import_archive_batch(
+    ctx: &EvidenceCtx,
+    case_id: &str,
+    source_tag: &'static str,
+    planned: Vec<PlannedArchiveEntry>,
+) -> Result<Vec<ArtifactRecord>, String> {
+    use std::collections::HashMap;
+    validate_case_id(case_id)?;
+    if planned.is_empty() {
+        return Ok(Vec::new());
+    }
+    // The storage API supports up to 32 unique artifacts per atomic batch
+    // and at most 32 events for any one artifact. Duplicate bytes share an
+    // immutable artifact ID, so multiple archive paths aggregate lineage.
+    let mut occurrences = HashMap::<String, usize>::new();
+    for plan in &planned {
+        if plan.name.is_empty()
+            || plan.name.len() > 100
+            || plan.provenance.len() > 512
+            || plan.title.len() > 200
+        {
+            return Err("archive metadata exceeds atomic import limits".into());
+        }
+        let digest = digest_of("sha256", &plan.bytes)?;
+        let seen = occurrences.entry(digest).or_default();
+        *seen += 1;
+        if *seen > 16 {
+            return Err("identical archive data exceeds 16 provenance paths per artifact".into());
+        }
+        if occurrences.len() > 32 {
+            return Err("atomic archive import supports at most 32 distinct artifacts".into());
+        }
+    }
+    let store = ctx.store.lock().map_err(|_| "case store unavailable")?;
+    let mut all_records = Vec::with_capacity(planned.len());
+    let mut unique_records = Vec::with_capacity(occurrences.len());
+    let mut ids = HashMap::<String, usize>::new();
+    for plan in &planned {
+        let record = prepare_import_record(
+            ctx,
+            &store,
+            Path::new(&plan.name),
+            &plan.bytes,
+            case_id,
+            false,
+        )?;
+        if !ids.contains_key(&record.id) {
+            ids.insert(record.id.clone(), unique_records.len());
+            unique_records.push(record.clone());
+        }
+        all_records.push(record);
+    }
+    let mut event_groups = vec![Vec::new(); unique_records.len()];
+    let mut finding_groups = vec![Vec::new(); unique_records.len()];
+    for (plan, record) in planned.iter().zip(all_records.iter()) {
+        let index = ids[&record.id];
+        event_groups[index].push(ImportEvent {
+            source: source_tag,
+            action: "derived",
+            description: &plan.name,
+        });
+        event_groups[index].push(ImportEvent {
+            source: source_tag,
+            action: "extract",
+            description: &plan.provenance,
+        });
+        finding_groups[index].push(NewFinding {
+            title: plan.title.clone(),
+            severity: "info".into(),
+            details: format!("{}\nDerived SHA-256: {}", plan.provenance, record.sha256,),
+        });
+    }
+    let items: Vec<ImportBatchItem<'_>> = unique_records
+        .iter()
+        .enumerate()
+        .map(|(index, record)| ImportBatchItem {
+            record,
+            events: &event_groups[index],
+            findings: &finding_groups[index],
+        })
+        .collect();
+    store
+        .commit_artifact_batch(&ctx.artifacts_dir, &items)
+        .map_err(|e| {
+            format!(
+                "archive database batch was rolled back: {e}; already-published \
+             unindexed evidence bytes may require cleanup"
+            )
+        })?;
+    Ok(all_records)
+}
+
 /// The parser never writes archive-controlled paths; imported evidence is
 /// content-addressed and every output is linked back to its source artifact.
 #[tauri::command]
@@ -630,6 +861,7 @@ fn extract_archive_from_evidence(
     if record.size > MAX_ARCHIVE_INPUT_BYTES as u64 {
         return Err("archive source is larger than the 16 MiB limit".into());
     }
+    cyberdeck_storage::verify_artifact_file(&record, &ctx.artifacts_dir)?;
     let source = std::fs::read(&record.stored_path)
         .map_err(|e| format!("cannot read archive evidence: {e}"))?;
     if source.len() as u64 != record.size || digest_of("sha256", &source)? != record.sha256 {
@@ -640,43 +872,126 @@ fn extract_archive_from_evidence(
         "zip" => extract_zip_limited(&source, offset, MAX_ARCHIVE_OUTPUT_BYTES)?,
         _ => extract_tar_limited(&source, offset, MAX_ARCHIVE_OUTPUT_BYTES)?,
     };
-    let mut imported = Vec::with_capacity(entries.len());
+    let mut planned = Vec::with_capacity(entries.len());
     for (index, entry) in entries.into_iter().enumerate() {
-        // Keep a short, synthetic filename to avoid Windows path-length limits.
-        // The full archive-relative original name belongs in provenance events.
         let base = entry.path.rsplit('/').next().unwrap_or("file");
-        let base = sanitize_file_name(base);
-        let short = base.chars().take(48).collect::<String>();
+        let safe = sanitize_file_name(base);
+        let short = safe.chars().take(48).collect::<String>();
         let name = format!("{format}-{index:03}-{short}");
-        let artifact = import_bytes(ctx, Path::new(&name), &entry.bytes, case_id, false)?;
-        let lineage = format!(
+        let provenance = format!(
             "Source: {} (sha256 {}) | Format: {} | Archive offset: 0x{:x} | \
              Entry: {} | Header offset: 0x{:x}",
-            record.id, record.sha256, format, offset, entry.path, entry.source_offset
+            record.id, record.sha256, format, offset, entry.path, entry.source_offset,
         );
-        {
-            let store = ctx.store.lock().map_err(|_| "case store unavailable")?;
-            store.record_event(
-                case_id,
-                "forensics.archive",
-                "extract",
-                Some(&artifact.id),
-                &lineage,
-            )?;
-            store.add_findings(
-                case_id,
-                "forensics.archive",
-                Some(&artifact.id),
-                &[NewFinding {
-                    title: format!("Extracted {format} entry: {}", entry.path),
-                    severity: "info".into(),
-                    details: format!("{lineage}\nDerived SHA-256: {}", artifact.sha256),
-                }],
-            )?;
+        if provenance.len() > 512 {
+            return Err(format!(
+                "archive entry {index} provenance exceeds 512 bytes"
+            ));
         }
-        imported.push(artifact);
+        planned.push(PlannedArchiveEntry {
+            name,
+            bytes: entry.bytes,
+            provenance,
+            title: format!("Extracted {format} entry {index}"),
+        });
     }
-    Ok(imported)
+    import_archive_batch(ctx, case_id, "forensics.archive", planned)
+}
+
+/// Explicit nested extraction, staged for integration-owner Tauri registration.
+/// Parsing of every layer completes before importing any leaf. Each leaf
+/// commits independently; a later import failure reports previously imported
+/// entries rather than implying archive-wide transaction semantics.
+#[tauri::command]
+pub fn file_extract_nested_archive(
+    ctx: State<'_, EvidenceCtx>,
+    case_id: String,
+    id: String,
+    format: String,
+    offset: usize,
+    max_depth: usize,
+) -> Result<Vec<ArtifactRecord>, String> {
+    extract_nested_from_evidence(&ctx, &case_id, &id, &format, offset, max_depth)
+}
+
+fn extract_nested_from_evidence(
+    ctx: &EvidenceCtx,
+    case_id: &str,
+    id: &str,
+    format: &str,
+    offset: usize,
+    max_depth: usize,
+) -> Result<Vec<ArtifactRecord>, String> {
+    use cyberdeck_crypto::extraction::{
+        nested::extract_nested_limited, MAX_ARCHIVE_ENTRIES, MAX_ARCHIVE_INPUT_BYTES,
+        MAX_ARCHIVE_OUTPUT_BYTES,
+    };
+    validate_case_id(case_id)?;
+    let format = match format {
+        "zip" => "zip",
+        "tar" => "tar",
+        "gzip" => "gzip",
+        _ => return Err("unsupported nested archive format".into()),
+    };
+    let source_record = ctx
+        .store
+        .lock()
+        .map_err(|_| "case store unavailable")?
+        .get_artifact(id)?
+        .filter(|item| item.case_id == case_id)
+        .ok_or("nested source evidence is not in the selected case")?;
+    if source_record.size > MAX_ARCHIVE_INPUT_BYTES as u64 {
+        return Err("nested source archive exceeds 16 MiB".into());
+    }
+    cyberdeck_storage::verify_artifact_file(&source_record, &ctx.artifacts_dir)?;
+    let source = std::fs::read(&source_record.stored_path)
+        .map_err(|e| format!("cannot read nested archive source: {e}"))?;
+    if source.len() as u64 != source_record.size
+        || digest_of("sha256", &source)? != source_record.sha256
+    {
+        return Err("nested archive source integrity failure".into());
+    }
+    let leafs = extract_nested_limited(
+        &source,
+        format,
+        offset,
+        max_depth,
+        MAX_ARCHIVE_ENTRIES,
+        MAX_ARCHIVE_OUTPUT_BYTES,
+    )?;
+    let mut planned = Vec::with_capacity(leafs.len());
+    for (index, leaf) in leafs.into_iter().enumerate() {
+        let last = leaf.lineage.last().ok_or("nested lineage is empty")?;
+        let name_part = sanitize_file_name(last.item_name.rsplit('/').next().unwrap_or("member"));
+        let short = name_part.chars().take(48).collect::<String>();
+        let name = format!("nested-{index:03}-{short}");
+        let chain = leaf
+            .lineage
+            .iter()
+            .enumerate()
+            .map(|(depth, hop)| {
+                format!(
+                    "{depth}:{}:{}@0x{:x}",
+                    hop.format, hop.item_name, hop.source_offset,
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(" -> ");
+        let provenance = format!(
+            "Parent: {} sha256={} | source offset 0x{:x} | {}",
+            source_record.id, source_record.sha256, offset, chain,
+        );
+        if provenance.len() > 512 {
+            return Err(format!("nested entry {index} provenance exceeds 512 bytes"));
+        }
+        planned.push(PlannedArchiveEntry {
+            name,
+            bytes: leaf.bytes,
+            provenance,
+            title: format!("Nested archive entry {index}"),
+        });
+    }
+    import_archive_batch(ctx, case_id, "forensics.nested", planned)
 }
 
 #[cfg(test)]
@@ -687,6 +1002,234 @@ mod tests {
         EvidenceCtx {
             store: Mutex::new(ArtifactStore::open(&dir.join("index.db")).unwrap()),
             artifacts_dir: dir.to_path_buf(),
+        }
+    }
+
+    #[test]
+    fn archive_batch_indexes_distinct_and_deduplicated_files_atomically() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = test_ctx(dir.path());
+        let planned = vec![
+            PlannedArchiveEntry {
+                name: "one.bin".into(),
+                bytes: b"same".to_vec(),
+                provenance: "Parent: source-A > one.bin".into(),
+                title: "Member one".into(),
+            },
+            PlannedArchiveEntry {
+                name: "two.bin".into(),
+                bytes: b"other".to_vec(),
+                provenance: "Parent: source-A > two.bin".into(),
+                title: "Member two".into(),
+            },
+            PlannedArchiveEntry {
+                name: "duplicate.bin".into(),
+                bytes: b"same".to_vec(),
+                provenance: "Parent: source-A > duplicate.bin".into(),
+                title: "Duplicate".into(),
+            },
+        ];
+        let records =
+            import_archive_batch(&ctx, DEFAULT_CASE, "forensics.archive", planned).unwrap();
+        assert_eq!(records.len(), 3);
+        assert_eq!(records[0].id, records[2].id);
+        let store = ctx.store.lock().unwrap();
+        assert_eq!(store.list_artifacts(DEFAULT_CASE).unwrap().len(), 2);
+        assert_eq!(store.list_events(DEFAULT_CASE).unwrap().len(), 6);
+        assert_eq!(store.list_findings(DEFAULT_CASE).unwrap().len(), 3);
+    }
+
+    #[test]
+    fn oversized_atomic_archive_batch_rejects_before_file_publication() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = test_ctx(dir.path());
+        let planned = (0..33)
+            .map(|i| PlannedArchiveEntry {
+                name: format!("member-{i}.bin"),
+                bytes: format!("distinct contents {i}").into_bytes(),
+                provenance: format!("source member #{i}"),
+                title: format!("Member {i}"),
+            })
+            .collect();
+        assert!(
+            import_archive_batch(&ctx, DEFAULT_CASE, "forensics.archive", planned)
+                .unwrap_err()
+                .contains("32 distinct")
+        );
+        let store = ctx.store.lock().unwrap();
+        assert!(store.list_artifacts(DEFAULT_CASE).unwrap().is_empty());
+        assert!(store.list_events(DEFAULT_CASE).unwrap().is_empty());
+        assert!(!dir.path().join(DEFAULT_CASE).exists());
+    }
+
+    #[test]
+    fn nested_extraction_preserves_source_chain_and_rejects_tampering() {
+        use flate2::{write::GzEncoder, Compression};
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = test_ctx(dir.path());
+        let case = ctx
+            .store
+            .lock()
+            .unwrap()
+            .create_case("Nested evidence", "")
+            .unwrap();
+        let mut header = [0u8; 512];
+        header[..8].copy_from_slice(b"note.txt");
+        header[124..136].copy_from_slice(b"00000000005\0");
+        header[156] = b'0';
+        header[257..263].copy_from_slice(b"ustar\0");
+        header[148..156].fill(b' ');
+        let checksum = header.iter().map(|&b| b as usize).sum::<usize>();
+        header[148..156].copy_from_slice(format!("{checksum:06o}\0 ").as_bytes());
+        let mut tar = header.to_vec();
+        tar.extend_from_slice(b"hello");
+        tar.resize(512 + 512 + 1024, 0);
+        let mut gzip = GzEncoder::new(Vec::new(), Compression::fast());
+        gzip.write_all(&tar).unwrap();
+        let compressed = gzip.finish().unwrap();
+        let source =
+            import_bytes(&ctx, Path::new("outer.gz"), &compressed, &case.id, true).unwrap();
+        assert!(
+            extract_nested_from_evidence(&ctx, DEFAULT_CASE, &source.id, "gzip", 0, 2).is_err()
+        );
+        let imported =
+            extract_nested_from_evidence(&ctx, &case.id, &source.id, "gzip", 0, 2).unwrap();
+        assert_eq!(imported.len(), 1);
+        assert_eq!(std::fs::read(&imported[0].stored_path).unwrap(), b"hello");
+        let events = ctx.store.lock().unwrap().list_events(&case.id).unwrap();
+        assert!(events.iter().any(|e| e.source == "forensics.nested"
+            && e.action == "extract"
+            && e.source_description.contains(&source.id)
+            && e.source_description.contains("note.txt")));
+        std::fs::write(&source.stored_path, b"modified").unwrap();
+        assert!(extract_nested_from_evidence(&ctx, &case.id, &source.id, "gzip", 0, 2).is_err());
+    }
+
+    #[test]
+    fn repeat_evidence_import_keeps_identity_path_and_checks_original_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = test_ctx(dir.path());
+        let first = import_bytes(
+            &ctx,
+            Path::new("initial.bin"),
+            b"immutable sample",
+            DEFAULT_CASE,
+            true,
+        )
+        .unwrap();
+        let next = import_bytes(
+            &ctx,
+            Path::new("renamed-copy.bin"),
+            b"immutable sample",
+            DEFAULT_CASE,
+            true,
+        )
+        .unwrap();
+        assert_eq!(first.id, next.id);
+        assert_eq!(first.stored_path, next.stored_path);
+        assert_eq!(first.name, next.name);
+        assert_eq!(
+            ctx.store
+                .lock()
+                .unwrap()
+                .list_artifacts(DEFAULT_CASE)
+                .unwrap()
+                .len(),
+            1
+        );
+        let copy_path = std::path::PathBuf::from(&first.stored_path);
+        assert_eq!(std::fs::read(&copy_path).unwrap(), b"immutable sample");
+        std::fs::write(&copy_path, b"modified evidence").unwrap();
+        assert!(import_bytes(
+            &ctx,
+            Path::new("renamed-copy.bin"),
+            b"immutable sample",
+            DEFAULT_CASE,
+            true
+        )
+        .is_err());
+        assert_eq!(std::fs::read(&copy_path).unwrap(), b"modified evidence");
+    }
+
+    #[test]
+    fn invalid_second_import_event_does_not_index_artifact_or_findings() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = test_ctx(dir.path());
+        let invalid_description = "X".repeat(513);
+        let events = [
+            ImportEvent {
+                source: "forensics.archive",
+                action: "derived",
+                description: "entry.bin",
+            },
+            ImportEvent {
+                source: "forensics.archive",
+                action: "extract",
+                description: &invalid_description,
+            },
+        ];
+        let findings = [NewFinding {
+            title: "Archive finding".into(),
+            severity: "info".into(),
+            details: "should roll back".into(),
+        }];
+        assert!(import_bytes_with_events(
+            &ctx,
+            Path::new("entry.bin"),
+            b"artifact",
+            DEFAULT_CASE,
+            false,
+            &events,
+            &findings,
+        )
+        .is_err());
+        let store = ctx.store.lock().unwrap();
+        assert!(store.list_artifacts(DEFAULT_CASE).unwrap().is_empty());
+        assert!(store.list_events(DEFAULT_CASE).unwrap().is_empty());
+        assert!(store.list_findings(DEFAULT_CASE).unwrap().is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_case_directory_cannot_redirect_evidence_publication() {
+        let dir = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let ctx = test_ctx(dir.path());
+        std::os::unix::fs::symlink(outside.path(), dir.path().join(DEFAULT_CASE)).unwrap();
+        assert!(import_bytes(
+            &ctx,
+            Path::new("sample.bin"),
+            b"blocked",
+            DEFAULT_CASE,
+            true
+        )
+        .unwrap_err()
+        .contains("symlink"));
+        assert!(std::fs::read_dir(outside.path()).unwrap().next().is_none());
+    }
+
+    #[test]
+    fn preexisting_symlink_is_not_accepted_as_evidence() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = test_ctx(dir.path());
+        let bytes = b"symlink fixture";
+        let digest = digest_of("sha256", bytes).unwrap();
+        let case_dir = dir.path().join(DEFAULT_CASE);
+        std::fs::create_dir_all(&case_dir).unwrap();
+        let target = dir.path().join("outside.bin");
+        std::fs::write(&target, bytes).unwrap();
+        let stored_path = case_dir.join(format!("{digest}.evidence"));
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(&target, &stored_path).unwrap();
+            assert!(
+                import_bytes(&ctx, Path::new("sample.bin"), bytes, DEFAULT_CASE, true).is_err()
+            );
+            assert_eq!(std::fs::read(&target).unwrap(), bytes);
+        }
+        #[cfg(not(unix))]
+        {
+            assert!(!stored_path.exists());
         }
     }
 

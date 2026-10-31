@@ -27,6 +27,19 @@ fn matched(tail: &[u8]) -> Option<(&'static str, &'static str)> {
     if tail.starts_with(b"%PDF-") {
         return Some(("pdf", "PDF document header"));
     }
+    if tail.len() >= 32
+        && matches!(
+            tail.get(..4),
+            Some(
+                b"\xfe\xed\xfa\xce"
+                    | b"\xce\xfa\xed\xfe"
+                    | b"\xfe\xed\xfa\xcf"
+                    | b"\xcf\xfa\xed\xfe"
+            )
+        )
+    {
+        return Some(("mach-o", "Mach-O thin executable header"));
+    }
     if tail.starts_with(b"\x7fELF")
         && tail.len() >= 16
         && matches!(tail[4], 1 | 2)
@@ -104,7 +117,10 @@ pub fn scan_signatures(bytes: &[u8], max_hits: usize) -> Vec<SignatureHit> {
         // Cheap dispatch avoids a full signature table check on most bytes.
         let candidate = if matches!(
             first,
-            0x89 | b'%'
+            0xfe | 0xce
+                | 0xcf
+                | 0x89
+                | b'%'
                 | 0x7f
                 | b'P'
                 | 0x1f
@@ -198,6 +214,16 @@ mod tests {
         let mut fake_tar = vec![0u8; 512];
         fake_tar[257..262].copy_from_slice(b"ustar");
         assert!(scan_signatures(&fake_tar, 4).is_empty());
+    }
+    #[test]
+    fn detects_embedded_macho_and_rejects_short_magic() {
+        let mut embedded = b"prefix".to_vec();
+        embedded.extend_from_slice(b"\xcf\xfa\xed\xfe");
+        embedded.extend_from_slice(&[0u8; 28]);
+        assert!(scan_signatures(&embedded, 8)
+            .iter()
+            .any(|hit| hit.format == "mach-o" && hit.offset == 6));
+        assert!(scan_signatures(b"\xcf\xfa\xed\xfe", 8).is_empty());
     }
     #[test]
     fn results_are_bounded() {

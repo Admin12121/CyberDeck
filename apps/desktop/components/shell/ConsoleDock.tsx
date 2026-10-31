@@ -16,8 +16,10 @@ export function ConsoleDock() {
   const runCommand = async (raw: string) => {
     const line = raw.trim();
     if (!line) return;
-    log(`> ${line}`);
     const [cmd, ...args] = line.split(/\s+/);
+    // Console history is retained in memory; do not echo secrets or target credentials.
+    const sensitive = new Set(["verify", "hash", "b64", "unb64", "crack", "get", "scan", "spider"]);
+    log(sensitive.has(cmd.toLowerCase()) ? `> ${cmd.toLowerCase()} [arguments hidden]` : `> ${line}`);
     switch (cmd.toLowerCase()) {
       case "clear":
         wb.setConsoleLines([]);
@@ -95,7 +97,7 @@ export function ConsoleDock() {
         try {
           const result = await crackWordlistDialog(args[0], args[1], args[2]);
           log(`crack: ${result.tried} tried in ${result.duration_ms} ms · ${result.matches.length} match(es) · ${result.threads} threads`);
-          for (const m of result.matches.slice(0, 10)) log(`  cracked: ${m.password}`);
+          if (result.matches.length > 0) log("  matches recovered; plaintext is withheld from the operation log");
         } catch (err) {
           log(`crack failed: ${err instanceof Error ? err.message : String(err)}`);
         } finally {

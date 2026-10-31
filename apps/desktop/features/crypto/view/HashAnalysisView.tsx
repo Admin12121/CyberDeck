@@ -2,6 +2,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ArrowDown, ArrowUp, Copy, Play, Wand2, X } from "lucide-react";
 import { Chip, EmptyState, Field, Pane, Resizer, Select, TextInput, ToolButton } from "@ds/panes";
+import { useWorkbench } from "@state/workbench";
 import {
   OPERATIONS,
   detectImageMime,
@@ -100,6 +101,8 @@ function detectHashFamily(input: string): HashFamily | null {
 }
 
 export function HashAnalysisView() {
+  const wb = useWorkbench();
+  const [operationsWidth, setOperationsWidth] = useState(384);
   const [input, setInput] = useState("5d41402abc4b2a76b9719d911017c592");
   const [plaintext, setPlaintext] = useState("hello");
   const [algo, setAlgo] = useState("md5");
@@ -217,7 +220,7 @@ export function HashAnalysisView() {
     setCrackProgress(null);
     try {
       const algoForEngine = effectiveAlgo ?? crackAlgo;
-      const result =
+      const result = await wb.trackOperation(`Recovery: ${algoForEngine}`, async () =>
         engineChoice !== "native"
           ? await engineAttack(engineChoice, algoForEngine, input, crackMode, crackMode === "mask" ? mask : undefined)
           : crackMode === "mask"
@@ -230,7 +233,8 @@ export function HashAnalysisView() {
                   ? await crackCombinatorDialog(algoForEngine, input, wordlist?.path, wordlistB?.path)
                   : crackMode === "rules"
                     ? await crackRulesDialog(algoForEngine, input)
-                    : await crackWordlistDialog(algoForEngine, input, wordlist?.path, (p) => setCrackProgress(p));
+                    : await crackWordlistDialog(algoForEngine, input, wordlist?.path, (p) => setCrackProgress(p))
+      );
       setAttackResult(result);
       if ("matches" in result && result.matches.length > 0) loadHistory();
     } catch (err) {
@@ -339,7 +343,8 @@ export function HashAnalysisView() {
           onReload={loadHistory}
         />
       </div>
-      <Pane title="Operations" className="w-96 shrink-0" bodyClassName="overflow-auto">
+      <Resizer direction="horizontal" flip ariaLabel="Resize recovery operations" value={operationsWidth} onChange={setOperationsWidth} min={280} max={560} />
+      <Pane title="Operations" className="shrink-0" style={{ width: operationsWidth }} bodyClassName="overflow-auto">
         <div className="border-b border-line p-2">
           <div className="mb-1 text-[10px] uppercase tracking-wider text-fg-muted">Verify candidate</div>
           <div className="flex items-center gap-1">

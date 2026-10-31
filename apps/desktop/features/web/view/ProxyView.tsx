@@ -131,10 +131,7 @@ export function ProxyView() {
           </div>
           <div className="space-y-2 p-3 text-xs leading-relaxed text-fg-dim">
             <p>
-              One time per machine: download the CA, then install it into your browser or OS trust
-              store (Windows: double-click → Install Certificate → Trusted Root Certification
-              Authorities. Firefox: Settings → Certificates → Import). After that, HTTPS interception
-              works without warnings.
+              Trust the CyberDeck CA only in an isolated testing browser/profile on targets you are authorized to inspect. Installing a root CA permits interception of sensitive HTTPS traffic. Remove it when the assessment ends. Trust configuration, TLS compatibility, and end-to-end HTTPS interception must be checked on your platform.
             </p>
             <div className="flex items-center gap-2">
               <ToolButton tone="primary" onClick={() => void saveCa()} disabled={!desktop} title="Download cyberdeck-root-ca.crt">
@@ -155,9 +152,7 @@ export function ProxyView() {
           </div>
           <div className="space-y-2 p-3 text-xs leading-relaxed text-fg-dim">
             <p>
-              Point your browser at 127.0.0.1:{status.port}. Plain-HTTP requests land in History;
-              with Intercept on they are held here for Forward or Drop. HTTPS tunnels pass through
-              unintercepted until the CA arc.
+              Configure your browser HTTP and HTTPS proxy to 127.0.0.1:{status.port}. History records requests observed by the listener. Intercept can hold supported requests for Forward/Drop; HTTPS interception depends on trust, TLS compatibility and runtime support. Confirm HTTPS behavior with a controlled test before relying on it.
             </p>
             <div className="flex items-center gap-2">
               <span className="font-mono text-[10px] uppercase text-fg-muted">port</span>
@@ -253,7 +248,7 @@ export function ProxyView() {
         </Pane>
 
         <div className="pb-2 text-center font-mono text-[10px] text-fg-muted">
-          websocket history and HTTPS interception arrive with the CA + WS relay arcs
+          HTTP(S) and WebSocket behavior varies by route and runtime; verify traffic in History before relying on interception.
         </div>
       </div>
     </div>

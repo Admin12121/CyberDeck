@@ -28,9 +28,6 @@ export function JobsDock() {
           ))}
         </div>
         <Chip>{jobs.length}</Chip>
-        <ToolButton onClick={wb.runDemoJob} tone="primary" title="Queue another job through the shared pipeline">
-          + run job
-        </ToolButton>
         <div className="ml-auto flex items-center gap-2">
           <span className="font-mono text-[10px] text-fg-muted">Ctrl+J toggles this dock</span>
           <button type="button" onClick={wb.toggleDock} aria-label="Close jobs dock" className="text-fg-muted hover:text-fg">
@@ -40,7 +37,7 @@ export function JobsDock() {
       </div>
       <div className="min-h-0 flex-1 overflow-auto">
         {jobs.length === 0 ? (
-          <EmptyState title="No jobs" detail="Queue a job from any studio; progress, cancellation and results stream here." badge="shared job pipeline" />
+          <EmptyState title="No jobs" detail="Start a scan or analysis from its workspace. Operations tracked by the UI appear here; cancellation is available only for backend jobs that support it." />
         ) : (
           <table className="data-table">
             <thead>
@@ -56,7 +53,7 @@ export function JobsDock() {
             <tbody>
               {jobs.map((job) => (
                 <tr key={job.id}>
-                  <td className="text-fg-muted">#{job.id}</td>
+                  <td className="text-fg-muted">{job.id > 0 ? `#${job.id}` : "local"}</td>
                   <td>{job.kind}</td>
                   <td>
                     <span className={job.status === "running" ? "text-orange" : job.status === "completed" ? "text-ok" : job.status === "failed" ? "text-err" : "text-fg-muted"}>
@@ -73,10 +70,10 @@ export function JobsDock() {
                   </td>
                   <td className="text-fg-dim">{job.message}</td>
                   <td>
-                    {job.status === "running" ? (
+                    {job.status === "running" && job.id > 0 ? (
                       <ToolButton tone="danger" onClick={() => wb.cancelJob(job.id)}>cancel</ToolButton>
                     ) : (
-                      <span className="font-mono text-[10px] text-fg-muted">n/a</span>
+                      <span className="font-mono text-[10px] text-fg-muted">{job.status === "running" ? "running" : "—"}</span>
                     )}
                   </td>
                 </tr>

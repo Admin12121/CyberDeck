@@ -1,6 +1,6 @@
 "use client";
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Chip, Field, Pane, TextInput, ToolButton } from "@ds/panes";
+import { Chip, Field, Pane, Resizer, TextInput, ToolButton } from "@ds/panes";
 import { hexDump } from "@lib/hex";
 import {
   fileHex,
@@ -23,6 +23,7 @@ export function StringsView() {
   const wb = useWorkbench();
   const ctx = useEvidence();
   const [minLength, setMinLength] = useState("4");
+  const [entropyWidth, setEntropyWidth] = useState(288);
   const min = Math.max(2, Number.parseInt(minLength, 10) || 4);
   const id = ctx.selected?.id ?? null;
   const real = ctx.selected?.real ?? false;
@@ -90,7 +91,8 @@ export function StringsView() {
           <div className="p-3 font-mono text-[11px] text-fg-muted">select evidence to scan</div>
         )}
       </Pane>
-      <Pane title="Entropy profile" className="w-72 shrink-0">
+      <Resizer direction="horizontal" flip ariaLabel="Resize entropy profile" value={entropyWidth} onChange={setEntropyWidth} min={220} max={440} />
+      <Pane title="Entropy profile" className="shrink-0" style={{ width: entropyWidth }}>
         {ctx.selectedArtifact ? (
           <>
             <Field label="whole file" value={formatEntropy(ctx.selectedArtifact.entropy)} />

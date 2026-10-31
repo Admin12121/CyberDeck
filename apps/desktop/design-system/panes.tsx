@@ -27,7 +27,7 @@ export function Pane({
   return (
     <section style={style} className={`flex min-h-0 min-w-0 flex-col bg-panel ${className}`}>
       <header className="flex h-8 shrink-0 items-center justify-between gap-2 border-b border-line bg-sidebar px-2">
-        <span className="truncate text-[10px] font-medium uppercase tracking-wider text-fg-muted">
+        <span className="truncate text-[11px] font-medium uppercase tracking-wider text-fg-muted">
           {title}
         </span>
         {actions ? <div className="flex shrink-0 items-center gap-1">{actions}</div> : null}
@@ -118,7 +118,7 @@ export function ToolButton({
       onClick={onClick}
       disabled={disabled}
       title={title}
-      className={`inline-flex h-6 items-center gap-1 border px-2 font-mono text-[11px] transition-colors disabled:cursor-not-allowed disabled:opacity-40 ${tones[tone]}`}
+      className={`inline-flex h-7 items-center gap-1 border px-2 font-mono text-[11px] transition-colors disabled:cursor-not-allowed disabled:opacity-40 ${tones[tone]}`}
     >
       {children}
     </button>
@@ -149,7 +149,7 @@ export function TextInput({
       onKeyDown={onKeyDown}
       placeholder={placeholder}
       aria-label={ariaLabel}
-      className={`h-6 border border-line bg-app px-2 text-xs text-fg placeholder:text-fg-muted focus:border-orange focus:outline-none ${mono ? "font-mono" : ""} ${className}`}
+      className={`h-7 border border-line bg-app px-2 text-xs text-fg placeholder:text-fg-muted focus:border-orange focus:outline-none ${mono ? "font-mono" : ""} ${className}`}
     />
   );
 }

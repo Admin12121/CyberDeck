@@ -15,8 +15,8 @@
   --color-line: #3b3b44;         /* subtle 1px separators */
   --color-line-strong: #55555e;  /* strong separators / drag handles */
   --color-fg: #d6d6e0;           /* primary text */
-  --color-fg-dim: #8787a0;       /* secondary text / icons */
-  --color-fg-muted: #5c5c66;     /* muted text */
+  --color-fg-dim: #a5a5b5;       /* secondary text / icons */
+  --color-fg-muted: #9191a2;     /* muted text */
   --color-blue: #3fc1ff;         /* selection + analysis accent */
   --color-blue-selection: #2d9bff;
   --color-blue-dim: #14344a;
@@ -89,7 +89,7 @@ body {
   border-collapse: collapse;
 }
 .data-table th {
-  color: var(--color-fg-muted);
+  color: var(--color-fg-dim);
   font-weight: 500;
   text-align: left;
   padding: 3px 8px;

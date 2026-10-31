@@ -74,10 +74,13 @@ impl Default for ScanCtx {
     }
 }
 
+/// Curated CyberDeck TCP port preset, not Nmap's popularity-ranked port list.
 pub const TOP_PORTS_100: &[u16] = &[
-    21, 22, 23, 25, 53, 80, 110, 111, 135, 139, 143, 443, 445, 993, 995, 1723, 3306, 3389, 5900,
-    8080, 8443, 67, 69, 123, 161, 389, 636, 1080, 1433, 1521, 2049, 2121, 3128, 3268, 4444, 554,
-    5432, 5555, 6379, 8000, 8008, 8081, 8888, 9000, 9090, 9200, 10000, 27017, 50000, 5985,
+    21, 22, 23, 25, 53, 80, 110, 111, 135, 139, 143, 443, 445, 993, 995, 1723, 3306, 3389, 5900, 8080,
+    8443, 67, 69, 123, 161, 389, 636, 1080, 1433, 1521, 2049, 2121, 3128, 3268, 4444, 554, 5432, 5555, 6379, 8000,
+    8008, 8081, 8888, 9000, 9090, 9200, 10000, 27017, 50000, 5985, 1, 7, 9, 13, 17, 19, 20, 26, 37, 42,
+    43, 49, 70, 79, 81, 88, 102, 106, 109, 113, 119, 137, 138, 179, 194, 199, 264, 427, 465, 500,
+    512, 513, 514, 515, 524, 548, 563, 587, 593, 623, 631, 873, 902, 989, 990, 992, 1194, 1883, 2375, 5060,
 ];
 
 /// Expand target spec: single IP, hostname, CIDR (IPv4 /24-/32), comma lists.
@@ -102,13 +105,14 @@ pub fn parse_targets(spec: &str) -> Result<Vec<IpAddr>, String> {
                     }
                     let bits = u32::from(v4);
                     let suffix = 32u32.saturating_sub(mask as u32);
-                    let base = bits & (!0u32 << suffix);
                     let count = 1u64 << suffix;
+                    // The /0 size check must run before shifting by 32 bits.
                     if count > MAX_HOSTS as u64 {
                         return Err(format!(
-                            "/{mask} expands to {count} hosts; the cap this arc is {MAX_HOSTS}"
+                            "/{mask} expands to {count} hosts; the cap is {MAX_HOSTS}"
                         ));
                     }
+                    let base = bits & u32::MAX.checked_shl(suffix).unwrap_or(0);
                     for i in 0..count {
                         hosts.push(IpAddr::V4(std::net::Ipv4Addr::from(base + i as u32)));
                     }
@@ -138,6 +142,8 @@ pub fn parse_targets(spec: &str) -> Result<Vec<IpAddr>, String> {
     if hosts.is_empty() {
         return Err("no targets parsed".to_string());
     }
+    hosts.sort_unstable();
+    hosts.dedup();
     Ok(hosts)
 }
 
@@ -232,11 +238,22 @@ fn summarize_banner(raw: &str) -> String {
     }
 }
 
+/// Do not mistake a timeout for a refused TCP connection.
+fn classify_connect_error(kind: std::io::ErrorKind) -> &'static str {
+    use std::io::ErrorKind;
+    match kind {
+        ErrorKind::ConnectionRefused => "closed",
+        ErrorKind::TimedOut | ErrorKind::WouldBlock => "no-response",
+        ErrorKind::NetworkUnreachable | ErrorKind::HostUnreachable => "unreachable",
+        _ => "unknown",
+    }
+}
+
 /// Connect + optional banner grab for one host:port.
 fn probe(host: IpAddr, port: u16) -> (String, String) {
     let addr = std::net::SocketAddr::new(host, port);
     match TcpStream::connect_timeout(&addr, CONNECT_TIMEOUT) {
-        Err(_) => ("closed".to_string(), String::new()),
+        Err(error) => (classify_connect_error(error.kind()).to_string(), String::new()),
         Ok(mut stream) => {
             let _ = stream.set_read_timeout(Some(BANNER_TIMEOUT));
             let _ = stream.set_write_timeout(Some(BANNER_TIMEOUT));
@@ -257,78 +274,126 @@ fn probe(host: IpAddr, port: u16) -> (String, String) {
     }
 }
 
-/// Run the full host×port matrix across all cores with progress + stop.
+/// Bound scan plans rather than allocating millions of pending host/port jobs.
+const MAX_SCAN_PROBES: u64 = 250_000;
+
+fn scan_probe_count(host_count: usize, port_count: usize) -> Result<u64, String> {
+    let count = (host_count as u64)
+        .checked_mul(port_count as u64)
+        .ok_or("scan target count overflow")?;
+    if count > MAX_SCAN_PROBES {
+        return Err(format!(
+            "{count} probes exceed the per-run limit of {MAX_SCAN_PROBES}; split the scan into smaller scopes"
+        ));
+    }
+    Ok(count)
+}
+
+fn report_progress(
+    on_progress: &Channel<ScanProgress>,
+    reported: &StdMutex<u64>,
+    tried: u64,
+    total: u64,
+) {
+    let mut last = reported.lock().expect("scan progress poisoned");
+    if tried > *last {
+        *last = tried;
+        let _ = on_progress.send(ScanProgress {
+            tried,
+            total,
+            percent: (tried * 100 / total.max(1)) as u32,
+        });
+    }
+}
+
+/// Backward-compatible API for internal callers not tracking live scan state.
 pub fn run_scan(
     hosts: Vec<IpAddr>,
     ports: Vec<u16>,
     stop: &AtomicBool,
     on_progress: &Channel<ScanProgress>,
 ) -> Vec<ScanEntry> {
-    let mut jobs: Vec<(IpAddr, u16)> = Vec::new();
-    for h in &hosts {
-        for p in &ports {
-            jobs.push((*h, *p));
-        }
+    let results = Arc::new(StdMutex::new(Vec::new()));
+    run_scan_into(hosts, ports, stop, on_progress, &results)
+}
+
+/// A bounded pool claims indexes without materializing the full host x port
+/// matrix. Open results are published as they arrive, not only at completion.
+fn run_scan_into(
+    hosts: Vec<IpAddr>,
+    ports: Vec<u16>,
+    stop: &AtomicBool,
+    on_progress: &Channel<ScanProgress>,
+    results: &Arc<StdMutex<Vec<ScanEntry>>>,
+) -> Vec<ScanEntry> {
+    let total = (hosts.len() as u64).saturating_mul(ports.len() as u64);
+    if total == 0 || total > MAX_SCAN_PROBES {
+        return Vec::new();
     }
-    let total = jobs.len() as u64;
-    let threads = std::thread::available_parallelism()
+
+    let next = AtomicU64::new(0);
+    let completed = AtomicU64::new(0);
+    let reported = StdMutex::new(0u64);
+    let workers = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(1)
-        .clamp(1, 64);
-    let chunk_size = (jobs.len() + threads - 1) / threads.max(1);
-    let found = Arc::new(AtomicU64::new(0));
-    let mut partials: Vec<Vec<ScanEntry>> = Vec::new();
+        .clamp(1, 32)
+        .min(total as usize);
+
     std::thread::scope(|scope| {
-        let mut handles = Vec::new();
-        for (chunk_index, chunk) in jobs.chunks(chunk_size.max(1)).enumerate() {
-            let stop = stop;
-            let on_progress = on_progress;
-            let found = Arc::clone(&found);
-            let base = (chunk_index * chunk_size.max(1)) as u64;
-            handles.push(scope.spawn(move || {
-                let mut tried: u64 = 0;
-                let mut out: Vec<ScanEntry> = Vec::new();
-                for (i, (host, port)) in chunk.iter().enumerate() {
+        for _ in 0..workers {
+            let results = Arc::clone(results);
+            let next = &next;
+            let completed = &completed;
+            let reported = &reported;
+            let hosts = &hosts;
+            let ports = &ports;
+            scope.spawn(move || {
+                loop {
                     if stop.load(Ordering::Relaxed) {
                         break;
                     }
-                    tried += 1;
-                    if tried % 64 == 0 || i + 1 == chunk.len() {
-                        let done = (base + tried).min(total);
-                        let _ = on_progress.send(ScanProgress {
-                            tried: done,
-                            total,
-                            percent: (done * 100 / total.max(1)) as u32,
-                        });
+                    let index = next.fetch_add(1, Ordering::Relaxed);
+                    if index >= total {
+                        break;
                     }
-                    let (state, banner) = probe(*host, *port);
+                    let offset = index as usize;
+                    let host = hosts[offset / ports.len()];
+                    let port = ports[offset % ports.len()];
+                    let (state, banner) = probe(host, port);
                     if state == "open" {
-                        let service = well_known_service(*port).to_string();
-                        if found.fetch_add(1, Ordering::Relaxed) + 1 >= MAX_RESULTS as u64 {
+                        let mut output = results.lock().expect("scan results poisoned");
+                        if output.len() >= MAX_RESULTS {
                             stop.store(true, Ordering::Relaxed);
+                        } else {
+                            let service = well_known_service(port);
+                            output.push(ScanEntry {
+                                host: host.to_string(),
+                                port,
+                                state,
+                                service: if service.is_empty() {
+                                    "unknown".into()
+                                } else {
+                                    service.into()
+                                },
+                                banner,
+                            });
                         }
-                        out.push(ScanEntry {
-                            host: host.to_string(),
-                            port: *port,
-                            state,
-                            service: if service.is_empty() {
-                                "unknown".to_string()
-                            } else {
-                                service
-                            },
-                            banner,
-                        });
+                    }
+                    let tried = completed.fetch_add(1, Ordering::Relaxed) + 1;
+                    if tried % 32 == 0 || tried == total {
+                        report_progress(on_progress, reported, tried, total);
                     }
                 }
-                (tried, out)
-            }));
+            });
         }
-        partials = handles
-            .into_iter()
-            .map(|h| h.join().unwrap_or_default().1)
-            .collect();
     });
-    partials.into_iter().flatten().collect()
+
+    // Cancellation is not 100% completion; preserve the actual attempted count.
+    report_progress(on_progress, &reported, completed.load(Ordering::Relaxed), total);
+    let mut final_results = results.lock().expect("scan results poisoned");
+    final_results.sort_by(|a, b| a.host.cmp(&b.host).then(a.port.cmp(&b.port)));
+    final_results.clone()
 }
 
 fn now_ms() -> u64 {
@@ -403,6 +468,7 @@ pub fn netscan_start(
     let hosts = parse_targets(&targets)?;
     let host_count = hosts.len();
     let port_list = parse_ports(&ports)?;
+    scan_probe_count(host_count, port_list.len())?;
     if ctx.running.swap(true, Ordering::AcqRel) {
         return Err("a scan is already running; stop it first".to_string());
     }
@@ -425,7 +491,7 @@ pub fn netscan_start(
     let ports_spec = ports.clone();
 
     std::thread::spawn(move || {
-        let entries = run_scan(hosts, port_list, &stop_out, &on_progress);
+        let entries = run_scan_into(hosts, port_list, &stop_out, &on_progress, &results_out);
         let open = entries.len();
         let duration = started.elapsed().as_millis() as u64;
         if !entries.is_empty() {
@@ -589,11 +655,46 @@ mod tests {
     }
 
     #[test]
+    fn preset_port_counts_are_truthful_and_unique() {
+        assert_eq!(TOP_PORTS_100.len(), 100);
+        let unique = TOP_PORTS_100.iter().copied().collect::<std::collections::HashSet<_>>();
+        assert_eq!(unique.len(), 100);
+        assert_eq!(parse_ports("top25").unwrap().len(), 25);
+        assert_eq!(parse_ports("top100").unwrap().len(), 100);
+    }
+
+    #[test]
+    fn ipv4_slash_zero_is_a_bounded_error_not_a_shift_panic() {
+        assert!(parse_targets("192.0.2.1/0").is_err());
+    }
+
+    #[test]
+    fn connect_error_states_are_distinct() {
+        use std::io::ErrorKind;
+        assert_eq!(classify_connect_error(ErrorKind::ConnectionRefused), "closed");
+        assert_eq!(classify_connect_error(ErrorKind::TimedOut), "no-response");
+        assert_eq!(classify_connect_error(ErrorKind::NetworkUnreachable), "unreachable");
+    }
+
+    #[test]
     fn parses_port_specs() {
         assert_eq!(parse_ports("top25").unwrap().len(), 25);
         let ports = parse_ports("80,443,8000-8002").unwrap();
         assert_eq!(ports, vec![80, 443, 8000, 8001, 8002]);
         assert!(parse_ports("9000-99999").is_err());
+    }
+
+    #[test]
+    fn scan_probe_budget_rejects_excessive_work_without_allocating_jobs() {
+        assert_eq!(scan_probe_count(2, 100).unwrap(), 200);
+        assert!(scan_probe_count(4096, 1024).is_err());
+        assert_eq!(scan_probe_count(0, 0).unwrap(), 0);
+    }
+
+    #[test]
+    fn repeated_host_targets_are_deduplicated() {
+        let targets = parse_targets("127.0.0.1,127.0.0.1,127.0.0.2").unwrap();
+        assert_eq!(targets.len(), 2);
     }
 
     #[test]

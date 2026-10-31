@@ -103,6 +103,186 @@ pub fn recover_md5(target_hex: &str, candidates: &[&[u8]]) -> Result<Vec<usize>,
     }
 }
 
+/// Native OpenCL SHA-1 matching. Positive GPU results are rechecked with Rust SHA-1.
+pub fn recover_sha1(target_hex: &str, candidates: &[&[u8]]) -> Result<Vec<usize>, String> {
+    let target = hex::decode(target_hex).map_err(|_| "SHA-1 target must be hex")?;
+    if target.len() != 20 {
+        return Err("SHA-1 target must be 20 bytes".into());
+    }
+    if candidates.is_empty() {
+        return Ok(Vec::new());
+    }
+    if candidates.len() > MAX_GPU_BATCH {
+        return Err("GPU batch exceeds bound".into());
+    }
+    if candidates.iter().any(|c| c.len() > MAX_GPU_CANDIDATE_BYTES) {
+        return Err("GPU SHA-1 supports only 0..=55-byte candidates".into());
+    }
+    #[cfg(feature = "gpu")]
+    {
+        native::execute_sha1(&target, candidates)
+    }
+    #[cfg(not(feature = "gpu"))]
+    {
+        Err("GPU feature not enabled; use native CPU recovery".into())
+    }
+}
+
+/// Supported native OpenCL digest formats for explicit GPU device selection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub enum GpuHash {
+    Sha256,
+    Md5,
+    Sha1,
+    Ntlm,
+}
+impl GpuHash {
+    fn digest_bytes(self) -> usize {
+        match self {
+            Self::Sha256 => 32,
+            Self::Md5 => 16,
+            Self::Sha1 => 20,
+            Self::Ntlm => 16,
+        }
+    }
+    fn engine(self) -> &'static str {
+        match self {
+            Self::Sha256 => "cyberdeck-crypto-opencl-sha256",
+            Self::Md5 => "cyberdeck-crypto-opencl-md5",
+            Self::Sha1 => "cyberdeck-crypto-opencl-sha1",
+            Self::Ntlm => "cyberdeck-crypto-opencl-ntlm",
+        }
+    }
+    #[cfg(feature = "gpu")]
+    fn native(self) -> native::Algorithm {
+        match self {
+            Self::Sha256 => native::Algorithm::Sha256,
+            Self::Md5 => native::Algorithm::Md5,
+            Self::Sha1 => native::Algorithm::Sha1,
+            Self::Ntlm => native::Algorithm::Ntlm,
+        }
+    }
+}
+
+/// Stream synthetic or user-supplied candidate bytes to a chosen OpenCL GPU.
+/// The zero-based device index refers to probe().devices and may change after
+/// GPU driver updates or when OpenCL platforms are re-enumerated.
+/// Existing recover_*_stream APIs intentionally retain the first-GPU default.
+pub fn recover_stream_on_device<I, B, F>(
+    algorithm: GpuHash,
+    device_index: usize,
+    target_hex: &str,
+    candidates: I,
+    max_attempts: u64,
+    max_matches: usize,
+    cancel: F,
+) -> Result<GpuStreamResult, String>
+where
+    I: IntoIterator<Item = B>,
+    B: AsRef<[u8]>,
+    F: FnMut() -> bool,
+{
+    recover_stream_on_device_with_batch(
+        algorithm,
+        device_index,
+        GPU_STREAM_BATCH,
+        target_hex,
+        candidates,
+        max_attempts,
+        max_matches,
+        cancel,
+    )
+}
+
+/// Like recover_stream_on_device but allows bounded per-job batch tuning.
+/// This is not a hardware performance claim: benchmark both size and device.
+pub fn recover_stream_on_device_with_batch<I, B, F>(
+    algorithm: GpuHash,
+    device_index: usize,
+    batch_size: usize,
+    target_hex: &str,
+    candidates: I,
+    max_attempts: u64,
+    max_matches: usize,
+    cancel: F,
+) -> Result<GpuStreamResult, String>
+where
+    I: IntoIterator<Item = B>,
+    B: AsRef<[u8]>,
+    F: FnMut() -> bool,
+{
+    #[cfg(feature = "gpu")]
+    {
+        let mut session: Option<native::Session> = None;
+        stream_with_batch(
+            target_hex,
+            candidates,
+            max_attempts,
+            max_matches,
+            batch_size,
+            algorithm.digest_bytes(),
+            algorithm.engine(),
+            cancel,
+            |hash, batch| {
+                let target = hex::decode(hash).map_err(|_| "invalid GPU target hex")?;
+                if session.is_none() {
+                    session = Some(native::Session::new_for_device(
+                        batch_size,
+                        algorithm.native(),
+                        device_index,
+                    )?);
+                }
+                session
+                    .as_mut()
+                    .expect("GPU session initialized")
+                    .execute(&target, batch)
+            },
+        )
+    }
+    #[cfg(not(feature = "gpu"))]
+    {
+        let _ = device_index;
+        stream_with_batch(
+            target_hex,
+            candidates,
+            max_attempts,
+            max_matches,
+            batch_size,
+            algorithm.digest_bytes(),
+            algorithm.engine(),
+            cancel,
+            |_, _| Err("GPU feature not enabled; no OpenCL work was performed".into()),
+        )
+    }
+}
+
+/// Native GPU NTLM matching (MD4 of UTF-16LE).
+/// This optimized single-block implementation is intentionally ASCII-only:
+/// 0..=27 bytes. Use native CPU recovery for Unicode or longer candidates.
+pub fn recover_ntlm(target_hex: &str, candidates: &[&[u8]]) -> Result<Vec<usize>, String> {
+    let target = hex::decode(target_hex).map_err(|_| "NTLM target must be hex")?;
+    if target.len() != 16 {
+        return Err("NTLM target must be 16 bytes".into());
+    }
+    if candidates.is_empty() {
+        return Ok(Vec::new());
+    }
+    if candidates.len() > MAX_GPU_BATCH {
+        return Err("GPU batch exceeds bound".into());
+    }
+    if candidates.iter().any(|c| c.len() > 27 || !c.is_ascii()) {
+        return Err("GPU NTLM supports only ASCII candidates of length 0..=27".into());
+    }
+    #[cfg(feature = "gpu")]
+    {
+        native::execute_ntlm(&target, candidates)
+    }
+    #[cfg(not(feature = "gpu"))]
+    {
+        Err("GPU feature not enabled; use native CPU NTLM recovery".into())
+    }
+}
+
 pub const GPU_STREAM_BATCH: usize = 4096;
 pub const MAX_GPU_STREAM_CANDIDATES: u64 = 10_000_000;
 pub const MAX_GPU_STREAM_MATCHES: usize = 100;
@@ -224,6 +404,84 @@ where
     }
 }
 
+/// Run bounded SHA-1 GPU recovery using one native OpenCL session per stream.
+pub fn recover_sha1_stream<I, B, F>(
+    target_hex: &str,
+    candidates: I,
+    max_attempts: u64,
+    max_matches: usize,
+    cancel: F,
+) -> Result<GpuStreamResult, String>
+where
+    I: IntoIterator<Item = B>,
+    B: AsRef<[u8]>,
+    F: FnMut() -> bool,
+{
+    #[cfg(feature = "gpu")]
+    {
+        let mut session: Option<native::Session> = None;
+        return stream_with_checked(
+            target_hex,
+            candidates,
+            max_attempts,
+            max_matches,
+            20,
+            "cyberdeck-crypto-opencl-sha1",
+            cancel,
+            |hash, batch| {
+                let target = hex::decode(hash).map_err(|_| "invalid SHA-1 target")?;
+                if session.is_none() {
+                    session = Some(native::Session::new_for(
+                        GPU_STREAM_BATCH,
+                        native::Algorithm::Sha1,
+                    )?);
+                }
+                session
+                    .as_mut()
+                    .expect("SHA-1 session initialized")
+                    .execute(&target, batch)
+            },
+        );
+    }
+    #[cfg(not(feature = "gpu"))]
+    {
+        stream_with_checked(
+            target_hex,
+            candidates,
+            max_attempts,
+            max_matches,
+            20,
+            "cyberdeck-crypto-opencl-sha1",
+            cancel,
+            recover_sha1,
+        )
+    }
+}
+
+/// Stream ASCII-only NTLM candidates through native OpenCL MD4.
+pub fn recover_ntlm_stream<I, B, F>(
+    target_hex: &str,
+    candidates: I,
+    max_attempts: u64,
+    max_matches: usize,
+    cancel: F,
+) -> Result<GpuStreamResult, String>
+where
+    I: IntoIterator<Item = B>,
+    B: AsRef<[u8]>,
+    F: FnMut() -> bool,
+{
+    recover_stream_on_device(
+        GpuHash::Ntlm,
+        0,
+        target_hex,
+        candidates,
+        max_attempts,
+        max_matches,
+        cancel,
+    )
+}
+
 fn dispatch_batch<E>(
     target_hex: &str,
     batch: &mut Vec<Vec<u8>>,
@@ -288,6 +546,36 @@ fn stream_with_checked<I, B, F, E>(
     max_matches: usize,
     digest_bytes: usize,
     engine: &'static str,
+    cancel: F,
+    executor: E,
+) -> Result<GpuStreamResult, String>
+where
+    I: IntoIterator<Item = B>,
+    B: AsRef<[u8]>,
+    F: FnMut() -> bool,
+    E: FnMut(&str, &[&[u8]]) -> Result<Vec<usize>, String>,
+{
+    stream_with_batch(
+        target_hex,
+        candidates,
+        max_attempts,
+        max_matches,
+        GPU_STREAM_BATCH,
+        digest_bytes,
+        engine,
+        cancel,
+        executor,
+    )
+}
+
+fn stream_with_batch<I, B, F, E>(
+    target_hex: &str,
+    candidates: I,
+    max_attempts: u64,
+    max_matches: usize,
+    batch_size: usize,
+    digest_bytes: usize,
+    engine: &'static str,
     mut cancel: F,
     mut executor: E,
 ) -> Result<GpuStreamResult, String>
@@ -304,6 +592,9 @@ where
     {
         return Err("GPU digest has incorrect size".into());
     }
+    if batch_size == 0 || batch_size > MAX_GPU_BATCH {
+        return Err("GPU batch size must be 1..=65536".into());
+    }
     if max_attempts == 0
         || max_attempts > MAX_GPU_STREAM_CANDIDATES
         || max_matches == 0
@@ -319,7 +610,7 @@ where
         cancelled: false,
         limit_reached: false,
     };
-    let mut batch: Vec<Vec<u8>> = Vec::with_capacity(GPU_STREAM_BATCH);
+    let mut batch: Vec<Vec<u8>> = Vec::with_capacity(batch_size);
     let mut generated = 0u64;
     let mut source = candidates.into_iter();
     loop {
@@ -342,7 +633,7 @@ where
         }
         batch.push(candidate.to_vec());
         generated += 1;
-        if batch.len() >= GPU_STREAM_BATCH {
+        if batch.len() >= batch_size {
             dispatch_batch(
                 target_hex,
                 &mut batch,
@@ -602,6 +893,12 @@ mod native {
     pub(super) fn execute_md5(target: &[u8], candidates: &[&[u8]]) -> Result<Vec<usize>, String> {
         Session::new_for(candidates.len(), Algorithm::Md5)?.execute(target, candidates)
     }
+    pub(super) fn execute_sha1(target: &[u8], candidates: &[&[u8]]) -> Result<Vec<usize>, String> {
+        Session::new_for(candidates.len(), Algorithm::Sha1)?.execute(target, candidates)
+    }
+    pub(super) fn execute_ntlm(target: &[u8], candidates: &[&[u8]]) -> Result<Vec<usize>, String> {
+        Session::new_for(candidates.len(), Algorithm::Ntlm)?.execute(target, candidates)
+    }
 }
 #[cfg(test)]
 mod tests {
@@ -666,6 +963,31 @@ mod tests {
     }
 
     #[test]
+    fn ntlm_gpu_rejects_bad_inputs_without_a_driver() {
+        assert!(recover_ntlm("ab", &[b"a"]).is_err());
+        assert!(recover_ntlm("zz", &[b"a"]).is_err());
+        let target = "00".repeat(16);
+        assert!(recover_ntlm(&target, &[&[b'a'; 28]]).is_err());
+        assert!(recover_ntlm(&target, &[&[0xC3, 0xA9]]).is_err());
+        assert!(recover_ntlm(&target, &vec![b"a".as_slice(); MAX_GPU_BATCH + 1]).is_err());
+    }
+
+    #[test]
+    fn ntlm_native_reference_vectors_are_stable() {
+        use md4::Digest;
+        fn ntlm(candidate: &[u8]) -> String {
+            let mut utf16le = Vec::new();
+            for byte in candidate {
+                utf16le.extend_from_slice(&[*byte, 0]);
+            }
+            hex::encode(md4::Md4::digest(&utf16le))
+        }
+        assert_eq!(ntlm(b""), "31d6cfe0d16ae931b73c59d7e0c089c0");
+        assert_eq!(ntlm(b"password"), "8846f7eaee8fb117ad06bdd830b7586c");
+        assert_eq!(ntlm(b"Password123"), "58a478135a93ac3bf058a5ea0e8fdb71");
+    }
+
+    #[test]
     fn md5_gpu_rejects_invalid_digest_and_candidate_size() {
         assert!(recover_md5("zz", &[b"x"]).is_err());
         assert!(recover_md5("ab", &[b"x"]).is_err());
@@ -725,6 +1047,221 @@ mod tests {
             let result = recover_md5_stream(&target, words, 10_000, 1, || false).unwrap();
             assert_eq!(result.hits[0].index, GPU_STREAM_BATCH as u64);
             assert_eq!(result.batches, 2);
+        }
+    }
+
+    #[test]
+    fn sha1_gpu_rejects_invalid_digest_and_candidate_size() {
+        assert!(recover_sha1("zz", &[b"x"]).is_err());
+        assert!(recover_sha1("ab", &[b"x"]).is_err());
+        assert!(recover_sha1(&"00".repeat(20), &[&[b'x'; 56]]).is_err());
+        let too_many = vec![b"x".as_slice(); MAX_GPU_BATCH + 1];
+        assert!(recover_sha1(&"00".repeat(20), &too_many).is_err());
+    }
+    #[test]
+    fn sha1_mock_stream_preserves_global_match_index() {
+        use sha1::Digest;
+        let target = hex::encode(sha1::Sha1::digest(b"found"));
+        let words = std::iter::repeat(b"bad".to_vec())
+            .take(GPU_STREAM_BATCH)
+            .chain(std::iter::once(b"found".to_vec()));
+        let result = stream_with_checked(
+            &target,
+            words,
+            10_000,
+            1,
+            20,
+            "cyberdeck-crypto-opencl-sha1",
+            || false,
+            |_, items| {
+                Ok(items
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(i, c)| if *c == b"found" { Some(i) } else { None })
+                    .collect())
+            },
+        )
+        .unwrap();
+        assert_eq!(result.tried, (GPU_STREAM_BATCH + 1) as u64);
+        assert_eq!(result.hits[0].index, GPU_STREAM_BATCH as u64);
+        assert_eq!(result.engine, "cyberdeck-crypto-opencl-sha1");
+    }
+    #[test]
+    fn sha1_hardware_reference_vectors_if_available() {
+        #[cfg(feature = "gpu")]
+        if probe().available {
+            use sha1::{Digest, Sha1};
+            let inputs = vec![
+                vec![],
+                b"a".to_vec(),
+                b"abc".to_vec(),
+                vec![0xff, 0x00],
+                vec![b'x'; 54],
+                vec![b'x'; 55],
+            ];
+            let refs: Vec<&[u8]> = inputs.iter().map(Vec::as_slice).collect();
+            for (index, input) in inputs.iter().enumerate() {
+                let target = hex::encode(Sha1::digest(input));
+                assert_eq!(recover_sha1(&target, &refs).unwrap(), vec![index]);
+            }
+            let mut words = vec![b"not-match".to_vec(); GPU_STREAM_BATCH + 2];
+            words[GPU_STREAM_BATCH] = b"hello".to_vec();
+            let target = hex::encode(Sha1::digest(b"hello"));
+            let result = recover_sha1_stream(&target, words, 10_000, 1, || false).unwrap();
+            assert_eq!(result.hits[0].index, GPU_STREAM_BATCH as u64);
+            assert_eq!(result.batches, 2);
+        }
+    }
+
+    #[test]
+    fn configurable_gpu_batch_size_accounts_for_partial_final_batch() {
+        let hash = "00".repeat(32);
+        let mut sizes = Vec::new();
+        let result = stream_with_batch(
+            &hash,
+            std::iter::repeat_n(b"test".to_vec(), 1_025),
+            2_000,
+            1,
+            128,
+            32,
+            "cyberdeck-crypto-opencl-sha256",
+            || false,
+            |_, batch| {
+                sizes.push(batch.len());
+                Ok(Vec::new())
+            },
+        )
+        .unwrap();
+        assert_eq!(result.tried, 1_025);
+        assert_eq!(result.batches, 9);
+        assert_eq!(sizes, [128, 128, 128, 128, 128, 128, 128, 128, 1]);
+        for invalid_size in [0, MAX_GPU_BATCH + 1] {
+            assert!(stream_with_batch(
+                &hash,
+                [b"x"],
+                1,
+                1,
+                invalid_size,
+                32,
+                "cyberdeck-crypto-opencl-sha256",
+                || false,
+                |_, _| Ok(vec![]),
+            )
+            .is_err());
+        }
+    }
+
+    #[test]
+    fn selected_gpu_stream_validates_target_before_device_access() {
+        assert!(
+            recover_stream_on_device(GpuHash::Sha256, 0, "zz", [b"test"], 5, 1, || false,).is_err()
+        );
+        assert!(recover_stream_on_device(
+            GpuHash::Md5,
+            0,
+            &"00".repeat(32),
+            [b"test"],
+            5,
+            1,
+            || false,
+        )
+        .is_err());
+        assert!(recover_stream_on_device(
+            GpuHash::Sha1,
+            0,
+            &"00".repeat(20),
+            [b"test"],
+            0,
+            1,
+            || false,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn explicit_device_index_parity_if_hardware_is_accessible() {
+        #[cfg(feature = "gpu")]
+        {
+            use md4::{Digest as _, Md4};
+            use md5::Md5;
+            use sha1::Sha1;
+            use sha2::{Digest, Sha256};
+
+            let devices = probe().devices;
+            for device_index in 0..devices.len() {
+                for algorithm in [GpuHash::Sha256, GpuHash::Md5, GpuHash::Sha1, GpuHash::Ntlm] {
+                    let hash = |candidate: &[u8]| -> String {
+                        let digest = match algorithm {
+                            GpuHash::Sha256 => Sha256::digest(candidate).to_vec(),
+                            GpuHash::Md5 => Md5::digest(candidate).to_vec(),
+                            GpuHash::Sha1 => Sha1::digest(candidate).to_vec(),
+                            GpuHash::Ntlm => {
+                                let mut utf16le = Vec::new();
+                                for byte in candidate {
+                                    utf16le.extend_from_slice(&[*byte, 0]);
+                                }
+                                Md4::digest(&utf16le).to_vec()
+                            }
+                        };
+                        hex::encode(digest)
+                    };
+                    // Cover empty and maximum-size candidates on every GPU,
+                    // not only the first device returned by OpenCL.
+                    for candidate in [
+                        Vec::new(),
+                        vec![b'x'; if algorithm == GpuHash::Ntlm { 27 } else { 55 }],
+                    ] {
+                        let result = recover_stream_on_device_with_batch(
+                            algorithm,
+                            device_index,
+                            64,
+                            &hash(&candidate),
+                            vec![b"not-a-hit".to_vec(), candidate.clone()],
+                            10,
+                            1,
+                            || false,
+                        )
+                        .expect("explicit GPU device failed reference vector");
+                        assert_eq!(result.tried, 2, "device {device_index} {algorithm:?}");
+                        assert_eq!(result.hits.len(), 1, "device {device_index} {algorithm:?}");
+                        assert_eq!(result.hits[0].index, 1);
+                        assert_eq!(result.hits[0].candidate, candidate);
+                    }
+                    // Partial last batch and global index across multiple
+                    // dispatches must work for every GPU vendor/algorithm.
+                    let last = vec![b'x'; if algorithm == GpuHash::Ntlm { 27 } else { 55 }];
+                    let batch = std::iter::repeat_n(b"not-a-hit".to_vec(), 257)
+                        .chain(std::iter::once(last.clone()));
+                    let result = recover_stream_on_device_with_batch(
+                        algorithm,
+                        device_index,
+                        128,
+                        &hash(&last),
+                        batch,
+                        258,
+                        1,
+                        || false,
+                    )
+                    .expect("explicit GPU device failed cross-batch validation");
+                    assert_eq!(result.tried, 258);
+                    assert_eq!(result.batches, 3);
+                    assert_eq!(result.hits.len(), 1);
+                    assert_eq!(result.hits[0].index, 257);
+                    assert_eq!(result.hits[0].candidate, last);
+                }
+            }
+            if !devices.is_empty() {
+                let result = recover_stream_on_device(
+                    GpuHash::Sha256,
+                    devices.len(),
+                    &"00".repeat(32),
+                    [b"x"],
+                    1,
+                    1,
+                    || false,
+                );
+                assert!(result.is_err(), "out-of-range GPU index must fail");
+            }
         }
     }
 

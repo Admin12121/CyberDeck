@@ -1,6 +1,9 @@
 //! Bounded native Gzip extraction for forensic artifacts.
 //! Never trusts embedded names or paths; callers choose the stored output name.
 
+#[path = "nested.rs"]
+pub mod nested;
+
 use std::io::Read;
 
 pub const MAX_GZIP_INPUT_BYTES: usize = 16 * 1024 * 1024;
@@ -356,20 +359,34 @@ fn tar_octal(bytes: &[u8]) -> Result<usize, String> {
     if bytes.first().is_some_and(|b| b & 0x80 != 0) {
         return Err("base-256 TAR fields unsupported".into());
     }
-    let mut digits = bytes
-        .iter()
-        .copied()
-        .skip_while(|b| *b == b' ' || *b == 0)
-        .take_while(|b| *b != 0 && *b != b' ');
-    digits.try_fold(0usize, |number, b| {
-        if !(b'0'..=b'7').contains(&b) {
-            return Err("bad TAR octal field".into());
+    let mut value = 0usize;
+    let mut started = false;
+    let mut ended = false;
+    for &byte in bytes {
+        if !started && matches!(byte, b' ' | 0) {
+            continue;
         }
-        number
-            .checked_mul(8)
-            .and_then(|v| v.checked_add((b - b'0') as usize))
-            .ok_or_else(|| "TAR octal overflow".into())
-    })
+        if ended {
+            if !matches!(byte, b' ' | 0) {
+                return Err("unexpected bytes after TAR octal terminator".into());
+            }
+            continue;
+        }
+        if (b'0'..=b'7').contains(&byte) {
+            started = true;
+            value = value.checked_mul(8)
+                .and_then(|v| v.checked_add((byte - b'0') as usize))
+                .ok_or("TAR octal overflow")?;
+        } else if matches!(byte, b' ' | 0) {
+            ended = true;
+        } else {
+            return Err("bad TAR octal digit".into());
+        }
+    }
+    if !started {
+        return Err("TAR numeric field contains no octal digits".into());
+    }
+    Ok(value)
 }
 fn nul_end(data: &[u8]) -> &[u8] {
     &data[..data.iter().position(|b| *b == 0).unwrap_or(data.len())]
@@ -590,6 +607,14 @@ mod archive_tests {
         }
         let bomb = sample_zip(b"data", &vec![b'Z'; 2048], true);
         assert!(extract_zip_limited(&bomb, 0, 512).is_err());
+    }
+
+    #[test]
+    fn tar_numeric_fields_reject_hidden_or_ambiguous_bytes() {
+        assert_eq!(tar_octal(b"  00017\0 ").unwrap(), 15);
+        assert!(tar_octal(b"000017\0evil").is_err());
+        assert!(tar_octal(b" 00001x").is_err());
+        assert!(tar_octal(b"\0\0\0\0").is_err());
     }
 
     #[test]

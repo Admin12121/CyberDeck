@@ -11,12 +11,20 @@ export function StatusBar() {
   const [creating, setCreating] = useState(false);
   const [caseTitle, setCaseTitle] = useState("");
   const [caseError, setCaseError] = useState<string | null>(null);
+  const [casesLoaded, setCasesLoaded] = useState(false);
   useEffect(() => {
     let active = true;
-    void caseList().then((list) => { if (active) setCases(list); })
-      .catch((error: unknown) => { if (active) setCaseError(String(error)); });
+    void caseList().then((list) => { if (active) { setCases(list); setCasesLoaded(true); } })
+      .catch((error: unknown) => { if (active) { setCaseError(String(error)); setCasesLoaded(true); } });
     return () => { active = false; };
   }, []);
+  useEffect(() => {
+    if (!casesLoaded) return;
+    if (cases.length === 0) { if (wb.caseId !== "scratchpad") wb.setCaseId("scratchpad"); return; }
+    // Never silently display case A while writes still target a stale case ID.
+    if (!cases.some((item) => item.id === wb.caseId)) wb.setCaseId(cases[0].id);
+  }, [cases, casesLoaded, wb.caseId, wb.setCaseId]);
+
   const createCase = async () => {
     if (!caseTitle.trim()) return;
     try {
@@ -36,15 +44,17 @@ export function StatusBar() {
       <span className={isDesktop() ? "text-ok" : "text-warn"}>{isDesktop() ? "ipc: tauri" : "ipc: browser fallback"}</span>
       <span>workspace: {tool ? `${tool.category} / ${tool.label}` : wb.tool}</span>
       <label className="flex items-center gap-1" title="Active evidence case">
-        case
+        active case
         <select
           aria-label="Active case"
+          disabled={!casesLoaded || !!caseError}
           value={wb.caseId}
           onChange={(event) => wb.setCaseId(event.target.value)}
-          className="max-w-44 border border-line bg-sidebar px-1 text-[10px] text-fg"
+          className="max-w-52 border border-orange/50 bg-panel px-1 text-[11px] text-fg"
         >
           {cases.map((item) => <option key={item.id} value={item.id}>{item.title}</option>)}
-          {cases.length === 0 ? <option value="scratchpad">Scratchpad</option> : null}
+          {!cases.some((item) => item.id === wb.caseId) ? <option value={wb.caseId}>{!casesLoaded ? "Loading cases…" : cases.length === 0 && wb.caseId === "scratchpad" ? "Scratchpad (create a case to save evidence)" : "Resolving case…"}</option> : null}
+          {cases.length === 0 && wb.caseId !== "scratchpad" ? <option value="scratchpad">Scratchpad (no saved case)</option> : null}
         </select>
       </label>
       {creating ? (
@@ -71,7 +81,7 @@ export function StatusBar() {
         >
           console (Ctrl+`)
         </button>
-        <span>CyberDeck v0.1.0 · native Rust · local</span>
+        <span>CyberDeck v0.1.0 · local workbench</span>
       </span>
     </footer>
   );

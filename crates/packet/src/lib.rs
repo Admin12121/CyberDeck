@@ -816,7 +816,31 @@ fn dissect_udp(
     if length < 8 {
         return empty_frame();
     }
-    let end = (length as usize).min(transport.len());
+    // A full IP datagram cannot carry fewer bytes than its UDP length.
+    // Do not promote a partial UDP payload to a usable stream.
+    if length as usize > transport.len() {
+        let info = format!(
+            "UDP length {} exceeds {} available IP payload byte(s)",
+            length,
+            transport.len()
+        );
+        layers.push(Layer {
+            label: "User Datagram Protocol".into(),
+            value: info.clone(),
+        });
+        return Dissected {
+            source: source.to_string(),
+            destination: destination.to_string(),
+            protocol: "UDP-truncated".into(),
+            info,
+            color_hint: color_for("other"),
+            layers,
+            stream_id: None,
+            tcp: None,
+            payload: Vec::new(),
+        };
+    }
+    let end = length as usize;
     let payload = transport.get(8..end).unwrap_or(&[]).to_vec();
     let mut endpoints = [
         format!("{source}:{src_port}"),
@@ -1342,13 +1366,14 @@ mod tests {
     fn ipv4_snaplen_truncation_never_promotes_partial_udp() {
         let mut ip = vec![0x45, 0, 0, 36, 0, 1, 0, 0, 64, 17, 0, 0];
         ip.extend_from_slice(&[192, 0, 2, 1, 192, 0, 2, 2]);
-        ip.extend_from_slice(&[0x04, 0xd2, 0, 53, 0, 8, 0, 0]);
+        ip.extend_from_slice(&[0x04, 0xd2, 0x1f, 0x90, 0, 8, 0, 0]);
         let truncated = dissect(101, &ip);
         assert_eq!(truncated.protocol, "IPv4-truncated");
         assert!(truncated.stream_id.is_none());
         assert!(truncated.payload.is_empty());
         assert!(truncated.tcp.is_none());
-        ip[2..4].copy_from_slice(&(ip.len() as u16).to_be_bytes());
+        let captured_len = ip.len() as u16;
+        ip[2..4].copy_from_slice(&captured_len.to_be_bytes());
         assert_eq!(dissect(101, &ip).protocol, "UDP");
     }
 
@@ -1359,12 +1384,49 @@ mod tests {
         ip.push(1);
         ip.extend_from_slice(&[0; 15]);
         ip.push(2);
-        ip.extend_from_slice(&[0x04, 0xd2, 0, 53, 0, 8, 0, 0]);
+        ip.extend_from_slice(&[0x04, 0xd2, 0x1f, 0x90, 0, 8, 0, 0]);
         let truncated = dissect(101, &ip);
         assert_eq!(truncated.protocol, "IPv6-truncated");
         assert!(truncated.stream_id.is_none());
         assert!(truncated.payload.is_empty());
         ip[4..6].copy_from_slice(&8u16.to_be_bytes());
         assert_eq!(dissect(101, &ip).protocol, "UDP");
+    }
+
+    #[test]
+    fn ipv4_udp_length_larger_than_complete_ip_payload_is_not_streamed() {
+        let mut ip = vec![0x45, 0, 0, 32, 0, 1, 0, 0, 64, 17, 0, 0];
+        ip.extend_from_slice(&[192, 0, 2, 1, 192, 0, 2, 2]);
+        ip.extend_from_slice(&[0x04, 0xd2, 0x1f, 0x90, 0, 20, 0, 0]);
+        ip.extend_from_slice(b"test");
+        let invalid = dissect(101, &ip);
+        assert_eq!(invalid.protocol, "UDP-truncated");
+        assert!(invalid.stream_id.is_none());
+        assert!(invalid.payload.is_empty());
+
+        ip[24..26].copy_from_slice(&12u16.to_be_bytes());
+        let valid = dissect(101, &ip);
+        assert_eq!(valid.protocol, "UDP");
+        assert_eq!(valid.payload, b"test");
+    }
+
+    #[test]
+    fn ipv6_udp_length_larger_than_complete_ip_payload_is_not_streamed() {
+        let mut ip = vec![0x60, 0, 0, 0, 0, 12, 17, 64];
+        ip.extend_from_slice(&[0; 15]);
+        ip.push(1);
+        ip.extend_from_slice(&[0; 15]);
+        ip.push(2);
+        ip.extend_from_slice(&[0x04, 0xd2, 0x1f, 0x90, 0, 20, 0, 0]);
+        ip.extend_from_slice(b"test");
+        let invalid = dissect(101, &ip);
+        assert_eq!(invalid.protocol, "UDP-truncated");
+        assert!(invalid.stream_id.is_none());
+        assert!(invalid.payload.is_empty());
+
+        ip[44..46].copy_from_slice(&12u16.to_be_bytes());
+        let valid = dissect(101, &ip);
+        assert_eq!(valid.protocol, "UDP");
+        assert_eq!(valid.payload, b"test");
     }
 }

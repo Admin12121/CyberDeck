@@ -2,7 +2,7 @@
 /** Scan view: real multithreaded TCP connect scanning via the Rust core (§5.3). */
 import { useCallback, useEffect, useState } from "react";
 import { Play, Square } from "lucide-react";
-import { Chip, EmptyState, Pane, Select, TextInput, ToolButton } from "@ds/panes";
+import { Chip, EmptyState, Pane, Resizer, Select, TextInput, ToolButton } from "@ds/panes";
 import {
   isDesktop,
   netscanExport,
@@ -28,6 +28,7 @@ export function ScanView() {
   const desktop = isDesktop();
   const wb = useWorkbench();
   const [target, setTarget] = useState("127.0.0.1");
+  const [notesWidth, setNotesWidth] = useState(320);
   const [ports, setPorts] = useState("top25");
   const [authorized, setAuthorized] = useState(false);
   const [running, setRunning] = useState(false);
@@ -190,7 +191,8 @@ export function ScanView() {
             )}
           </Pane>
         </div>
-        <Pane title="Notes" className="w-80 shrink-0">
+        <Resizer direction="horizontal" flip ariaLabel="Resize scan notes" value={notesWidth} onChange={setNotesWidth} min={220} max={500} />
+        <Pane title="Notes" className="shrink-0" style={{ width: notesWidth }}>
           <div className="p-2 font-mono text-[10px] leading-relaxed text-fg-muted">
             native TCP connect scanner: CIDR/host targets, port presets or ranges, banner grab on
             open ports, all cores, live progress. nmap (NPSL) stays license-gated; this engine is
@@ -201,7 +203,7 @@ export function ScanView() {
           </div>
           {status.save_error ? <div className="border-t border-line p-2 text-xs text-err">Case save failed: {status.save_error}</div> : null}
           <div className="border-t border-line p-2">
-            <ToolButton onClick={() => wb.runDemoJob()} title="Queue the shared pipeline demo job">Demo job</ToolButton>
+            <span className="text-fg-muted">Live scan status appears above; completed scans are listed below.</span>
           </div>
           <div className="border-t border-line p-2">
             <div className="mb-1 text-[10px] uppercase tracking-wider text-fg-muted">Scan history ({history.length})</div>

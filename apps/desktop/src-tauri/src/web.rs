@@ -111,13 +111,19 @@ pub struct HttpResponseWire {
     pub url: String,
 }
 
+/// Share connection pools across scans, Repeater and proxy forwarding.
 fn http_client() -> reqwest::Client {
-    reqwest::Client::builder()
-        .timeout(Duration::from_secs(15))
-        .redirect(reqwest::redirect::Policy::none())
-        .user_agent("CyberDeck-Workbench/0.1")
-        .build()
-        .expect("http client")
+    static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+    CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .timeout(Duration::from_secs(15))
+            .redirect(reqwest::redirect::Policy::none())
+            // Avoid looping when the host's proxy points back at CyberDeck.
+            .no_proxy()
+            .user_agent("CyberDeck-Workbench/0.1")
+            .build()
+            .expect("http client")
+    }).clone()
 }
 
 /// Parse a raw HTTP request into (method, url, headers, body). The Host or
@@ -742,6 +748,35 @@ mod scope_tests {
         ));
     }
 
+    #[tokio::test]
+    async fn websocket_handshake_preserves_first_frame() {
+        use tokio::io::{duplex, AsyncReadExt, AsyncWriteExt};
+        let (mut writer, mut reader) = duplex(512);
+        writer.write_all(b"HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n\x81\x02OK")
+            .await.unwrap();
+        let head = read_http_response_head(&mut reader).await.unwrap();
+        assert!(is_websocket_switching_protocols(&head));
+        let mut frame = [0u8; 4];
+        reader.read_exact(&mut frame).await.unwrap();
+        assert_eq!(&frame, b"\x81\x02OK");
+    }
+
+    #[test]
+    fn websocket_upgrade_accepts_status_without_reason_phrase() {
+        assert!(is_websocket_switching_protocols(
+            "HTTP/1.1 101\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n"));
+    }
+
+    #[test]
+    fn websocket_upgrade_requires_confirmed_101() {
+        assert!(is_websocket_switching_protocols(
+            "HTTP/1.1 101 Switching Protocols\r\nConnection: keep-alive, Upgrade\r\nUpgrade: websocket\r\n\r\n"));
+        assert!(!is_websocket_switching_protocols(
+            "HTTP/1.1 200 OK\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n"));
+        assert!(!is_websocket_switching_protocols(
+            "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n\r\n"));
+    }
+
     #[test]
     fn nominated_connection_headers_are_hop_by_hop() {
         let headers = vec![
@@ -1076,18 +1111,37 @@ async fn connect_tunnel(
                     .any(|token| token.trim().eq_ignore_ascii_case("upgrade"))
         })
     {
-        let tcp = TcpStream::connect((host.as_str(), port))
+        let tcp = tokio::time::timeout(
+            Duration::from_secs(15), TcpStream::connect((host.as_str(), port))
+        )
             .await
+            .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "ws upstream connect timed out"))?
             .map_err(|e| std::io::Error::other(format!("ws upstream connect failed: {e}")))?;
         let connector = crate::webtls::tls_client().map_err(|e| std::io::Error::other(e))?;
         let server_name = rustls::pki_types::ServerName::try_from(host.clone())
             .map_err(|e| std::io::Error::other(format!("bad sni: {e}")))?;
-        let mut upstream = connector
-            .connect(server_name, tcp)
+        let mut upstream = tokio::time::timeout(
+            Duration::from_secs(15), connector.connect(server_name, tcp),
+        )
             .await
+            .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "ws upstream tls timed out"))?
             .map_err(|e| std::io::Error::other(format!("ws upstream tls failed: {e}")))?;
         upstream.write_all(head_text.as_bytes()).await?;
         upstream.write_all(&body).await?;
+        // A WebSocket session only exists after the upstream confirms 101.
+        // Otherwise relay its ordinary response and do not record a WS session.
+        let handshake = tokio::time::timeout(
+            Duration::from_secs(15), read_http_response_head(&mut upstream),
+        )
+            .await
+            .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "ws handshake timed out"))??;
+        tls_stream.write_all(handshake.as_bytes()).await?;
+        tls_stream.flush().await?;
+        if !is_websocket_switching_protocols(&handshake) {
+            tokio::io::copy(&mut upstream, &mut tls_stream).await?;
+            tls_stream.flush().await?;
+            return Ok(());
+        }
         let (mut c_read, mut c_write) = tokio::io::split(tls_stream);
         let (mut u_read, mut u_write) = tokio::io::split(upstream);
         let started = now_ms();
@@ -1195,6 +1249,48 @@ async fn connect_tunnel(
     tls_stream.write_all(&resp_body).await?;
     tls_stream.flush().await?;
     Ok(())
+}
+
+/// Read only the HTTP response header for WebSocket upgrade handling.
+async fn read_http_response_head<R>(stream: &mut R) -> std::io::Result<String>
+where R: tokio::io::AsyncRead + Unpin {
+    use tokio::io::AsyncReadExt;
+    const MAX_HEADERS: usize = 32 * 1024;
+    let mut head = Vec::with_capacity(512);
+    let mut byte = [0u8; 1];
+    loop {
+        if head.len() >= MAX_HEADERS {
+            return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "ws response headers too large"));
+        }
+        if stream.read(&mut byte).await? == 0 {
+            return Err(std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "incomplete ws response"));
+        }
+        head.push(byte[0]);
+        if head.ends_with(b"\r\n\r\n") { break; }
+    }
+    String::from_utf8(head)
+        .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidData, "non-UTF8 ws response"))
+}
+
+fn is_websocket_switching_protocols(head: &str) -> bool {
+    let mut lines = head.split("\r\n");
+    let Some(status) = lines.next() else { return false; };
+    let mut status_parts = status.split_whitespace();
+    if status_parts.next() != Some("HTTP/1.1") || status_parts.next() != Some("101") {
+        return false;
+    }
+    let mut upgrade = false;
+    let mut connection = false;
+    for line in lines {
+        let Some((key, value)) = line.split_once(':') else { continue; };
+        if key.eq_ignore_ascii_case("upgrade") {
+            upgrade |= value.trim().eq_ignore_ascii_case("websocket");
+        }
+        if key.eq_ignore_ascii_case("connection") {
+            connection |= value.split(',').any(|part| part.trim().eq_ignore_ascii_case("upgrade"));
+        }
+    }
+    upgrade && connection
 }
 
 /// CONNECT authority must contain an explicit valid TCP port. Splitting on
@@ -1380,12 +1476,18 @@ async fn execute_request(
     headers: &[(String, String)],
     body: &[u8],
 ) -> (u16, Vec<(String, String)>, Vec<u8>) {
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(15))
-        .redirect(reqwest::redirect::Policy::none())
-        .user_agent("CyberDeck-Workbench/0.1")
-        .build()
-        .expect("http client");
+    let client = http_client();
+    execute_request_with_client(&client, method, url, headers, body).await
+}
+
+/// Allow transport/TLS verification against a trusted localhost test server.
+async fn execute_request_with_client(
+    client: &reqwest::Client,
+    method: &str,
+    url: &str,
+    headers: &[(String, String)],
+    body: &[u8],
+) -> (u16, Vec<(String, String)>, Vec<u8>) {
     let Ok(method_req) = reqwest::Method::from_bytes(method.as_bytes()) else {
         return (400, vec![], b"bad method".to_vec());
     };
@@ -1579,6 +1681,10 @@ pub async fn proxy_forward(id: u64, ctx: State<'_, WebCtx>) -> Result<u16, Strin
 /// Drop a held request; the browser receives a 502.
 #[tauri::command]
 pub async fn proxy_drop(id: u64, ctx: State<'_, WebCtx>) -> Result<(), String> {
+    proxy_drop_inner(id, &ctx).await
+}
+
+async fn proxy_drop_inner(id: u64, ctx: &WebCtx) -> Result<(), String> {
     let pending = ctx
         .shared
         .pending
@@ -1781,6 +1887,38 @@ mod local_wire_tests {
     }
 
     #[tokio::test]
+    async fn verified_https_upstream_preserves_response_bytes() {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            let directory = tempfile::tempdir().unwrap();
+            let ca = crate::webtls::init_ca(directory.path()).unwrap();
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let server_ca = Arc::clone(&ca);
+            let server = tokio::spawn(async move {
+                let (socket, _) = listener.accept().await.unwrap();
+                let mut tls = crate::webtls::tls_acceptor(&server_ca, "localhost").unwrap()
+                    .accept(socket).await.unwrap();
+                let (head, _) = crate::webtls::read_http_message(&mut tls).await.unwrap();
+                assert!(head.starts_with("GET /verified HTTP/1.1"));
+                tls.write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 3\r\nconnection: close\r\n\r\n").await.unwrap();
+                tls.write_all(&[0xff, 0x00, 0x01]).await.unwrap();
+                tls.flush().await.unwrap();
+            });
+            let client = reqwest::Client::builder()
+                .add_root_certificate(reqwest::Certificate::from_pem(ca.cert_pem.as_bytes()).unwrap())
+                .redirect(reqwest::redirect::Policy::none())
+                .no_proxy()
+                .build().unwrap();
+            let (status, _, body) = execute_request_with_client(
+                &client, "GET", &format!("https://localhost:{port}/verified"), &[], &[]
+            ).await;
+            assert_eq!(status, 200);
+            assert_eq!(body, vec![0xff, 0x00, 0x01]);
+            server.await.unwrap();
+        }).await.expect("verified upstream HTTPS request timed out");
+    }
+
+    #[tokio::test]
     async fn binary_http_roundtrip_through_proxy() {
         tokio::time::timeout(Duration::from_secs(10), async {
             let upstream_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1899,7 +2037,7 @@ mod local_wire_tests {
                 shared,
                 ca: Mutex::new(Some(ca)),
             };
-            proxy_drop(1, &ctx).await.unwrap();
+            proxy_drop_inner(1, &ctx).await.unwrap();
             let mut response = [0u8; 512];
             let size = tls.read(&mut response).await.unwrap();
             assert!(

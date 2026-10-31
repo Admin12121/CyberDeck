@@ -2,6 +2,16 @@
 
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+
+mod batch;
+pub use batch::ImportBatchItem;
+mod case_integrity;
+mod ingest;
+pub use case_integrity::CaseIntegritySummary;
+pub use ingest::ImportEvent;
+mod integrity;
+pub use integrity::{verify_artifact_file, GENESIS_HASH};
 
 pub const DEFAULT_CASE: &str = "scratchpad";
 
@@ -67,7 +77,7 @@ pub struct CaseEvent {
 }
 
 /// A portable case report includes no host-local paths or copied evidence bytes.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct ReportArtifact {
     pub id: String,
     pub name: String,
@@ -77,15 +87,52 @@ pub struct ReportArtifact {
     pub imported_at: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct CaseReport {
     pub schema_version: u8,
+    pub manifest_sha256: String,
+    pub provenance: ProvenanceVerification,
     pub generated_ms: i64,
     pub case: CaseRecord,
     pub artifacts: Vec<ReportArtifact>,
     pub findings: Vec<FindingRecord>,
     pub events: Vec<CaseEvent>,
     pub truncated: bool,
+}
+
+/// Unkeyed integrity chain; retain its head externally to detect wholesale DB rewrites.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProvenanceVerification {
+    pub verified_events: usize,
+    pub head_sha256: String,
+}
+
+/// Recompute a portable report's digest over all fields except the digest
+/// itself. Preserve the returned digest independently.
+pub fn case_report_manifest_digest(report: &CaseReport) -> Result<String, String> {
+    let payload = serde_json::to_vec(&(
+        report.schema_version,
+        report.generated_ms,
+        &report.case,
+        &report.artifacts,
+        &report.findings,
+        &report.events,
+        &report.provenance,
+        report.truncated,
+    ))
+    .map_err(|e| format!("cannot serialize case manifest: {e}"))?;
+    let mut digest = Sha256::new();
+    digest.update(b"cyberdeck.case-report.v2\0");
+    digest.update(payload);
+    Ok(format!("{:x}", digest.finalize()))
+}
+
+pub fn verify_case_report_manifest(report: &CaseReport) -> Result<(), String> {
+    let calculated = case_report_manifest_digest(report)?;
+    if calculated != report.manifest_sha256 {
+        return Err("case report manifest SHA-256 mismatch".into());
+    }
+    Ok(())
 }
 
 pub fn validate_case_id(id: &str) -> Result<(), String> {
@@ -124,7 +171,7 @@ impl ArtifactStore {
             "PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;",
         )
         .map_err(|e| format!("cannot configure artifact index: {e}"))?;
-        const SCHEMA_VERSION: i64 = 1;
+        const SCHEMA_VERSION: i64 = 2;
         let version: i64 = conn
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .map_err(|e| format!("cannot read artifact index version: {e}"))?;
@@ -133,7 +180,7 @@ impl ArtifactStore {
                 "artifact index schema {version} is newer than supported {SCHEMA_VERSION}"
             ));
         }
-        if version < SCHEMA_VERSION {
+        if version < 1 {
             let migration = conn
                 .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
                 .map_err(|e| format!("cannot begin artifact index migration: {e}"))?;
@@ -225,6 +272,70 @@ impl ArtifactStore {
             migration
                 .commit()
                 .map_err(|e| format!("cannot commit artifact index migration: {e}"))?;
+        }
+        if version < 2 {
+            let tx = conn
+                .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+                .map_err(|e| format!("cannot start provenance migration: {e}"))?;
+            tx.execute_batch(r#"
+                CREATE TABLE IF NOT EXISTS case_event_integrity (
+                    event_id INTEGER PRIMARY KEY REFERENCES case_events(id),
+                    case_id TEXT NOT NULL REFERENCES cases(id),
+                    previous_hash TEXT NOT NULL,
+                    event_hash TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_event_integrity_case
+                    ON case_event_integrity(case_id,event_id);
+                CREATE TRIGGER IF NOT EXISTS event_integrity_update BEFORE UPDATE ON case_event_integrity
+                    BEGIN SELECT RAISE(ABORT,'integrity hashes are immutable'); END;
+                CREATE TRIGGER IF NOT EXISTS event_integrity_delete BEFORE DELETE ON case_event_integrity
+                    BEGIN SELECT RAISE(ABORT,'integrity hashes are immutable'); END;
+                CREATE TRIGGER IF NOT EXISTS event_integrity_scope BEFORE INSERT ON case_event_integrity
+                    WHEN NOT EXISTS(SELECT 1 FROM case_events WHERE id=NEW.event_id AND case_id=NEW.case_id)
+                    BEGIN SELECT RAISE(ABORT,'integrity case mismatch'); END;
+            "#).map_err(|e| format!("cannot create provenance table: {e}"))?;
+            // Historical events are hashed once; older databases keep their file paths.
+            let events: Vec<CaseEvent> =
+                {
+                    let mut stmt = tx.prepare(
+                    "SELECT id,case_id,source,action,artifact_id,source_description,created_ms
+                     FROM case_events ORDER BY case_id,id"
+                ).map_err(|e| e.to_string())?;
+                    let rows = stmt
+                        .query_map([], |r| {
+                            Ok(CaseEvent {
+                                id: r.get(0)?,
+                                case_id: r.get(1)?,
+                                source: r.get(2)?,
+                                action: r.get(3)?,
+                                artifact_id: r.get(4)?,
+                                source_description: r.get(5)?,
+                                created_ms: r.get(6)?,
+                            })
+                        })
+                        .map_err(|e| e.to_string())?;
+                    rows.collect::<Result<Vec<_>, _>>()
+                        .map_err(|e| e.to_string())?
+                };
+            let mut heads = std::collections::HashMap::<String, String>::new();
+            for event in events {
+                let previous = heads
+                    .get(&event.case_id)
+                    .map(String::as_str)
+                    .unwrap_or(GENESIS_HASH);
+                let digest = integrity::event_hash(&event, previous);
+                tx.execute(
+                    "INSERT INTO case_event_integrity(event_id,case_id,previous_hash,event_hash)
+                     VALUES (?1,?2,?3,?4)",
+                    params![event.id, event.case_id, previous, digest],
+                )
+                .map_err(|e| format!("cannot backfill provenance: {e}"))?;
+                heads.insert(event.case_id, digest);
+            }
+            tx.execute_batch("PRAGMA user_version = 2;")
+                .map_err(|e| format!("cannot set provenance schema version: {e}"))?;
+            tx.commit()
+                .map_err(|e| format!("cannot commit provenance migration: {e}"))?;
         }
         Ok(Self { conn })
     }
@@ -375,6 +486,72 @@ impl ArtifactStore {
 
     /// Store one small provenance event, retaining operation/source linkage.
     /// Callers must not put passwords, session tokens or captured bodies here.
+    /// Verify the full unkeyed per-case hash chain, not only the latest event.
+    pub fn verify_case_provenance(&self, case_id: &str) -> Result<ProvenanceVerification, String> {
+        if !self.case_exists(case_id)? {
+            return Err("case not found".into());
+        }
+        let mut stmt = self.conn.prepare(
+            "SELECT e.id,e.case_id,e.source,e.action,e.artifact_id,e.source_description,e.created_ms,
+                    h.previous_hash,h.event_hash
+             FROM case_events e LEFT JOIN case_event_integrity h ON e.id=h.event_id
+             WHERE e.case_id=?1 ORDER BY e.id ASC"
+        ).map_err(|e| e.to_string())?;
+        let records = stmt
+            .query_map(params![case_id], |r| {
+                Ok((
+                    CaseEvent {
+                        id: r.get(0)?,
+                        case_id: r.get(1)?,
+                        source: r.get(2)?,
+                        action: r.get(3)?,
+                        artifact_id: r.get(4)?,
+                        source_description: r.get(5)?,
+                        created_ms: r.get(6)?,
+                    },
+                    r.get::<_, Option<String>>(7)?,
+                    r.get::<_, Option<String>>(8)?,
+                ))
+            })
+            .map_err(|e| e.to_string())?;
+        let mut last = GENESIS_HASH.to_string();
+        let mut count = 0_usize;
+        for item in records {
+            let (event, previous, hash) = item.map_err(|e| e.to_string())?;
+            let calculated = integrity::event_hash(&event, &last);
+            if previous.as_deref() != Some(last.as_str())
+                || hash.as_deref() != Some(calculated.as_str())
+            {
+                return Err(format!(
+                    "provenance integrity failure at event {}",
+                    event.id
+                ));
+            }
+            last = calculated;
+            count += 1;
+        }
+        Ok(ProvenanceVerification {
+            verified_events: count,
+            head_sha256: last,
+        })
+    }
+
+    /// Check the selected case, path containment, length and actual SHA-256.
+    pub fn verify_artifact(
+        &self,
+        case_id: &str,
+        artifact_id: &str,
+        artifacts_root: &std::path::Path,
+    ) -> Result<(), String> {
+        validate_case_id(case_id)?;
+        let record = self
+            .get_artifact(artifact_id)?
+            .filter(|r| r.case_id == case_id)
+            .ok_or_else(|| "artifact not found in selected case".to_string())?;
+        integrity::verify_artifact_file(&record, artifacts_root)
+    }
+
+    /// Append event and hash together. A failed hash write rolls back the event.
     pub fn record_event(
         &self,
         case_id: &str,
@@ -395,25 +572,72 @@ impl ArtifactStore {
             return Err("invalid event metadata length".into());
         }
         if let Some(id) = artifact_id {
-            let linked_case: Option<String> = self
+            let owner: Option<String> = self
                 .conn
                 .query_row(
-                    "SELECT case_id FROM artifacts WHERE id = ?1",
+                    "SELECT case_id FROM artifacts WHERE id=?1",
                     params![id],
-                    |row| row.get(0),
+                    |r| r.get(0),
                 )
                 .optional()
                 .map_err(|e| e.to_string())?;
-            if linked_case.as_deref() != Some(case_id) {
+            if owner.as_deref() != Some(case_id) {
                 return Err("event artifact belongs to another case or is missing".into());
             }
         }
-        self.conn.execute(
-            "INSERT INTO case_events (case_id,source,action,artifact_id,source_description,created_ms)
+        let tx = self
+            .conn
+            .unchecked_transaction()
+            .map_err(|e| format!("cannot begin provenance transaction: {e}"))?;
+        let last_id: Option<i64> = tx
+            .query_row(
+                "SELECT id FROM case_events WHERE case_id=?1 ORDER BY id DESC LIMIT 1",
+                params![case_id],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(|e| e.to_string())?;
+        let head: Option<(i64, String)> = tx
+            .query_row(
+                "SELECT event_id,event_hash FROM case_event_integrity
+             WHERE case_id=?1 ORDER BY event_id DESC LIMIT 1",
+                params![case_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()
+            .map_err(|e| e.to_string())?;
+        if last_id != head.as_ref().map(|(id, _)| *id) {
+            return Err("provenance chain is missing event records".into());
+        }
+        let previous = head
+            .map(|(_, hash)| hash)
+            .unwrap_or_else(|| GENESIS_HASH.into());
+        let now = timestamp_ms();
+        tx.execute(
+            "INSERT INTO case_events(case_id,source,action,artifact_id,source_description,created_ms)
              VALUES (?1,?2,?3,?4,?5,?6)",
-            params![case_id,source,action,artifact_id,source_description,timestamp_ms()],
+            params![case_id,source,action,artifact_id,source_description,now],
         ).map_err(|e| format!("cannot store event: {e}"))?;
-        Ok(self.conn.last_insert_rowid())
+        let id = tx.last_insert_rowid();
+        let event = CaseEvent {
+            id,
+            case_id: case_id.to_string(),
+            source: source.to_string(),
+            action: action.to_string(),
+            artifact_id: artifact_id.map(str::to_string),
+            source_description: source_description.to_string(),
+            created_ms: now,
+        };
+        let event_hash = integrity::event_hash(&event, &previous);
+        tx.execute(
+            "INSERT INTO case_event_integrity(event_id,case_id,previous_hash,event_hash)
+             VALUES (?1,?2,?3,?4)",
+            params![id, case_id, previous, event_hash],
+        )
+        .map_err(|e| format!("cannot store event hash: {e}"))?;
+        tx.commit()
+            .map_err(|e| format!("cannot commit provenance event: {e}"))?;
+        Ok(id)
     }
 
     pub fn list_events(&self, case_id: &str) -> Result<Vec<CaseEvent>, String> {
@@ -453,7 +677,7 @@ impl ArtifactStore {
         let mut all_artifacts = self.list_artifacts(case_id)?;
         let mut truncated = all_artifacts.len() > 2000;
         all_artifacts.truncate(2000);
-        let artifacts = all_artifacts
+        let mut artifacts = all_artifacts
             .into_iter()
             .map(|a| ReportArtifact {
                 id: a.id,
@@ -463,7 +687,8 @@ impl ArtifactStore {
                 signature: a.signature,
                 imported_at: a.imported_at,
             })
-            .collect();
+            .collect::<Vec<_>>();
+        artifacts.sort_by(|a: &ReportArtifact, b: &ReportArtifact| a.id.cmp(&b.id));
         let findings = self.list_findings(case_id)?;
         let events = self.list_events(case_id)?;
         let count_findings: i64 = self
@@ -483,15 +708,20 @@ impl ArtifactStore {
             )
             .map_err(|e| e.to_string())?;
         truncated |= count_findings > 2000 || count_events > 2000;
-        Ok(CaseReport {
-            schema_version: 1,
+        let provenance = self.verify_case_provenance(case_id)?;
+        let mut report = CaseReport {
+            schema_version: 2,
+            manifest_sha256: String::new(),
+            provenance,
             generated_ms: timestamp_ms(),
             case,
             artifacts,
             findings,
             events,
             truncated,
-        })
+        };
+        report.manifest_sha256 = case_report_manifest_digest(&report)?;
+        Ok(report)
     }
 
     /// Insert or replace by id (idempotent imports of identical content).
@@ -573,39 +803,33 @@ impl ArtifactStore {
             .map_err(|e| e.to_string())
     }
 
+    /// Direct indexed lookup avoids scanning all evidence records across cases.
     pub fn get_artifact(&self, id: &str) -> Result<Option<ArtifactRecord>, String> {
-        Ok(self.list_all()?.into_iter().find(|record| record.id == id))
-    }
-
-    fn list_all(&self) -> Result<Vec<ArtifactRecord>, String> {
-        let mut stmt = self
-            .conn
-            .prepare(
-                "SELECT id, case_id, name, stored_path, original_path, size,
-                        sha256, md5, sha1, crc32, signature, entropy, imported_at
-                 FROM artifacts",
+        self.conn
+            .query_row(
+                "SELECT id,case_id,name,stored_path,original_path,size,
+                        sha256,md5,sha1,crc32,signature,entropy,imported_at
+                 FROM artifacts WHERE id=?1",
+                params![id],
+                |row| {
+                    Ok(ArtifactRecord {
+                        id: row.get(0)?,
+                        case_id: row.get(1)?,
+                        name: row.get(2)?,
+                        stored_path: row.get(3)?,
+                        original_path: row.get(4)?,
+                        size: row.get::<_, i64>(5)?.max(0) as u64,
+                        sha256: row.get(6)?,
+                        md5: row.get(7)?,
+                        sha1: row.get(8)?,
+                        crc32: row.get(9)?,
+                        signature: row.get(10)?,
+                        entropy: row.get(11)?,
+                        imported_at: row.get(12)?,
+                    })
+                },
             )
-            .map_err(|e| e.to_string())?;
-        let rows = stmt
-            .query_map([], |row| {
-                Ok(ArtifactRecord {
-                    id: row.get(0)?,
-                    case_id: row.get(1)?,
-                    name: row.get(2)?,
-                    stored_path: row.get(3)?,
-                    original_path: row.get(4)?,
-                    size: row.get::<_, i64>(5)?.max(0) as u64,
-                    sha256: row.get(6)?,
-                    md5: row.get(7)?,
-                    sha1: row.get(8)?,
-                    crc32: row.get(9)?,
-                    signature: row.get(10)?,
-                    entropy: row.get(11)?,
-                    imported_at: row.get(12)?,
-                })
-            })
-            .map_err(|e| e.to_string())?;
-        rows.collect::<Result<Vec<_>, _>>()
+            .optional()
             .map_err(|e| e.to_string())
     }
 
@@ -878,7 +1102,7 @@ mod tests {
             .conn
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .unwrap();
-        assert_eq!(v, 1);
+        assert_eq!(v, 2);
         assert!(store.conn.execute("INSERT INTO artifacts SELECT 'orphan','not-a-case',name,stored_path,original_path,size,sha256,md5,sha1,crc32,signature,entropy,imported_at FROM artifacts WHERE id='legacy'", []).is_err());
         assert!(store
             .conn
@@ -962,6 +1186,126 @@ mod tests {
         }
         let reopened = ArtifactStore::open(&path).unwrap();
         assert_eq!(reopened.list_artifacts(DEFAULT_CASE).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn verify_artifact_streams_bytes_and_checks_case_containment() {
+        use sha2::{Digest, Sha256};
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("artifacts");
+        let case_dir = root.join(DEFAULT_CASE);
+        std::fs::create_dir_all(&case_dir).unwrap();
+        let stored = case_dir.join("evidence.bin");
+        let content = vec![0x42u8; 200_000];
+        std::fs::write(&stored, &content).unwrap();
+        let store = ArtifactStore::open(&dir.path().join("index.db")).unwrap();
+        let mut evidence = record("verify");
+        evidence.stored_path = stored.to_string_lossy().into_owned();
+        evidence.size = content.len() as u64;
+        evidence.sha256 = format!("{:x}", Sha256::digest(&content));
+        store.upsert_artifact(&evidence).unwrap();
+        store
+            .verify_artifact(DEFAULT_CASE, "verify", &root)
+            .unwrap();
+        std::fs::write(&stored, vec![0x43u8; content.len()]).unwrap();
+        assert!(store
+            .verify_artifact(DEFAULT_CASE, "verify", &root)
+            .is_err());
+        std::fs::write(&stored, &content).unwrap();
+        let other = store.create_case("Other", "").unwrap();
+        let other_dir = root.join(&other.id);
+        std::fs::create_dir_all(&other_dir).unwrap();
+        let out_of_scope = other_dir.join("copied.bin");
+        std::fs::write(&out_of_scope, &content).unwrap();
+        let mut cross = evidence;
+        cross.id = "wrong-case-file".into();
+        cross.stored_path = out_of_scope.to_string_lossy().into_owned();
+        store.upsert_artifact(&cross).unwrap();
+        assert!(store
+            .verify_artifact(DEFAULT_CASE, &cross.id, &root)
+            .is_err());
+    }
+
+    #[test]
+    fn provenance_chain_detects_unauthorized_insert() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ArtifactStore::open(&dir.path().join("index.db")).unwrap();
+        store
+            .record_event(DEFAULT_CASE, "unit", "create", None, "alpha")
+            .unwrap();
+        store
+            .record_event(DEFAULT_CASE, "unit", "inspect", None, "beta")
+            .unwrap();
+        let valid = store.verify_case_provenance(DEFAULT_CASE).unwrap();
+        assert_eq!(valid.verified_events, 2);
+        assert_eq!(valid.head_sha256.len(), 64);
+        assert_eq!(
+            store
+                .export_case_report(DEFAULT_CASE)
+                .unwrap()
+                .provenance
+                .head_sha256,
+            valid.head_sha256
+        );
+        store
+            .conn
+            .execute(
+                "INSERT INTO case_events(case_id,source,action,source_description,created_ms)
+             VALUES (?1,'rogue','insert','unauthorized',123)",
+                params![DEFAULT_CASE],
+            )
+            .unwrap();
+        assert!(store.verify_case_provenance(DEFAULT_CASE).is_err());
+        assert!(store
+            .record_event(DEFAULT_CASE, "unit", "add", None, "later")
+            .is_err());
+    }
+
+    #[test]
+    fn provenance_v2_migration_backfills_legacy_events() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("index.db");
+        let store = ArtifactStore::open(&db).unwrap();
+        store
+            .record_event(DEFAULT_CASE, "unit", "legacy", None, "older event")
+            .unwrap();
+        store
+            .conn
+            .execute_batch("DROP TABLE case_event_integrity; PRAGMA user_version=1;")
+            .unwrap();
+        drop(store);
+        let reopened = ArtifactStore::open(&db).unwrap();
+        let proof = reopened.verify_case_provenance(DEFAULT_CASE).unwrap();
+        assert_eq!(proof.verified_events, 1);
+        reopened
+            .record_event(DEFAULT_CASE, "unit", "new", None, "more")
+            .unwrap();
+        assert_eq!(
+            reopened
+                .verify_case_provenance(DEFAULT_CASE)
+                .unwrap()
+                .verified_events,
+            2
+        );
+    }
+
+    #[test]
+    fn case_report_manifest_is_stable_and_detects_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ArtifactStore::open(&dir.path().join("index.db")).unwrap();
+        store.upsert_artifact(&record("manifest")).unwrap();
+        store
+            .record_event(DEFAULT_CASE, "import", "create", Some("manifest"), "source")
+            .unwrap();
+        let mut exported = store.export_case_report(DEFAULT_CASE).unwrap();
+        assert_eq!(exported.manifest_sha256.len(), 64);
+        verify_case_report_manifest(&exported).unwrap();
+        verify_case_report_manifest(&store.export_case_report(DEFAULT_CASE).unwrap()).unwrap();
+        exported.generated_ms += 1;
+        assert!(verify_case_report_manifest(&exported).is_err());
+        exported.generated_ms -= 1;
+        exported.artifacts[0].name.push_str(".tampered");
+        assert!(verify_case_report_manifest(&exported).is_err());
     }
 
     #[test]

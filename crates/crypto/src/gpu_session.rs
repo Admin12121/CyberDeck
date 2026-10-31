@@ -19,6 +19,7 @@ pub(super) enum Algorithm {
     Sha256,
     Md5,
     Sha1,
+    Ntlm,
 }
 impl Algorithm {
     fn digest_bytes(self) -> usize {
@@ -26,6 +27,7 @@ impl Algorithm {
             Self::Sha256 => 32,
             Self::Md5 => 16,
             Self::Sha1 => 20,
+            Self::Ntlm => 16,
         }
     }
     fn verify(self, candidate: &[u8], target: &[u8]) -> bool {
@@ -33,6 +35,17 @@ impl Algorithm {
             Self::Sha256 => Sha256::digest(candidate).as_slice() == target,
             Self::Md5 => md5::Md5::digest(candidate).as_slice() == target,
             Self::Sha1 => sha1::Sha1::digest(candidate).as_slice() == target,
+            Self::Ntlm => {
+                use md4::Digest as _;
+                if candidate.len() > 27 || !candidate.is_ascii() {
+                    return false;
+                }
+                let mut utf16le = Vec::with_capacity(candidate.len() * 2);
+                for ch in candidate {
+                    utf16le.extend_from_slice(&[*ch, 0]);
+                }
+                md4::Md4::digest(&utf16le).as_slice() == target
+            }
         }
     }
 }
@@ -62,6 +75,15 @@ impl Session {
         Self::new_for(capacity, Algorithm::Sha256)
     }
     pub(super) fn new_for(capacity: usize, algorithm: Algorithm) -> Result<Self, String> {
+        Self::new_for_device(capacity, algorithm, 0)
+    }
+    /// Device order matches gpu::probe().devices at enumeration time.
+    /// Indices are ephemeral across driver updates and restarts.
+    pub(super) fn new_for_device(
+        capacity: usize,
+        algorithm: Algorithm,
+        device_index: usize,
+    ) -> Result<Self, String> {
         if capacity == 0 || capacity > MAX_GPU_BATCH {
             return Err("invalid GPU capacity".into());
         }
@@ -69,10 +91,13 @@ impl Session {
         // SAFETY: dynamically loaded symbols use OpenCL ABI, all owned handles
         // are released through the same loaded library after use.
         unsafe {
-            let (_, device) = select_devices(&api)?
-                .into_iter()
-                .next()
-                .ok_or("No OpenCL GPU device detected")?;
+            let devices = select_devices(&api)?;
+            let (_, device) = devices.get(device_index).copied().ok_or_else(|| {
+                format!(
+                    "OpenCL GPU index {device_index} unavailable ({} devices detected)",
+                    devices.len()
+                )
+            })?;
             let context_fn: FContext = api.symbol(b"clCreateContext")?;
             let queue_fn: FQueue = api.symbol(b"clCreateCommandQueue")?;
             let program_fn: FProgram = api.symbol(b"clCreateProgramWithSource")?;
@@ -116,6 +141,7 @@ impl Session {
                 Algorithm::Sha256 => include_str!("sha256.cl"),
                 Algorithm::Md5 => include_str!("md5.cl"),
                 Algorithm::Sha1 => include_str!("sha1.cl"),
+                Algorithm::Ntlm => include_str!("ntlm.cl"),
             };
             let source_ptr = source.as_ptr().cast::<c_char>();
             let source_len = source.len();
@@ -174,6 +200,7 @@ impl Session {
                 Algorithm::Sha256 => "sha256_match",
                 Algorithm::Md5 => "md5_match",
                 Algorithm::Sha1 => "sha1_match",
+                Algorithm::Ntlm => "ntlm_match",
             })
             .expect("kernel name");
             let kernel = Owned {
@@ -242,6 +269,8 @@ impl Session {
             || candidates.is_empty()
             || candidates.len() > self.capacity
             || candidates.iter().any(|c| c.len() > MAX_GPU_CANDIDATE_BYTES)
+            || (matches!(self.algorithm, Algorithm::Ntlm)
+                && candidates.iter().any(|c| c.len() > 27 || !c.is_ascii()))
         {
             return Err("invalid GPU session batch".into());
         }
@@ -254,8 +283,12 @@ impl Session {
         let words: Vec<u32> = target
             .chunks_exact(4)
             .map(|b| match self.algorithm {
-                Algorithm::Sha256 | Algorithm::Sha1 => u32::from_be_bytes(b.try_into().expect("digest word")),
-                Algorithm::Md5 => u32::from_le_bytes(b.try_into().expect("digest word")),
+                Algorithm::Sha256 | Algorithm::Sha1 => {
+                    u32::from_be_bytes(b.try_into().expect("digest word"))
+                }
+                Algorithm::Md5 | Algorithm::Ntlm => {
+                    u32::from_le_bytes(b.try_into().expect("digest word"))
+                }
             })
             .collect();
         // SAFETY: blocking transfers guard all host references, in-order queue.

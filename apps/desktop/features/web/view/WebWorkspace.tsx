@@ -1,19 +1,19 @@
 "use client";
 /** Web studio: ZAP-model workspace with top-bar tabs (Master Plan 5.2). */
-import { useState } from "react";
+import { WebWorkflowProvider, useWebWorkflow, type WebTab } from "./WebWorkflow";
 import { HistoryView } from "./HistoryView";
 import { ProxyView } from "./ProxyView";
 import { RepeaterView } from "./RepeaterView";
 import { ScannerView } from "./ScannerView";
 import { SpiderView } from "./SpiderView";
 
-export function WebWorkspace() {
-  const [tab, setTab] = useState<"proxy" | "history" | "repeater" | "scanner" | "spider">("proxy");
+function WebWorkspaceContent() {
+  const { tab, setTab } = useWebWorkflow();
   const show = (id: string) => (tab === id ? "h-full" : "hidden h-full");
   return (
     <div className="flex h-full min-h-0 flex-col">
       <div className="flex h-8 shrink-0 items-center gap-1 border-b border-line bg-sidebar px-2">
-        {(["proxy", "history", "repeater", "scanner", "spider"] as const).map((t) => (
+        {(["proxy", "history", "repeater", "scanner", "spider"] as WebTab[]).map((t) => (
           <button
             key={t}
             type="button"
@@ -35,4 +35,8 @@ export function WebWorkspace() {
       </div>
     </div>
   );
+}
+
+export function WebWorkspace() {
+  return <WebWorkflowProvider><WebWorkspaceContent /></WebWorkflowProvider>;
 }

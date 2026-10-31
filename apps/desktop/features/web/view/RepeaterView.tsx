@@ -1,9 +1,10 @@
 /** Repeater: multiple request tabs with response inspector, raw and hex views. */
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Copy, Play, X } from "lucide-react";
 import { Chip, EmptyState, Pane, ToolButton } from "@ds/panes";
 import { httpSend, isDesktop, type HttpResponseWire } from "@lib/ipc";
 import { hexDump } from "@lib/hex";
+import { useWebWorkflow } from "./WebWorkflow";
 
 interface RepeaterTab {
   name: string;
@@ -16,10 +17,21 @@ const SAMPLE_REQUEST = `GET / HTTP/1.1\r\nHost: example.com\r\nUser-Agent: Cyber
 
 export function RepeaterView() {
   const desktop = isDesktop();
+  const { repeaterHandoff } = useWebWorkflow();
+  const nextTabId = useRef(2);
+  const lastHandoff = useRef(0);
   const [tabs, setTabs] = useState<RepeaterTab[]>([{ name: "R1", request: SAMPLE_REQUEST, response: null, error: null }]);
   const [active, setActive] = useState(0);
   const [busy, setBusy] = useState(false);
   const [bodyMode, setBodyMode] = useState<"inspector" | "raw" | "hex">("inspector");
+
+  useEffect(() => {
+    if (!repeaterHandoff || repeaterHandoff.id === lastHandoff.current) return;
+    lastHandoff.current = repeaterHandoff.id;
+    const name = `R${nextTabId.current++}`;
+    setTabs((previous) => [...previous, { name, request: repeaterHandoff.request, response: null, error: repeaterHandoff.reconstructed ? "Draft reconstructed from metadata. Verify scheme, method, headers and body before sending." : null }]);
+    setActive(tabs.length);
+  }, [repeaterHandoff, tabs.length]);
 
   const current = tabs[active];
   const update = (patch: Partial<RepeaterTab>) =>
@@ -38,6 +50,7 @@ export function RepeaterView() {
     }
   };
 
+  // This is an encoding of response.body text, not original network bytes.
   const hexRows = current.response
     ? hexDump(new TextEncoder().encode(current.response.body).slice(0, 2048))
     : [];
@@ -46,34 +59,20 @@ export function RepeaterView() {
     <div className="flex h-full min-h-0 flex-col">
       <div className="flex h-8 shrink-0 items-center gap-1 border-b border-line bg-sidebar px-2">
         {tabs.map((t, i) => (
-          <button
-            key={t.name}
-            type="button"
-            onClick={() => setActive(i)}
-            className={`flex h-6 items-center gap-1 border px-2 font-mono text-[10px] uppercase ${
-              i === active ? "border-orange/50 text-orange" : "border-transparent text-fg-muted hover:text-fg"
-            }`}
-          >
-            {t.name}
+          <div key={t.name} className={`flex h-6 items-center gap-1 border px-1 font-mono text-[11px] uppercase ${i === active ? "border-orange/50 text-orange" : "border-transparent text-fg-muted"}`}>
+            <button type="button" aria-selected={i === active} onClick={() => setActive(i)}
+              className="h-full px-1 hover:text-fg" title={`Open ${t.name}`}>{t.name}</button>
             {tabs.length > 1 ? (
-              <span
-                role="button"
-                aria-label={`Close ${t.name}`}
-                onClick={(e) => {
-                  e.stopPropagation();
-                  setTabs((prev) => prev.filter((_, j) => j !== i));
-                  setActive((a) => (i < a ? a - 1 : Math.min(a, tabs.length - 2)));
-                }}
-                className="text-fg-muted hover:text-err"
-              >
-                ×
-              </span>
+              <button type="button" aria-label={`Close ${t.name}`} onClick={() => {
+                setTabs((prev) => prev.filter((_, j) => j !== i));
+                setActive((a) => (i < a ? a - 1 : Math.min(a, tabs.length - 2)));
+              }} className="px-0.5 text-fg-muted hover:text-err">×</button>
             ) : null}
-          </button>
+          </div>
         ))}
         <ToolButton
           onClick={() => {
-            const name = `R${tabs.length + 1}`;
+            const name = `R${nextTabId.current++}`;
             setTabs((prev) => [...prev, { name, request: SAMPLE_REQUEST, response: null, error: null }]);
             setActive(tabs.length);
           }}
@@ -113,7 +112,7 @@ export function RepeaterView() {
                     onClick={() => setBodyMode(mode)}
                     className={`flex h-6 items-center border px-1.5 font-mono text-[10px] uppercase ${bodyMode === mode ? "border-orange/50 text-orange" : "border-line text-fg-muted"}`}
                   >
-                    {mode}
+                    {mode === "hex" ? "Text hex" : mode}
                   </button>
                 ))}
                 <ToolButton onClick={() => void navigator.clipboard?.writeText(current.response?.body ?? "")}>
@@ -148,6 +147,7 @@ export function RepeaterView() {
               </div>
             ) : (
               <pre className="h-full overflow-auto p-2 font-mono text-[11px] leading-relaxed text-fg-dim">
+                <div className="mb-2 text-warn">UTF-8 encoding of displayed text; not original HTTP response bytes.</div>
                 {hexRows.map((row) => (
                   <div key={row.offset}>
                     <span className="text-fg-muted">{row.offset.toString(16).padStart(8, "0")}</span>

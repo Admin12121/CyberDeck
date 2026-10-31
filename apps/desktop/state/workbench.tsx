@@ -11,6 +11,7 @@ import {
   useContext,
   useEffect,
   useMemo,
+  useRef,
   useState,
 } from "react";
 import { CATEGORIES, type CategoryId, type ToolId } from "@features/registry";
@@ -45,6 +46,7 @@ interface WorkbenchApi {
   selectCategory: (id: CategoryId) => void;
   selectTool: (id: ToolId) => void;
   runDemoJob: () => void;
+  trackOperation: <T>(kind: string, operation: () => Promise<T>) => Promise<T>;
   cancelJob: (id: number) => void;
   setPaletteOpen: (open: boolean) => void;
   setDockOpen: (open: boolean) => void;
@@ -97,6 +99,7 @@ export function WorkbenchProvider({ children }: { children: React.ReactNode }) {
   const [category, setCategory] = useState<CategoryId>("crypto");
   const [tool, setTool] = useState<ToolId>("crypto.recipes");
   const [jobs, setJobs] = useState<Record<number, JobView>>({});
+  const localJobId = useRef(-1);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [dockOpen, setDockOpen] = useState(false);
   const [dockTab, setDockTab] = useState<"jobs" | "console">("jobs");
@@ -187,6 +190,23 @@ export function WorkbenchProvider({ children }: { children: React.ReactNode }) {
     }).catch((err) => console.error("job_start failed:", err));
   }, []);
 
+  // Surface native operations without inventing backend cancellation or durable jobs.
+  const trackOperation = useCallback(async <T,>(kind: string, operation: () => Promise<T>): Promise<T> => {
+    const id = localJobId.current--;
+    const startedAt = Date.now();
+    setJobs((previous) => ({ ...previous, [id]: { id, kind, status: "running", percent: 0, message: "Working…", startedAt } }));
+    setDockTab("jobs");
+    setDockOpen(true);
+    try {
+      const result = await operation();
+      setJobs((previous) => ({ ...previous, [id]: { ...previous[id], status: "completed", percent: 100, message: "Completed", finishedAt: Date.now() } }));
+      return result;
+    } catch (error) {
+      setJobs((previous) => ({ ...previous, [id]: { ...previous[id], status: "failed", percent: 0, message: String(error), finishedAt: Date.now() } }));
+      throw error;
+    }
+  }, []);
+
   const cancelJob = useCallback((id: number) => {
     void jobCancel(id).catch((err) => console.error("job_cancel failed:", err));
   }, []);
@@ -251,6 +271,7 @@ export function WorkbenchProvider({ children }: { children: React.ReactNode }) {
       selectCategory,
       selectTool,
       runDemoJob,
+      trackOperation,
       cancelJob,
       setPaletteOpen,
       setDockTab,
@@ -278,6 +299,7 @@ export function WorkbenchProvider({ children }: { children: React.ReactNode }) {
       selectCategory,
       selectTool,
       runDemoJob,
+      trackOperation,
       cancelJob,
       toggleDock,
       setNavigatorWidth,

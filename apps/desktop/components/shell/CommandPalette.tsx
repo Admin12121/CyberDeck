@@ -14,6 +14,7 @@ interface Command {
 export function CommandPalette() {
   const wb = useWorkbench();
   const [query, setQuery] = useState("");
+  const [activeIndex, setActiveIndex] = useState(0);
 
   const commands = useMemo<Command[]>(() => {
     const toolCommands: Command[] = CATEGORIES.flatMap((category) =>
@@ -27,7 +28,6 @@ export function CommandPalette() {
         })),
     );
     const actions: Command[] = [
-      { id: "action.job", label: "Run demo job", hint: "Queue a cancellable job through the shared pipeline", run: wb.runDemoJob },
       { id: "action.dock", label: "Toggle jobs dock", hint: "Ctrl+J", run: wb.toggleDock },
     ];
     return [...toolCommands, ...actions];
@@ -48,10 +48,14 @@ export function CommandPalette() {
           <input
             autoFocus
             value={query}
-            onChange={(e) => setQuery(e.target.value)}
+            onChange={(e) => { setQuery(e.target.value); setActiveIndex(0); }}
             onKeyDown={(e) => {
-              if (e.key === "Enter" && filtered[0]) {
-                filtered[0].run();
+              if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+                e.preventDefault();
+                setActiveIndex((index) => Math.max(0, Math.min(filtered.length - 1, index + (e.key === "ArrowDown" ? 1 : -1))));
+              }
+              if (e.key === "Enter" && filtered[activeIndex]) {
+                filtered[activeIndex].run();
                 wb.setPaletteOpen(false);
               }
             }}
@@ -68,11 +72,12 @@ export function CommandPalette() {
               <li key={command.id}>
                 <button
                   type="button"
+                  onMouseEnter={() => setActiveIndex(index)}
                   onClick={() => {
                     command.run();
                     wb.setPaletteOpen(false);
                   }}
-                  className={`block w-full px-2 py-1.5 text-left ${index === 0 ? "bg-orange-dim" : "hover:bg-raised"}`}
+                  className={`block w-full px-2 py-1.5 text-left ${index === activeIndex ? "bg-orange-dim" : "hover:bg-raised"}`}
                 >
                   <div className="text-xs text-fg">{command.label}</div>
                   <div className="truncate font-mono text-[10px] text-fg-muted">{command.hint}</div>

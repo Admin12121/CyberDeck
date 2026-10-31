@@ -1,6 +1,6 @@
 "use client";
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Chip, Field, Pane, TextInput, ToolButton } from "@ds/panes";
+import { Chip, Field, Pane, Resizer, TextInput, ToolButton } from "@ds/panes";
 import { hexDump } from "@lib/hex";
 import {
   fileHex,
@@ -33,6 +33,7 @@ export function FileAnalysisView() {
   const [binaryBusy, setBinaryBusy] = useState(false);
   const [scanBusy, setScanBusy] = useState(false);
   const [scanError, setScanError] = useState<string | null>(null);
+  const [inspectorWidth, setInspectorWidth] = useState(320);
   const [extracting, setExtracting] = useState<number | null>(null);
   const [extractNote, setExtractNote] = useState<string | null>(null);
   useEffect(() => { setScan(null); setBinary(null); setScanError(null); setExtractNote(null); }, [ctx.selectedArtifact?.id, wb.caseId]);
@@ -94,7 +95,8 @@ export function FileAnalysisView() {
       <Pane title={`Hex: ${ctx.selectedArtifact?.name ?? ctx.selectedSample?.name ?? "no selection"}`} className="min-w-0 flex-1" bodyClassName="relative">
         <HexBody ctx={ctx} />
       </Pane>
-      <Pane title="Inspector" className="w-80 shrink-0">
+      <Resizer direction="horizontal" flip ariaLabel="Resize file inspector" value={inspectorWidth} onChange={setInspectorWidth} min={240} max={520} />
+      <Pane title="Inspector" className="shrink-0" style={{ width: inspectorWidth }}>
         {ctx.selectedArtifact ? (
           <>
             <Field label="sha256" value={<span className="break-all">{ctx.selectedArtifact.sha256}</span>} />

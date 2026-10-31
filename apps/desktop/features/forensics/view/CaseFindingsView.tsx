@@ -88,7 +88,8 @@ export function CaseFindingsView() {
             <table className="data-table">
               <thead><tr><th className="w-20">Severity</th><th>Title</th><th className="w-28">Source</th><th className="w-32">Recorded</th></tr></thead>
               <tbody>{filtered.map((f) => (
-                <tr key={f.id} onClick={() => setSelected(f.id)}
+                <tr key={f.id} onClick={() => setSelected(f.id)} tabIndex={0} aria-selected={current?.id === f.id}
+                   onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); setSelected(f.id); } }}
                   className={"cursor-pointer " + (current?.id === f.id ? "selected" : "")}>
                   <td><Chip tone={severityTone(f.severity)}>{f.severity}</Chip></td>
                   <td className="text-fg">{f.title}</td>

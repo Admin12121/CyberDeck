@@ -75,6 +75,8 @@ pub const MAX_STREAM_BYTES_PER_DIRECTION: usize = 512 * 1024;
 pub const MAX_STREAM_SEGMENTS: usize = 4096;
 pub const MAX_STREAM_CHUNKS: usize = 512;
 const MAX_OVERLAP_COMPARE_BYTES: usize = 4 * MAX_STREAM_BYTES_PER_DIRECTION;
+// Cap sequence displacements well below TCP's ambiguous signed half-range.
+const MAX_STREAM_SEQUENCE_DISTANCE: i64 = 64 * 1024 * 1024;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct StreamChunk {
@@ -158,6 +160,7 @@ fn follow_tcp_side(
 ) -> Vec<u8> {
     let mut segments: Vec<Segment<'_>> = Vec::new();
     let mut first_seq = None;
+    let mut sequence_limit_reported = false;
     for (arrival, packet) in packets.iter().enumerate() {
         let d = &packet.dissected;
         if d.stream_id.as_deref() != Some(id) || d.payload.is_empty() {
@@ -174,8 +177,21 @@ fn follow_tcp_side(
         }
         let sequence = tcp.sequence.wrapping_add(u32::from(tcp.flags & 0x02 != 0));
         let base = *first_seq.get_or_insert(sequence);
+        let relative_sequence = (sequence.wrapping_sub(base) as i32) as i64;
+        if relative_sequence.abs() > MAX_STREAM_SEQUENCE_DISTANCE {
+            transcript.truncated = true;
+            if !sequence_limit_reported {
+                note(
+                    transcript,
+                    dir,
+                    "TCP sequence displacement exceeds the 64 MiB safety limit",
+                );
+                sequence_limit_reported = true;
+            }
+            continue;
+        }
         segments.push(Segment {
-            relative_sequence: (sequence.wrapping_sub(base) as i32) as i64,
+            relative_sequence,
             arrival,
             data: &d.payload,
         });
@@ -504,6 +520,46 @@ mod tests {
         assert_eq!(text_chunks(&out, "A"), "abcd");
         assert_eq!(out.gaps, 0);
     }
+    #[test]
+    fn implausible_large_tcp_sequence_displacement_fails_closed() {
+        let out = follow_stream(
+            &[
+                packet("A", 100, 0, b"GET / HTTP/1.1\r\n\r\n"),
+                packet("A", 100u32.wrapping_add(100_000_000), 0, b"bogus"),
+                packet("A", 100u32.wrapping_sub(100_000_000), 0, b"backwards"),
+                packet("A", 100u32.wrapping_add(200_000_000), 0, b"more"),
+            ],
+            ID,
+        )
+        .unwrap();
+        assert!(out.truncated);
+        assert!(out.application_hints.is_empty());
+        assert_eq!(out.gaps, 0);
+        assert_eq!(text_chunks(&out, "A"), "GET / HTTP/1.1\r\n\r\n");
+        assert_eq!(
+            out.chunks
+                .iter()
+                .filter(|chunk| chunk.kind == "notice" && chunk.text.contains("64 MiB"))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn near_sequence_limit_does_not_discard_as_ambiguous() {
+        let out = follow_stream(
+            &[
+                packet("A", 100, 0, b"start"),
+                packet("A", 100 + MAX_STREAM_SEQUENCE_DISTANCE as u32, 0, b"end"),
+            ],
+            ID,
+        )
+        .unwrap();
+        assert!(!out.truncated);
+        assert_eq!(out.gaps, 1);
+        assert_eq!(text_chunks(&out, "A"), "startend");
+    }
+
     #[test]
     fn rejects_unknown_ids_and_preserves_udp_datagrams() {
         assert!(follow_stream(&[], "something").is_err());

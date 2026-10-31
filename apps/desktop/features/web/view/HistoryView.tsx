@@ -1,7 +1,7 @@
 "use client";
 import { useCallback, useEffect, useState } from "react";
 import { Globe, Play, PlayCircle, Square } from "lucide-react";
-import { Chip, EmptyState, Pane, Select, TextInput, ToolButton } from "@ds/panes";
+import { Chip, EmptyState, Pane, Resizer, Select, TextInput, ToolButton } from "@ds/panes";
 import {
   engineScan,
   httpSend,
@@ -21,6 +21,7 @@ import {
   type WebFindingWire,
 } from "@lib/ipc";
 import { buildSitesTree, filterCaptured, useTarget } from "../controller";
+import { makeGetDraft, useWebWorkflow } from "./WebWorkflow";
 
 // ---------------------------------------------------------------- history ---
 
@@ -28,6 +29,8 @@ export function HistoryView() {
   const desktop = isDesktop();
   const [rows, setRows] = useState<CapturedRequestWire[]>([]);
   const [query, setQuery] = useState("");
+  const [sitesWidth, setSitesWidth] = useState(256);
+  const { draftInRepeater, scanTarget } = useWebWorkflow();
 
   const refresh = useCallback(() => {
     if (!desktop) return;
@@ -58,6 +61,7 @@ export function HistoryView() {
               <th>Path</th>
               <th className="w-14">Status</th>
               <th className="w-20">Size</th>
+              <th className="w-44">Actions</th>
             </tr>
           </thead>
           <tbody>
@@ -69,15 +73,20 @@ export function HistoryView() {
                 <td className="text-fg-dim">{r.path}</td>
                 <td className={r.status >= 400 ? "text-err" : "text-ok"}>{r.status}</td>
                 <td>{r.size}</td>
+                <td className="whitespace-nowrap">
+                  <ToolButton disabled={r.method.toUpperCase() !== "GET"} title={r.method.toUpperCase() === "GET" ? "Draft only: reconstructed from summary. Verify scheme and headers before sending" : "Original request bytes are not stored, so non-GET replay is unsafe"} onClick={() => draftInRepeater(makeGetDraft(`http://${r.host}${r.path}`), true)}>Draft</ToolButton>
+                  <ToolButton onClick={() => scanTarget(`http://${r.host}${r.path}`)} title="Select HTTP URL for scanner; verify protocol and scope">Scan</ToolButton>
+                </td>
               </tr>
             ))}
             {filtered.length === 0 ? (
-              <tr><td colSpan={6} className="text-center text-fg-muted">no traffic captured yet; start the proxy and browse through it</td></tr>
+              <tr><td colSpan={7} className="text-center text-fg-muted">no traffic captured yet; start the proxy and browse through it</td></tr>
             ) : null}
           </tbody>
         </table>
       </Pane>
-      <Pane title="Sites" className="w-64 shrink-0">
+      <Resizer direction="horizontal" flip ariaLabel="Resize sites tree" value={sitesWidth} onChange={setSitesWidth} min={192} max={440} />
+      <Pane title="Sites" className="shrink-0" style={{ width: sitesWidth }}>
         <SitesTree rows={rows} />
       </Pane>
     </div>

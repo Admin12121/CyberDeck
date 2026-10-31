@@ -1,6 +1,6 @@
 "use client";
-import { useCallback, useEffect, useMemo, useState } from "react";
-import { Chip, Field, Pane, TextInput, ToolButton } from "@ds/panes";
+import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
+import { Chip, Field, Pane, Resizer, TextInput, ToolButton } from "@ds/panes";
 import { hexDump } from "@lib/hex";
 import {
   fileHex,
@@ -23,7 +23,7 @@ interface Selected {
   real: boolean;
 }
 
-export function useEvidence() {
+function useEvidenceState() {
   const desktop = isDesktop();
   const wb = useWorkbench();
   const [artifacts, setArtifacts] = useState<ArtifactRecord[]>([]);
@@ -31,6 +31,7 @@ export function useEvidence() {
   const [query, setQuery] = useState("");
   const [importError, setImportError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [treeWidth, setTreeWidth] = useState(288);
 
   const refresh = useCallback(async () => {
     if (!desktop) return;
@@ -84,12 +85,26 @@ export function useEvidence() {
     setQuery,
     importError,
     busy,
+    treeWidth,
+    setTreeWidth,
     importEvidence,
     refresh,
   };
 }
 
-type EvidenceContext = ReturnType<typeof useEvidence>;
+type EvidenceContext = ReturnType<typeof useEvidenceState>;
+const EvidenceContextStore = createContext<EvidenceContext | null>(null);
+
+export function EvidenceProvider({ children }: { children: ReactNode }) {
+  const state = useEvidenceState();
+  return <EvidenceContextStore.Provider value={state}>{children}</EvidenceContextStore.Provider>;
+}
+
+export function useEvidence(): EvidenceContext {
+  const state = useContext(EvidenceContextStore);
+  if (!state) throw new Error("EvidenceProvider is required for forensic views");
+  return state;
+}
 
 export function EvidenceTree({ ctx }: { ctx: EvidenceContext }) {
   const q = ctx.query.trim().toLowerCase();
@@ -97,9 +112,11 @@ export function EvidenceTree({ ctx }: { ctx: EvidenceContext }) {
   const sampleFiles = SAMPLE_EVIDENCE.filter((f) => !q || f.name.toLowerCase().includes(q));
 
   return (
+    <>
     <Pane
       title={`Evidence${ctx.desktop ? "" : " (samples, browser fallback)"}`}
-      className="w-72 shrink-0"
+      className="shrink-0"
+      style={{ width: ctx.treeWidth }}
       bodyClassName="p-1"
       actions={
         <ToolButton
@@ -160,6 +177,8 @@ export function EvidenceTree({ ctx }: { ctx: EvidenceContext }) {
         })
       )}
     </Pane>
+    <Resizer direction="horizontal" ariaLabel="Resize evidence tree" value={ctx.treeWidth} onChange={ctx.setTreeWidth} min={192} max={420} />
+    </>
   );
 }
 

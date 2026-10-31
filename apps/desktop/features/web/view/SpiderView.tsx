@@ -21,16 +21,20 @@ import {
   type WebFindingWire,
 } from "@lib/ipc";
 import { buildSitesTree, filterCaptured, useTarget } from "../controller";
+import { makeGetDraft, useWebWorkflow } from "./WebWorkflow";
+import { useWorkbench } from "@state/workbench";
 
 // ----------------------------------------------------------------- spider ---
 
 export function SpiderView() {
   const desktop = isDesktop();
-  const { target, setTarget, normalized } = useTarget();
+  const wb = useWorkbench();
+  const { target, setTarget, normalized, scanTarget, draftInRepeater } = useWebWorkflow();
   const [depth, setDepth] = useState("2");
   const [links, setLinks] = useState<string[]>([]);
   const [busy, setBusy] = useState(false);
   const [authorized, setAuthorized] = useState(false);
+  useEffect(() => { setAuthorized(false); }, [normalized]);
   const [error, setError] = useState<string | null>(null);
 
   const crawl = async () => {
@@ -38,7 +42,7 @@ export function SpiderView() {
     setError(null);
     setLinks([]);
     try {
-      setLinks(await spiderScan(normalized, Math.max(1, Math.min(4, Number.parseInt(depth, 10) || 2)), authorized));
+      setLinks(await wb.trackOperation("Web spider", () => spiderScan(normalized, Math.max(1, Math.min(4, Number.parseInt(depth, 10) || 2)), authorized)));
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -75,13 +79,17 @@ export function SpiderView() {
       </label>
       <Pane title="Discovered URLs" className="min-h-0 flex-1">
         {links.length === 0 ? (
-          <EmptyState title={busy ? "Crawling…" : "No URLs yet"} detail="Depth-limited same-host crawl; discovered links feed the scanner and repeater." badge="spider" />
+          <EmptyState title={busy ? "Crawling…" : "No URLs yet"} detail="Depth-limited same-host crawl; discovered links can be sent to Scanner or drafted in Repeater." badge="spider" />
         ) : (
           <table className="data-table">
             <tbody>
               {links.map((url) => (
                 <tr key={url}>
                   <td className="text-fg-dim">{url}</td>
+                    <td className="w-44 whitespace-nowrap text-right">
+                      <ToolButton onClick={() => draftInRepeater(makeGetDraft(url), true)} title="Create an editable GET request draft; original request headers are not available">Draft in Repeater</ToolButton>
+                      <ToolButton onClick={() => scanTarget(url)} title="Set this URL as the scanner target; authorization must be confirmed there">Scan URL</ToolButton>
+                    </td>
                 </tr>
               ))}
             </tbody>

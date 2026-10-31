@@ -73,6 +73,8 @@ fn main() {
             cases::case_findings_list,
             cases::case_events_list,
             cases::case_report,
+            cases::case_provenance_verify,
+            cases::case_artifact_verify,
             cases::case_findings_add,
             evidence::file_list,
             evidence::file_hex,

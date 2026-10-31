@@ -1,5 +1,5 @@
 "use client";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { ChevronRight, FolderOpen, Play, ShieldAlert, Square } from "lucide-react";
 import { Chip, EmptyState, Pane, Resizer, Select, TextInput, ToolButton } from "@ds/panes";
 import { hexDump } from "@lib/hex";
@@ -47,16 +47,19 @@ export function PacketStudioView() {
   const desktop = isDesktop();
   const wb = useWorkbench();
   const [capture, setCapture] = useState<PcapOpenWire | null>(null);
+  const [showSample, setShowSample] = useState(false);
   const [openError, setOpenError] = useState<string | null>(null);
   const [opening, setOpening] = useState(false);
   const [filter, setFilter] = useState("");
+  const [packetScrollTop, setPacketScrollTop] = useState(0);
+  const packetScrollRef = useRef<HTMLDivElement>(null);
   const [selected, setSelected] = useState(0);
   const [tab, setTab] = useState<"packets" | "conversations" | "statistics" | "streams">("packets");
-  const [packetBytes, setPacketBytes] = useState<HexResponseWire | null>(null);
+  const [packetBytes, setPacketBytes] = useState<{ frameIndex: number; data: HexResponseWire } | null>(null);
   // null: details and bytes share the row evenly; dragging pins px.
   const [detailsWidth, setDetailsWidth] = useState<number | null>(null);
 
-  const packets = capture?.packets ?? SAMPLE_DISPLAY;
+  const packets = capture?.packets ?? (showSample ? SAMPLE_DISPLAY : []);
 
   const openCapture = async () => {
     setOpening(true);
@@ -64,6 +67,7 @@ export function PacketStudioView() {
     try {
       const wire = await pcapOpenDialog();
       setCapture(wire);
+      setShowSample(false);
       setSelected(0);
       setPacketBytes(null);
     } catch (err) {
@@ -74,21 +78,6 @@ export function PacketStudioView() {
     }
   };
 
-  useEffect(() => {
-    if (!capture) return;
-    let cancelled = false;
-    setPacketBytes(null);
-    pcapPacketBytes(selected, 0, 512)
-      .then((data) => {
-        if (!cancelled) setPacketBytes(data);
-      })
-      .catch((err) => {
-        if (!cancelled) console.error("pcap_packet_bytes failed:", err);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [capture, selected]);
 
   const filtered = useMemo(() => {
     const q = filter.trim();
@@ -97,6 +86,31 @@ export function PacketStudioView() {
   }, [packets, filter]);
 
   const current = filtered.find((p) => p.index === selected) ?? filtered[0];
+  // A bounded virtual window keeps large PCAPs responsive without dropping rows.
+  const rowHeight = 22;
+  const firstVisible = Math.max(0, Math.floor(packetScrollTop / rowHeight) - 16);
+  const lastVisible = Math.min(filtered.length, firstVisible + 220);
+  useEffect(() => {
+    if (packetScrollRef.current) packetScrollRef.current.scrollTop = 0;
+    setPacketScrollTop(0);
+  }, [filter, capture, tab]);
+  // Frame metadata, immutable capture bytes and Recipes handoff share one index.
+  const currentIndex = current?.index ?? null;
+  const currentBytes = packetBytes?.frameIndex === currentIndex ? packetBytes.data : null;
+  useEffect(() => {
+    if (!capture || currentIndex === null) return;
+    let cancelled = false;
+    setPacketBytes(null);
+    pcapPacketBytes(currentIndex, 0, 512)
+      .then((data) => {
+        if (!cancelled) setPacketBytes({ frameIndex: currentIndex, data });
+      })
+      .catch((err) => {
+        if (!cancelled) console.error("pcap_packet_bytes failed:", err);
+      });
+    return () => { cancelled = true; };
+  }, [capture, currentIndex]);
+
   const sampleBytes = useMemo(
     () => (!capture && current ? sampleFrameBytes(current.index + 1, Math.min(current.length, 160)) : new Uint8Array()),
     [capture, current],
@@ -114,6 +128,7 @@ export function PacketStudioView() {
         >
           <FolderOpen size={11} /> {opening ? "opening…" : "Open…"}
         </ToolButton>
+        {!capture && <ToolButton onClick={() => { setShowSample(true); setSelected(0); }} title="Open explicitly labeled demonstration data, not case evidence">Sample</ToolButton>}
         <ToolButton disabled title="Live capture requires platform driver clearance (§7.2)">
           <Play size={11} /> Capture
         </ToolButton>
@@ -127,7 +142,7 @@ export function PacketStudioView() {
         {capture ? (
           <Chip tone="ok">{capture.file_name} · {capture.format.toUpperCase()} · {capture.packet_count} packets</Chip>
         ) : (
-          <Chip>sample capture</Chip>
+          <Chip>{showSample ? "DEMO: sample packets" : "No capture opened"}</Chip>
         )}
       </div>
       {openError ? (
@@ -140,7 +155,9 @@ export function PacketStudioView() {
       ) : null}
 
       <div className="flex min-h-0 flex-1 flex-col">
-        <div className="flex min-h-0 flex-[5] flex-col overflow-hidden border-b border-line">
+        <div ref={packetScrollRef}
+          onScroll={(event) => setPacketScrollTop(event.currentTarget.scrollTop)}
+          className="flex min-h-0 flex-[5] flex-col overflow-auto border-b border-line">
           {tab === "packets" ? (
             <table className="data-table">
               <thead>
@@ -155,11 +172,15 @@ export function PacketStudioView() {
                 </tr>
               </thead>
               <tbody>
-                {filtered.map((p) => (
+                {firstVisible > 0 ? <tr aria-hidden="true"><td colSpan={7} style={{ height: firstVisible * rowHeight, padding: 0, border: 0 }} /></tr> : null}
+                {filtered.slice(firstVisible, lastVisible).map((p) => (
                   <tr
                     key={p.index}
                     onClick={() => setSelected(p.index)}
-                    className={`cursor-pointer ${p.index === current?.index ? "selected" : ""}`}
+                    tabIndex={0}
+                    aria-selected={p.index === current?.index}
+                    onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); setSelected(p.index); } }}
+                    className={`h-[22px] cursor-pointer ${p.index === current?.index ? "selected" : ""}`}
                   >
                     <td className="text-fg-muted">{p.index + 1}</td>
                     <td>{timeLabel(p.time_ms)}</td>
@@ -170,6 +191,7 @@ export function PacketStudioView() {
                     <td className="text-fg-dim">{p.info}</td>
                   </tr>
                 ))}
+                {lastVisible < filtered.length ? <tr aria-hidden="true"><td colSpan={7} style={{ height: (filtered.length - lastVisible) * rowHeight, padding: 0, border: 0 }} /></tr> : null}
               </tbody>
             </table>
           ) : tab === "conversations" ? (
@@ -272,20 +294,20 @@ export function PacketStudioView() {
             <div className="flex h-8 shrink-0 items-center border-b border-line bg-sidebar px-2 text-[10px] font-medium uppercase tracking-wider text-fg-muted">
               <span className="flex-1">Packet bytes (offset · hex · ascii)</span>
               <ToolButton
-                disabled={!capture || !packetBytes || packetBytes.rows.length === 0}
+                disabled={!capture || !current || !currentBytes || currentBytes.rows.length === 0}
                 title="Transfer selected captured frame bytes to the Recipes workspace"
                 onClick={() => {
-                  if (!capture || !packetBytes) return;
-                  const hex = packetBytes.rows.map((row) => row.hex.replace(/[^0-9a-f]/gi, "")).join("");
-                  wb.sendToRecipes(hex, `${capture.file_name}: frame ${selected + 1} (visible bytes)`,
+                  if (!capture || !current || !currentBytes) return;
+                  const hex = currentBytes.rows.map((row) => row.hex.replace(/[^0-9a-f]/gi, "")).join("");
+                  wb.sendToRecipes(hex, `${capture.file_name}: frame ${current.index + 1} (visible bytes)`,
                     [{ opId: "from_hex", enabled: true }]);
                 }}
               >Send to Recipes</ToolButton>
             </div>
             <div className="min-h-0 flex-1 overflow-auto">
-              {capture && packetBytes ? (
+              {capture && currentBytes ? (
                 <pre className="p-1 font-mono text-[11px] leading-relaxed text-fg-dim">
-                  {packetBytes.rows.map((row) => (
+                  {currentBytes.rows.map((row) => (
                     <div key={row.offset}>
                       <span className="text-fg-muted">{row.offset.toString(16).padStart(4, "0")}</span>
                       {"  "}
