@@ -43,6 +43,8 @@ mod crawl_application;
 mod engine_infrastructure;
 #[path = "../infrastructure/forward.rs"]
 mod forward_infrastructure;
+#[path = "../application/passive_rules.rs"]
+mod passive_rules_application;
 #[path = "../application/proxy.rs"]
 mod proxy_application;
 #[path = "../application/proxy_state.rs"]

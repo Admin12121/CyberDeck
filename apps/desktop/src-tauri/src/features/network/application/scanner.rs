@@ -5,6 +5,14 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 
 use super::tcp_probe::probe_observation;
+use super::udp_probe::probe_udp_observation;
+
+/// Native scan protocol; the original seven netscan commands remain TCP-only.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ScanTransport {
+    Tcp,
+    Udp,
+}
 use super::{ScanEntry, ScanObservation, ScanProgress};
 
 const MAX_RESULTS: usize = 20_000;
@@ -85,6 +93,30 @@ pub(super) fn run_scan_into_scoped_v1(
     scope_is_active: &(impl Fn() -> bool + Sync),
     on_observation: &(impl Fn(ScanObservation) + Sync),
 ) -> Vec<ScanEntry> {
+    run_scan_into_scoped_transport(
+        ScanTransport::Tcp,
+        hosts,
+        ports,
+        stop,
+        on_progress,
+        results,
+        scope_is_active,
+        on_observation,
+    )
+}
+
+/// UDP uses the same bounded worker/case-revision/cancellation pipeline but
+/// publishes typed observations rather than altering legacy open-TCP results.
+pub(super) fn run_scan_into_scoped_transport(
+    transport: ScanTransport,
+    hosts: Vec<IpAddr>,
+    ports: Vec<u16>,
+    stop: &AtomicBool,
+    on_progress: &(impl Fn(ScanProgress) + Sync),
+    results: &Arc<StdMutex<Vec<ScanEntry>>>,
+    scope_is_active: &(impl Fn() -> bool + Sync),
+    on_observation: &(impl Fn(ScanObservation) + Sync),
+) -> Vec<ScanEntry> {
     let total = (hosts.len() as u64).saturating_mul(ports.len() as u64);
     if total == 0 || total > MAX_SCAN_PROBES {
         return Vec::new();
@@ -123,14 +155,17 @@ pub(super) fn run_scan_into_scoped_v1(
                     stop.store(true, Ordering::Release);
                     break;
                 }
-                let observation = probe_observation(host, port);
+                let observation = match transport {
+                    ScanTransport::Tcp => probe_observation(host, port),
+                    ScanTransport::Udp => probe_udp_observation(host, port),
+                };
                 if !scope_is_active() {
                     stop.store(true, Ordering::Release);
                     break;
                 }
                 // Callback owns the bounded case-scoped store. The underlying
                 // original status is never changed by service-name inference.
-                if observation.state == "open" {
+                if transport == ScanTransport::Tcp && observation.state == "open" {
                     let mut output = results.lock().expect("scan results poisoned");
                     if output.len() >= MAX_RESULTS {
                         stop.store(true, Ordering::Relaxed);
@@ -168,6 +203,26 @@ pub(super) fn run_scan_into_scoped_v1(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn udp_worker_respects_revoked_case_without_sending_datagrams() {
+        let stop = AtomicBool::new(false);
+        let results = Arc::new(StdMutex::new(Vec::new()));
+        let observations = StdMutex::new(Vec::new());
+        let output = run_scan_into_scoped_transport(
+            ScanTransport::Udp,
+            vec!["127.0.0.1".parse().unwrap()],
+            vec![53],
+            &stop,
+            &|_| {},
+            &results,
+            &|| false,
+            &|obs| observations.lock().unwrap().push(obs),
+        );
+        assert!(output.is_empty());
+        assert!(observations.lock().unwrap().is_empty());
+        assert!(stop.load(Ordering::Acquire));
+    }
 
     #[test]
     fn cancellation_prevents_tcp_connect_attempts_and_false_completion() {

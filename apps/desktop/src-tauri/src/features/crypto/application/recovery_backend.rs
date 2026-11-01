@@ -20,14 +20,17 @@ use std::time::Instant;
 #[serde(tag = "backend", rename_all = "snake_case")]
 pub enum BackendSelection {
     Cpu,
+    /// Native Hashcat enumerates its own devices; no Rust OpenCL index mapping.
+    HashcatManaged,
     OpenCl {
         device_index: usize,
         batch_size: usize,
     },
 }
-impl From<BackendSelection> for RecoveryBackend {
-    fn from(value: BackendSelection) -> Self {
-        match value {
+impl TryFrom<BackendSelection> for RecoveryBackend {
+    type Error = String;
+    fn try_from(value: BackendSelection) -> Result<Self, Self::Error> {
+        Ok(match value {
             BackendSelection::Cpu => Self::Cpu,
             BackendSelection::OpenCl {
                 device_index,
@@ -36,7 +39,10 @@ impl From<BackendSelection> for RecoveryBackend {
                 device_index,
                 batch_size,
             },
-        }
+            BackendSelection::HashcatManaged => {
+                return Err("Hashcat-managed devices cannot execute through Rust recovery".into());
+            }
+        })
     }
 }
 
@@ -145,6 +151,9 @@ pub fn probe_recovery_devices() -> RecoveryDeviceInventory {
 fn validate_backend(backend: BackendSelection, probe: Option<&GpuProbe>) -> Result<(), String> {
     match backend {
         BackendSelection::Cpu => Ok(()),
+        BackendSelection::HashcatManaged => {
+            Err("Hashcat-managed backend requires embedded Hashcat".into())
+        }
         BackendSelection::OpenCl {
             device_index,
             batch_size,
@@ -238,7 +247,7 @@ pub fn execute_reader<R: BufRead, P: FnMut(RecoveryProgressWire)>(
     }
     let started = Instant::now();
     let completed = recover_sha256_wordlist_on_backend(
-        request.backend.into(),
+        request.backend.try_into()?,
         &request.target_hash,
         reader,
         RecoveryLimits {
@@ -513,6 +522,28 @@ mod tests {
         r.target_hash = "xyz".into();
         assert!(validate_request(&r).is_err());
     }
+    #[test]
+    fn hashcat_managed_backend_is_not_silently_mapped_to_rust_cpu() {
+        let mut r = request(BackendSelection::HashcatManaged);
+        r.target_hash = "00".repeat(32);
+        let serialized = serde_json::to_string(&r).unwrap();
+        assert!(serialized.contains("\"backend\":\"hashcat_managed\""));
+        let roundtrip: RecoveryRequest = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(roundtrip.backend, BackendSelection::HashcatManaged);
+        assert!(<RecoveryBackend as TryFrom<BackendSelection>>::try_from(
+            BackendSelection::HashcatManaged
+        )
+        .is_err());
+        assert!(validate_backend(BackendSelection::HashcatManaged, None).is_err());
+        assert!(execute_reader(
+            &roundtrip,
+            Cursor::new(b"fixture\\n"),
+            &RecoveryCancel::new(),
+            |_| {}
+        )
+        .is_err());
+    }
+
     #[test]
     fn global_candidate_quota_and_cancel_token_roundtrip() {
         let mut r = request(BackendSelection::Cpu);

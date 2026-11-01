@@ -35,6 +35,8 @@ mod scan_wire;
 mod session;
 #[path = "../infrastructure/probe.rs"]
 mod tcp_probe;
+#[path = "../infrastructure/udp_probe.rs"]
+mod udp_probe;
 
 pub use host_targets::parse_targets;
 pub use port_rules::{parse_ports, TOP_PORTS_100};
@@ -86,6 +88,33 @@ pub fn netscan_start(
     ctx: State<'_, ScanCtx>,
 ) -> Result<ScanSummaryWire, String> {
     scan_commands::start(
+        targets,
+        ports,
+        on_progress,
+        authorized,
+        case_id,
+        app,
+        evidence,
+        selected,
+        ctx,
+    )
+}
+
+/// Additive UDP method: user-mode connected datagrams with conservative
+/// response evidence; the original seven netscan_* calls remain unchanged.
+#[tauri::command]
+pub fn netscan_udp_start_v1(
+    targets: String,
+    ports: String,
+    on_progress: Channel<ScanProgress>,
+    authorized: bool,
+    case_id: String,
+    app: AppHandle,
+    evidence: State<'_, EvidenceCtx>,
+    selected: State<'_, CaseSessionCtx>,
+    ctx: State<'_, ScanCtx>,
+) -> Result<ScanSummaryWire, String> {
+    scan_commands::start_udp(
         targets,
         ports,
         on_progress,

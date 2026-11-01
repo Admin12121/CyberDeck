@@ -16,6 +16,25 @@ const MAGIC: &[u8; 8] = b"CDHC0001";
 const MAX_PRIVATE_OUTPUT: u64 = 1 << 20;
 const HARD_DEADLINE: Duration = Duration::from_secs(315);
 
+/// Safe, stable diagnostics for a sealed child process. Never include the
+/// worker's stdout/stderr because upstream libraries may print target data.
+fn worker_failure(code: Option<i32>) -> &'static str {
+    match code {
+        Some(10) => "embedded worker protocol rejected request",
+        Some(11) => "embedded worker input files unavailable or unsafe",
+        Some(21) => "embedded Hashcat C ABI version mismatch",
+        Some(22) => "embedded Hashcat could not allocate native context",
+        Some(23 | 24) => "embedded Hashcat rejected bounds or file path",
+        Some(31) => "Hashcat SHA-256 mode options initialization failed",
+        Some(32) => "Hashcat native option parsing failed",
+        Some(33) => "Hashcat native option validation failed",
+        Some(34) => "Hashcat native session unavailable; verify compute runtime and device drivers",
+        Some(35) => "Hashcat native session preparation failed",
+        Some(40) => "Hashcat native kernel execution failed",
+        _ => "embedded Hashcat worker crashed or exited unexpectedly",
+    }
+}
+
 /// Best-effort clearing of confidential worker output on all return paths.
 struct SensitiveBytes(Vec<u8>);
 impl Drop for SensitiveBytes {
@@ -24,7 +43,6 @@ impl Drop for SensitiveBytes {
         std::sync::atomic::compiler_fence(std::sync::atomic::Ordering::SeqCst);
     }
 }
-
 
 /// Worker exit cleanup must happen even if the supervising native thread
 /// panics or the active case is revoked while the GPU runtime is busy.
@@ -45,32 +63,45 @@ fn worker_name() -> &'static str {
 }
 
 pub fn runtime_available(root: &Path) -> Result<(), String> {
-    for p in [
-        root.join(worker_name()),
-        root.join(if cfg!(windows) {
+    // A native library without its exact SHA-256 mode, kernels and notices
+    // cannot be advertised as a complete bundled recovery capability.
+    let required_files = [
+        worker_name(),
+        if cfg!(windows) {
             "cyberdeck_hashcat_shim.dll"
         } else if cfg!(target_os = "macos") {
             "libcyberdeck_hashcat_shim.dylib"
         } else {
             "libcyberdeck_hashcat_shim.so"
-        }),
-        root.join(if cfg!(windows) {
+        },
+        if cfg!(windows) {
             "hashcat.dll"
         } else if cfg!(target_os = "macos") {
             "libhashcat.8.dylib"
         } else {
             "libhashcat.so.8"
-        }),
-        root.join("modules").join(if cfg!(windows) {
-            "module_01400.dll"
+        },
+        if cfg!(windows) {
+            "modules/module_01400.dll"
         } else {
-            "module_01400.so"
-        }),
-        root.join("source-manifest.json"),
-    ] {
-        if !p.is_file() {
-            return Err("source-built Hashcat runtime is not bundled".into());
+            "modules/module_01400.so"
+        },
+        "OpenCL/m01400_a0-optimized.cl",
+        "OpenCL/m01400_a1-optimized.cl",
+        "OpenCL/m01400_a3-optimized.cl",
+        "OpenCL/amp_a0.cl",
+        "source-manifest.json",
+        "licenses/HASHCAT_MIT.txt",
+        "licenses/OPENCL_HEADERS.txt",
+    ];
+    for relative in required_files {
+        let path = root.join(relative);
+        if !path.is_file() || path.metadata().map(|meta| meta.len() == 0).unwrap_or(true) {
+            return Err("source-built Hashcat runtime is incomplete".into());
         }
+    }
+    if !root.join("tunings").is_dir() {
+        return Err("source-built Hashcat runtime is incomplete".into());
     }
     Ok(())
 }
@@ -123,6 +154,12 @@ pub fn execute_path<P: FnMut(RecoveryProgressWire)>(
     _progress: P,
 ) -> Result<RecoveryRun, String> {
     recovery_backend::validate_request(request)?;
+    if !matches!(
+        request.backend,
+        recovery_backend::BackendSelection::HashcatManaged
+    ) {
+        return Err("embedded Hashcat requires Hashcat-managed device selection".into());
+    }
     runtime_available(runtime)?;
     if !wordlist.is_file() {
         return Err("wordlist must be an accessible regular file".into());
@@ -187,7 +224,7 @@ pub fn execute_path<P: FnMut(RecoveryProgressWire)>(
         match child.0.try_wait() {
             Ok(Some(status)) => {
                 if !status.success() {
-                    return Err("embedded Hashcat worker exited with failure".into());
+                    return Err(worker_failure(status.code()).into());
                 }
                 break false;
             }
@@ -216,7 +253,8 @@ pub fn execute_path<P: FnMut(RecoveryProgressWire)>(
             return Err("Hashcat result output exceeded strict limit".into());
         }
         let target = RecoveryTarget::parse("sha256", &request.target_hash)?;
-        let content = SensitiveBytes(fs::read(&output).map_err(|_| "cannot read bounded private output")?);
+        let content =
+            SensitiveBytes(fs::read(&output).map_err(|_| "cannot read bounded private output")?);
         for candidate in content.0.split(|b| *b == b'\n') {
             let candidate = candidate.strip_suffix(b"\r").unwrap_or(candidate);
             if candidate.is_empty() {
@@ -278,6 +316,26 @@ pub fn execute_path<P: FnMut(RecoveryProgressWire)>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn incomplete_bundle_must_not_claim_embedded_capability() {
+        let scratch = tempfile::tempdir().unwrap();
+        assert!(runtime_available(scratch.path()).is_err());
+        // Merely creating a worker executable is insufficient; kernels,
+        // SHA-256 mode, provenance and license notices are mandatory.
+        std::fs::write(scratch.path().join(worker_name()), b"worker").unwrap();
+        assert!(runtime_available(scratch.path()).is_err());
+    }
+
+    #[test]
+    fn worker_failure_diagnostics_are_redacted_and_specific() {
+        assert!(worker_failure(Some(34)).contains("compute runtime"));
+        assert!(worker_failure(Some(21)).contains("ABI"));
+        assert!(worker_failure(None).contains("crashed"));
+        for code in [10, 11, 21, 22, 23, 24, 31, 32, 33, 34, 35, 40] {
+            assert!(!worker_failure(Some(code)).contains("/tmp/"));
+        }
+    }
+
     #[test]
     fn protocol_bounds_and_path_safety() {
         let root = Path::new("/tmp/a");

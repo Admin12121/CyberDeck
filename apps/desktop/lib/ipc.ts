@@ -52,7 +52,8 @@ export const b64 = {
 
 export type RecoveryBackendV1 =
   | { backend: "cpu" }
-  | { backend: "open_cl"; device_index: number; batch_size: number };
+  | { backend: "open_cl"; device_index: number; batch_size: number }
+  | { backend: "hashcat_managed" };
 
 export interface RecoveryRequestV1 {
   algorithm: "sha256";
@@ -1322,6 +1323,7 @@ export interface ScanObservationWire {
   method: string;
   service: string;
   service_basis: "observed_response" | "port_hint_only" | "none";
+  remote_software_claim: string | null;
   banner: string;
   started_at_ms: number;
   elapsed_ms: number;
@@ -1379,6 +1381,22 @@ export async function netscanStart(
   const channel = new Channel<ScanProgressWire>();
   if (onProgress) channel.onmessage = onProgress;
   return invoke<ScanSummaryWire>("netscan_start", { targets, ports, caseId, authorized, onProgress: channel });
+}
+
+/** Native connected-UDP observations. Silence remains inconclusive. */
+export async function netscanUdpStartV1(
+  targets: string,
+  ports: string,
+  caseId: string,
+  authorized: boolean,
+  onProgress?: (p: ScanProgressWire) => void,
+): Promise<ScanSummaryWire> {
+  if (!inTauri) throw new Error("UDP scanning requires the desktop runtime");
+  const channel = new Channel<ScanProgressWire>();
+  if (onProgress) channel.onmessage = onProgress;
+  return invoke<ScanSummaryWire>("netscan_udp_start_v1", {
+    targets, ports, caseId, authorized, onProgress: channel,
+  });
 }
 
 export async function netscanResults(): Promise<ScanEntryWire[]> {

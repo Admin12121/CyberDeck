@@ -1,11 +1,12 @@
 //! Backend-owned bounded Web assessment jobs: no UI-owned cancellation truth.
 use super::{
     authorize_pinned_assessment, crawl_application, execute_case_scoped_assessment,
-    scan_application, scan_domain, target_scope, Finding,
+    passive_rules_application, scan_application, scan_domain, selected_history_grant, target_scope,
+    webhistory, Finding, WebCtx,
 };
 use crate::features::forensics::ipc::evidence::EvidenceCtx;
 use crate::features::shared::session::{CaseSessionCtx, CaseSessionWire};
-use cyberdeck_storage::{ArtifactStore, NewFinding};
+use cyberdeck_storage::{ArtifactStore, HistoryCaptureGrant, NewFinding};
 use serde::Serialize;
 use std::collections::VecDeque;
 use std::sync::{
@@ -22,12 +23,14 @@ const MAX_ACTIVE: usize = 2;
 enum Kind {
     Scanner,
     Spider,
+    Passive,
 }
 impl Kind {
     fn parse(text: &str) -> Result<Self, String> {
         match text {
             "scanner" => Ok(Self::Scanner),
             "spider" => Ok(Self::Spider),
+            "passive" => Ok(Self::Passive),
             _ => Err("unknown native Web job kind".into()),
         }
     }
@@ -35,6 +38,7 @@ impl Kind {
         match self {
             Self::Scanner => "scanner",
             Self::Spider => "spider",
+            Self::Passive => "passive",
         }
     }
 }
@@ -47,6 +51,7 @@ pub struct WebAssessmentJobWire {
     pub processed: usize,
     pub discovered: usize,
     pub findings: Vec<Finding>,
+    pub rule_findings: Vec<passive_rules_application::PassiveFinding>,
     pub urls: Vec<String>,
     pub error: Option<String>,
 }
@@ -56,6 +61,7 @@ struct Job {
     cancel: AtomicBool,
     snapshot: Mutex<WebAssessmentJobWire>,
     saved_count: Mutex<Option<usize>>,
+    passive_grant: OnceLock<HistoryCaptureGrant>,
 }
 impl Job {
     fn new(id: u64, scope: CaseSessionWire, kind: Kind) -> Self {
@@ -63,6 +69,7 @@ impl Job {
             scope,
             cancel: AtomicBool::new(false),
             saved_count: Mutex::new(None),
+            passive_grant: OnceLock::new(),
             snapshot: Mutex::new(WebAssessmentJobWire {
                 job_id: id,
                 kind: kind.name().into(),
@@ -70,6 +77,7 @@ impl Job {
                 processed: 0,
                 discovered: 0,
                 findings: vec![],
+                rule_findings: vec![],
                 urls: vec![],
                 error: None,
             }),
@@ -91,6 +99,7 @@ impl Job {
         if let Ok(mut state) = self.snapshot.lock() {
             state.state = "cancelled".into();
             state.findings.clear();
+            state.rule_findings.clear();
             state.urls.clear();
             state.error = None;
         }
@@ -111,6 +120,12 @@ impl Job {
                     state.findings = findings;
                     state.state = "completed".into();
                 }
+                Ok(Outcome::Passive(mut alerts)) => {
+                    alerts.truncate(passive_rules_application::MAX_FINDINGS);
+                    state.discovered = alerts.len();
+                    state.rule_findings = alerts;
+                    state.state = "completed".into();
+                }
                 Ok(Outcome::Urls(mut urls)) => {
                     urls.truncate(60);
                     state.discovered = urls.len();
@@ -124,6 +139,31 @@ impl Job {
             }
         }
     }
+    /// Deny stale passive observations after consent expiry/revocation,
+    /// even when the operator has not changed the selected case.
+    fn with_passive_authority<T>(
+        &self,
+        session: &CaseSessionCtx,
+        action: impl FnOnce() -> Result<T, String>,
+    ) -> Result<T, String> {
+        if self.view()?.kind != "passive" {
+            return action();
+        }
+        let grant = self
+            .passive_grant
+            .get()
+            .ok_or("passive job grant unavailable")?;
+        // Hold consent authority through the complete result publication or
+        // SQLite commit, so proxy_stop/revoke cannot interleave with it.
+        // Lock order: case store (if saving) -> publication -> policy -> job.
+        let policy = session
+            .history_policy
+            .lock()
+            .map_err(|_| "History policy unavailable".to_string())?;
+        policy.authorize_grant(grant)?;
+        action()
+    }
+
     /// Exactly-once manual case save. The caller must hold the backend
     /// selected revision's publication gate and the existing case store lock.
     /// Never serialize an authoritative case_id or findings payload from UI.
@@ -142,8 +182,8 @@ impl Job {
             .snapshot
             .lock()
             .map_err(|_| "Web job status unavailable")?;
-        if state.state != "completed" || state.kind != "scanner" {
-            return Err("only completed native Scanner jobs may save findings".into());
+        if state.state != "completed" || !matches!(state.kind.as_str(), "scanner" | "passive") {
+            return Err("only completed native Web findings may be saved".into());
         }
         if self.cancel.load(Ordering::Acquire) {
             return Err("cancelled Web assessment cannot save findings".into());
@@ -177,7 +217,39 @@ impl Job {
             .collect();
         // The source field identifies the native producer, and these bounded
         // non-secret findings have no borrowed/foreign artifact references.
-        let written = store.add_findings(case_id, "web.native", None, &records)?;
+        let records = if state.kind == "passive" {
+            state
+                .rule_findings
+                .iter()
+                .take(128)
+                .map(|alert| {
+                    let mut title = format!("[{}] {}", alert.rule_id, alert.title);
+                    while title.len() > 200 {
+                        title.pop();
+                    }
+                    let mut details = format!(
+                        "Rule: {}\nConfidence: {}\n{}\nEvidence: {}",
+                        alert.rule_id, alert.confidence, alert.detail, alert.evidence,
+                    );
+                    while details.len() > 8192 {
+                        details.pop();
+                    }
+                    NewFinding {
+                        title,
+                        severity: alert.severity.clone(),
+                        details,
+                    }
+                })
+                .collect::<Vec<_>>()
+        } else {
+            records
+        };
+        let source = if state.kind == "passive" {
+            "web.passive"
+        } else {
+            "web.native"
+        };
+        let written = store.add_findings(case_id, source, None, &records)?;
         *receipt = Some(written);
         Ok(written)
     }
@@ -191,6 +263,7 @@ impl Job {
 }
 enum Outcome {
     Findings(Vec<Finding>),
+    Passive(Vec<passive_rules_application::PassiveFinding>),
     Urls(Vec<String>),
 }
 
@@ -285,6 +358,9 @@ pub async fn web_assessment_start_v1(
 ) -> Result<u64, String> {
     scan_domain::require_authorization(authorized)?;
     let kind = Kind::parse(&kind)?;
+    if matches!(kind, Kind::Passive) {
+        return Err("passive history scans require the protected offline entry point".into());
+    }
     let selected = session.selected()?;
     let pinned = target_scope::prepare_private_target(&target_url).await?;
     session.ensure(&selected)?;
@@ -309,6 +385,9 @@ pub async fn web_assessment_start_v1(
                 )
                 .await
                 .map(Outcome::Findings),
+                Kind::Passive => {
+                    Err("passive history scans have a separate consent-bound entry point".into())
+                }
                 Kind::Spider => crawl_application::run_spider_with_progress(
                     &pinned.client,
                     pinned.url.to_string(),
@@ -338,6 +417,110 @@ pub async fn web_assessment_start_v1(
     Ok(id)
 }
 
+/// Rule catalog is intentionally fixed and source-versioned. No dynamic
+/// scripts, plugins, arbitrary regex or history-reveal controls in IPC.
+#[tauri::command]
+pub fn web_passive_rules_v1() -> Vec<passive_rules_application::RuleInfo> {
+    passive_rules_application::RULES.to_vec()
+}
+
+/// Passively inspect only existing backend-consented volatile HTTP history.
+/// No OS network authorization is needed because this issues NO HTTP requests.
+/// Captured raw bytes never leave the History mutex or enter the job registry.
+#[tauri::command]
+pub fn web_passive_start_v1(
+    enabled_rules: Vec<String>,
+    app: AppHandle,
+    session: State<'_, CaseSessionCtx>,
+    proxy: State<'_, WebCtx>,
+) -> Result<u64, String> {
+    let selected_ids = passive_rules_application::selected_rules(&enabled_rules)?;
+    let selected = session.selected()?;
+    let grant = selected_history_grant(&session, &selected, &proxy)?;
+    let observations = webhistory::passive_observations(&grant)?;
+    if observations.is_empty() {
+        return Err("no authorized volatile HTTP history to analyze".into());
+    }
+    let job = session.with_current_publication(&selected, || {
+        session
+            .history_policy
+            .lock()
+            .map_err(|_| "case history policy unavailable")?
+            .authorize_grant(&grant)?;
+        registry()
+            .lock()
+            .map_err(|_| "Web job registry unavailable")?
+            .add(selected.clone(), Kind::Passive)
+    })?;
+    job.passive_grant
+        .set(grant.clone())
+        .map_err(|_| "passive job grant already bound")?;
+    let id = job.view()?.job_id;
+    tauri::async_runtime::spawn(async move {
+        let session = app.state::<CaseSessionCtx>();
+        let proxy = app.state::<WebCtx>();
+        let mut findings = Vec::new();
+        let mut failed = None;
+        for (index, observation) in observations.iter().enumerate() {
+            // Yield and bound work to make Stop, consent expiry and case switch
+            // observable, even if all 64 responses are already in memory.
+            tokio::time::sleep(Duration::from_millis(2)).await;
+            if job.cancel.load(Ordering::Acquire) {
+                job.cancelled();
+                return;
+            }
+            let authority = session.ensure(&selected).and_then(|_| {
+                if !proxy.shared.running.load(Ordering::Acquire) {
+                    return Err("proxy stopped during passive analysis".into());
+                }
+                session
+                    .history_policy
+                    .lock()
+                    .map_err(|_| "passive scan policy unavailable".to_string())?
+                    .authorize_grant(&grant)
+                    .map(|_| ())
+            });
+            if let Err(error) = authority {
+                failed = Some(error);
+                break;
+            }
+            for alert in passive_rules_application::analyze(observation, &selected_ids) {
+                if findings.len() >= passive_rules_application::MAX_FINDINGS {
+                    break;
+                }
+                findings.push(alert);
+            }
+            job.progress(index + 1, findings.len());
+        }
+        let result = match failed {
+            Some(error) => Err(error),
+            None => Ok(Outcome::Passive(findings)),
+        };
+        if session
+            .with_current_publication(&selected, || {
+                if !proxy.shared.running.load(Ordering::Acquire) {
+                    return Err("proxy stopped before passive result publication".into());
+                }
+                session
+                    .history_policy
+                    .lock()
+                    .map_err(|_| "passive scan policy unavailable".to_string())?
+                    .authorize_grant(&grant)?;
+                if job.cancel.load(Ordering::Acquire) {
+                    job.cancelled();
+                } else {
+                    job.finish(result);
+                }
+                Ok(())
+            })
+            .is_err()
+        {
+            job.cancelled();
+        }
+    });
+    Ok(id)
+}
+
 #[tauri::command]
 pub fn web_assessment_status_v1(
     job_id: u64,
@@ -345,11 +528,11 @@ pub fn web_assessment_status_v1(
 ) -> Result<WebAssessmentJobWire, String> {
     let selected = session.selected()?;
     session.with_current_publication(&selected, || {
-        registry()
+        let job = registry()
             .lock()
             .map_err(|_| "Web job registry unavailable")?
-            .get(job_id, &selected)?
-            .view()
+            .get(job_id, &selected)?;
+        job.with_passive_authority(&session, || job.view())
     })
 }
 
@@ -395,13 +578,100 @@ pub fn web_assessment_save_findings_v1(
             .lock()
             .map_err(|_| "Web job registry unavailable")?
             .get(job_id, &selected)?;
-        job.save_completed(&store, case_id)
+        job.with_passive_authority(&session, || job.save_completed(&store, case_id))
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn passive_job_consent_revocation_and_reconsent_prevent_stale_access() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = ArtifactStore::open(&temp.path().join("case.db")).unwrap();
+        let case = store.create_case("Passive case", "").unwrap();
+        let session = CaseSessionCtx::default();
+        let selected = session.select(&store, &case.id).unwrap();
+        let grant = session
+            .history_policy
+            .lock()
+            .unwrap()
+            .enable_volatile_capture(
+                &case.id,
+                cyberdeck_storage::HistoryRetentionLimits::default(),
+            )
+            .unwrap();
+        let job = Job::new(912, selected.clone(), Kind::Passive);
+        job.passive_grant.set(grant.clone()).unwrap();
+        job.finish(Ok(Outcome::Passive(vec![
+            passive_rules_application::PassiveFinding {
+                rule_id: passive_rules_application::RULES[0].id.into(),
+                title: "Missing CSP".into(),
+                severity: "low".into(),
+                confidence: "medium".into(),
+                detail: "HTML response policy".into(),
+                evidence: "Volatile HTTP history #42".into(),
+                history_id: 42,
+                status: 200,
+            },
+        ])));
+        assert!(job.with_passive_authority(&session, || Ok(())).is_ok());
+        session.history_policy.lock().unwrap().revoke();
+        assert!(job.with_passive_authority(&session, || Ok(())).is_err());
+        let renewed = session
+            .history_policy
+            .lock()
+            .unwrap()
+            .enable_volatile_capture(
+                &case.id,
+                cyberdeck_storage::HistoryRetentionLimits::default(),
+            )
+            .unwrap();
+        assert_ne!(renewed.generation, grant.generation);
+        assert!(job.with_passive_authority(&session, || Ok(())).is_err());
+        // Revision need not change for a consent replacement: the grant is
+        // distinct authority, so stale findings must not become saveable.
+        assert_eq!(session.selected().unwrap(), selected);
+    }
+
+    #[test]
+    fn passive_rule_job_saves_only_redacted_evidence_once() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = ArtifactStore::open(&temp.path().join("case.db")).unwrap();
+        let record = store.create_case("Passive findings", "").unwrap();
+        let session = CaseSessionCtx::default();
+        let selected = session.select(&store, &record.id).unwrap();
+        let job = Job::new(72, selected.clone(), Kind::Passive);
+        job.finish(Ok(Outcome::Passive(vec![
+            passive_rules_application::PassiveFinding {
+                rule_id: passive_rules_application::RULES[0].id.into(),
+                title: "Missing CSP".into(),
+                severity: "low".into(),
+                confidence: "medium".into(),
+                detail: "HTML lacks enforcing CSP".into(),
+                evidence: "Volatile HTTP history #456; response 200".into(),
+                history_id: 456,
+                status: 200,
+            },
+        ])));
+        assert_eq!(job.view().unwrap().rule_findings.len(), 1);
+        let saved = session
+            .with_current_publication(&selected, || job.save_completed(&store, &record.id))
+            .unwrap();
+        assert_eq!(saved, 1);
+        assert_eq!(job.save_completed(&store, &record.id).unwrap(), 1);
+        let findings = store.list_findings(&record.id).unwrap();
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].source, "web.passive");
+        assert!(findings[0].title.contains("cd.pscan.csp-missing.v1"));
+        assert!(findings[0].details.contains("Confidence: medium"));
+        assert!(!findings[0].details.contains("token="));
+        session.select(&store, &record.id).unwrap();
+        assert!(session
+            .with_current_publication(&selected, || { job.save_completed(&store, &record.id) })
+            .is_err());
+    }
 
     #[test]
     fn native_scan_findings_commit_is_exactly_once_and_case_scoped() {

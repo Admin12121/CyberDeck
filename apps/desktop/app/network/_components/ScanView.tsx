@@ -1,14 +1,16 @@
 "use client";
-/** Scan view: real multithreaded TCP connect scanning via the Rust core (§5.3). */
+/** Case-authorized native TCP/UDP scan observations via Rust. */
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Play, Square } from "lucide-react";
 import { Chip, EmptyState, Pane, Resizer, Select, TextInput, ToolButton } from "@ds/panes";
 import {
   isDesktop,
   netscanExport,
+  netscanDiscoverHosts,
   netscanResults,
   netscanObservationsV1,
   netscanStart,
+  netscanUdpStartV1,
   netscanStatus,
   netscanStop,
   type ScanEntryWire,
@@ -38,10 +40,14 @@ export function ScanView() {
   const [target, setTarget] = useWorkspaceDraft(wb.caseId, "network", "scan-target", "127.0.0.1");
   const [notesWidth, setNotesWidth] = useState(320);
   const [ports, setPorts] = useWorkspaceDraft(wb.caseId, "network", "scan-ports", "top25");
+  const [transport, setTransport] = useWorkspaceDraft<"tcp" | "udp">(
+    wb.caseId, "network", "scan-transport", "tcp",
+  );
   const [authorized, setAuthorized] = useState(false);
   const [running, setRunning] = useState(false);
   const [progress, setProgress] = useState<ScanProgressWire | null>(null);
   const [results, setResults] = useState<ScanEntryWire[]>([]);
+  const [discovered, setDiscovered] = useState<string[] | null>(null);
   const [observationPage, setObservationPage] = useState<ScanObservationPageWire | null>(null);
   const [observationOffset, setObservationOffset] = useState(0);
   const [error, setError] = useState<string | null>(null);
@@ -60,6 +66,7 @@ export function ScanView() {
     scanTicket.current += 1;
     pollTicket.current += 1;
     setResults([]);
+    setDiscovered(null);
     setObservationPage(null);
     setObservationOffset(0);
     setProgress(null);
@@ -112,7 +119,8 @@ export function ScanView() {
     setObservationOffset(0);
     setProgress({ tried: 0, total: 0, percent: 0 });
     try {
-      await netscanStart(target, ports, caseId, authorized, (p) => {
+      const launch = transport === "udp" ? netscanUdpStartV1 : netscanStart;
+      await launch(target, ports, caseId, authorized, (p) => {
         if (isCurrent()) setProgress(p);
       });
       if (isCurrent()) setRetainedRevision(revision);
@@ -124,6 +132,19 @@ export function ScanView() {
         setProgress(null);
         void poll();
       }
+    }
+  };
+
+  const discover = async () => {
+    if (!desktop || revision === null || !authorized || running || status.running) return;
+    const key = identity;
+    setError(null);
+    setDiscovered(null);
+    try {
+      const found = await netscanDiscoverHosts(target, authorized);
+      if (activeCase.current === key) setDiscovered(found);
+    } catch (err) {
+      if (activeCase.current === key) setError(err instanceof Error ? err.message : String(err));
     }
   };
 
@@ -158,7 +179,14 @@ export function ScanView() {
     <div className="flex h-full min-h-0 flex-col">
       <div className="cd-workspace-toolbar shrink-0 items-center gap-2  px-2">
         <span className="font-mono text-[10px] uppercase text-fg-muted">target</span>
-        <TextInput value={target} onChange={setTarget} placeholder="host / CIDR / list" ariaLabel="Scan target" className="w-56" />
+        <TextInput value={target} onChange={setTarget} placeholder="IP, CIDR, !exclusion" ariaLabel="Scan target" className="w-56" />
+        <Select
+          value={transport}
+          onChange={(value) => setTransport(value === "udp" ? "udp" : "tcp")}
+          options={[{ value: "tcp", label: "TCP connect" }, { value: "udp", label: "UDP" }]}
+          ariaLabel="Scan transport"
+          className="w-32"
+        />
         <span className="font-mono text-[10px] uppercase text-fg-muted">ports</span>
         <Select
           value={isPreset ? ports : "custom"}
@@ -173,6 +201,13 @@ export function ScanView() {
         {!isPreset ? (
           <TextInput value={ports} onChange={setPorts} placeholder="80,443,8000-8100" ariaLabel="Custom ports" className="w-40" />
         ) : null}
+        <ToolButton
+          onClick={() => void discover()}
+          disabled={!desktop || revision === null || !authorized || !target.trim() || running || status.running}
+          title="Discover responding hosts using bounded case-authorized TCP probes"
+        >
+          Discover
+        </ToolButton>
         {status.running || (running && scanCase.current === wb.caseId) ? (
           <ToolButton tone="danger" onClick={() => void stop()}>
             <Square size={11} /> Stop
@@ -182,7 +217,7 @@ export function ScanView() {
             tone="primary"
             onClick={() => void start()}
             disabled={!desktop || revision === null || !authorized || !target.trim() || status.running || running}
-            title={revision === null ? "Select a saved native investigation case before scanning" : "Backend-selected case and native confirmation are required before TCP probes"}
+            title={revision === null ? "Select a saved native investigation case before scanning" : "Backend-selected case and native confirmation are required before network probes"}
           >
             <Play size={11} /> {running ? "scanning…" : "Run scan"}
           </ToolButton>
@@ -225,11 +260,11 @@ export function ScanView() {
               </div>
             </div>
           ) : null}
-          <Pane title={"TCP observations: " + observedCount + " · " + openCount + " open · " + (observationPage?.closed ?? 0) + " closed · " + (observationPage?.inconclusive ?? 0) + " inconclusive"} className="min-h-0 flex-1">
+          <Pane title={"Network observations: " + observedCount + " · " + openCount + " open · " + (observationPage?.closed ?? 0) + " closed · " + (observationPage?.inconclusive ?? 0) + " inconclusive"} className="min-h-0 flex-1">
             {results.length === 0 && !observationPage?.entries.length ? (
               <EmptyState
                 title={running ? "Scanning…" : "No results"}
-                detail="TCP connect scan with observed banners. Select a saved case, acknowledge scope, confirm in the native dialog and run."
+                detail="Case-authorized TCP connect or connected-UDP scan. UDP silence remains inconclusive, not filtered. Confirm scope in the native dialog."
                 badge="netscan"
               />
             ) : (
@@ -238,6 +273,7 @@ export function ScanView() {
                   <tr>
                     <th className="w-40">Host</th>
                     <th className="w-16">Port</th>
+                    <th className="w-16">Proto</th>
                     <th className="w-20">State</th>
                     <th className="w-28">Service</th>
                     <th>Banner</th>
@@ -251,8 +287,9 @@ export function ScanView() {
                       <tr key={"obs-" + r.host + "-" + r.port + "-" + i}>
                         <td className="text-fg">{r.host}</td>
                         <td>{r.port}</td>
+                        <td className="uppercase text-fg-muted">{r.protocol}</td>
                         <td className={r.state === "open" ? "text-ok" : "text-fg-muted"}>{r.state}</td>
-                        <td className="text-orange" title={r.service_basis}>{r.service}{r.service_basis === "port_hint_only" ? " (port hint)" : ""}</td>
+                        <td className="text-orange" title={r.service_basis}>{r.service}{r.service_basis === "port_hint_only" ? " (port hint)" : ""}{r.remote_software_claim ? <span title="Unverified software identity claimed by the remote server"> · claims {r.remote_software_claim}</span> : null}</td>
                         <td className="truncate text-fg-muted" title={r.banner}>{r.banner || "—"}</td>
                         <td className="text-fg-muted" title={"Method: " + r.method + "; attempts: " + r.attempts + "; retries: " + r.retries + "; OS error: " + (r.os_error_code ?? "n/a")}>{r.reason}</td>
                         <td>{r.elapsed_ms} ms</td>
@@ -262,6 +299,7 @@ export function ScanView() {
                       <tr key={"open-" + r.host + "-" + r.port + "-" + i}>
                         <td className="text-fg">{r.host}</td>
                         <td>{r.port}</td>
+                        <td className="uppercase text-fg-muted">tcp</td>
                         <td className="text-ok">{r.state}</td>
                         <td className="text-orange">{r.service}</td>
                         <td className="truncate text-fg-muted" title={r.banner}>{r.banner}</td>
@@ -283,9 +321,10 @@ export function ScanView() {
         <Resizer direction="horizontal" flip ariaLabel="Resize scan notes" value={notesWidth} onChange={setNotesWidth} min={220} max={500} />
         <Pane title="Notes" className="shrink-0" style={{ width: notesWidth }}>
           <div className="p-2 font-mono text-[10px] leading-relaxed text-fg-muted">
-            native TCP connect scanner: CIDR/host targets, port presets or ranges, banner grab on
-            open ports, all cores, live progress. nmap (NPSL) stays license-gated; this engine is
-            our own code.
+            native TCP connect and connected UDP observations; IPv4/IPv6 CIDR and
+            comma-separated exclusions (!address or !CIDR). DNS/NTP UDP replies must match
+            our queries; UDP timeouts stay inconclusive. Full SYN/UDP-ICMP parity is not
+            yet available. Nmap source and fingerprints are not bundled.
           </div>
           <div className="border-t border-line px-2 py-1.5 font-mono text-[10px] text-fg-muted">
             {scanCase.current === wb.caseId
@@ -293,6 +332,18 @@ export function ScanView() {
               : "Native scan status is global; results and findings withheld until a scan is started in this case"}
           </div>
           {status.save_error ? <div className="border-t border-line p-2 text-xs text-err">Case save failed: {status.save_error}</div> : null}
+          {discovered !== null ? (
+            <div className="border-t border-line p-2 text-[10px] text-fg-muted">
+              <div className="mb-1 font-semibold text-fg">Responsive hosts: {discovered.length}</div>
+              <div className="max-h-24 overflow-y-auto font-mono">
+                {discovered.length === 0
+                  ? "No TCP response on the checked discovery ports; this does not prove hosts are down."
+                  : discovered.slice(0, 50).join(", ")}
+                {discovered.length > 50 ? " · " + (discovered.length - 50) + " more" : ""}
+              </div>
+            </div>
+          ) : null}
+
           <div className="border-t border-line p-2">
             <span className="text-fg-muted">Live scan status appears above; completed scans are listed below.</span>
           </div>

@@ -168,14 +168,19 @@ function useRecoveryController(targetHash: string) {
     clearReveal(); setError(null); setBusy(true); setStatus(null); setJobId(null);
     setDiscarded(false);
     const requestScope = scope;
-    const selected: RecoveryBackendV1 = selection;
+    const selected: RecoveryBackendV1 = engineChoice === "hashcat"
+      ? { backend: "hashcat_managed" }
+      : selection;
     const request: RecoveryRequestV1 = {
       algorithm: "sha256", target_hash: hash.toLowerCase(), backend: selected,
       max_candidates: maxCandidates, max_matches: maxMatches,
     };
     try {
-      // The native OS wordlist picker runs within the Tauri backend.
-      const id = await recoveryStartV1(request, () => {
+      // Both paths share the same backend-authorized job, cancellation and
+      // confidential Reveal lifecycle; never silently substitute engines.
+      const startCommand = engineChoice === "hashcat"
+        ? recoveryStartHashcatV1 : recoveryStartV1;
+      const id = await startCommand(request, () => {
         // Poll authoritative Rust state; events never contain recovered plaintext.
       });
       if (scopeRef.current !== requestScope) return;

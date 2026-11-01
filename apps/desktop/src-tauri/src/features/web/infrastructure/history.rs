@@ -546,6 +546,37 @@ struct BoundHistory {
 }
 
 impl BoundHistory {
+    /// Export only nonsecret response policy facts, never raw HTTP headers,
+    /// request URLs, cookies, tokens, response bodies, or the Entry reference.
+    /// Caller already selected backend case. This validates its live grant
+    /// and preserves the existing history -> case-policy mutex ordering.
+    fn passive_observations(
+        &mut self,
+        grant: &HistoryCaptureGrant,
+    ) -> Result<Vec<super::passive_rules_application::Observation>, String> {
+        self.authorized()
+            .ok_or("volatile History consent unavailable")?;
+        let binding = self.binding.as_ref().ok_or("History not bound to case")?;
+        if binding.grant != *grant {
+            return Err("passive scan case/generation mismatch".into());
+        }
+        let mut observations = Vec::new();
+        for item in self
+            .store
+            .entries
+            .iter()
+            .take(super::passive_rules_application::MAX_OBSERVATIONS)
+        {
+            observations.push(super::passive_rules_application::observe(
+                item.id,
+                &item.url,
+                item.status,
+                &item.headers,
+            ));
+        }
+        Ok(observations)
+    }
+
     fn authorized_ids(&mut self) -> std::collections::HashSet<u64> {
         if self.authorized().is_none() {
             return std::collections::HashSet::new();
@@ -853,6 +884,17 @@ pub fn capture_generation() -> Option<u64> {
     global().lock().expect("web history poisoned").authorized()
 }
 
+/// Backend-only bounded passive snapshot: projects away all confidential
+/// data inside the active protected History lock. Not an IPC reveal operation.
+pub(crate) fn passive_observations(
+    grant: &HistoryCaptureGrant,
+) -> Result<Vec<super::passive_rules_application::Observation>, String> {
+    global()
+        .lock()
+        .map_err(|_| "History unavailable")?
+        .passive_observations(grant)
+}
+
 /// Redacted listener summaries are visible only for entries accepted into
 /// the current backend-consented history generation, never a previous case.
 pub(crate) fn authorized_entry_ids() -> std::collections::HashSet<u64> {
@@ -948,6 +990,60 @@ pub(crate) fn read_detail_authorized(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn passive_projection_is_backend_granted_bounded_redacted_and_revocable() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = cyberdeck_storage::ArtifactStore::open(&tmp.path().join("case.db")).unwrap();
+        let policy = Arc::new(Mutex::new(ActiveCaseHistoryPolicy::default()));
+        let grant = {
+            let mut p = policy.lock().unwrap();
+            p.select_case(&store, "scratchpad").unwrap();
+            p.enable_volatile_capture("scratchpad", HistoryRetentionLimits::default())
+                .unwrap()
+        };
+        let mut bound = BoundHistory::default();
+        let stamp = bound.arm(policy.clone(), grant.clone()).unwrap();
+        bound.capture(
+            Some(stamp),
+            234,
+            OriginalSnapshot {
+                url: "https://private.test/?token=DO_NOT_SHOW".into(),
+                body_prefix: b"DO_NOT_SHOW".to_vec(),
+                body_original_len: 11,
+            },
+            "GET / HTTP/1.1\r\nAuthorization: Bearer DO_NOT_SHOW\r\n\r\n",
+            200,
+            &[
+                ("Content-Type".into(), "text/html".into()),
+                (
+                    "Set-Cookie".into(),
+                    "session=DO_NOT_SHOW; SameSite=None".into(),
+                ),
+            ],
+            b"DO_NOT_SHOW",
+            None,
+        );
+        let observed = bound.passive_observations(&grant).unwrap();
+        assert_eq!(observed.len(), 1);
+        assert_eq!(observed[0].history_id, 234);
+        assert!(observed[0].https && observed[0].html);
+        assert_eq!(observed[0].cookies.len(), 1);
+        let alerts = super::super::passive_rules_application::analyze(
+            &observed[0],
+            &super::super::passive_rules_application::RULES
+                .iter()
+                .map(|rule| rule.id)
+                .collect::<Vec<_>>(),
+        );
+        let result = serde_json::to_string(&alerts).unwrap();
+        assert!(!result.contains("DO_NOT_SHOW"));
+        assert!(!result.contains("private.test"));
+        assert!(!result.contains("session="));
+        policy.lock().unwrap().revoke();
+        assert!(bound.passive_observations(&grant).is_err());
+        assert!(bound.store.entries.is_empty());
+    }
 
     #[test]
     fn volatile_confidential_text_and_binary_are_cleared_on_invalidation() {

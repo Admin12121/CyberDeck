@@ -9,6 +9,7 @@ use tauri::ipc::Channel;
 use tauri::{AppHandle, Manager, State};
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons};
 
+use super::scan_service::ScanTransport;
 use super::{
     case_findings, file_export, host_discovery, parse_ports, parse_targets, scan_export, session,
     NetscanStatusWire, ScanCtx, ScanEntry, ScanHistoryItem, ScanProgress, ScanSummaryWire,
@@ -61,6 +62,58 @@ pub(super) fn start(
     selected: State<'_, CaseSessionCtx>,
     ctx: State<'_, ScanCtx>,
 ) -> Result<ScanSummaryWire, String> {
+    start_for_transport(
+        ScanTransport::Tcp,
+        targets,
+        ports,
+        on_progress,
+        authorized,
+        case_id,
+        app,
+        evidence,
+        selected,
+        ctx,
+    )
+}
+
+/// Additive, explicitly authorized UDP scan. Legacy netscan_start stays TCP.
+pub(super) fn start_udp(
+    targets: String,
+    ports: String,
+    on_progress: Channel<ScanProgress>,
+    authorized: bool,
+    case_id: String,
+    app: AppHandle,
+    evidence: State<'_, EvidenceCtx>,
+    selected: State<'_, CaseSessionCtx>,
+    ctx: State<'_, ScanCtx>,
+) -> Result<ScanSummaryWire, String> {
+    start_for_transport(
+        ScanTransport::Udp,
+        targets,
+        ports,
+        on_progress,
+        authorized,
+        case_id,
+        app,
+        evidence,
+        selected,
+        ctx,
+    )
+}
+
+fn start_for_transport(
+    transport: ScanTransport,
+    targets: String,
+    ports: String,
+    on_progress: Channel<ScanProgress>,
+    authorized: bool,
+    case_id: String,
+    app: AppHandle,
+    evidence: State<'_, EvidenceCtx>,
+    selected: State<'_, CaseSessionCtx>,
+    ctx: State<'_, ScanCtx>,
+) -> Result<ScanSummaryWire, String> {
     if !authorized {
         return Err("explicit scan authorization acknowledgment required".to_string());
     }
@@ -76,9 +129,22 @@ pub(super) fn start(
     let hosts = parse_targets(&targets)?;
     let host_count = hosts.len();
     let port_list = parse_ports(&ports)?;
+    if transport == ScanTransport::Udp && (host_count > 512 || port_list.len() > 128) {
+        return Err("UDP scan limit is 512 targets and 128 ports per run".into());
+    }
+    let transport_name = if transport == ScanTransport::Udp {
+        "UDP datagram"
+    } else {
+        "TCP connect"
+    };
+    let uncertainty = if transport == ScanTransport::Udp {
+        " UDP silence is inconclusive, not proof of filtering."
+    } else {
+        ""
+    };
     // A frontend acknowledgment alone does not authorize active network probes.
     let approved = app.dialog().message(format!(
-        "Authorize TCP connect probes of {host_count} parsed hosts and {} ports in this saved case? Only test systems you are permitted to assess.",
+        "Authorize {transport_name} probes of {host_count} parsed hosts and {} ports in this saved case? Only test systems you are permitted to assess.{uncertainty}",
         port_list.len(),
     )).title("Confirm scoped network scan")
         .buttons(MessageDialogButtons::YesNo).blocking_show();
@@ -92,8 +158,9 @@ pub(super) fn start(
     let probe_scope = scope.clone();
     let stop_on_revoke = Arc::clone(&ctx.stop);
     let save_scope = scope.clone();
-    let id = session::start(
+    let id = session::start_with_transport(
         &ctx,
+        transport,
         scope,
         hosts,
         port_list,
@@ -262,10 +329,16 @@ pub(super) fn discover_hosts(
         return Err("host discovery requires a saved backend-selected case".into());
     }
     let hosts = parse_targets(&targets)?;
+    if hosts.len() > host_discovery::MAX_DISCOVERY_HOSTS {
+        return Err(format!(
+            "host discovery is bounded to {} addresses per run",
+            host_discovery::MAX_DISCOVERY_HOSTS
+        ));
+    }
     let approved = app
         .dialog()
         .message(format!(
-            "Authorize TCP reachability probes of {} hosts in the selected case?",
+            "Authorize bounded TCP reachability probes of {} hosts (maximum 30-second run) in this selected case?",
             hosts.len()
         ))
         .title("Confirm network discovery")
@@ -275,7 +348,10 @@ pub(super) fn discover_hosts(
         return Err("host discovery cancelled by operator".into());
     }
     selected.ensure(&scope)?;
-    Ok(host_discovery::responding_hosts(hosts))
+    let found =
+        host_discovery::responding_hosts_scoped(hosts, &|| selected.ensure(&scope).is_ok())?;
+    selected.ensure(&scope)?;
+    Ok(found)
 }
 
 #[cfg(test)]
@@ -287,10 +363,20 @@ mod scope_tests {
     #[test]
     fn paginated_tcp_outcomes_keep_reasons_and_full_state_counts() {
         let sample = |port: u16, state: &str, reason: &str| super::super::ScanObservation {
-            host: "127.0.0.1".into(), port, protocol: "tcp".into(),
-            state: state.into(), reason: reason.into(), method: "tcp_connect".into(),
-            service: "unknown".into(), service_basis: "none".into(), banner: String::new(),
-            started_at_ms: 100, elapsed_ms: 13, attempts: 1, retries: 0,
+            host: "127.0.0.1".into(),
+            port,
+            protocol: "tcp".into(),
+            state: state.into(),
+            reason: reason.into(),
+            method: "tcp_connect".into(),
+            service: "unknown".into(),
+            service_basis: "none".into(),
+            remote_software_claim: None,
+            banner: String::new(),
+            started_at_ms: 100,
+            elapsed_ms: 13,
+            attempts: 1,
+            retries: 0,
             os_error_code: None,
         };
         let records = vec![
@@ -301,13 +387,25 @@ mod scope_tests {
         ];
         let page = paginate_scan_observations(&records, 1, 2).unwrap();
         assert_eq!((page.total, page.shown, page.offset), (4, 2, 1));
-        assert_eq!((page.open, page.closed, page.inconclusive, page.unreachable, page.filtered), (1, 1, 1, 1, 0));
+        assert_eq!(
+            (
+                page.open,
+                page.closed,
+                page.inconclusive,
+                page.unreachable,
+                page.filtered
+            ),
+            (1, 1, 1, 1, 0)
+        );
         assert_eq!(page.entries[0].reason, "tcp_connect_refused");
         assert_eq!(page.entries[1].reason, "connect_timeout_no_response");
         assert!(paginate_scan_observations(&records, 0, 0).is_err());
         assert!(paginate_scan_observations(&records, 0, 101).is_err());
         assert!(paginate_scan_observations(&records, 20_001, 100).is_err());
-        assert_eq!(paginate_scan_observations(&records, 4, 100).unwrap().shown, 0);
+        assert_eq!(
+            paginate_scan_observations(&records, 4, 100).unwrap().shown,
+            0
+        );
     }
 
     #[test]

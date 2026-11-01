@@ -162,6 +162,9 @@ fn main() {
             features::web::ipc::web::assessment_jobs::web_assessment_cancel_v1,
             // Backend-selected case/revision and completed native job only.
             features::web::ipc::web::assessment_jobs::web_assessment_save_findings_v1,
+            // Passive history rules: backend case/grant only, no active network request.
+            features::web::ipc::web::assessment_jobs::web_passive_rules_v1,
+            features::web::ipc::web::assessment_jobs::web_passive_start_v1,
             features::web::ipc::web::proxy_intercept,
             features::web::ipc::web::proxy_pending,
             features::web::ipc::web::proxy_forward,
@@ -172,6 +175,7 @@ fn main() {
             features::web::ipc::web::web_engines_detect,
             features::web::ipc::web::engine_scan,
             features::network::ipc::netscan::netscan_start,
+            features::network::ipc::netscan::netscan_udp_start_v1,
             features::network::ipc::netscan::netscan_stop,
             features::network::ipc::netscan::netscan_results,
             features::network::ipc::netscan::netscan_observations_v1,

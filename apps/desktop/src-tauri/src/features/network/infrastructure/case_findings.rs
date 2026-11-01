@@ -22,6 +22,14 @@ pub(super) fn save_scan(
     } else {
         build_observation_findings(observations, scan_id)
     };
+    let tool_key = if observations
+        .first()
+        .is_some_and(|row| row.protocol == "udp")
+    {
+        "network.udp"
+    } else {
+        "network.tcp"
+    };
     let context = app.state::<EvidenceCtx>();
     let store = context.store.lock().map_err(|_| "case store unavailable")?;
     let case_selection = app.state::<CaseSessionCtx>();
@@ -30,7 +38,7 @@ pub(super) fn save_scan(
         // A stale worker cannot add findings after a case switch/reselection.
         let mut count = 0;
         for batch in findings.chunks(128) {
-            count += store.add_findings(case_id, "network.tcp", None, batch)?;
+            count += store.add_findings(case_id, tool_key, None, batch)?;
         }
         Ok(count)
     })
@@ -38,14 +46,15 @@ pub(super) fn save_scan(
 
 fn build_observation_findings(observations: &[ScanObservation], scan_id: u64) -> Vec<NewFinding> {
     let mut findings = observations.iter().take(256).map(|observation| NewFinding {
-        title: format!("TCP {} {}:{}", observation.state, observation.host, observation.port),
+        title: format!("{} {} {}:{}", observation.protocol.to_ascii_uppercase(), observation.state, observation.host, observation.port),
         severity: "info".into(),
         details: format!(
-            "Authorized TCP connect scan #{scan_id}\nHost: {}\nPort: {}\nState: {}\nReason: {}\nMethod: {}\nService: {}\nService evidence: {}\nObserved unix ms: {}\nElapsed ms: {}\nAttempts: {}\nRetries: {}",
-            observation.host, observation.port, observation.state, observation.reason,
+            "Authorized {} scan #{scan_id}\nHost: {}\nPort: {}\nState: {}\nReason: {}\nMethod: {}\nService: {}\nService evidence: {}\nObserved unix ms: {}\nElapsed ms: {}\nAttempts: {}\nRetries: {}\nRemote-claimed identity (unverified): {}",
+            observation.protocol.to_ascii_uppercase(), observation.host, observation.port, observation.state, observation.reason,
             observation.method, observation.service, observation.service_basis,
             observation.started_at_ms, observation.elapsed_ms,
             observation.attempts, observation.retries,
+            observation.remote_software_claim.as_deref().unwrap_or("none"),
         ),
     }).collect::<Vec<_>>();
     if observations.len() > 256 {
@@ -101,11 +110,20 @@ mod tests {
     #[test]
     fn refused_timeout_and_service_evidence_persist_as_bounded_case_findings() {
         let make = |port, state: &str, reason: &str| ScanObservation {
-            host: "127.0.0.1".into(), port, protocol: "tcp".into(),
-            state: state.into(), reason: reason.into(),
-            method: "tcp_connect".into(), service: "unknown".into(),
-            service_basis: "none".into(), banner: String::new(),
-            started_at_ms: 1_700_000, elapsed_ms: 10, attempts: 1, retries: 0,
+            host: "127.0.0.1".into(),
+            port,
+            protocol: "tcp".into(),
+            state: state.into(),
+            reason: reason.into(),
+            method: "tcp_connect".into(),
+            service: "unknown".into(),
+            service_basis: "none".into(),
+            remote_software_claim: None,
+            banner: String::new(),
+            started_at_ms: 1_700_000,
+            elapsed_ms: 10,
+            attempts: 1,
+            retries: 0,
             os_error_code: None,
         };
         let observations = vec![
@@ -118,6 +136,14 @@ mod tests {
         assert!(findings[0].details.contains("tcp_connect_refused"));
         assert!(findings[1].details.contains("connect_timeout_no_response"));
         assert!(findings[1].details.contains("Observed unix ms: 1700000"));
+        let mut claimed = make(80, "open", "tcp_connect_accepted");
+        claimed.remote_software_claim = Some("nginx/1.25.3".into());
+        let supported = build_observation_findings(&[claimed], 77);
+        assert!(supported[0]
+            .details
+            .contains("Remote-claimed identity (unverified): nginx/1.25.3"));
+        assert!(!supported[0].details.contains("Server: ")); // no raw response persisted
+
         let many = vec![make(1234, "closed", "tcp_connect_refused"); 300];
         let capped = build_observation_findings(&many, 77);
         assert_eq!(capped.len(), 257);

@@ -118,11 +118,26 @@ fn validate_paths(req: &Request) -> io::Result<()> {
     Ok(())
 }
 
-fn run() -> Result<(), &'static str> {
-    let request = read_request(io::stdin().lock()).map_err(|_| "invalid private worker request")?;
-    validate_paths(&request).map_err(|_| "invalid worker input path")?;
-    let mut engine =
-        hashcat_ffi::NativeHashcat::new().map_err(|_| "native engine initialization failed")?;
+/// Stable numeric child exit statuses: never carry hashes, plaintext,
+/// paths, vendor driver strings or other sensitive data in IPC/logs.
+fn native_failure(error: hashcat_ffi::NativeError) -> i32 {
+    match error {
+        hashcat_ffi::NativeError::AbiMismatch => 21,
+        hashcat_ffi::NativeError::AllocationFailed => 22,
+        hashcat_ffi::NativeError::InvalidBound => 23,
+        hashcat_ffi::NativeError::InvalidPath => 24,
+        hashcat_ffi::NativeError::Native(-3) => 31, // mode-options initialization
+        hashcat_ffi::NativeError::Native(-41) => 32, // upstream option parsing
+        hashcat_ffi::NativeError::Native(-42) => 33, // upstream option validation
+        hashcat_ffi::NativeError::Native(-5) => 34, // native runtime/session init
+        hashcat_ffi::NativeError::Native(_) => 35,
+    }
+}
+
+fn run() -> Result<(), i32> {
+    let request = read_request(io::stdin().lock()).map_err(|_| 10)?;
+    validate_paths(&request).map_err(|_| 11)?;
+    let mut engine = hashcat_ffi::NativeHashcat::new().map_err(native_failure)?;
     engine
         .prepare_sha256(
             &request.root,
@@ -133,18 +148,19 @@ fn run() -> Result<(), &'static str> {
             request.max_seconds,
             request.device_id,
         )
-        .map_err(|_| "native engine rejected the request")?;
+        .map_err(native_failure)?;
     match engine.execute() {
-        Ok(0 | 1) => Ok(()), // finished with match or exhausted without match
-        _ => Err("native engine execution failed"),
+        Ok(0 | 1) => Ok(()), // completed with match or exhausted without match
+        Ok(_) => Err(40),
+        Err(error) => Err(native_failure(error)),
     }
 }
 
 fn main() {
-    // A supervising Tauri process redirects stdout/stderr to null. This binary
-    // returns only a status, never recovered plaintext, potfiles or target data.
-    if run().is_err() {
-        std::process::exit(1);
+    // A supervising Tauri process redirects stdout/stderr to null. Only
+    // bounded numeric status is returned, never raw candidates or target data.
+    if let Err(status) = run() {
+        std::process::exit(status);
     }
 }
 

@@ -4,7 +4,7 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Instant;
 
-use super::scan_service;
+use super::scan_service::{self, ScanTransport};
 use super::{ScanCtx, ScanEntry, ScanHistoryItem, ScanObservation, ScanProgress};
 use crate::features::shared::session::CaseSessionWire;
 
@@ -19,6 +19,38 @@ pub(super) fn now_ms() -> u64 {
 /// callback port: only the infrastructure adapter knows about the case store.
 pub(super) fn start<P, G, F>(
     ctx: &ScanCtx,
+    scope: CaseSessionWire,
+    hosts: Vec<IpAddr>,
+    port_list: Vec<u16>,
+    targets: String,
+    ports: String,
+    on_progress: P,
+    scope_is_active: G,
+    save_findings: F,
+) -> Result<u64, String>
+where
+    P: Fn(ScanProgress) + Sync + Send + 'static,
+    G: Fn() -> bool + Sync + Send + 'static,
+    F: FnOnce(u64, &[ScanEntry], &[ScanObservation]) -> Result<usize, String> + Send + 'static,
+{
+    start_with_transport(
+        ctx,
+        ScanTransport::Tcp,
+        scope,
+        hosts,
+        port_list,
+        targets,
+        ports,
+        on_progress,
+        scope_is_active,
+        save_findings,
+    )
+}
+
+/// Additive transport selection. Existing callers keep start() TCP semantics.
+pub(super) fn start_with_transport<P, G, F>(
+    ctx: &ScanCtx,
+    transport: ScanTransport,
     scope: CaseSessionWire,
     hosts: Vec<IpAddr>,
     port_list: Vec<u16>,
@@ -76,7 +108,8 @@ where
     let saved_out = Arc::clone(&ctx.saved_findings);
 
     std::thread::spawn(move || {
-        let entries = scan_service::run_scan_into_scoped_v1(
+        let entries = scan_service::run_scan_into_scoped_transport(
+            transport,
             hosts,
             port_list,
             &stop_out,
@@ -92,7 +125,16 @@ where
                 }
             },
         );
-        let open = entries.len();
+        let open = if transport == ScanTransport::Udp {
+            observed_out
+                .lock()
+                .expect("scan observations poisoned")
+                .iter()
+                .filter(|observation| observation.state == "open")
+                .count()
+        } else {
+            entries.len()
+        };
         let duration = started.elapsed().as_millis() as u64;
         if !stop_out.load(Ordering::Acquire) && scope_is_active() {
             let observed = observed_out.lock().expect("scan observations poisoned");

@@ -18,7 +18,10 @@ fn main() {
         "cargo:rerun-if-changed={}",
         hashcat.join("native").display()
     );
-    println!("cargo:rerun-if-changed={}", hashcat.join("upstream").display());
+    println!(
+        "cargo:rerun-if-changed={}",
+        hashcat.join("upstream").display()
+    );
     println!("cargo:rerun-if-changed={}", script.display());
     println!("cargo:rerun-if-env-changed=CC");
     println!("cargo:rerun-if-env-changed=MAKE");

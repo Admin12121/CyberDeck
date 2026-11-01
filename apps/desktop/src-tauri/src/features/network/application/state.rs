@@ -56,6 +56,9 @@ impl ScanCtx {
         if let Ok(mut rows) = self.results.lock() {
             rows.clear();
         }
+        if let Ok(mut rows) = self.observations.lock() {
+            rows.clear();
+        }
         if let Ok(mut history) = self.history.lock() {
             history.clear();
         }

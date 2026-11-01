@@ -276,6 +276,15 @@ fn start_recovery_with_wordlist_engine(
     embedded_runtime: Option<PathBuf>,
     emit: impl Fn(RecoveryEvent) + Send + 'static,
 ) -> Result<u64, String> {
+    recovery_backend::validate_request(&request)?;
+    if embedded_runtime.is_some()
+        != matches!(
+            request.backend,
+            recovery_backend::BackendSelection::HashcatManaged
+        )
+    {
+        return Err("recovery engine and backend selection do not match".into());
+    }
     let scope = RecoveryCtx::scope_from_session(session)?;
     let (job_id, token) = state.with_active(session, |registry, verified| {
         if *verified != scope {
@@ -442,6 +451,12 @@ pub fn recovery_start_v1(
     state: State<'_, RecoveryCtx>,
     session: State<'_, CaseSessionCtx>,
 ) -> Result<u64, String> {
+    if matches!(
+        request.backend,
+        recovery_backend::BackendSelection::HashcatManaged
+    ) {
+        return Err("Hashcat-managed backend requires the embedded engine command".into());
+    }
     let selected = state.with_active(&session, |registry, _| {
         registry
             .selected_wordlist
@@ -488,12 +503,25 @@ fn hashcat_resource_root(app: &AppHandle) -> Result<PathBuf, String> {
 #[tauri::command]
 pub fn recovery_hashcat_capabilities_v1(app: AppHandle) -> EmbeddedHashcatCapability {
     match hashcat_resource_root(&app) {
-        Ok(_) => EmbeddedHashcatCapability {
-            available: true,
-            mode: 1400,
-            hardware_verified: false,
-            detail: "Bundled SHA-256 wordlist mode; GPU acceptance not yet verified".into(),
-        },
+        Ok(_) => {
+            // The Rust OpenCL probe is a diagnostic only. Its indices are NOT
+            // Hashcat native device IDs, and enumeration is never a kernel KAT.
+            let probe = recovery_backend::probe_recovery_devices();
+            let detail = if probe.opencl_detected {
+                format!(
+                    "Bundled SHA-256 mode; {} OpenCL device(s) detected by Rust, Hashcat mapping and execution unverified",
+                    probe.devices.len()
+                )
+            } else {
+                "Bundled SHA-256 mode, but no compatible OpenCL runtime was detected; native execution may fail".into()
+            };
+            EmbeddedHashcatCapability {
+                available: true,
+                mode: 1400,
+                hardware_verified: false,
+                detail,
+            }
+        }
         Err(error) => EmbeddedHashcatCapability {
             available: false,
             mode: 1400,
@@ -514,6 +542,12 @@ pub fn recovery_start_hashcat_v1(
     session: State<'_, CaseSessionCtx>,
 ) -> Result<u64, String> {
     recovery_backend::validate_request(&request)?;
+    if !matches!(
+        request.backend,
+        recovery_backend::BackendSelection::HashcatManaged
+    ) {
+        return Err("embedded Hashcat requires a Hashcat-managed backend selection".into());
+    }
     let runtime = hashcat_resource_root(&app)?;
     let selected = state.with_active(&session, |registry, _| {
         registry

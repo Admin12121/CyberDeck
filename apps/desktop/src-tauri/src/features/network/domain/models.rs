@@ -41,6 +41,8 @@ pub struct ScanObservation {
     pub method: String,
     pub service: String,
     pub service_basis: String,
+    /// Unverified software identifier asserted in a received protocol response.
+    pub remote_software_claim: Option<String>,
     pub banner: String,
     pub started_at_ms: u64,
     pub elapsed_ms: u64,

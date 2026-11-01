@@ -9,6 +9,7 @@ import {
 } from "@lib/ipc";
 import { useWorkbenchCase } from "@state/workbench";
 import { useWebWorkflow } from "./WebWorkflow";
+import { PassiveRulesPanel } from "./PassiveRulesPanel";
 import {
   decodedBody, editableHistoryDraft, protectedHistoryAccess,
   type ProtectedHistoryDetail,
@@ -144,7 +145,10 @@ export function HistoryView() {
   const responseBase64 = reply?.body_base64 ?? detail?.response_body_base64 ?? null;
 
   return (
-    <div className="flex h-full min-h-0 gap-px bg-line">
+    <div className="flex h-full min-h-0 flex-col bg-line">
+      <PassiveRulesPanel enabled={Boolean(desktop && captureGeneration)} caseId={caseId}
+        revision={nativeRevision} generation={captureGeneration} />
+      <div className="flex min-h-0 flex-1 gap-px">
       <Pane title={`HTTP history · ${rows.length}`} className="min-w-0 flex-1" bodyClassName="p-0"
         actions={<TextInput value={query} onChange={setQuery} placeholder="Filter requests" ariaLabel="History filter" className="w-40" />}>
         {error ? <div role="alert" className="border-b border-line px-2 py-1 text-xs text-err">{error}</div> : null}
@@ -216,6 +220,7 @@ export function HistoryView() {
             </div>)}
         </div>}
       </Pane>
+      </div>
     </div>
   );
 }
