@@ -1,5 +1,5 @@
 //! Adapter around the existing case store shared by the evidence workspace.
-use crate::evidence::EvidenceCtx;
+use crate::features::forensics::ipc::evidence::EvidenceCtx;
 use cyberdeck_storage::ArtifactStore;
 
 pub mod storage_paths;

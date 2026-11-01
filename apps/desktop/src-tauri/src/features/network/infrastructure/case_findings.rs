@@ -1,6 +1,6 @@
 //! Persist authorized TCP scan observations into the selected evidence case.
 use super::ScanEntry;
-use crate::evidence::EvidenceCtx;
+use crate::features::forensics::ipc::evidence::EvidenceCtx;
 use cyberdeck_storage::NewFinding;
 use tauri::{AppHandle, Manager};
 

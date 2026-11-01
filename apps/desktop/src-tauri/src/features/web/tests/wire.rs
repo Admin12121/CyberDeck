@@ -4,7 +4,7 @@ use super::*;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
-fn shared(intercept: bool, ca: Option<Arc<crate::webtls::CaState>>) -> Arc<ProxyShared> {
+fn shared(intercept: bool, ca: Option<Arc<crate::features::web::webtls::CaState>>) -> Arc<ProxyShared> {
     Arc::new(ProxyShared {
         running: AtomicBool::new(true),
         intercept: AtomicBool::new(intercept),
@@ -18,11 +18,11 @@ fn shared(intercept: bool, ca: Option<Arc<crate::webtls::CaState>>) -> Arc<Proxy
     })
 }
 
-fn trusted_connector(ca: &crate::webtls::CaState) -> tokio_rustls::TlsConnector {
+fn trusted_connector(ca: &crate::features::web::webtls::CaState) -> tokio_rustls::TlsConnector {
     let mut roots = rustls::RootCertStore::empty();
     roots
         .add(rustls::pki_types::CertificateDer::from(
-            crate::webtls::pem_to_der(&ca.cert_pem),
+            crate::features::web::webtls::pem_to_der(&ca.cert_pem),
         ))
         .unwrap();
     let config = rustls::ClientConfig::builder()
@@ -37,18 +37,18 @@ async fn verified_wss_mitm_relays_both_binary_directions() {
             // The upstream and browser-facing MITM use different ephemeral
             // trusted CAs; neither TLS certificate verification is bypassed.
             let upstream_dir = tempfile::tempdir().unwrap();
-            let upstream_ca = crate::webtls::init_ca(upstream_dir.path()).unwrap();
+            let upstream_ca = crate::features::web::webtls::init_ca(upstream_dir.path()).unwrap();
             let proxy_dir = tempfile::tempdir().unwrap();
-            let proxy_ca = crate::webtls::init_ca(proxy_dir.path()).unwrap();
+            let proxy_ca = crate::features::web::webtls::init_ca(proxy_dir.path()).unwrap();
 
             let backend_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
             let backend_port = backend_listener.local_addr().unwrap().port();
             let backend_ca = Arc::clone(&upstream_ca);
             let upstream = tokio::spawn(async move {
                 let (socket, _) = backend_listener.accept().await.unwrap();
-                let mut tls = crate::webtls::tls_acceptor(&backend_ca, "localhost")
+                let mut tls = crate::features::web::webtls::tls_acceptor(&backend_ca, "localhost")
                     .unwrap().accept(socket).await.unwrap();
-                let (head, body) = crate::webtls::read_http_message(&mut tls).await.unwrap();
+                let (head, body) = crate::features::web::webtls::read_http_message(&mut tls).await.unwrap();
                 assert!(head.starts_with("GET /ws HTTP/1.1"));
                 assert!(head.contains("Upgrade: websocket"));
                 assert!(body.is_empty());
@@ -70,7 +70,7 @@ async fn verified_wss_mitm_relays_both_binary_directions() {
             let backend_connector = trusted_connector(&upstream_ca);
             let worker = tokio::spawn(async move {
                 let (mut connection, _) = listener.accept().await.unwrap();
-                let (connect_head, _) = crate::webtls::read_http_message(&mut connection).await.unwrap();
+                let (connect_head, _) = crate::features::web::webtls::read_http_message(&mut connection).await.unwrap();
                 connect_tunnel_with_ws_connector(
                     connection, worker_state, &connect_head, None, Some(backend_connector)
                 ).await.unwrap();
@@ -114,17 +114,17 @@ async fn verified_wss_mitm_relays_both_binary_directions() {
 async fn wss_non_switch_response_does_not_create_session() {
     tokio::time::timeout(Duration::from_secs(12), async {
             let upstream_dir = tempfile::tempdir().unwrap();
-            let upstream_ca = crate::webtls::init_ca(upstream_dir.path()).unwrap();
+            let upstream_ca = crate::features::web::webtls::init_ca(upstream_dir.path()).unwrap();
             let proxy_dir = tempfile::tempdir().unwrap();
-            let proxy_ca = crate::webtls::init_ca(proxy_dir.path()).unwrap();
+            let proxy_ca = crate::features::web::webtls::init_ca(proxy_dir.path()).unwrap();
             let backend_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
             let port = backend_listener.local_addr().unwrap().port();
             let backend_ca = Arc::clone(&upstream_ca);
             let upstream = tokio::spawn(async move {
                 let (socket, _) = backend_listener.accept().await.unwrap();
-                let mut tls = crate::webtls::tls_acceptor(&backend_ca, "localhost")
+                let mut tls = crate::features::web::webtls::tls_acceptor(&backend_ca, "localhost")
                     .unwrap().accept(socket).await.unwrap();
-                let (head, _) = crate::webtls::read_http_message(&mut tls).await.unwrap();
+                let (head, _) = crate::features::web::webtls::read_http_message(&mut tls).await.unwrap();
                 assert!(head.starts_with("GET /ws HTTP/1.1"));
                 tls.write_all(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 2\r\nConnection: close\r\n\r\nNO")
                     .await.unwrap();
@@ -137,7 +137,7 @@ async fn wss_non_switch_response_does_not_create_session() {
             let backend_connector = trusted_connector(&upstream_ca);
             let worker = tokio::spawn(async move {
                 let (mut connection, _) = listener.accept().await.unwrap();
-                let (connect_head, _) = crate::webtls::read_http_message(&mut connection).await.unwrap();
+                let (connect_head, _) = crate::features::web::webtls::read_http_message(&mut connection).await.unwrap();
                 connect_tunnel_with_ws_connector(connection, worker_state, &connect_head, None, Some(backend_connector))
                     .await.unwrap();
             });
@@ -166,18 +166,18 @@ async fn wss_non_switch_response_does_not_create_session() {
 async fn verified_https_upstream_preserves_response_bytes() {
     tokio::time::timeout(Duration::from_secs(10), async {
         let directory = tempfile::tempdir().unwrap();
-        let ca = crate::webtls::init_ca(directory.path()).unwrap();
+        let ca = crate::features::web::webtls::init_ca(directory.path()).unwrap();
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
         let server_ca = Arc::clone(&ca);
         let server = tokio::spawn(async move {
             let (socket, _) = listener.accept().await.unwrap();
-            let mut tls = crate::webtls::tls_acceptor(&server_ca, "localhost")
+            let mut tls = crate::features::web::webtls::tls_acceptor(&server_ca, "localhost")
                 .unwrap()
                 .accept(socket)
                 .await
                 .unwrap();
-            let (head, _) = crate::webtls::read_http_message(&mut tls).await.unwrap();
+            let (head, _) = crate::features::web::webtls::read_http_message(&mut tls).await.unwrap();
             assert!(head.starts_with("GET /verified HTTP/1.1"));
             tls.write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 3\r\nconnection: close\r\n\r\n")
                 .await
@@ -214,7 +214,7 @@ async fn chunked_binary_request_roundtrips_through_http_proxy() {
             let backend_port = upstream_listener.local_addr().unwrap().port();
             let backend = tokio::spawn(async move {
                 let (mut server, _) = upstream_listener.accept().await.unwrap();
-                let (request_head, body) = crate::webtls::read_http_message(&mut server).await.unwrap();
+                let (request_head, body) = crate::features::web::webtls::read_http_message(&mut server).await.unwrap();
                 assert!(request_head.starts_with("POST /binary HTTP/1.1"));
                 assert_eq!(body, [0xff, 0x00, 0x7f]);
                 server.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 3\r\nConnection: close\r\n\r\nACK").await.unwrap();
@@ -250,7 +250,7 @@ async fn binary_http_roundtrip_through_proxy() {
             let upstream_port = upstream_listener.local_addr().unwrap().port();
             let upstream = tokio::spawn(async move {
                 let (mut conn, _) = upstream_listener.accept().await.unwrap();
-                let (_, body) = crate::webtls::read_http_message(&mut conn).await.unwrap();
+                let (_, body) = crate::features::web::webtls::read_http_message(&mut conn).await.unwrap();
                 assert_eq!(body, vec![0xff,0x00,0x7f]);
                 conn.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: 3\r\nConnection: close\r\n\r\n").await.unwrap();
                 conn.write_all(&[0xff,0x00,0x01]).await.unwrap();
@@ -300,7 +300,7 @@ async fn connect_half_close_keeps_reverse_flow_alive() {
             });
             let mut browser=TcpStream::connect(addr).await.unwrap();
             browser.write_all(format!("CONNECT 127.0.0.1:{backend_port} HTTP/1.1\r\nHost: 127.0.0.1:{backend_port}\r\n\r\n").as_bytes()).await.unwrap();
-            let (established,_)=crate::webtls::read_http_message(&mut browser).await.unwrap();
+            let (established,_)=crate::features::web::webtls::read_http_message(&mut browser).await.unwrap();
             assert!(established.starts_with("HTTP/1.1 200"), "{established}");
             browser.write_all(b"PING").await.unwrap();
             browser.shutdown().await.unwrap();
@@ -315,7 +315,7 @@ async fn connect_half_close_keeps_reverse_flow_alive() {
 async fn intercepted_tls_request_can_be_dropped() {
     tokio::time::timeout(Duration::from_secs(10), async {
         let folder = tempfile::tempdir().unwrap();
-        let ca = crate::webtls::init_ca(folder.path()).unwrap();
+        let ca = crate::features::web::webtls::init_ca(folder.path()).unwrap();
         let shared = shared(true, Some(Arc::clone(&ca)));
         let proxy_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = proxy_listener.local_addr().unwrap();
@@ -329,14 +329,14 @@ async fn intercepted_tls_request_can_be_dropped() {
             .write_all(b"CONNECT localhost:8443 HTTP/1.1\r\nHost: localhost:8443\r\n\r\n")
             .await
             .unwrap();
-        let (established, _) = crate::webtls::read_http_message(&mut browser)
+        let (established, _) = crate::features::web::webtls::read_http_message(&mut browser)
             .await
             .unwrap();
         assert!(established.starts_with("HTTP/1.1 200"));
         let mut roots = rustls::RootCertStore::empty();
         roots
             .add(rustls::pki_types::CertificateDer::from(
-                crate::webtls::pem_to_der(&ca.cert_pem),
+                crate::features::web::webtls::pem_to_der(&ca.cert_pem),
             ))
             .unwrap();
         let config = rustls::ClientConfig::builder()

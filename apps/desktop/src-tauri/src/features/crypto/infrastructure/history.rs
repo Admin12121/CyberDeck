@@ -1,6 +1,6 @@
 //! Persistence adapter for the pre-existing crack-history storage interface.
 //! Legacy secret-retention behavior is unchanged pending Agent 5 migration.
-use crate::evidence::EvidenceCtx;
+use crate::features::forensics::ipc::evidence::EvidenceCtx;
 use cyberdeck_storage::CrackEntry;
 
 pub fn list(ctx: &EvidenceCtx) -> Result<Vec<CrackEntry>, String> {

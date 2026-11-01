@@ -1,6 +1,6 @@
 //! Tauri command transport for the case feature. Names and JSON payloads are stable.
 use super::{application, domain::*, infrastructure};
-use crate::evidence::EvidenceCtx;
+use crate::features::forensics::ipc::evidence::EvidenceCtx;
 use tauri::State;
 
 #[tauri::command]

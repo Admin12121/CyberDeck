@@ -25,7 +25,7 @@ pub(super) async fn start_proxy(
     // Starting a new proxy session cannot inherit sensitive captures/consent.
     webhistory::clear_session();
     // CA is initialized with the proxy so HTTPS interception is ready at once.
-    let ca = crate::webtls::init_ca(ca_dir)?;
+    let ca = crate::features::web::webtls::init_ca(ca_dir)?;
     *ctx.shared.ca.lock().expect("ca poisoned") = Some(Arc::clone(&ca));
     *ctx.ca.lock().expect("ca poisoned") = Some(ca);
     let addr: SocketAddr = format!("127.0.0.1:{port}")

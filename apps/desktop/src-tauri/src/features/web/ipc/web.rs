@@ -14,16 +14,16 @@ use std::sync::{
 #[cfg(test)]
 use std::time::Duration;
 
-#[path = "features/web/infrastructure/history.rs"]
+#[path = "../infrastructure/history.rs"]
 mod webhistory;
 
-#[path = "features/web/domain/proxy_policy.rs"]
+#[path = "../domain/proxy_policy.rs"]
 mod proxy_policy_domain;
-#[path = "features/web/domain/proxy_rules.rs"]
+#[path = "../domain/proxy_rules.rs"]
 mod proxy_rules_domain;
-#[path = "features/web/domain/request.rs"]
+#[path = "../domain/request.rs"]
 mod request_domain;
-#[path = "features/web/domain/scan.rs"]
+#[path = "../domain/scan.rs"]
 mod scan_domain;
 
 use proxy_policy_domain::{is_hop_header_for_message, parse_connect_target, tls_host_matches};
@@ -33,27 +33,27 @@ use proxy_rules_domain::replace_bytes_limited;
 pub use proxy_rules_domain::{MatchReplaceRule, MAX_PROXY_BODY};
 
 pub use request_domain::parse_raw_request;
-#[path = "features/web/infrastructure/client.rs"]
+#[path = "../infrastructure/client.rs"]
 mod client_infrastructure;
-#[path = "features/web/application/crawl.rs"]
+#[path = "../application/crawl.rs"]
 mod crawl_application;
-#[path = "features/web/infrastructure/engine.rs"]
+#[path = "../infrastructure/engine.rs"]
 mod engine_infrastructure;
-#[path = "features/web/infrastructure/forward.rs"]
+#[path = "../infrastructure/forward.rs"]
 mod forward_infrastructure;
-#[path = "features/web/application/proxy.rs"]
+#[path = "../application/proxy.rs"]
 mod proxy_application;
-#[path = "features/web/application/proxy_state.rs"]
+#[path = "../application/proxy_state.rs"]
 mod proxy_state_application;
-#[path = "features/web/infrastructure/proxy_stream.rs"]
+#[path = "../infrastructure/proxy_stream.rs"]
 mod proxy_stream_infrastructure;
-#[path = "features/web/infrastructure/proxy_transport.rs"]
+#[path = "../infrastructure/proxy_transport.rs"]
 mod proxy_transport_infrastructure;
-#[path = "features/web/application/repeater.rs"]
+#[path = "../application/repeater.rs"]
 mod repeater_application;
-#[path = "features/web/application/scan.rs"]
+#[path = "../application/scan.rs"]
 mod scan_application;
-#[path = "features/web/infrastructure/websocket.rs"]
+#[path = "../infrastructure/websocket.rs"]
 mod websocket_infrastructure;
 use forward_infrastructure::execute_request;
 #[cfg(test)]
@@ -68,7 +68,7 @@ use websocket_infrastructure::{
     is_websocket_switching_protocols, read_http_response_head, relay_upgrade_rejection_body,
     relay_ws_counted, websocket_accept_matches,
 };
-#[path = "features/web/ipc/dto.rs"]
+#[path = "dto.rs"]
 mod web_wire;
 pub use web_wire::{
     CapturedRequest, EngineScanResult, HttpResponseWire, PendingWire, ProxyStatusWire,
@@ -109,7 +109,7 @@ pub async fn spider_scan(
 }
 
 #[cfg(test)]
-#[path = "features/web/tests/scope.rs"]
+#[path = "../tests/scope.rs"]
 mod scope_tests;
 
 // --- HTTP interception proxy ---------------------------------------------------
@@ -127,7 +127,7 @@ pub async fn proxy_start(
     if ctx.shared.running.load(Ordering::Relaxed) {
         return Err("proxy already running; stop it first".to_string());
     }
-    let ca_dir = crate::storage_paths::data_dir(&app)?;
+    let ca_dir = crate::features::cases::infrastructure::storage_paths::data_dir(&app)?;
     proxy_application::start_proxy(port, &ctx, &ca_dir).await
 }
 
@@ -219,8 +219,8 @@ pub async fn proxy_ca_pem(app: tauri::AppHandle, ctx: State<'_, WebCtx>) -> Resu
     if let Some(ca) = ctx.ca.lock().expect("ca poisoned").as_ref() {
         return Ok(ca.cert_pem.clone());
     }
-    let ca_dir = crate::storage_paths::data_dir(&app)?;
-    let ca = crate::webtls::init_ca(&ca_dir)?;
+    let ca_dir = crate::features::cases::infrastructure::storage_paths::data_dir(&app)?;
+    let ca = crate::features::web::webtls::init_ca(&ca_dir)?;
     *ctx.ca.lock().expect("ca poisoned") = Some(Arc::clone(&ca));
     Ok(ca.cert_pem.clone())
 }
@@ -247,5 +247,5 @@ pub async fn engine_scan(
 }
 
 #[cfg(test)]
-#[path = "features/web/tests/wire.rs"]
+#[path = "../tests/wire.rs"]
 mod local_wire_tests;

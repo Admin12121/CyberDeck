@@ -2,7 +2,7 @@
 //! `netscan.rs` retains stable command macro wrappers for existing registration.
 use std::sync::atomic::Ordering;
 
-use crate::evidence::EvidenceCtx;
+use crate::features::forensics::ipc::evidence::EvidenceCtx;
 use tauri::ipc::Channel;
 use tauri::{AppHandle, State};
 use tauri_plugin_dialog::DialogExt;

@@ -6,12 +6,12 @@ use std::time::Instant;
 use tauri::{AppHandle, State};
 use tauri_plugin_dialog::DialogExt;
 
-#[path = "features/crypto/domain/crack.rs"]
-mod domain;
-#[path = "features/crypto/infrastructure/wordlists.rs"]
-mod wordlists;
-#[path = "features/crypto/application/recovery.rs"]
+#[path = "../application/recovery.rs"]
 mod application;
+#[path = "../domain/crack.rs"]
+mod domain;
+#[path = "../infrastructure/wordlists.rs"]
+mod wordlists;
 
 pub use domain::{CrackMatch, CrackProgress, CrackResultWire, WordlistInfoWire};
 
@@ -52,7 +52,10 @@ pub(crate) fn resolved_wordlist(
 
 /// Read the capped candidate prefix for hybrid/combinator handlers without
 /// loading the rest of the selected wordlist.
-pub(crate) fn read_wordlist_prefix(path: &std::path::Path, limit: usize) -> Result<Vec<u8>, String> {
+pub(crate) fn read_wordlist_prefix(
+    path: &std::path::Path,
+    limit: usize,
+) -> Result<Vec<u8>, String> {
     wordlists::read_nonempty_prefix(path, limit)
 }
 
@@ -63,7 +66,7 @@ pub fn crack_wordlist_dialog(
     target_hash: String,
     wordlist_path: Option<String>,
     on_progress: tauri::ipc::Channel<CrackProgress>,
-    ctx: State<'_, crate::evidence::EvidenceCtx>,
+    ctx: State<'_, crate::features::forensics::ipc::evidence::EvidenceCtx>,
 ) -> Result<CrackResultWire, String> {
     let target = target_hash.trim().to_string();
     if target.is_empty() {
@@ -80,13 +83,12 @@ pub fn crack_wordlist_dialog(
     let started = Instant::now();
     let (wordlist, wordlist_name) = resolved_wordlist(&app, wordlist_path.as_deref())?;
     let total = wordlists::count_lines(&wordlist)?;
-    let file = std::fs::File::open(&wordlist)
-        .map_err(|e| format!("cannot open wordlist: {e}"))?;
+    let file = std::fs::File::open(&wordlist).map_err(|e| format!("cannot open wordlist: {e}"))?;
     let reader = std::io::BufReader::with_capacity(1 << 20, file);
     let result = application::execute(reader, &algo, &target, total, |progress| {
         let _ = on_progress.send(progress);
     })?;
-    crate::history::persist(
+    crate::features::crypto::ipc::history::persist(
         ctx.inner(),
         &result.format,
         &target,

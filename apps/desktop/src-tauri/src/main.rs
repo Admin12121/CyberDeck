@@ -2,41 +2,28 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-mod attack;
-mod cases;
-mod crack;
-mod engines;
-mod evidence;
-mod history;
-#[path = "features/shared/jobs/ipc.rs"]
-mod jobs;
-mod netscan;
-mod ops;
-mod pcap;
-mod storage_paths;
-mod web;
-mod webtls;
+mod features;
 
 use std::sync::Mutex;
 
 use cyberdeck_storage::ArtifactStore;
-use evidence::EvidenceCtx;
+use features::forensics::ipc::evidence::EvidenceCtx;
 use tauri::Manager;
 
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
-        .manage(jobs::JobManager::new())
-        .manage(netscan::ScanCtx::default())
-        .manage(pcap::PcapCtx {
+        .manage(features::shared::jobs::ipc::JobManager::new())
+        .manage(features::network::ipc::netscan::ScanCtx::default())
+        .manage(features::network::ipc::pcap::PcapCtx {
             current: std::sync::Mutex::new(None),
         })
-        .manage(web::WebCtx {
+        .manage(features::web::ipc::web::WebCtx {
             proxy_running: std::sync::atomic::AtomicBool::new(false),
             proxy_port: std::sync::atomic::AtomicU16::new(8080),
             proxy_handle: std::sync::Mutex::new(None),
             ca: std::sync::Mutex::new(None),
-            shared: std::sync::Arc::new(web::ProxyShared {
+            shared: std::sync::Arc::new(features::web::ipc::web::ProxyShared {
                 running: std::sync::atomic::AtomicBool::new(false),
                 intercept: std::sync::atomic::AtomicBool::new(false),
                 port: std::sync::atomic::AtomicU16::new(8080),
@@ -51,7 +38,8 @@ fn main() {
         .setup(|app| {
             // Case store lives under the OS app-data directory; the SQLite
             // index and artifact copies are created on first launch (§8.4).
-            let data_dir = storage_paths::data_dir(app.handle()).map_err(std::io::Error::other)?;
+            let data_dir = features::cases::infrastructure::storage_paths::data_dir(app.handle())
+                .map_err(std::io::Error::other)?;
             let store =
                 ArtifactStore::open(&data_dir.join("cases.db")).map_err(std::io::Error::other)?;
             app.manage(EvidenceCtx {
@@ -61,76 +49,76 @@ fn main() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
-            jobs::job_start,
-            jobs::job_cancel,
-            ops::crypto_op,
-            ops::crypto_catalog,
-            ops::recipe_run,
-            ops::kdf_verify,
-            evidence::file_import_dialog,
-            evidence::file_import_derived,
-            cases::case_list,
-            cases::case_create,
-            cases::case_findings_list,
-            cases::case_events_list,
-            cases::case_report,
-            cases::case_provenance_verify,
-            cases::case_artifact_verify,
-            cases::case_integrity_verify,
-            cases::case_provenance_verify_against,
-            cases::case_findings_add,
-            evidence::file_list,
-            evidence::file_hex,
-            evidence::file_signature_scan,
-            evidence::file_binary_inspect,
-            evidence::file_extract_gzip,
-            evidence::file_extract_archive,
-            evidence::file_extract_nested_archive,
-            evidence::file_strings,
-            evidence::file_strings_scan,
-            evidence::file_entropy_regions,
-            evidence::file_metadata_scan,
-            evidence::digest_file_dialog,
-            pcap::pcap_open_dialog,
-            pcap::pcap_packet_bytes,
-            pcap::pcap_follow_stream,
-            crack::crack_wordlist_dialog,
-            crack::pick_wordlist,
-            history::crack_history_list,
-            history::crack_history_delete,
-            history::crack_history_clear,
-            attack::crack_rules_dialog,
-            attack::crack_mask,
-            attack::crack_hybrid_dialog,
-            attack::crack_hybrid_reverse_dialog,
-            attack::crack_combinator_dialog,
-            attack::benchmark,
-            attack::device_info,
-            engines::engines_detect,
-            engines::engine_attack,
-            web::http_send,
-            web::web_scan,
-            web::spider_scan,
-            web::proxy_start,
-            web::proxy_stop,
-            web::proxy_status,
-            web::proxy_history,
-            web::proxy_intercept,
-            web::proxy_pending,
-            web::proxy_forward,
-            web::proxy_drop,
-            web::proxy_set_rules,
-            web::proxy_ca_pem,
-            web::ws_list,
-            web::web_engines_detect,
-            web::engine_scan,
-            netscan::netscan_start,
-            netscan::netscan_stop,
-            netscan::netscan_results,
-            netscan::netscan_status,
-            netscan::netscan_history,
-            netscan::netscan_export,
-            netscan::netscan_discover_hosts,
+            features::shared::jobs::ipc::job_start,
+            features::shared::jobs::ipc::job_cancel,
+            features::crypto::ipc::ops::crypto_op,
+            features::crypto::ipc::ops::crypto_catalog,
+            features::crypto::ipc::ops::recipe_run,
+            features::crypto::ipc::ops::kdf_verify,
+            features::forensics::ipc::evidence::file_import_dialog,
+            features::forensics::ipc::evidence::file_import_derived,
+            features::cases::case_list,
+            features::cases::case_create,
+            features::cases::case_findings_list,
+            features::cases::case_events_list,
+            features::cases::case_report,
+            features::cases::case_provenance_verify,
+            features::cases::case_artifact_verify,
+            features::cases::case_integrity_verify,
+            features::cases::case_provenance_verify_against,
+            features::cases::case_findings_add,
+            features::forensics::ipc::evidence::file_list,
+            features::forensics::ipc::evidence::file_hex,
+            features::forensics::ipc::evidence::file_signature_scan,
+            features::forensics::ipc::evidence::file_binary_inspect,
+            features::forensics::ipc::evidence::file_extract_gzip,
+            features::forensics::ipc::evidence::file_extract_archive,
+            features::forensics::ipc::evidence::file_extract_nested_archive,
+            features::forensics::ipc::evidence::file_strings,
+            features::forensics::ipc::evidence::file_strings_scan,
+            features::forensics::ipc::evidence::file_entropy_regions,
+            features::forensics::ipc::evidence::file_metadata_scan,
+            features::forensics::ipc::evidence::digest_file_dialog,
+            features::network::ipc::pcap::pcap_open_dialog,
+            features::network::ipc::pcap::pcap_packet_bytes,
+            features::network::ipc::pcap::pcap_follow_stream,
+            features::crypto::ipc::crack::crack_wordlist_dialog,
+            features::crypto::ipc::crack::pick_wordlist,
+            features::crypto::ipc::history::crack_history_list,
+            features::crypto::ipc::history::crack_history_delete,
+            features::crypto::ipc::history::crack_history_clear,
+            features::crypto::ipc::attack::crack_rules_dialog,
+            features::crypto::ipc::attack::crack_mask,
+            features::crypto::ipc::attack::crack_hybrid_dialog,
+            features::crypto::ipc::attack::crack_hybrid_reverse_dialog,
+            features::crypto::ipc::attack::crack_combinator_dialog,
+            features::crypto::ipc::attack::benchmark,
+            features::crypto::ipc::attack::device_info,
+            features::crypto::ipc::engines::engines_detect,
+            features::crypto::ipc::engines::engine_attack,
+            features::web::ipc::web::http_send,
+            features::web::ipc::web::web_scan,
+            features::web::ipc::web::spider_scan,
+            features::web::ipc::web::proxy_start,
+            features::web::ipc::web::proxy_stop,
+            features::web::ipc::web::proxy_status,
+            features::web::ipc::web::proxy_history,
+            features::web::ipc::web::proxy_intercept,
+            features::web::ipc::web::proxy_pending,
+            features::web::ipc::web::proxy_forward,
+            features::web::ipc::web::proxy_drop,
+            features::web::ipc::web::proxy_set_rules,
+            features::web::ipc::web::proxy_ca_pem,
+            features::web::ipc::web::ws_list,
+            features::web::ipc::web::web_engines_detect,
+            features::web::ipc::web::engine_scan,
+            features::network::ipc::netscan::netscan_start,
+            features::network::ipc::netscan::netscan_stop,
+            features::network::ipc::netscan::netscan_results,
+            features::network::ipc::netscan::netscan_status,
+            features::network::ipc::netscan::netscan_history,
+            features::network::ipc::netscan::netscan_export,
+            features::network::ipc::netscan::netscan_discover_hosts,
         ])
         .run(tauri::generate_context!())
         .expect("CyberDeck desktop runtime failed to start");

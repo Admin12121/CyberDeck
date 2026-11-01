@@ -2,7 +2,7 @@
 use super::{
     capture_file, capture_service, hex_format, pcap_wire::wire_packet, PcapCtx, PcapOpenWire,
 };
-use crate::evidence::HexResponse;
+use crate::features::forensics::ipc::evidence::HexResponse;
 use tauri::{AppHandle, State};
 use tauri_plugin_dialog::DialogExt;
 

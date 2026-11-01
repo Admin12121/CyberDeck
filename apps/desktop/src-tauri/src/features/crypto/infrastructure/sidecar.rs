@@ -5,7 +5,7 @@ use std::path::Path;
 use std::process::{Command, ExitStatus};
 use std::time::Duration;
 
-use crate::attack::AttackMatch;
+use crate::features::crypto::ipc::attack::AttackMatch;
 use super::engine_formats::{parse_hashcat_outfile, parse_john_show};
 use super::process::run_with_timeout;
 use super::scratch::ScratchDir;

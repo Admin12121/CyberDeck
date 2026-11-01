@@ -2,26 +2,26 @@
 //! This Tauri attack path remains CPU-only. Native OpenCL kernels exist in the
 //! crypto crate but are not yet connected to this desktop handler.
 
-
-
-#[path = "features/crypto/domain/masks.rs"]
+#[path = "../domain/masks.rs"]
 mod masks;
-pub use masks::MaskPlan;
 use masks::plan_mask;
+pub use masks::MaskPlan;
 
-#[path = "features/crypto/domain/attack.rs"]
+#[path = "../domain/attack.rs"]
 mod attack_domain;
 pub use attack_domain::{AttackMatch, AttackResultWire, BenchmarkWire, DeviceInfoWire};
 
-#[path = "features/crypto/domain/rules.rs"]
+#[path = "../domain/rules.rs"]
 mod rules;
 
 /// Apply built-in rules over a wordlist body, chunked across CPU cores.
 /// Each worker owns a slice of words; partials merge in order so hits keep
 /// their source line identity.
-#[path = "features/crypto/application/attack.rs"]
+#[path = "../application/attack.rs"]
 mod application;
-pub use application::{rules_over_bytes, hybrid_over_bytes, hybrid_reverse_over_bytes, combinator_over_bytes};
+pub use application::{
+    combinator_over_bytes, hybrid_over_bytes, hybrid_reverse_over_bytes, rules_over_bytes,
+};
 use application::{guard, mask_attack};
 
 #[tauri::command]
@@ -29,12 +29,11 @@ pub fn crack_rules_dialog(
     app: tauri::AppHandle,
     algo: String,
     target_hash: String,
-    ctx: tauri::State<'_, crate::evidence::EvidenceCtx>,
+    ctx: tauri::State<'_, crate::features::forensics::ipc::evidence::EvidenceCtx>,
 ) -> Result<AttackResultWire, String> {
     let target = guard(&algo, &target_hash)?;
-    let (path, name) = crate::crack::resolved_wordlist(&app, None)?;
-    let file = std::fs::File::open(&path)
-        .map_err(|e| format!("cannot read wordlist: {e}"))?;
+    let (path, name) = crate::features::crypto::ipc::crack::resolved_wordlist(&app, None)?;
+    let file = std::fs::File::open(&path).map_err(|e| format!("cannot read wordlist: {e}"))?;
     let reader = std::io::BufReader::with_capacity(1 << 20, file);
     let words = cyberdeck_crypto::candidates::WordlistCandidates::new(reader)
         .map(|item| item.map(|candidate| String::from_utf8_lossy(&candidate).into_owned()));
@@ -50,7 +49,7 @@ pub fn crack_mask(
     algo: String,
     target_hash: String,
     mask: String,
-    ctx: tauri::State<'_, crate::evidence::EvidenceCtx>,
+    ctx: tauri::State<'_, crate::features::forensics::ipc::evidence::EvidenceCtx>,
 ) -> Result<AttackResultWire, String> {
     let result = mask_attack(&algo, &target_hash, &mask)?;
     record_history(
@@ -70,12 +69,13 @@ pub fn crack_hybrid_dialog(
     target_hash: String,
     mask: String,
     wordlist_path: Option<String>,
-    ctx: tauri::State<'_, crate::evidence::EvidenceCtx>,
+    ctx: tauri::State<'_, crate::features::forensics::ipc::evidence::EvidenceCtx>,
 ) -> Result<AttackResultWire, String> {
     let target = guard(&algo, &target_hash)?;
     // The UI's chosen wordlist is reused; a dialog opens only when none is set.
-    let (path, name) = crate::crack::resolved_wordlist(&app, wordlist_path.as_deref())?;
-    let body = crate::crack::read_wordlist_prefix(&path, 500)?;
+    let (path, name) =
+        crate::features::crypto::ipc::crack::resolved_wordlist(&app, wordlist_path.as_deref())?;
+    let body = crate::features::crypto::ipc::crack::read_wordlist_prefix(&path, 500)?;
     let mut result = hybrid_over_bytes(&algo, &target, &mask, &body)?;
     result.source = format!("{name} + {mask}");
     record_history(
@@ -95,11 +95,12 @@ pub fn crack_hybrid_reverse_dialog(
     target_hash: String,
     mask: String,
     wordlist_path: Option<String>,
-    ctx: tauri::State<'_, crate::evidence::EvidenceCtx>,
+    ctx: tauri::State<'_, crate::features::forensics::ipc::evidence::EvidenceCtx>,
 ) -> Result<AttackResultWire, String> {
     let target = guard(&algo, &target_hash)?;
-    let (path, name) = crate::crack::resolved_wordlist(&app, wordlist_path.as_deref())?;
-    let body = crate::crack::read_wordlist_prefix(&path, 500)?;
+    let (path, name) =
+        crate::features::crypto::ipc::crack::resolved_wordlist(&app, wordlist_path.as_deref())?;
+    let body = crate::features::crypto::ipc::crack::read_wordlist_prefix(&path, 500)?;
     let mut result = hybrid_reverse_over_bytes(&algo, &target, &mask, &body)?;
     result.source = format!("{mask} + {name}");
     record_history(
@@ -119,14 +120,17 @@ pub fn crack_combinator_dialog(
     target_hash: String,
     wordlist_path: Option<String>,
     second_wordlist_path: Option<String>,
-    ctx: tauri::State<'_, crate::evidence::EvidenceCtx>,
+    ctx: tauri::State<'_, crate::features::forensics::ipc::evidence::EvidenceCtx>,
 ) -> Result<AttackResultWire, String> {
     let target = guard(&algo, &target_hash)?;
-    let (first_path, first_name) = crate::crack::resolved_wordlist(&app, wordlist_path.as_deref())?;
-    let (second_path, second_name) =
-        crate::crack::resolved_wordlist(&app, second_wordlist_path.as_deref())?;
-    let first_body = crate::crack::read_wordlist_prefix(&first_path, 500)?;
-    let second_body = crate::crack::read_wordlist_prefix(&second_path, 500)?;
+    let (first_path, first_name) =
+        crate::features::crypto::ipc::crack::resolved_wordlist(&app, wordlist_path.as_deref())?;
+    let (second_path, second_name) = crate::features::crypto::ipc::crack::resolved_wordlist(
+        &app,
+        second_wordlist_path.as_deref(),
+    )?;
+    let first_body = crate::features::crypto::ipc::crack::read_wordlist_prefix(&first_path, 500)?;
+    let second_body = crate::features::crypto::ipc::crack::read_wordlist_prefix(&second_path, 500)?;
     let mut result = combinator_over_bytes(&algo, &target, &first_body, &second_body)?;
     result.source = format!("{first_name} x {second_name}");
     record_history(
@@ -139,7 +143,7 @@ pub fn crack_combinator_dialog(
     Ok(result)
 }
 
-#[path = "features/crypto/application/benchmark.rs"]
+#[path = "../application/benchmark.rs"]
 mod benchmark_app;
 
 #[tauri::command]
@@ -149,13 +153,13 @@ pub fn benchmark(algo: String, duration_ms: Option<u64>) -> Result<BenchmarkWire
 
 /// Compatibility entry point for external engine adapters.
 pub fn record_history(
-    ctx: &crate::evidence::EvidenceCtx,
+    ctx: &crate::features::forensics::ipc::evidence::EvidenceCtx,
     algo: &str,
     target: &str,
     engine: &str,
     matches: &[AttackMatch],
 ) {
-    crate::history::persist(
+    crate::features::crypto::ipc::history::persist(
         ctx,
         algo,
         target,
@@ -165,7 +169,7 @@ pub fn record_history(
     );
 }
 
-#[path = "features/crypto/infrastructure/gpu_discovery.rs"]
+#[path = "../infrastructure/gpu_discovery.rs"]
 mod gpu_discovery;
 
 #[tauri::command]

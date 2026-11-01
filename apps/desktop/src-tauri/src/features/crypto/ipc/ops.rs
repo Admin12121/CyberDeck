@@ -1,9 +1,9 @@
 //! Thin backward-compatible Tauri crypto IPC entry points.
 //! Business logic and wire types are separated by feature-first ownership.
 
-#[path = "features/crypto/application/ops.rs"]
+#[path = "../application/ops.rs"]
 mod application;
-#[path = "features/crypto/domain/ops.rs"]
+#[path = "../domain/ops.rs"]
 mod domain;
 
 pub use domain::OpResult;

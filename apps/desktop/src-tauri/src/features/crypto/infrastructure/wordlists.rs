@@ -1,7 +1,7 @@
 //! Single source of truth for local wordlist selection, metadata and limits.
 use std::path::Path;
 
-use crate::evidence::MAX_IMPORT_BYTES;
+use crate::features::forensics::ipc::evidence::MAX_IMPORT_BYTES;
 
 pub fn inspect(path: &Path) -> Result<(String, u64), String> {
     let meta =

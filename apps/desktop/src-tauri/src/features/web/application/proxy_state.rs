@@ -27,9 +27,9 @@ pub struct ProxyShared {
     pub pending: Mutex<HashMap<u64, PendingRequest>>,
     pub next_id: AtomicU64,
     /// CA state for TLS interception, set by proxy_start.
-    pub ca: Mutex<Option<Arc<crate::webtls::CaState>>>,
+    pub ca: Mutex<Option<Arc<crate::features::web::webtls::CaState>>>,
     /// Relayed WebSocket connections, recorded during TLS interception.
-    pub ws: Mutex<Vec<crate::webtls::WsConnection>>,
+    pub ws: Mutex<Vec<crate::features::web::webtls::WsConnection>>,
 }
 
 pub struct WebCtx {
@@ -37,5 +37,5 @@ pub struct WebCtx {
     pub proxy_port: AtomicU16,
     pub proxy_handle: Mutex<Option<tokio::task::JoinHandle<()>>>,
     pub shared: Arc<ProxyShared>,
-    pub ca: Mutex<Option<Arc<crate::webtls::CaState>>>,
+    pub ca: Mutex<Option<Arc<crate::features::web::webtls::CaState>>>,
 }

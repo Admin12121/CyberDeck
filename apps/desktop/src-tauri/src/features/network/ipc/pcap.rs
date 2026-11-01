@@ -6,19 +6,19 @@ use std::sync::Mutex;
 use cyberdeck_packet::{parse_capture, PacketMeta};
 use tauri::{AppHandle, State};
 
-use crate::evidence::HexResponse;
+use crate::features::forensics::ipc::evidence::HexResponse;
 
-#[path = "features/network/application/capture_cache.rs"]
+#[path = "../application/capture_cache.rs"]
 mod capture_cache;
-#[path = "features/network/infrastructure/capture_file.rs"]
+#[path = "../infrastructure/capture_file.rs"]
 mod capture_file;
-#[path = "features/network/application/capture_service.rs"]
+#[path = "../application/capture_service.rs"]
 mod capture_service;
-#[path = "features/network/ipc/hex.rs"]
+#[path = "hex.rs"]
 mod hex_format;
-#[path = "features/network/ipc/pcap_commands.rs"]
+#[path = "pcap_commands.rs"]
 mod pcap_commands;
-#[path = "features/network/ipc/pcap_wire.rs"]
+#[path = "pcap_wire.rs"]
 mod pcap_wire;
 pub use capture_cache::CachedCapture;
 #[cfg(test)]

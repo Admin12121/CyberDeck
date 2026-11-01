@@ -4,35 +4,35 @@
 use std::net::IpAddr;
 use std::sync::{Arc, Mutex as StdMutex};
 
-use crate::evidence::EvidenceCtx;
+use crate::features::forensics::ipc::evidence::EvidenceCtx;
 use tauri::ipc::Channel;
 use tauri::{AppHandle, State};
 
-#[path = "features/network/infrastructure/case_findings.rs"]
+#[path = "../infrastructure/case_findings.rs"]
 mod case_findings;
-#[path = "features/network/infrastructure/file_export.rs"]
+#[path = "../infrastructure/file_export.rs"]
 mod file_export;
-#[path = "features/network/infrastructure/discovery.rs"]
+#[path = "../infrastructure/discovery.rs"]
 mod host_discovery;
-#[path = "features/network/infrastructure/targets.rs"]
+#[path = "../infrastructure/targets.rs"]
 mod host_targets;
-#[path = "features/network/domain/ports.rs"]
+#[path = "../domain/ports.rs"]
 mod port_rules;
-#[path = "features/network/ipc/commands.rs"]
+#[path = "commands.rs"]
 mod scan_commands;
-#[path = "features/network/application/export.rs"]
+#[path = "../application/export.rs"]
 mod scan_export;
-#[path = "features/network/domain/models.rs"]
+#[path = "../domain/models.rs"]
 mod scan_models;
-#[path = "features/network/application/scanner.rs"]
+#[path = "../application/scanner.rs"]
 mod scan_service;
-#[path = "features/network/application/state.rs"]
+#[path = "../application/state.rs"]
 mod scan_state;
-#[path = "features/network/ipc/scan_wire.rs"]
+#[path = "scan_wire.rs"]
 mod scan_wire;
-#[path = "features/network/application/session.rs"]
+#[path = "../application/session.rs"]
 mod session;
-#[path = "features/network/infrastructure/probe.rs"]
+#[path = "../infrastructure/probe.rs"]
 mod tcp_probe;
 
 pub use host_targets::parse_targets;

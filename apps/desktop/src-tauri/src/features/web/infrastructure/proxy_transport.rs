@@ -21,7 +21,7 @@ pub(super) async fn handle_conn(
     let history_stamp = webhistory::capture_generation();
     let (head, body_bytes) = tokio::time::timeout(
         Duration::from_secs(15),
-        crate::webtls::read_http_message(&mut stream),
+        crate::features::web::webtls::read_http_message(&mut stream),
     )
     .await
     .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "HTTP request timed out"))??;
@@ -184,14 +184,14 @@ pub(super) async fn connect_tunnel_with_ws_connector(
         .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
         .await;
     let ca = ca.expect("ca checked");
-    let acceptor = crate::webtls::tls_acceptor(&ca, &host).map_err(|e| std::io::Error::other(e))?;
+    let acceptor = crate::features::web::webtls::tls_acceptor(&ca, &host).map_err(|e| std::io::Error::other(e))?;
     let mut tls_stream = acceptor
         .accept(stream)
         .await
         .map_err(|e| std::io::Error::other(format!("tls handshake with client failed: {e}")))?;
     let (head_text, body_bytes) = tokio::time::timeout(
         Duration::from_secs(15),
-        crate::webtls::read_http_message(&mut tls_stream),
+        crate::features::web::webtls::read_http_message(&mut tls_stream),
     )
     .await
     .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "HTTPS request timed out"))??;
@@ -242,7 +242,7 @@ pub(super) async fn connect_tunnel_with_ws_connector(
         .map_err(|e| std::io::Error::other(format!("ws upstream connect failed: {e}")))?;
         let connector = match ws_connector {
             Some(connector) => connector,
-            None => crate::webtls::tls_client().map_err(std::io::Error::other)?,
+            None => crate::features::web::webtls::tls_client().map_err(std::io::Error::other)?,
         };
         let server_name = rustls::pki_types::ServerName::try_from(host.clone())
             .map_err(|e| std::io::Error::other(format!("bad sni: {e}")))?;
@@ -292,7 +292,7 @@ pub(super) async fn connect_tunnel_with_ws_connector(
             if ws.len() >= 1000 {
                 ws.remove(0);
             }
-            ws.push(crate::webtls::WsConnection {
+            ws.push(crate::features::web::webtls::WsConnection {
                 host: host.clone(),
                 bytes_client_to_server: 0,
                 bytes_server_to_client: 0,

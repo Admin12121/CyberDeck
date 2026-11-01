@@ -1,6 +1,6 @@
 //! Fixed-width lowercase hexadecimal display without per-byte heap strings.
 //! Retains the existing no-trailing-space IPC text format.
-use crate::evidence::{HexResponse, HexRow};
+use crate::features::forensics::ipc::evidence::{HexResponse, HexRow};
 
 pub(super) fn format_hex_bytes(bytes: &[u8]) -> String {
     const DIGITS: &[u8; 16] = b"0123456789abcdef";

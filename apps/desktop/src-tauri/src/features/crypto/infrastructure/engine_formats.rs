@@ -1,5 +1,5 @@
 //! External engine format mappings and text parsers. No Tauri/process dependencies.
-use crate::attack::AttackMatch;
+use crate::features::crypto::ipc::attack::AttackMatch;
 
 pub fn parse_hashcat_version(output: &str) -> Option<String> {
     output

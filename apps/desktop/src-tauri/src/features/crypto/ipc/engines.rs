@@ -7,34 +7,32 @@ use std::time::{Duration, Instant};
 
 use tauri::{AppHandle, Manager, State};
 
-#[path = "features/crypto/domain/engines.rs"]
+#[path = "../domain/engines.rs"]
 mod domain;
 pub use domain::{EngineAttackResult, EngineStatus};
 
-#[path = "features/crypto/infrastructure/engine_formats.rs"]
+#[path = "../infrastructure/engine_formats.rs"]
 mod engine_formats;
 pub use engine_formats::{
     hashcat_mode, john_format, parse_hashcat_outfile, parse_hashcat_version, parse_john_show,
     parse_john_version,
 };
 
-#[path = "features/crypto/application/engines.rs"]
+#[path = "../application/engines.rs"]
 mod application;
-#[path = "features/crypto/infrastructure/sidecar.rs"]
+#[path = "../infrastructure/sidecar.rs"]
 mod sidecar;
 
-#[path = "features/crypto/infrastructure/executables.rs"]
+#[path = "../infrastructure/executables.rs"]
 mod executables;
 pub use executables::which_exists;
 
-#[path = "features/crypto/infrastructure/scratch.rs"]
+#[path = "../infrastructure/scratch.rs"]
 mod scratch;
 
-#[path = "features/crypto/infrastructure/process.rs"]
+#[path = "../infrastructure/process.rs"]
 pub(crate) mod process;
 use process::run_with_timeout;
-
-
 
 /// Where a binary may live: the bundled resource directory first, then PATH.
 fn candidate_paths(app: &AppHandle, binary: &str) -> Vec<PathBuf> {
@@ -119,7 +117,7 @@ pub fn engine_attack(
     target_hash: String,
     mode: String,
     mask: Option<String>,
-    ctx: State<'_, crate::evidence::EvidenceCtx>,
+    ctx: State<'_, crate::features::forensics::ipc::evidence::EvidenceCtx>,
 ) -> Result<EngineAttackResult, String> {
     let target = application::normalized_target(&target_hash)?;
     application::validate_mode(&engine, &mode, mask.as_deref())?;
@@ -151,13 +149,15 @@ pub fn engine_attack(
         None
     };
     let wordlist = if mode == "wordlist" {
-        Some(crate::crack::resolved_wordlist(&app, None)?.0)
+        Some(crate::features::crypto::ipc::crack::resolved_wordlist(&app, None)?.0)
     } else {
         None
     };
 
     let started = Instant::now();
-    let cache = app.path().app_cache_dir()
+    let cache = app
+        .path()
+        .app_cache_dir()
         .map_err(|e| format!("cannot resolve cache dir: {e}"))?;
     let scratch = scratch::ScratchDir::create(&cache)?;
     let run = match engine.as_str() {
@@ -193,7 +193,13 @@ pub fn engine_attack(
         started.elapsed().as_millis() as u64,
         run,
     );
-    crate::attack::record_history(&ctx, &algo, &target, &result.engine, &result.matches);
+    crate::features::crypto::ipc::attack::record_history(
+        &ctx,
+        &algo,
+        &target,
+        &result.engine,
+        &result.matches,
+    );
     Ok(result)
 }
 

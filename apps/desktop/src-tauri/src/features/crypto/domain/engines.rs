@@ -1,6 +1,6 @@
 //! External engine IPC payloads. No Tauri/process dependencies.
 use serde::Serialize;
-use crate::attack::AttackMatch;
+use crate::features::crypto::ipc::attack::AttackMatch;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct EngineStatus {

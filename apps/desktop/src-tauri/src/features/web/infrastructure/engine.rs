@@ -1,7 +1,7 @@
 //! Optional external tool adapters, not replacements for the native Web engine.
 use super::scan_domain::require_authorization;
 use super::{EngineScanResult, WebEngineStatus};
-use crate::engines::which_exists;
+use crate::features::crypto::ipc::engines::which_exists;
 use std::time::{Duration, Instant};
 
 pub(super) async fn detect_engines() -> Vec<WebEngineStatus> {

@@ -1,6 +1,6 @@
 //! Legacy crack-history persistence adapter; preserves existing write behavior.
 //! Never use this as evidence of encrypted storage: Agent 5 owns that migration.
-use crate::evidence::EvidenceCtx;
+use crate::features::forensics::ipc::evidence::EvidenceCtx;
 
 pub fn persist<'a>(
     ctx: &EvidenceCtx,

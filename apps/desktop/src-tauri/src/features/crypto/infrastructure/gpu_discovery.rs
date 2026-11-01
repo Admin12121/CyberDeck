@@ -10,7 +10,7 @@ pub fn detect_gpus() -> Vec<GpuDevice> {
     ]);
     // Use the same bounded, concurrently drained process runner as engine
     // adapters so a broken driver command cannot hang the desktop indefinitely.
-    let output = crate::engines::process::run_with_timeout(
+    let output = crate::features::crypto::ipc::engines::process::run_with_timeout(
         command,
         std::time::Duration::from_secs(3),
     );
