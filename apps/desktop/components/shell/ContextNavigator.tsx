@@ -1,10 +1,11 @@
 "use client";
 
 import { CATEGORIES } from "@features/registry";
-import { useWorkbench } from "@state/workbench";
+import { useWorkbenchLocation, useWorkbenchLayout } from "@state/workbench";
 
 export function ContextNavigator() {
-  const wb = useWorkbench();
+  const wb = useWorkbenchLocation();
+  const layout = useWorkbenchLayout();
   const category = CATEGORIES.find((item) => item.id === wb.category);
 
   return (
@@ -12,7 +13,7 @@ export function ContextNavigator() {
       id="cyberdeck-context-navigator"
       aria-label={`${category?.label ?? "Workspace"} tools`}
       className="flex min-h-0 shrink-0 flex-col border-r border-line bg-sidebar min-[1080px]:border-r-0"
-      style={{ width: wb.navigatorWidth }}
+      style={{ width: layout.navigatorWidth }}
     >
       <div className="cd-workspace-toolbar px-3">
         <h2 className="truncate text-sm font-semibold text-fg">{category?.label}</h2>

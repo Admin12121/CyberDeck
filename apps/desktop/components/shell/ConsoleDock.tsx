@@ -4,12 +4,13 @@
  * (help, clear, scan, spider, get, crack, status).
  */
 import { useRef } from "react";
-import { b64,crackWordlistDialog,cryptoOp,httpSend,isDesktop,kdfVerify,spiderScan,webScan } from "@lib/ipc";import { useWorkbench } from "@state/workbench";
+import { b64,crackWordlistDialog,cryptoOp,httpSend,isDesktop,kdfVerify,spiderScan,webScan } from "@lib/ipc";import { useWorkbenchCase, useWorkbenchTerminals } from "@state/workbench";
 
 export function ConsoleDock({ terminalId }: { terminalId: string }) {
-  const wb = useWorkbench();
-  const currentCase = useRef(wb.caseId);
-  currentCase.current = wb.caseId;
+  const wb = useWorkbenchTerminals();
+  const { caseId } = useWorkbenchCase();
+  const currentCase = useRef(caseId);
+  currentCase.current = caseId;
   const input = wb.terminalInputs[terminalId] ?? "";
   const setInput = (value: string) => wb.setTerminalInput(terminalId, value);
   const lines = terminalId === "terminal-1" ? wb.consoleLines : wb.terminalLines[terminalId] ?? [];
@@ -17,11 +18,11 @@ export function ConsoleDock({ terminalId }: { terminalId: string }) {
   const setBusy = (next: boolean) => wb.setTerminalBusy(terminalId, next);
 
   const log = (line: string) => {
-    if (currentCase.current === wb.caseId) wb.logTerminal(terminalId, line);
+    if (currentCase.current === caseId) wb.logTerminal(terminalId, line);
   };
 
   const runCommand = async (raw: string) => {
-    const caseAtInvocation = wb.caseId;
+    const caseAtInvocation = caseId;
     const line = raw.trim();
     if (!line) return;
     const [cmd, ...args] = line.split(/\s+/);

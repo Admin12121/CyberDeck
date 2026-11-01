@@ -51,3 +51,36 @@ test("all browser exports use one checked helper rather than local anchor implem
   }
   assert.match(source("lib/download.ts"), /Cannot download empty content/);
 });
+
+test("shell and status bar consume focused state contexts rather than terminal/job state", () => {
+  const shell = source("components/shell/Workbench.tsx");
+  const status = source("components/shell/StatusBar.tsx");
+  const navigator = source("components/shell/ContextNavigator.tsx");
+  assert.match(shell, /useWorkbenchLayout/);
+  assert.match(shell, /useWorkbenchLocation/);
+  assert.doesNotMatch(shell, /useWorkbench\(\)/);
+  assert.match(status, /useWorkbenchCase\(\)/);
+  assert.doesNotMatch(status, /useWorkbench\(\)/);
+  assert.match(navigator, /useWorkbenchLocation\(\)/);
+  assert.match(navigator, /useWorkbenchLayout\(\)/);
+});
+
+test("case transitions, panel preferences and volatile terminal state remain separate modules", () => {
+  const provider = source("state/workbench.tsx");
+  assert.match(provider, /useNativeCaseSession\(/);
+  assert.match(provider, /usePanelPreferences\(/);
+  assert.match(provider, /useTerminalSessions\(/);
+  assert.match(provider, /operationGeneration\.current/);
+  assert.doesNotMatch(provider, /caseSessionSelectV1\(/);
+  assert.doesNotMatch(provider, /window\.localStorage\.setItem\(STORAGE_KEY/);
+});
+
+test("heavy Jobs and Console views subscribe to separate update domains", () => {
+  const jobs = source("components/shell/JobsDock.tsx");
+  const consoleView = source("components/shell/ConsoleDock.tsx");
+  assert.match(jobs, /useWorkbenchJobs\(\)/);
+  assert.doesNotMatch(jobs, /useWorkbench\(\)/);
+  assert.match(consoleView, /useWorkbenchTerminals\(\)/);
+  assert.match(consoleView, /useWorkbenchCase\(\)/);
+  assert.doesNotMatch(consoleView, /useWorkbench\(\)/);
+});

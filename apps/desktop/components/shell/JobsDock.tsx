@@ -1,10 +1,10 @@
 "use client";
 
-import { useWorkbench } from "@state/workbench";
+import { useWorkbenchJobs } from "@state/workbench";
 import { EmptyState, ToolButton } from "@ds/panes";
 
 export function JobsDock() {
-  const wb = useWorkbench();
+  const wb = useWorkbenchJobs();
   const jobs = Object.values(wb.jobs).sort((a, b) => b.startedAt - a.startedAt);
   return (
     <div className="h-full min-h-0 overflow-auto bg-panel" role="region" aria-label="All jobs">
@@ -35,7 +35,7 @@ export function JobsDock() {
 }
 
 export function JobDetail({ jobId }: { jobId: number }) {
-  const wb = useWorkbench();
+  const wb = useWorkbenchJobs();
   const job = wb.jobs[jobId];
   if (!job) return <EmptyState title="Job no longer available" />;
   return (

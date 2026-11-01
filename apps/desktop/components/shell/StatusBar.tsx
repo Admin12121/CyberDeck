@@ -2,10 +2,10 @@
 /** Status bar: transport, workspace, job state, engine status (§3.5). */
 import { caseCreate, caseList, isDesktop, type CaseRecordWire } from "@lib/ipc";
 import { useEffect, useState } from "react";
-import { useWorkbench } from "@state/workbench";
+import { useWorkbenchCase } from "@state/workbench";
 
 export function StatusBar() {
-  const wb = useWorkbench();
+  const wb = useWorkbenchCase();
   const [cases, setCases] = useState<CaseRecordWire[]>([]);
   const [runtime, setRuntime] = useState<"checking" | "native" | "browser">("checking");
   useEffect(() => { setRuntime(isDesktop() ? "native" : "browser"); }, []);

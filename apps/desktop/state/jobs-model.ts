@@ -76,3 +76,23 @@ export function applyJobEvent(
       };
   }
 }
+
+/** Complete local job only while its original case-bound record is still active. */
+export function completeLocalJob(
+  jobs: Record<number, JobView>,
+  id: number,
+  status: "completed" | "failed",
+  message: string,
+  now: number,
+): Record<number, JobView> {
+  const job = jobs[id];
+  if (!job || job.status !== "running") return jobs;
+  return {
+    ...jobs,
+    [id]: {
+      ...job, status,
+      percent: status === "completed" ? 100 : job.percent,
+      message, finishedAt: now,
+    },
+  };
+}

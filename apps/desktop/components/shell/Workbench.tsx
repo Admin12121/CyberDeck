@@ -3,7 +3,7 @@
  * Workbench shell: logo rail + workspace column. Every category stays
  * mounted; hidden ones keep their state across switches (Master Plan §3.5).
  */
-import { WorkbenchProvider, useWorkbench } from "@state/workbench";
+import { WorkbenchProvider, useWorkbenchLocation, useWorkbenchLayout } from "@state/workbench";
 import { PANEL_LIMITS } from "@state/workbench";
 import { CryptoWorkspace } from "@features/crypto";
 import { NetworkWorkspace } from "@features/network";
@@ -22,7 +22,7 @@ import { Resizer } from "@ds/Resizer";
  * hop between tools without losing work (Master Plan §3.5).
  */
 function ActiveWorkspace() {
-  const wb = useWorkbench();
+  const wb = useWorkbenchLocation();
   const show = (id: string) => (wb.category === id ? "h-full" : "hidden h-full");
   return (
     <>
@@ -36,7 +36,7 @@ function ActiveWorkspace() {
 }
 
 function Shell() {
-  const wb = useWorkbench();
+  const wb = useWorkbenchLayout();
   return (
     <div className="flex h-screen w-screen overflow-hidden">
       <Rail />

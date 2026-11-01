@@ -19,7 +19,8 @@ import type { RecipeStep } from "@features/crypto/model";
 import { jobCancel, jobStart } from "@lib/ipc";
 import { useNativeCaseSession, type CaseSessionState } from "@state/case-session";
 import { usePanelPreferences } from "@state/panel-preferences";
-import { applyJobEvent, type JobView } from "@state/jobs-model";
+import { useTerminalSessions } from "@state/terminal-sessions";
+import { applyJobEvent, completeLocalJob, type JobView } from "@state/jobs-model";
 
 export interface RecipeHandoff {
   input: string;
@@ -71,6 +72,49 @@ interface WorkbenchApi {
 
 const WorkbenchContext = createContext<WorkbenchApi | null>(null);
 
+/** Focused contexts avoid invalidating shell/navigation for unrelated job or terminal updates. */
+export type WorkbenchLocation = Pick<WorkbenchApi, "category" | "tool" | "selectTool" | "selectCategory">;
+export type WorkbenchLayout = Pick<WorkbenchApi, "navigatorOpen" | "toggleNavigator" | "navigatorWidth" | "dockHeight" | "dockOpen" | "setNavigatorWidth" | "setDockHeight">;
+export type WorkbenchCase = Pick<WorkbenchApi, "caseId" | "caseSession" | "setCaseId">;
+export type WorkbenchJobs = Pick<WorkbenchApi, "jobs" | "cancelJob">;
+export type WorkbenchTerminals = Pick<WorkbenchApi,
+  "consoleLines" | "terminalLines" | "terminalInputs" | "terminalBusy" |
+  "logTerminal" | "clearTerminal" | "setTerminalInput" | "setTerminalBusy"
+>;
+
+const LocationContext = createContext<WorkbenchLocation | null>(null);
+const LayoutContext = createContext<WorkbenchLayout | null>(null);
+const CaseContext = createContext<WorkbenchCase | null>(null);
+const JobsContext = createContext<WorkbenchJobs | null>(null);
+const TerminalsContext = createContext<WorkbenchTerminals | null>(null);
+
+export function useWorkbenchLocation(): WorkbenchLocation {
+  const state = useContext(LocationContext);
+  if (!state) throw new Error("useWorkbenchLocation requires WorkbenchProvider");
+  return state;
+}
+export function useWorkbenchLayout(): WorkbenchLayout {
+  const state = useContext(LayoutContext);
+  if (!state) throw new Error("useWorkbenchLayout requires WorkbenchProvider");
+  return state;
+}
+export function useWorkbenchCase(): WorkbenchCase {
+  const state = useContext(CaseContext);
+  if (!state) throw new Error("useWorkbenchCase requires WorkbenchProvider");
+  return state;
+}
+
+export function useWorkbenchJobs(): WorkbenchJobs {
+  const ctx = useContext(JobsContext);
+  if (!ctx) throw new Error("useWorkbenchJobs requires WorkbenchProvider");
+  return ctx;
+}
+export function useWorkbenchTerminals(): WorkbenchTerminals {
+  const ctx = useContext(TerminalsContext);
+  if (!ctx) throw new Error("useWorkbenchTerminals requires WorkbenchProvider");
+  return ctx;
+}
+
 export { PANEL_LIMITS } from "@state/panel-preferences";
 
 function firstToolOf(category: CategoryId): ToolId {
@@ -85,14 +129,14 @@ export function WorkbenchProvider({ children }: { children: React.ReactNode }) {
   const recentTools = useRef<Partial<Record<CategoryId, ToolId>>>({ crypto: "crypto.recipes" });
   const [jobs, setJobs] = useState<Record<number, JobView>>({});
   const localJobId = useRef(-1);
+  const operationGeneration = useRef(0);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [dockOpen, setDockOpen] = useState(false);
   const [navigatorByCategory, setNavigatorByCategory] = useState<Record<CategoryId, boolean>>({ crypto: true, network: true, web: true, reverse: false, forensics: true });
   const [dockTab, setDockTab] = useState<"jobs" | "console">("jobs");
-  const [consoleLines, setConsoleLines] = useState<string[]>([]);
-  const [terminalLines, setTerminalLines] = useState<Record<string, string[]>>({});
-  const [terminalInputs, setTerminalInputs] = useState<Record<string, string>>({});
-  const [terminalBusy, setTerminalBusyState] = useState<Record<string, boolean>>({});
+  const { consoleLines, setConsoleLines, terminalLines, terminalInputs,
+    terminalBusy, logConsole, logTerminal, clearTerminal, setTerminalInput,
+    setTerminalBusy, resetTerminals } = useTerminalSessions();
   const [recipeHandoff, setRecipeHandoff] = useState<RecipeHandoff | null>(null);
   // Default tool is in Crypto, which carries its own side panes; users toggle
   // the inspector from the title bar and it returns automatically elsewhere.
@@ -151,13 +195,12 @@ export function WorkbenchProvider({ children }: { children: React.ReactNode }) {
   const caseSession = useNativeCaseSession(caseId, locationLoaded);
 
   const changeCase = useCallback((id: string) => {
+    if (id === caseId) return;
+    operationGeneration.current += 1;
     setCaseId(id);
     setJobs({});
-    setConsoleLines([]);
-    setTerminalLines({});
-    setTerminalInputs({});
-    setTerminalBusyState({});
-  }, []);
+    resetTerminals();
+  }, [caseId, resetTerminals]);
 
   const navigatorOpen = CATEGORIES.some((item) => item.id === category && item.tools.filter((tool) => !tool.disabled).length > 1) && navigatorByCategory[category];
   const toggleNavigator = useCallback(() => {
@@ -185,25 +228,34 @@ export function WorkbenchProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   const runDemoJob = useCallback(() => {
+    const generation = operationGeneration.current;
     void jobStart("demo", (event) => {
-      setJobs((prev) => applyJobEvent(prev, event, "demo"));
+      if (generation !== operationGeneration.current) return;
+      setJobs((prev) => generation === operationGeneration.current ? applyJobEvent(prev, event, "demo") : prev);
       setDockOpen(true);
-    }).catch((err) => console.error("job_start failed:", err));
+    }).catch((err) => {
+      if (generation === operationGeneration.current) console.error("job_start failed:", err);
+    });
   }, []);
 
   // Surface native operations without inventing backend cancellation or durable jobs.
   const trackOperation = useCallback(async <T,>(kind: string, operation: () => Promise<T>): Promise<T> => {
     const id = localJobId.current--;
+    const generation = operationGeneration.current;
     const startedAt = Date.now();
     setJobs((previous) => ({ ...previous, [id]: { id, kind, status: "running", percent: 0, message: "Working…", startedAt } }));
     setDockTab("jobs");
     setDockOpen(true);
     try {
       const result = await operation();
-      setJobs((previous) => ({ ...previous, [id]: { ...previous[id], status: "completed", percent: 100, message: "Completed", finishedAt: Date.now() } }));
+      if (generation === operationGeneration.current) {
+        setJobs((previous) => completeLocalJob(previous, id, "completed", "Completed", Date.now()));
+      }
       return result;
     } catch (error) {
-      setJobs((previous) => ({ ...previous, [id]: { ...previous[id], status: "failed", percent: 0, message: String(error), finishedAt: Date.now() } }));
+      if (generation === operationGeneration.current) {
+        setJobs((previous) => completeLocalJob(previous, id, "failed", String(error), Date.now()));
+      }
       throw error;
     }
   }, []);
@@ -213,29 +265,6 @@ export function WorkbenchProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   const toggleDock = useCallback(() => setDockOpen((v) => !v), []);
-  const logConsole = useCallback((line: string) => {
-    setConsoleLines((prev) => [...prev.slice(-499), line]);
-  }, []);
-  const setTerminalBusy = useCallback((terminalId: string, busy: boolean) => {
-    setTerminalBusyState((previous) => ({ ...previous, [terminalId]: busy }));
-  }, []);
-  const logTerminal = useCallback((terminalId: string, line: string) => {
-    if (terminalId === "terminal-1") {
-      setConsoleLines((prev) => [...prev.slice(-499), line]);
-    } else {
-      setTerminalLines((prev) => ({
-        ...prev,
-        [terminalId]: [...(prev[terminalId] ?? []).slice(-499), line],
-      }));
-    }
-  }, []);
-  const clearTerminal = useCallback((terminalId: string) => {
-    if (terminalId === "terminal-1") setConsoleLines([]);
-    else setTerminalLines((prev) => ({ ...prev, [terminalId]: [] }));
-  }, []);
-  const setTerminalInput = useCallback((terminalId: string, input: string) => {
-    setTerminalInputs((prev) => ({ ...prev, [terminalId]: input.slice(0, 4096) }));
-  }, []);
 
   // An explicit, bounded in-memory handoff: preserves source context without reimport.
   // Durable case links will replace this temporary channel in the case milestone.
@@ -353,7 +382,48 @@ export function WorkbenchProvider({ children }: { children: React.ReactNode }) {
     ],
   );
 
-  return <WorkbenchContext.Provider value={value}>{children}</WorkbenchContext.Provider>;
+  const locationValue = useMemo<WorkbenchLocation>(
+    () => ({ category, tool, selectTool, selectCategory }),
+    [category, tool, selectTool, selectCategory],
+  );
+  const layoutValue = useMemo<WorkbenchLayout>(
+    () => ({
+      navigatorOpen, toggleNavigator, navigatorWidth: panels.navigator,
+      dockHeight: panels.dock, dockOpen, setNavigatorWidth, setDockHeight,
+    }),
+    [navigatorOpen, toggleNavigator, panels.navigator, panels.dock, dockOpen, setNavigatorWidth, setDockHeight],
+  );
+  const caseValue = useMemo<WorkbenchCase>(
+    () => ({ caseId, caseSession, setCaseId: changeCase }),
+    [caseId, caseSession, changeCase],
+  );
+
+  const jobsValue = useMemo<WorkbenchJobs>(
+    () => ({ jobs, cancelJob }),
+    [jobs, cancelJob],
+  );
+  const terminalValue = useMemo<WorkbenchTerminals>(
+    () => ({
+      consoleLines, terminalLines, terminalInputs, terminalBusy,
+      logTerminal, clearTerminal, setTerminalInput, setTerminalBusy,
+    }),
+    [consoleLines, terminalLines, terminalInputs, terminalBusy,
+      logTerminal, clearTerminal, setTerminalInput, setTerminalBusy],
+  );
+
+  return (
+    <LocationContext.Provider value={locationValue}>
+      <LayoutContext.Provider value={layoutValue}>
+        <CaseContext.Provider value={caseValue}>
+          <JobsContext.Provider value={jobsValue}>
+            <TerminalsContext.Provider value={terminalValue}>
+              <WorkbenchContext.Provider value={value}>{children}</WorkbenchContext.Provider>
+            </TerminalsContext.Provider>
+          </JobsContext.Provider>
+        </CaseContext.Provider>
+      </LayoutContext.Provider>
+    </LocationContext.Provider>
+  );
 }
 
 export function useWorkbench(): WorkbenchApi {
