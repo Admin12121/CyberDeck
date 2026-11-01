@@ -44,5 +44,32 @@ test("Recovery V1 real route uses existing typed native calls and authorized rev
   assert.match(ui, /currentJob.*scope/);
   assert.doesNotMatch(ui, /localStorage|sessionStorage|crackHistory/);
   assert.match(view, /<NativeRecoveryV1 targetHash=\{input\}/);
-  assert.match(view, /const \[legacyRecoveryEnabled\] = useState\(false\)/);
+  assert.doesNotMatch(view, /CrackedHistory|legacyRecoveryEnabled|crackHistoryList|crackHistoryClear/);
+  assert.match(view, /<NativeRecoveryResults \/>/);
+  assert.match(view, /<NativeRecoveryControls \/>/);
+  assert.match(view, /title="Detected Candidates"/);
+  assert.match(view, /title="Recovery Results"/);
+  assert.ok(ui.includes("onClick={() => void r.start()}"));
+  assert.ok(ui.includes("onClick={() => void r.cancel()}"));
+  assert.ok(ui.includes("onClick={() => void r.discard()}"));
+  assert.ok(ui.includes('r.status === null ? ('));
+  assert.ok(ui.includes('r.running ? ('));
+  assert.ok(ui.includes('Choose Wordlist'));
+  assert.ok(ui.includes('onClick={() => void r.chooseWordlist()}'));
+  assert.ok(ui.includes('disabled={!r.desktop || !r.scope'));
+  for (const [name, command] of [
+    ["recoverySelectWordlistV1", "recovery_select_wordlist_v1"],
+    ["recoveryWordlistStatusV1", "recovery_wordlist_status_v1"],
+  ]) {
+    assert.ok(ipc.includes("function " + name + "("));
+    assert.ok(ipc.includes('"' + command + '"'));
+    assert.ok(rust.includes("fn " + command + "("));
+    assert.ok(ui.includes(name));
+  }
+  assert.ok(read("apps/desktop/src-tauri/src/main.rs").includes("recovery_select_wordlist_v1"));
+  assert.ok(view.includes("maxLength={MAX_HASH_INPUT_CHARS}"));
+  assert.ok(view.includes("resize-none"));
+  assert.ok(view.includes("showNextCandidates(event.currentTarget)"));
+  assert.ok(ui.includes("Scroll to view more masked matches"));
+
 });

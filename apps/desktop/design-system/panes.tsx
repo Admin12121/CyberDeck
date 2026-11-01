@@ -9,7 +9,7 @@ import type { CSSProperties, ReactNode } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Select as CossSelect, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { Tabs, TabsList, TabsTab } from "@/components/ui/tabs";
+import { Tabs, TabsList, TabsPanel, TabsTab } from "@/components/ui/tabs";
 
 export { Resizer } from "./Resizer";
 
@@ -42,27 +42,39 @@ export function Pane({
 }
 
 /** Shared local-workspace tabs. Primary category navigation stays in the sidebar. */
+/** Shared coss tabs. A panel map is optional for feature views with in-place tab content. */
 export function WorkspaceTabs<T extends string>({
-  items, active, onChange, ariaLabel, placement = "top",
+  items, active, onChange, ariaLabel, placement = "top", panels,
 }: {
   items: readonly T[];
   active: T;
   onChange: (tab: T) => void;
   ariaLabel: string;
   placement?: "top" | "bottom";
+  panels?: Partial<Record<T, ReactNode>>;
 }) {
   return (
     <Tabs value={active} onValueChange={(value) => onChange(value as T)}
-      className="w-full gap-0">
-      <TabsList aria-label={ariaLabel} size="sm" variant="underline"
-        className="cd-workspace-toolbar w-full min-w-0 justify-start gap-1 overflow-x-auto px-2"
+      className={panels ? "flex min-h-0 flex-1 flex-col gap-0" : "shrink-0 gap-0"}>
+      <TabsList aria-label={ariaLabel} size="sm"
+        className="w-full min-w-0 justify-start gap-1 overflow-x-auto rounded-none border-b border-line bg-panel px-2 py-1"
         data-placement={placement}>
         {items.map((tab) => (
-          <TabsTab key={tab} value={tab} className="h-7 shrink-0 rounded-sm px-2 font-mono text-[10px] uppercase tracking-wide">
+          <TabsTab key={tab} value={tab}
+            className="h-7 shrink-0 grow-0 rounded-md px-3 font-mono text-[10px] uppercase tracking-wide">
             {tab}
           </TabsTab>
         ))}
       </TabsList>
+      {panels && (
+        <div className="min-h-0 flex-1">
+          {items.map((tab) => (
+            <TabsPanel key={tab} value={tab} keepMounted className="h-full min-h-0 data-[hidden]:hidden">
+              {panels[tab]}
+            </TabsPanel>
+          ))}
+        </div>
+      )}
     </Tabs>
   );
 }

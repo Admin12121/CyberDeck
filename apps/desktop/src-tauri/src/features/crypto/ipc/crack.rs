@@ -38,6 +38,11 @@ pub fn pick_wordlist(app: AppHandle) -> Result<WordlistInfoWire, String> {
     })
 }
 
+/// Validate a previously OS-selected file again before recovery starts.
+pub(crate) fn inspect_recovery_wordlist(path: &std::path::Path) -> Result<(String, u64), String> {
+    wordlists::inspect(path)
+}
+
 pub(crate) fn resolved_wordlist(
     app: &AppHandle,
     wordlist_path: Option<&str>,

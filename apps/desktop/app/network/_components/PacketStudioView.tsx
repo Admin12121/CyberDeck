@@ -1,7 +1,7 @@
 "use client";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { ChevronRight, FolderOpen, Play, ShieldAlert, Square } from "lucide-react";
-import { Chip, EmptyState, Pane, Resizer, Select, TextInput, ToolButton, WorkspaceTabs } from "@ds/panes";
+import { ChevronRight, FolderOpen } from "lucide-react";
+import { Chip, EmptyState, TextInput, ToolButton, WorkspaceTabs } from "@ds/panes";
 import { hexDump } from "@lib/hex";
 import {
   isDesktop,
@@ -15,11 +15,12 @@ import {
 } from "@lib/ipc";
 import { useWorkbench } from "@state/workbench";
 import { useWorkspaceDraft } from "@state/workspace-sessions";
-import type { ToolId } from "@state/tool-registry";
 import { LiveCaptureView } from "./LiveCaptureView";
+import { PacketStartView } from "./PacketStartView";
+import { PacketTable } from "./PacketTable";
+import { PacketPaneSplit } from "./PacketPaneSplit";
 import {
   PROTOCOL_COLORS,
-  SAMPLE_HOSTS,
   SAMPLE_PACKETS,
   conversationsOf,
   detailTree,
@@ -46,24 +47,14 @@ const SAMPLE_DISPLAY: DisplayPacket[] = SAMPLE_PACKETS.map((p, i) => ({
 }));
 
 export function PacketStudioView() {
-  const { caseId } = useWorkbench();
-  const [source, setSource] = useWorkspaceDraft<"files" | "live">(caseId, "network", "packet-source", "files");
-  return (
-    <div className="flex h-full min-h-0 flex-col">
-      <div className="flex shrink-0 gap-1 border-b border-line px-2 py-1">
-        <ToolButton tone={source === "files" ? "primary" : "default"} onClick={() => setSource("files")}>Opened PCAP / Sample</ToolButton>
-        <ToolButton tone={source === "live" ? "primary" : "default"} onClick={() => setSource("live")}>Native Live Capture</ToolButton>
-      </div>
-      <div className={source === "files" ? "min-h-0 flex-1" : "hidden"}><ImportedCaptureView /></div>
-      <div className={source === "live" ? "min-h-0 flex-1" : "hidden"}><LiveCaptureView /></div>
-    </div>
-  );
+  return <ImportedCaptureView />;
 }
 
 function ImportedCaptureView() {
   const desktop = isDesktop();
   const wb = useWorkbench();
   const [capture, setCapture] = useState<PcapOpenWire | null>(null);
+  const [screen, setScreen] = useState<"welcome" | "offline" | "native">("welcome");
   const [showSample, setShowSample] = useState(false);
   const [openError, setOpenError] = useState<string | null>(null);
   const [opening, setOpening] = useState(false);
@@ -82,6 +73,7 @@ function ImportedCaptureView() {
   useEffect(() => {
     openSequence.current += 1;
     setCapture(null);
+    setScreen("welcome");
     setShowSample(false);
     setSelected(0);
     setPacketBytes(null);
@@ -101,6 +93,7 @@ function ImportedCaptureView() {
       const wire = await pcapOpenDialog();
       if (!isCurrent()) return;
       setCapture(wire);
+      setScreen("offline");
       setShowSample(false);
       setSelected(0);
       setPacketBytes(null);
@@ -121,7 +114,7 @@ function ImportedCaptureView() {
 
   const current = filtered.find((p) => p.index === selected) ?? filtered[0];
   // A bounded virtual window keeps large PCAPs responsive without dropping rows.
-  const rowHeight = 22;
+  const rowHeight = 26;
   const firstVisible = Math.max(0, Math.floor(packetScrollTop / rowHeight) - 16);
   const lastVisible = Math.min(filtered.length, firstVisible + 220);
   useEffect(() => {
@@ -157,7 +150,28 @@ function ImportedCaptureView() {
 
   return (
     <div className="flex h-full min-h-0 flex-col">
-      <div className="cd-workspace-toolbar shrink-0 items-center gap-2  px-2">
+      <div className={screen === "offline" ? "hidden" : `flex min-h-0 flex-1 flex-col overflow-y-auto ${screen === "welcome" ? "bg-panel" : ""}`}>
+        {screen === "welcome" && (
+          <PacketStartView opening={opening} desktop={desktop}
+            onOpen={() => void openCapture()}
+            onSample={() => { setCapture(null); setShowSample(true); setSelected(0); setPacketBytes(null); setOpenError(null); setScreen("offline"); }}
+            lastOpened={capture?.file_name ?? null}
+            onResumeOpened={() => { if (capture) setScreen("offline"); }} />
+        )}
+        {screen === "welcome" && openError && (
+          <p role="alert" className="mx-auto mb-3 w-full max-w-6xl px-6 text-xs text-err">{openError}</p>
+        )}
+        <div className={screen === "welcome" ? "mt-auto shrink-0 border-t border-line pt-4" : "min-h-0 flex-1"}>
+          <LiveCaptureView presentation={screen === "welcome" ? "setup" : "full"}
+            onCaptureStarted={() => setScreen("native")}
+            onReturnToStart={() => setScreen("welcome")} />
+        </div>
+      </div>
+      <div className={screen === "offline" ? "flex min-h-0 flex-1 flex-col" : "hidden"}>
+        <div className="cd-workspace-toolbar shrink-0 items-center gap-2 px-2">
+        <ToolButton onClick={() => setScreen("welcome")} title="Return to capture file and interface selection">
+          Capture
+        </ToolButton>
         <ToolButton
           onClick={() => void openCapture()}
           disabled={!desktop || opening}
@@ -165,7 +179,7 @@ function ImportedCaptureView() {
         >
           <FolderOpen size={11} /> {opening ? "opening…" : "Open…"}
         </ToolButton>
-        {!capture && <ToolButton onClick={() => { setShowSample(true); setSelected(0); }} title="Open explicitly labeled demonstration data, not case evidence">Sample</ToolButton>}
+        {!capture && <ToolButton onClick={() => { setShowSample(true); setSelected(0); setScreen("offline"); }} title="Open explicitly labeled demonstration data, not case evidence">Sample</ToolButton>}
 
         <TextInput
           value={filter}
@@ -189,46 +203,24 @@ function ImportedCaptureView() {
         </div>
       ) : null}
 
-      <div className="flex min-h-0 flex-1 flex-col">
-        <div ref={packetScrollRef}
+      <PacketPaneSplit
+        list={        <div ref={packetScrollRef}
           onScroll={(event) => setPacketScrollTop(event.currentTarget.scrollTop)}
-          className="flex min-h-0 flex-[5] flex-col overflow-auto border-b border-line">
+          className="h-full overflow-auto bg-panel">
           {tab === "packets" ? (
-            <table className="data-table">
-              <thead>
-                <tr>
-                  <th className="w-10">No.</th>
-                  <th className="w-24">Time</th>
-                  <th className="w-32">Source</th>
-                  <th className="w-32">Destination</th>
-                  <th className="w-20">Protocol</th>
-                  <th className="w-16">Length</th>
-                  <th>Info</th>
-                </tr>
-              </thead>
-              <tbody>
-                {firstVisible > 0 ? <tr aria-hidden="true"><td colSpan={7} style={{ height: firstVisible * rowHeight, padding: 0, border: 0 }} /></tr> : null}
-                {filtered.slice(firstVisible, lastVisible).map((p) => (
-                  <tr
-                    key={p.index}
-                    onClick={() => setSelected(p.index)}
-                    tabIndex={0}
-                    aria-selected={p.index === current?.index}
-                    onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); setSelected(p.index); } }}
-                    className={`h-[22px] cursor-pointer ${p.index === current?.index ? "selected" : ""}`}
-                  >
-                    <td className="text-fg-muted">{p.index + 1}</td>
-                    <td>{timeLabel(p.time_ms)}</td>
-                    <td className="text-fg">{p.source}</td>
-                    <td className="text-fg">{p.destination}</td>
-                    <td className={PROTOCOL_COLORS[p.color_hint] ?? "text-fg-dim"}>{p.protocol}</td>
-                    <td>{p.length}</td>
-                    <td className="text-fg-dim">{p.info}</td>
-                  </tr>
-                ))}
-                {lastVisible < filtered.length ? <tr aria-hidden="true"><td colSpan={7} style={{ height: (filtered.length - lastVisible) * rowHeight, padding: 0, border: 0 }} /></tr> : null}
-              </tbody>
-            </table>
+            <PacketTable
+              rows={filtered.slice(firstVisible, lastVisible).map((p) => ({
+                index: p.index, time: timeLabel(p.time_ms),
+                source: p.source, destination: p.destination,
+                protocol: p.protocol, length: p.length, info: p.info,
+                protocolColor: PROTOCOL_COLORS[p.color_hint] ?? "text-fg-dim",
+              }))}
+              selectedIndex={current?.index ?? null}
+              onSelect={setSelected}
+              topSpacer={firstVisible * rowHeight}
+              bottomSpacer={(filtered.length - lastVisible) * rowHeight}
+              empty={showSample || capture ? "No packets match the display filter" : "No capture loaded"}
+            />
           ) : tab === "conversations" ? (
             <table className="data-table">
               <thead>
@@ -287,17 +279,9 @@ function ImportedCaptureView() {
             <FollowStreamView packets={filtered} />
           )}
         </div>
-
-        <div className="flex min-h-0 flex-[3]">
-          <div
-            aria-label="Packet details container"
-            className={detailsWidth === null ? "flex min-w-0 flex-1 flex-col overflow-hidden bg-panel" : "flex shrink-0 flex-col overflow-hidden bg-panel"}
-            style={detailsWidth === null ? undefined : { width: detailsWidth }}
-          >
-            <div className="cd-workspace-toolbar shrink-0 items-center  px-2 text-[10px] font-medium uppercase tracking-wider text-fg-muted">
-              Packet details: {current ? `frame ${current.index + 1}` : "no selection"}
-            </div>
-            <div className="min-h-0 flex-1 overflow-auto p-1">
+}
+        detailTitle={`Packet details: ${current ? "frame " + (current.index + 1) : "no selection"}`}
+        details={            <div className="min-h-0 flex-1 overflow-auto p-1">
               {current ? (
                 capture ? (
                   current.layers.map((layer, i) => (
@@ -307,39 +291,18 @@ function ImportedCaptureView() {
                   detailTree(SAMPLE_PACKETS[current.index]).map((node, i) => <DetailBranch key={i} node={node} depth={0} />)
                 )
               ) : null}
-            </div>
-          </div>
-          <Resizer
-            direction="horizontal"
-            ariaLabel="Resize packet details"
-            value={detailsWidth ?? 0}
-            onChange={setDetailsWidth}
-            min={240}
-            max={720}
-            onDragStart={() => {
-              if (detailsWidth === null) {
-                const left = document.querySelector('div[aria-label="Packet details container"]');
-                const measured = Math.round((left?.getBoundingClientRect().width ?? 0));
-                setDetailsWidth(measured);
-                return measured;
-              }
-            }}
-          />
-          <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden bg-panel">
-            <div className="cd-workspace-toolbar shrink-0 items-center  px-2 text-[10px] font-medium uppercase tracking-wider text-fg-muted">
-              <span className="flex-1">Packet bytes (offset · hex · ascii)</span>
-              <ToolButton
-                disabled={!capture || !current || !currentBytes || currentBytes.rows.length === 0}
-                title="Transfer selected captured frame bytes to the Recipes workspace"
-                onClick={() => {
-                  if (!capture || !current || !currentBytes) return;
-                  const hex = currentBytes.rows.map((row) => row.hex.replace(/[^0-9a-f]/gi, "")).join("");
-                  wb.sendToRecipes(hex, `${capture.file_name}: frame ${current.index + 1} (visible bytes)`,
-                    [{ opId: "from_hex", enabled: true }]);
-                }}
-              >Send to Recipes</ToolButton>
-            </div>
-            <div className="min-h-0 flex-1 overflow-auto">
+            </div>}
+        bytesTitle="Packet bytes (offset · hex · ASCII)"
+        bytesActions={<ToolButton
+  disabled={!capture || !current || !currentBytes || currentBytes.rows.length === 0}
+  title="Transfer selected captured frame bytes to Recipes"
+  onClick={() => {
+    if (!capture || !current || !currentBytes) return;
+    const hex = currentBytes.rows.map((row) => row.hex.replace(/[^0-9a-f]/gi, "")).join("");
+    wb.sendToRecipes(hex, `${capture.file_name}: frame ${current.index + 1} (visible bytes)`,
+      [{ opId: "from_hex", enabled: true }]);
+  }}>Send to Recipes</ToolButton>}
+        bytes={            <div className="min-h-0 flex-1 overflow-auto">
               {capture && currentBytes ? (
                 <pre className="p-1 font-mono text-[11px] leading-relaxed text-fg-dim">
                   {currentBytes.rows.map((row) => (
@@ -365,13 +328,11 @@ function ImportedCaptureView() {
                   ))}
                 </pre>
               ) : null}
-            </div>
-          </div>
-        </div>
-      </div>
-
+            </div>}
+      />
       <WorkspaceTabs items={["packets", "conversations", "statistics", "streams"] as const}
         active={tab} onChange={setTab} placement="bottom" ariaLabel="Packet investigation views" />
+      </div>
     </div>
   );
 }

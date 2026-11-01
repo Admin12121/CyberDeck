@@ -109,7 +109,25 @@ export async function recoveryDevicesV1(): Promise<RecoveryDeviceInventoryV1> {
   return invoke<RecoveryDeviceInventoryV1>("recovery_devices_v1", {});
 }
 
-/** Opens a native wordlist picker; streams only masked progress and results. */
+export interface RecoveryWordlistV1 {
+  name: string;
+  size_bytes: number;
+}
+
+/** Operator-selects a wordlist in a native file picker. Only safe metadata
+ * is returned; the backend owns and case-scopes the private filesystem path.
+ */
+export async function recoverySelectWordlistV1(): Promise<RecoveryWordlistV1> {
+  if (!inTauri) throw new Error("Wordlist selection requires the native desktop");
+  return invoke<RecoveryWordlistV1>("recovery_select_wordlist_v1");
+}
+
+export async function recoveryWordlistStatusV1(): Promise<RecoveryWordlistV1 | null> {
+  if (!inTauri) return null;
+  return invoke<RecoveryWordlistV1 | null>("recovery_wordlist_status_v1");
+}
+
+/** Starts recovery using the previously OS-selected backend wordlist. */
 export async function recoveryStartV1(
   request: RecoveryRequestV1, onEvent: (event: RecoveryEventV1) => void,
 ): Promise<number> {

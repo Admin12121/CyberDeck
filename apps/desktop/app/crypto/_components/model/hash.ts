@@ -24,11 +24,11 @@ export function detectHashFormats(input: string): HashFormatCandidate[] {
     }
   };
 
-  hexLen(32, "MD5 / NTLM / MD4 family", true, "32 hex chars; several formats share this shape; identifier narrows with context");
-  hexLen(40, "SHA-1 / MySQL5 / RIPEMD-160", true, "40 hex chars");
-  hexLen(64, "SHA-256 / SHA3-256 / BLAKE2s-256", true, "64 hex chars");
+  hexLen(32, "MD5 / NTLM / MD4 family", true, "32 hex characters; different algorithms share this shape", "medium");
+  hexLen(40, "SHA-1 / MySQL5 / RIPEMD-160", true, "40 hex characters; multiple algorithms share this shape", "medium");
+  hexLen(64, "SHA-256 / SHA3-256 / BLAKE2s-256", true, "64 hex characters; multiple algorithms share this shape", "medium");
   hexLen(96, "SHA-384", true, "96 hex chars");
-  hexLen(128, "SHA-512 / Whirlpool / BLAKE2b-512", true, "128 hex chars");
+  hexLen(128, "SHA-512 / Whirlpool / BLAKE2b-512", true, "128 hex characters; multiple algorithms share this shape", "medium");
   hexLen(16, "MySQL pre-4.1", false, "16 hex chars, legacy MySQL password hash", "medium");
   hexLen(41, "MySQL5 (SHA-1 with seed)", true, "leading '*' + 40 hex chars", "medium");
 
@@ -36,19 +36,19 @@ export function detectHashFormats(input: string): HashFormatCandidate[] {
     candidates.push({ format: "bcrypt", confidence: "high", note: "$2*$ modular crypt format", gpuCapable: false });
   }
   if (/^\$argon2(id|i|d)\$/.test(value)) {
-    candidates.push({ format: "argon2 (id/i/d)", confidence: "high", note: "memory-hard KDF, verifies and cracks natively (slow)", gpuCapable: false });
+    candidates.push({ format: "argon2 (id/i/d)", confidence: "high", note: "Memory-hard KDF; not supported by SHA-256 Recovery V1", gpuCapable: false });
   }
   if (/^\$y\$/.test(value)) {
-    candidates.push({ format: "yescrypt", confidence: "high", note: "yescrypt PHC string (current /etc/shadow default); cracks via john or hashcat 22700", gpuCapable: true });
+    candidates.push({ format: "yescrypt", confidence: "high", note: "yescrypt-style prefix; outside SHA-256 Recovery V1", gpuCapable: true });
   }
   if (/^\$7\$/.test(value)) {
     candidates.push({ format: "yescrypt (scrypt field)", confidence: "medium", note: "libxcrypt scrypt-style prefix, often yescrypt in modern shadows", gpuCapable: true });
   }
   if (/^\$6\$/.test(value)) {
-    candidates.push({ format: "sha512crypt", confidence: "high", note: "$6$ unix crypt; cracks via john or hashcat 1800", gpuCapable: true });
+    candidates.push({ format: "sha512crypt", confidence: "high", note: "Unix crypt-style prefix; outside Recovery V1", gpuCapable: true });
   }
   if (/^\$5\$/.test(value)) {
-    candidates.push({ format: "sha256crypt", confidence: "high", note: "$5$ unix crypt; cracks via john or hashcat 17400", gpuCapable: true });
+    candidates.push({ format: "sha256crypt", confidence: "high", note: "Unix crypt-style prefix; outside Recovery V1", gpuCapable: true });
   }
   if (/^\$NT\$/.test(value)) {
     candidates.push({ format: "NTLM (pass-the-hash form)", confidence: "high", note: "$NT$ prefix", gpuCapable: true });
@@ -59,7 +59,7 @@ export function detectHashFormats(input: string): HashFormatCandidate[] {
   if (/^\$krb5pa\$/.test(value) || /^\$krb5i?\$/.test(value)) {
     candidates.push({ format: "Kerberos AS-REP / TGS-REP", confidence: "high", note: "Kerberos etype hash", gpuCapable: true });
   }
-  if (/^[A-Za-z0-9+/]{20,}={0,2}$/.test(value) && value.length >= 40) {
+  if (/^[A-Za-z0-9+/]{20,}={0,2}$/.test(value) && value.length >= 40 && !HEX_RE.test(value)) {
     candidates.push({ format: "unknown (base64-like)", confidence: "low", note: "not a recognized digest shape; inspect manually or via recipes", gpuCapable: false });
   }
 

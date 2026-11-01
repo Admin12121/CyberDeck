@@ -123,6 +123,8 @@ fn main() {
             features::crypto::ipc::attack::benchmark,
             features::crypto::ipc::attack::device_info,
             features::crypto::ipc::recovery::recovery_devices_v1,
+            features::crypto::ipc::recovery::recovery_select_wordlist_v1,
+            features::crypto::ipc::recovery::recovery_wordlist_status_v1,
             features::crypto::ipc::recovery::recovery_start_v1,
             features::crypto::ipc::recovery::recovery_cancel_v1,
             features::crypto::ipc::recovery::recovery_status_v1,

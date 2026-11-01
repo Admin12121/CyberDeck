@@ -1,10 +1,14 @@
 "use client";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { createContext, useCallback, useContext, useEffect, useRef, useState, type ReactNode } from "react";
+import { Play, Square, Trash2, Eye, EyeOff, Info, FileUp } from "lucide-react";
+import { Chip } from "@ds/panes";
+import { hasCurrentRecoveryScope, isSha256WordlistTarget, recoveryDisplay } from "./recovery-presentation";
 import { Button } from "@/components/ui/button";
 import { Select } from "@ds/panes";
 import { useWorkbenchCase } from "@state/workbench";
 import {
   isDesktop, recoveryCancelV1, recoveryDevicesV1, recoveryDiscardV1,
+  recoverySelectWordlistV1, recoveryWordlistStatusV1, type RecoveryWordlistV1,
   recoveryRevealV1, recoveryStartV1, recoveryStatusV1,
   type RecoveryBackendV1, type RecoveryDeviceInventoryV1,
   type RecoveryJobStatusV1, type RecoveryRequestV1,
@@ -13,7 +17,7 @@ import {
 // Store only a backend-owned opaque job reference across route remounts.
 let currentJob: { scope: string; id: number } | null = null;
 
-export function NativeRecoveryV1({ targetHash }: { targetHash: string }) {
+function useRecoveryController(targetHash: string) {
   const { caseId, caseSession } = useWorkbenchCase();
   const [desktop, setDesktop] = useState(false);
   useEffect(() => setDesktop(isDesktop()), []);
@@ -34,9 +38,13 @@ export function NativeRecoveryV1({ targetHash }: { targetHash: string }) {
   const [secretHex, setSecretHex] = useState<string | null>(null);
   const [revealing, setRevealing] = useState(false);
   const [pendingCancel, setPendingCancel] = useState(false);
+  const [wordlist, setWordlist] = useState<{ scope: string; info: RecoveryWordlistV1 } | null>(null);
+  const [choosingWordlist, setChoosingWordlist] = useState(false);
+  const [wordlistError, setWordlistError] = useState<string | null>(null);
+  const [discarded, setDiscarded] = useState(false);
   const clearReveal = useCallback(() => setSecretHex(null), []);
   const hash = targetHash.trim();
-  const validHash = /^[0-9a-fA-F]{64}$/.test(hash);
+  const validHash = isSha256WordlistTarget(hash);
   const running = status?.phase === "running" || status?.phase === "cancelling";
   const selectedDevice = backend.startsWith("open_cl:") ? Number(backend.slice(8)) : null;
   const deviceAvailable = selectedDevice === null ||
@@ -48,6 +56,9 @@ export function NativeRecoveryV1({ targetHash }: { targetHash: string }) {
     setError(null);
     setBusy(false);
     setPendingCancel(false);
+    setDiscarded(false);
+    setWordlistError(null);
+    setChoosingWordlist(false);
     if (scope && currentJob?.scope === scope) {
       setJobId(currentJob.id);
     } else {
@@ -68,6 +79,19 @@ export function NativeRecoveryV1({ targetHash }: { targetHash: string }) {
     });
     return () => { active = false; };
   }, [desktop, scope]);
+
+  useEffect(() => {
+    if (!scope || !desktop) { setWordlist(null); return; }
+    let active = true;
+    setWordlist(null);
+    void recoveryWordlistStatusV1().then((info) => {
+      if (active && scopeRef.current === scope)
+        setWordlist(info ? { scope, info } : null);
+    }).catch((reason: unknown) => {
+      if (active && scopeRef.current === scope) setWordlistError(String(reason));
+    });
+    return () => { active = false; };
+  }, [scope, desktop]);
 
   useEffect(() => {
     if (!scope || jobId === null) return;
@@ -97,9 +121,28 @@ export function NativeRecoveryV1({ targetHash }: { targetHash: string }) {
     return () => window.clearTimeout(timer);
   }, [secretHex, clearReveal]);
 
+  const selectedWordlist = wordlist?.scope === scope ? wordlist.info : null;
+
+  const chooseWordlist = async () => {
+    if (!desktop || !scope || choosingWordlist || busy || jobId !== null) return;
+    const requestedScope = scope;
+    setChoosingWordlist(true);
+    setWordlistError(null);
+    try {
+      const info = await recoverySelectWordlistV1();
+      if (scopeRef.current === requestedScope) setWordlist({ scope: requestedScope, info });
+    } catch (reason) {
+      if (scopeRef.current === requestedScope && !/cancelled/i.test(String(reason)))
+        setWordlistError(String(reason));
+    } finally {
+      if (scopeRef.current === requestedScope) setChoosingWordlist(false);
+    }
+  };
+
   const start = async () => {
-    if (!scope || !validHash || busy || !deviceAvailable || jobId !== null) return;
+    if (!scope || !validHash || !selectedWordlist || busy || !deviceAvailable || jobId !== null) return;
     clearReveal(); setError(null); setBusy(true); setStatus(null); setJobId(null);
+    setDiscarded(false);
     const requestScope = scope;
     const selected: RecoveryBackendV1 = selectedDevice === null
       ? { backend: "cpu" }
@@ -136,10 +179,13 @@ export function NativeRecoveryV1({ targetHash }: { targetHash: string }) {
   const discard = async () => {
     if (jobId === null || !scope || running) return;
     clearReveal();
-    try { await recoveryDiscardV1(jobId); } catch (reason) { setError(String(reason)); }
+    try {
+      const discarded = await recoveryDiscardV1(jobId);
+      if (!discarded) { setError("Result already revoked; check active case."); return; }
+    } catch (reason) { setError(String(reason)); return; }
     if (scopeRef.current === scope) {
       if (currentJob?.id === jobId) currentJob = null;
-      setJobId(null); setStatus(null);
+      setJobId(null); setStatus(null); setError(null); setDiscarded(true);
     }
   };
 
@@ -159,106 +205,263 @@ export function NativeRecoveryV1({ targetHash }: { targetHash: string }) {
     : !scope ? (caseId === "scratchpad" ? "Select a saved case to authorize recovery"
       : caseSession.error ?? "Waiting for native case selection")
     : !validHash ? "Enter a SHA-256 digest (64 hexadecimal characters)"
+    : !selectedWordlist ? "Choose a local wordlist before starting"
     : !deviceAvailable ? "Selected OpenCL device unavailable" : null;
   const progress = status?.progress;
   const percent = progress && progress.budget > 0
     ? Math.min(100, Math.round(progress.tried / progress.budget * 100)) : 0;
+  // Mask even the next paint after a case switch; effects run after rendering.
+  const scopedJob = hasCurrentRecoveryScope(currentJob, scope, jobId);
 
+  return {
+    desktop, scope, backend, setBackend, inventory, deviceError, batchSize, setBatchSize,
+    maxCandidates, setMaxCandidates, maxMatches, setMaxMatches,
+    jobId: scopedJob ? jobId : null,
+    status: scopedJob ? status : null,
+    busy, error: scopedJob || jobId === null ? error : null,
+    secretHex: scopedJob ? secretHex : null,
+    discarded, revealing, pendingCancel, clearReveal, validHash,
+    selectedWordlist, choosingWordlist, wordlistError, chooseWordlist,
+    running: scopedJob && running, selectedDevice, deviceAvailable, start, cancel, discard, reveal,
+    disabledReason, progress: scopedJob ? progress : null, percent, hash, caseId,
+  };
+}
+
+type RecoveryController = ReturnType<typeof useRecoveryController>;
+const RecoveryContext = createContext<RecoveryController | null>(null);
+function useRecovery() {
+  const state = useContext(RecoveryContext);
+  if (!state) throw new Error("Recovery V1 requires its provider");
+  return state;
+}
+
+export function NativeRecoveryV1({
+  targetHash, children,
+}: { targetHash: string; children: ReactNode }) {
+  const state = useRecoveryController(targetHash);
+  return <RecoveryContext.Provider value={state}>{children}</RecoveryContext.Provider>;
+}
+
+export function NativeRecoveryControls() {
+  const r = useRecovery();
   return (
-    <section aria-label="Native SHA-256 Recovery V1" className="border-b border-line p-2 text-xs">
-      <div className="mb-2 flex items-center justify-between gap-2">
-        <strong>Native SHA-256 recovery</strong>
-        <span className="font-mono text-[10px] text-fg-muted">
-          {scope ? "case authorized" : "case required"} · wordlist
-        </span>
+    <section aria-label="Recovery controls" className="space-y-3 border-b border-line px-3 py-3">
+      <div className="flex items-center justify-between gap-2">
+        <div className="text-xs font-semibold text-fg">Recovery</div>
+        <Chip tone={r.scope ? "ok" : "muted"}>{r.scope ? "Case ready" : "Case required"}</Chip>
       </div>
-      <p className="mb-2 text-[11px] text-fg-muted">
-        Native wordlist picker, CPU or OpenCL, cancellable jobs and masked results.
-        Plaintext requires explicit OS confirmation. Nothing is saved automatically.
-      </p>
-      <div className="grid grid-cols-2 gap-2">
-        <label className="space-y-1">
-          <span className="text-[10px] text-fg-muted">Backend</span>
-          <Select ariaLabel="Recovery V1 backend" value={backend}
-            onChange={(value) => { setBackend(value); clearReveal(); }}
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <span className="text-[11px] text-fg-dim">SHA-256 wordlist recovery · CPU/OpenCL</span>
+        <details className="relative text-[11px] text-fg-muted">
+          <summary className="inline-flex cursor-pointer items-center gap-1 rounded px-1 focus-visible:outline focus-visible:outline-2" aria-label="Recovery security and limits information">
+            <Info size={13} aria-hidden="true" /> Info
+          </summary>
+          <div className="mt-2 max-w-sm rounded border border-line bg-app p-2 leading-relaxed">
+            Choose a wordlist through the native file picker before Start. Running jobs can be stopped.
+            Results are masked; each Reveal requires native OS confirmation.
+            Results expire and are never saved automatically. OpenCL devices
+            are selectable but not hardware-verified.
+          </div>
+        </details>
+      </div>
+      <div className="grid grid-cols-2 gap-3">
+        <label className="col-span-2 space-y-1">
+          <span className="text-[11px] text-fg-muted">Backend</span>
+          <Select ariaLabel="Recovery V1 backend" value={r.backend}
+            onChange={(value) => { r.setBackend(value); r.clearReveal(); }}
             options={[
-              { value: "cpu", label: "CPU — Rust" },
-              ...(inventory?.devices ?? []).map((d) => ({
+              { value: "cpu", label: "CPU · Native Rust" },
+              ...(r.inventory?.devices ?? []).map((d) => ({
                 value: "open_cl:" + d.device_index,
-                label: "OpenCL " + d.device_index + ": " + d.name + " (unverified)",
+                label: "OpenCL " + d.device_index + " · " + d.name,
               })),
             ]} className="w-full" />
         </label>
         <label className="space-y-1">
-          <span className="text-[10px] text-fg-muted">Candidate budget (1–1,000,000)</span>
+          <span className="text-[11px] text-fg-muted">Candidate limit</span>
           <input type="number" aria-label="Recovery candidate budget" min={1} max={1000000}
-            value={maxCandidates} onChange={(e) => {
+            value={r.maxCandidates} onChange={(e) => {
               const n = Number(e.target.value);
-              if (Number.isSafeInteger(n)) setMaxCandidates(Math.max(1, Math.min(1000000, n)));
-            }} className="w-full rounded border border-line bg-app px-2 py-1 font-mono text-xs" />
+              if (Number.isSafeInteger(n)) r.setMaxCandidates(Math.max(1, Math.min(1000000, n)));
+            }} className="h-8 w-full rounded-sm border border-line bg-app px-2 font-mono text-xs text-fg" />
         </label>
         <label className="space-y-1">
-          <span className="text-[10px] text-fg-muted">Maximum matches (1–4)</span>
+          <span className="text-[11px] text-fg-muted">Max matches</span>
           <input type="number" aria-label="Maximum matches" min={1} max={4}
-            value={maxMatches} onChange={(e) => {
+            value={r.maxMatches} onChange={(e) => {
               const n = Number(e.target.value);
-              if (Number.isSafeInteger(n)) setMaxMatches(Math.max(1, Math.min(4, n)));
-            }} className="w-full rounded border border-line bg-app px-2 py-1 font-mono text-xs" />
+              if (Number.isSafeInteger(n)) r.setMaxMatches(Math.max(1, Math.min(4, n)));
+            }} className="h-8 w-full rounded-sm border border-line bg-app px-2 font-mono text-xs text-fg" />
         </label>
-        {selectedDevice !== null ? (
-          <label className="space-y-1">
-            <span className="text-[10px] text-fg-muted">OpenCL batch (1–65,536)</span>
+        {r.selectedDevice !== null ? (
+          <label className="col-span-2 space-y-1">
+            <span className="text-[11px] text-fg-muted">OpenCL batch size</span>
             <input type="number" aria-label="OpenCL batch size" min={1} max={65536}
-              value={batchSize} onChange={(e) => {
+              value={r.batchSize} onChange={(e) => {
                 const n = Number(e.target.value);
-                if (Number.isSafeInteger(n)) setBatchSize(Math.max(1, Math.min(65536, n)));
-              }} className="w-full rounded border border-line bg-app px-2 py-1 font-mono text-xs" />
+                if (Number.isSafeInteger(n)) r.setBatchSize(Math.max(1, Math.min(65536, n)));
+              }} className="h-8 w-full rounded-sm border border-line bg-app px-2 font-mono text-xs text-fg" />
           </label>
         ) : null}
       </div>
-      {inventory ? <p className="mt-1 text-[10px] text-fg-muted">{inventory.detail}</p> : null}
-      {deviceError ? <p role="alert" className="mt-1 text-err">{deviceError}</p> : null}
-      {disabledReason ? <p className="mt-2 text-warn">{disabledReason}</p> : null}
-      <div className="mt-2 flex flex-wrap gap-1">
-        <Button size="sm" disabled={!!disabledReason || busy || jobId !== null}
-          onClick={() => void start()}>{busy ? "Choosing wordlist…" : "Start native recovery"}</Button>
-        <Button size="sm" variant="outline" disabled={!running || pendingCancel}
-          onClick={() => void cancel()}>{status?.phase === "cancelling" ? "Cancelling…" : "Cancel"}</Button>
-        <Button size="sm" variant="outline" disabled={jobId === null || running}
-          onClick={() => void discard()}>Discard</Button>
+      {!r.validHash && r.hash.length > 0 ? (
+        <p role="status" className="text-[11px] text-warn">
+          This input is not a 64-character SHA-256 digest. Recovery V1 cannot process it.
+        </p>
+      ) : null}
+      {r.disabledReason && !(r.hash.length > 0 && !r.validHash) ? (
+        <p role="status" className="text-[11px] text-warn">{r.disabledReason}</p>
+      ) : null}
+      <div className="space-y-1.5">
+        <span className="text-[11px] text-fg-muted">Wordlist</span>
+        <div className="flex min-w-0 items-center gap-2">
+          <Button size="sm" variant="outline" className="h-8 shrink-0 gap-1.5"
+            title="Select a local wordlist through the native OS file picker"
+            disabled={!r.desktop || !r.scope || r.choosingWordlist || r.busy || r.jobId !== null}
+            onClick={() => void r.chooseWordlist()}>
+            <FileUp size={13} aria-hidden="true" />
+            {r.choosingWordlist ? "Selecting…" : "Choose Wordlist"}
+          </Button>
+          <span className="min-w-0 truncate font-mono text-[11px] text-fg-dim"
+            title={r.selectedWordlist?.name ?? "No wordlist selected"}>
+            {r.selectedWordlist?.name ?? "No file selected"}
+          </span>
+        </div>
+        {r.wordlistError ? <p role="alert" className="text-[11px] text-err">{r.wordlistError}</p> : null}
       </div>
-      {jobId !== null ? (
-        <div className="mt-2 space-y-1 font-mono text-[11px]" aria-live="polite">
-          <p>Native job #{jobId} · {status?.phase ?? "loading"}</p>
-          {progress ? <>
-            <p>{progress.tried.toLocaleString()} / {progress.budget.toLocaleString()} tried · {progress.matches} masked matches</p>
-            <progress aria-label="Native recovery progress" value={percent} max={100} className="w-full" />
-          </> : null}
-          {status?.summary ? <>
-            <p>{status.summary.tried.toLocaleString()} tried · {status.summary.matches.length} matches
-              {status.summary.limit_reached ? " · candidate limit reached" : ""}</p>
-            {status.summary.matches.map((match, ordinal) => (
-              <div key={ordinal} className="flex items-center justify-between gap-1">
-                <span>Candidate #{match.candidate_index} · masked</span>
-                <Button size="sm" variant="outline" disabled={!status.reveal_available || revealing}
-                  onClick={() => void reveal(ordinal)}>Reveal (OS consent)</Button>
-              </div>
-            ))}
-            {!!status.summary.matches.length && !status.reveal_available
-              ? <p>Confidential results expired, revoked or unavailable.</p> : null}
-          </> : null}
-        </div>
-      ) : null}
-      {secretHex !== null ? (
-        <div role="region" aria-label="Transient recovered candidate" className="mt-2 border border-line p-2">
-          <div className="mb-1 flex items-center justify-between gap-1">
-            <span className="text-warn">Sensitive hex · hides after 30 seconds</span>
-            <Button size="sm" variant="outline" onClick={clearReveal}>Hide</Button>
-          </div>
-          <code className="break-all">{secretHex}</code>
-        </div>
-      ) : null}
-      {error ? <p role="alert" className="mt-2 break-words text-err">{error}</p> : null}
+      <div role="group" aria-label="Recovery action">
+        {r.busy || r.jobId === null ? (
+          <Button size="sm" className="h-8 min-w-28 gap-1.5"
+            title={r.disabledReason ?? "Start the selected native SHA-256 wordlist recovery"}
+            disabled={!!r.disabledReason || r.busy || r.choosingWordlist}
+            onClick={() => void r.start()}>
+            <Play size={14} aria-hidden="true" /> {r.busy ? "Starting…" : "Start"}
+          </Button>
+        ) : r.status === null ? (
+          <Button size="sm" className="h-8 min-w-28" disabled>Loading job…</Button>
+        ) : r.running ? (
+          <Button size="sm" variant="outline" className="h-8 min-w-28 gap-1.5"
+            title="Request cancellation; the native worker stops cooperatively"
+            disabled={r.pendingCancel || r.status.phase === "cancelling"}
+            onClick={() => void r.cancel()}>
+            <Square size={13} aria-hidden="true" />
+            {r.pendingCancel || r.status.phase === "cancelling" ? "Stopping…" : "Stop"}
+          </Button>
+        ) : (
+          <Button size="sm" variant="outline" className="h-8 min-w-28 gap-1.5"
+            title="Discard finished or failed results and return to Start"
+            disabled={r.revealing}
+            onClick={() => void r.discard()}>
+            <Trash2 size={13} aria-hidden="true" /> Discard
+          </Button>
+        )}
+      </div>
     </section>
+  );
+}
+
+export function NativeRecoveryDevices() {
+  const { inventory, deviceError, desktop } = useRecovery();
+  return (
+    <section aria-label="Recovery devices" className="space-y-2 px-3 py-3 text-[11px]">
+      <div className="text-xs font-semibold text-fg">Devices</div>
+      <div className="flex items-center justify-between gap-2">
+        <span>CPU · Native Rust</span><Chip tone={desktop ? "ok" : "muted"}>{desktop ? "Available" : "Desktop only"}</Chip>
+      </div>
+      {(inventory?.devices ?? []).map((device) => (
+        <div key={device.device_index} className="flex flex-wrap items-start justify-between gap-2 border-t border-line pt-2">
+          <span className="min-w-0 flex-1 break-words">
+            {device.name}<span className="block text-fg-muted">{device.vendor} · {device.driver}</span>
+          </span>
+          <Chip tone="muted">Unverified</Chip>
+        </div>
+      ))}
+      {desktop && inventory?.devices.length === 0 ? (
+        <p className="text-fg-muted">No OpenCL devices detected. CPU remains available.</p>
+      ) : null}
+      {deviceError ? <p role="alert" className="text-err">{deviceError}</p> : null}
+      {inventory && !inventory.opencl_detected ? (
+        <details className="text-fg-muted">
+          <summary className="cursor-pointer">OpenCL details</summary>
+          <p className="mt-1 break-words">{inventory.detail}</p>
+        </details>
+      ) : null}
+    </section>
+  );
+}
+
+export function NativeRecoveryResults() {
+  const r = useRecovery();
+  const view = recoveryDisplay(r.scope, r.jobId, r.status, r.error, r.discarded);
+  const matches = r.status?.summary?.matches ?? [];
+  const [visibleMatches, setVisibleMatches] = useState(16);
+  useEffect(() => { setVisibleMatches(16); }, [r.scope, r.jobId]);
+  const isActive = view.kind === "running";
+  return (
+    <div className="h-full min-h-0 space-y-3 overflow-y-auto p-3"
+      aria-live="polite" aria-relevant="text" aria-label="Scroll recovery results"
+      onScroll={(event) => {
+        const node = event.currentTarget;
+        if (node.scrollTop + node.clientHeight >= node.scrollHeight - 72) {
+          setVisibleMatches((count) => Math.min(count + 16, matches.length));
+        }
+      }}>
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="flex items-center gap-2">
+          <span className="text-xs font-medium text-fg">{view.title}</span>
+          {isActive ? <Chip tone="orange">Active</Chip> : null}
+          {view.kind === "completed" ? <Chip tone="ok">Masked</Chip> : null}
+          {view.kind === "failed" ? <Chip tone="err">Failed</Chip> : null}
+        </div>
+        {r.jobId !== null ? <span className="font-mono text-[11px] text-fg-muted">Job #{r.jobId}</span> : null}
+      </div>
+      <p className="text-[11px] leading-relaxed text-fg-muted">{view.detail}</p>
+      {r.status?.progress && (
+        <div className="space-y-1.5">
+          <div className="flex justify-between gap-2 font-mono text-[11px] text-fg-dim">
+            <span>{r.status.progress.tried.toLocaleString()} / {r.status.progress.budget.toLocaleString()} candidates</span>
+            <span>{r.percent}%</span>
+          </div>
+          <progress className="h-2 w-full" aria-label="Native recovery progress" value={r.percent} max={100} />
+        </div>
+      )}
+      {r.status?.summary && (
+        <div className="flex flex-wrap gap-3 text-[11px] text-fg-muted">
+          <span>{r.status.summary.tried.toLocaleString()} checked</span>
+          <span>{r.status.summary.duration_ms.toLocaleString()} ms</span>
+          {r.status.summary.limit_reached ? <span>Candidate limit reached</span> : null}
+        </div>
+      )}
+      {matches.length > 0 && (
+        <div className="space-y-2" aria-label="Masked recovered candidates">
+          {matches.slice(0, visibleMatches).map((match, ordinal) => (
+            <div key={ordinal} className="flex items-center justify-between gap-2 rounded-sm border border-line bg-app px-3 py-2">
+              <div className="min-w-0">
+                <p className="font-mono text-xs text-fg">••••••••</p>
+                <p className="mt-1 text-[11px] text-fg-muted">Candidate #{match.candidate_index}</p>
+              </div>
+              <Button size="sm" variant="outline" className="h-8 gap-1.5"
+                title="Native OS confirmation required before revealing sensitive candidate bytes"
+                disabled={r.status?.phase !== "completed" || !r.status.reveal_available || r.revealing}
+                onClick={() => void r.reveal(ordinal)}>
+                <Eye size={13} aria-hidden="true" /> Reveal
+              </Button>
+            </div>
+          ))}
+        </div>
+      )}
+      {visibleMatches < matches.length ? <p className="text-[11px] text-fg-muted">Scroll to view more masked matches</p> : null}
+      {r.secretHex !== null && (
+        <div role="region" aria-label="Transient recovered candidate" className="rounded-sm border border-line bg-app p-3">
+          <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+            <span className="text-[11px] text-warn">Sensitive hex · auto-hide in 30 seconds</span>
+            <Button size="sm" variant="outline" className="h-8 gap-1"
+              onClick={r.clearReveal}><EyeOff size={13} aria-hidden="true" /> Hide</Button>
+          </div>
+          <code className="break-all font-mono text-xs text-fg">{r.secretHex}</code>
+        </div>
+      )}
+      {r.error && r.jobId !== null && <p role="alert" className="text-[11px] text-err">{r.error}</p>}
+    </div>
   );
 }

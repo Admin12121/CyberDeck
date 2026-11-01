@@ -1,8 +1,13 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
-import { Play, RefreshCw, Square } from "lucide-react";
-import { Chip, EmptyState, Pane, Select, TextInput, ToolButton, WorkspaceTabs } from "@ds/panes";
+import { Play, RefreshCw, Square, Settings2, Info, MonitorDot } from "lucide-react";
+import { Router } from "@lucasmarkes/hairline/react";
+import { Button } from "@/components/ui/button";
+import { Chip, EmptyState, Select, TextInput, ToolButton, WorkspaceTabs } from "@ds/panes";
+import { PacketTable } from "./PacketTable";
+import { PacketPaneSplit } from "./PacketPaneSplit";
+import { nativeCapturePacketRow } from "./packet-row-model";
 import {
   isDesktop, captureInterfacesV1, captureStartV1, captureStatusV1, captureStopV1,
   captureProvenanceV1, captureHostsV1, captureFlowsV1, captureFramePageV1,
@@ -15,7 +20,8 @@ import { useWorkspaceDraft } from "@state/workspace-sessions";
 import { activeCaptureId, boundedPageOffset, captureLimits, matchesCaptureIdentity } from "./capture-view-policy";
 import { currentNativeSession, dropNativeSession, rememberNativeSession, subscribeNativeSessions } from "./capture-session-registry";
 
-type Tab = "packets" | "hosts" | "flows";
+type DataTab = "packets" | "hosts" | "flows";
+type Tab = DataTab | "statistics";
 type SessionRef = { id: number; revision: number };
 type Pages = {
   packets: CapturePageV1<CaptureFrameProvenanceV1>;
@@ -27,11 +33,22 @@ function emptyPage<T>(): CapturePageV1<T> { return { total: 0, offset: 0, entrie
 function emptyPages(): Pages { return { packets: emptyPage(), hosts: emptyPage(), flows: emptyPage() }; }
 function message(error: unknown): string { return error instanceof Error ? error.message : String(error); }
 function bytesAsHex(bytes: number[], startOffset = 0): string {
-  return bytes.map((byte, index) => (index % 16 === 0 ? (index ? "\n" : "") + (startOffset + index).toString(16).padStart(4, "0") + "  " : " ") + byte.toString(16).padStart(2, "0")).join("");
+  const rows: string[] = [];
+  for (let i = 0; i < bytes.length; i += 16) {
+    const chunk = bytes.slice(i, i + 16);
+    const hex = chunk.map((value) => value.toString(16).padStart(2, "0")).join(" ");
+    const ascii = chunk.map((value) => value >= 32 && value <= 126 ? String.fromCharCode(value) : ".").join("");
+    rows.push(`${(startOffset + i).toString(16).padStart(4, "0")}  ${hex.padEnd(47)}  ${ascii}`);
+  }
+  return rows.join("\n");
 }
 
 /** Native jobs continue in Rust across route navigation; cache only a session reference, never raw evidence. */
-export function LiveCaptureView() {
+export function LiveCaptureView({ presentation = "full", onCaptureStarted, onReturnToStart }: {
+  presentation?: "setup" | "full";
+  onCaptureStarted?: () => void;
+  onReturnToStart?: () => void;
+}) {
   const desktop = isDesktop();
   const { caseId, caseSession } = useWorkbenchCase();
   const revision = caseSession.phase === "ready" && caseSession.caseId === caseId ? caseSession.revision : null;
@@ -55,9 +72,11 @@ export function LiveCaptureView() {
   const [pages, setPages] = useState<Pages>(emptyPages);
   const [frame, setFrame] = useState<CaptureFramePageV1 | null>(null);
   const [selectedIndex, setSelectedIndex] = useState<number | null>(null);
+  const [detailsWidth, setDetailsWidth] = useState<number | null>(null);
   const [working, setWorking] = useState(false);
   const [loadingPages, setLoadingPages] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [showLimits, setShowLimits] = useState(false);
 
   const valid = useCallback((key: string, version: number) =>
     currentIdentity.current === key && token.current === version, []);
@@ -122,7 +141,7 @@ export function LiveCaptureView() {
     return () => clearInterval(interval);
   }, [desktop, sessionId, identity, poll, status?.phase]);
 
-  const loadPages = useCallback(async (id: number, key: string, version: number, offsets: Record<Tab, number>) => {
+  const loadPages = useCallback(async (id: number, key: string, version: number, offsets: Record<DataTab, number>) => {
     const order = ++pageRequest.current;
     setLoadingPages(true);
     try {
@@ -144,8 +163,8 @@ export function LiveCaptureView() {
     void loadPages(sessionId, identity, token.current, { packets: 0, hosts: 0, flows: 0 });
   }, [readable, sessionId, identity, loadPages]);
 
-  async function start() {
-    if (!canStart || revision === null) return;
+  async function start(selectedDevice = device) {
+    if (!desktop || revision === null || running || working || !eligible.some((entry) => entry.name === selectedDevice)) return;
     const limits = captureLimits(maxPackets, memoryMiB, seconds);
     if (!limits) {
       setError("Use whole-number limits: 1–20000 packets, 1–16 MiB and 1–600 seconds."); return;
@@ -153,7 +172,7 @@ export function LiveCaptureView() {
     const key = identity, version = ++token.current;
     setWorking(true); setStatus(null); setPages(emptyPages()); setFrame(null); setError(null);
     try {
-      const next = await captureStartV1(device, limits);
+      const next = await captureStartV1(selectedDevice, limits);
       if (next.case_id !== caseId || !Number.isSafeInteger(next.session_id) || next.session_id <= 0) throw new Error("invalid backend capture identity");
       // The native dialog may resolve after this route unmounts. Keep only the
       // backend-owned identity so a later mount can resume status and Stop.
@@ -161,6 +180,7 @@ export function LiveCaptureView() {
       if (!valid(key, version)) return;
       setReference({ id: next.session_id, revision });
       setStatus(next);
+      onCaptureStarted?.();
     } catch (cause) {
       if (valid(key, version)) setError("Capture start: " + message(cause));
     } finally {
@@ -197,9 +217,9 @@ export function LiveCaptureView() {
   }
 
   function movePage(delta: number) {
-    const current = pages[tab];
+    const current = pages[tab === "statistics" ? "packets" : tab];
     const offset = boundedPageOffset(current.offset, current.total, delta, SIZE);
-    if (!readable || sessionId === null || loadingPages || offset === null) return;
+    if (!readable || sessionId === null || loadingPages || tab === "statistics" || offset === null) return;
     void loadPages(sessionId, identity, token.current, {
       packets: tab === "packets" ? offset : pages.packets.offset,
       hosts: tab === "hosts" ? offset : pages.hosts.offset,
@@ -207,96 +227,269 @@ export function LiveCaptureView() {
     });
   }
 
-  const page = pages[tab];
+  const page = pages[tab === "statistics" ? "packets" : tab];
+  if (presentation === "setup") {
+    return (
+      <section aria-label="Capture interfaces" className="w-full px-5 pb-5 sm:px-7">
+        <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+          <div className="flex items-baseline gap-3">
+            <h2 className="text-sm font-semibold">Capture</h2>
+            {desktop && (
+              <span className="text-xs text-fg-muted">
+                {devices.length ? `${eligible.length} available · ${devices.length} found` : "Interfaces"}
+              </span>
+            )}
+          </div>
+          {desktop && (
+            <Button size="xs" variant="ghost" onClick={() => void discover()}
+              title="Refresh network interfaces" aria-label="Refresh network interfaces">
+              <RefreshCw size={14} /> Refresh
+            </Button>
+          )}
+        </div>
+        {!desktop ? (
+          <div className="flex flex-col items-start gap-2 py-2">
+            <Router label="Network interfaces unavailable" theme="dark" className="w-28 max-w-full opacity-50" />
+            <p className="text-xs text-fg-muted">Live capture requires the desktop application.</p>
+          </div>
+        ) : (
+          <div className="min-w-0">
+            {devices.length === 0 ? (
+              <p className="px-4 py-4 text-sm text-fg-muted">
+                No interfaces found. Use Refresh to retry.
+              </p>
+            ) : (
+              <div aria-label="Native capture interfaces" className="max-h-52 overflow-y-auto">
+                {devices.map((entry) => {
+                  const supported = entry.up && entry.ethernet && !entry.loopback;
+                  const selected = device === entry.name;
+                  return (
+                    <Button key={entry.index + ":" + entry.name} type="button"
+                      aria-pressed={selected} disabled={!supported || running || working}
+                      variant="ghost" size="sm"
+                      onClick={() => { setDevice(entry.name); void start(entry.name); }}
+                      className={`flex h-auto min-h-10 w-full justify-start gap-3 rounded-none border-b border-line px-4 py-2.5 text-left font-normal last:border-b-0 hover:bg-accent ${selected ? "bg-selected" : ""}`}>
+                      <span aria-hidden="true" className={`size-2.5 shrink-0 rounded-full border ${selected ? "border-fg bg-fg" : "border-fg-muted"}`} />
+                      <MonitorDot size={16} className="shrink-0 text-fg-muted" />
+                      <span className="min-w-0 flex-1 truncate font-mono text-xs text-fg">{entry.name}</span>
+                      <span className="shrink-0 text-xs text-fg-muted">
+                        {entry.loopback ? "Loopback" : entry.ethernet ? "Ethernet" : "Other"}
+                      </span>
+                      <span className={`shrink-0 text-xs ${supported ? "text-fg-dim" : "text-fg-muted"}`}>
+                        {entry.up ? supported ? "Ready" : "Unsupported" : "Down"}
+                      </span>
+                    </Button>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        )}
+        <div className="mt-3 flex flex-wrap items-center gap-2">
+          {running && sessionId !== null && (
+            <Button variant="destructive-outline" size="sm" disabled={working || status?.phase === "stopping"}
+              onClick={() => void stop()}><Square size={13} /> Stop</Button>
+          )}
+          {sessionId !== null && (
+            <Button variant="outline" size="sm" onClick={() => onCaptureStarted?.()}>
+              View Capture
+            </Button>
+          )}
+          {desktop && (
+            <Button variant="ghost" size="sm" aria-expanded={showLimits}
+              aria-controls="capture-advanced-limits" onClick={() => setShowLimits((value) => !value)}>
+              <Settings2 size={14} /> Options
+            </Button>
+          )}
+          {desktop && (
+            <Button variant="ghost" size="icon" aria-label="Capture permissions and limitations"
+              title="Linux desktop only. Live capture needs a saved authorized case, explicit operator consent and raw-socket permission. Capture filters are not supported; display filters apply during offline inspection.">
+              <Info size={14} aria-hidden="true" />
+            </Button>
+          )}
+          {desktop && revision === null && (
+            <span className="text-xs text-fg-muted">Saved case required</span>
+          )}
+          {status && (
+            <span className="ml-auto text-xs text-fg-muted">
+              {status.phase} · {status.progress.packets} frames
+            </span>
+          )}
+        </div>
+        {showLimits && desktop && (
+          <div id="capture-advanced-limits" className="mt-3 flex flex-wrap gap-3 rounded-md border border-line bg-panel p-3">
+            <label className="flex flex-col gap-1 text-xs text-fg-muted">Packets
+              <TextInput value={maxPackets} onChange={setMaxPackets} ariaLabel="Maximum packets" className="w-28" />
+            </label>
+            <label className="flex flex-col gap-1 text-xs text-fg-muted">Memory (MiB)
+              <TextInput value={memoryMiB} onChange={setMemoryMiB} ariaLabel="Memory limit in MiB" className="w-28" />
+            </label>
+            <label className="flex flex-col gap-1 text-xs text-fg-muted">Duration (s)
+              <TextInput value={seconds} onChange={setSeconds} ariaLabel="Maximum capture seconds" className="w-28" />
+            </label>
+          </div>
+        )}
+        {(error || caseSession.error) && (
+          <p role="alert" className="mt-3 text-xs text-err">{error || caseSession.error}</p>
+        )}
+      </section>
+    );
+  }
+  const selectedPacket = pages.packets.entries.find((packet) => packet.packet_index === selectedIndex);
   return (
-    <div className="flex h-full min-h-0 flex-col">
+    <div className="flex h-full min-h-0 flex-col" aria-label="Native packet analyzer">
       <div className="cd-workspace-toolbar shrink-0 items-center gap-2 px-2">
+        {onReturnToStart && (
+          <Button variant="ghost" size="sm" onClick={onReturnToStart}>Capture selection</Button>
+        )}
         <span className="text-[10px] uppercase text-fg-muted">Interface</span>
         <Select value={device} onChange={setDevice} ariaLabel="Native capture interface" className="w-44"
           options={eligible.length ? eligible.map((entry) => ({ value: entry.name, label: entry.name + " · " + entry.index })) :
             [{ value: "-", label: "No eligible Ethernet interface" }]} />
-        <ToolButton onClick={() => void discover()} disabled={!desktop} title="Refresh native interface list"><RefreshCw size={12} /> Refresh</ToolButton>
+        <ToolButton onClick={() => void discover()} disabled={!desktop} title="Refresh native interface list">
+          <RefreshCw size={12} /> Refresh
+        </ToolButton>
         {running ? (
           <ToolButton tone="danger" onClick={() => void stop()} disabled={working || status?.phase === "stopping"}>
             <Square size={12} /> {status?.phase === "stopping" ? "Stopping…" : "Stop"}
           </ToolButton>
         ) : (
           <ToolButton tone="primary" onClick={() => void start()} disabled={!canStart}
-            title="Requires a selected investigation case, native confirmation and Linux CAP_NET_RAW">
-            <Play size={12} /> {working ? "Confirming…" : "Capture"}
+            title="Requires a saved case, native confirmation and Linux CAP_NET_RAW">
+            <Play size={12} /> {working ? "Confirming…" : "Start Capture"}
           </ToolButton>
         )}
-        <Chip tone={running ? "orange" : status?.phase === "failed" ? "err" : readable ? "ok" : "muted"}>{status?.phase ?? "idle"}</Chip>
-        <span className="ml-auto text-[10px] text-fg-muted">{status ? String(status.progress.packets) + " frames · " + String(status.progress.stored_pcap_bytes) + " PCAP bytes" : "Native Linux Ethernet"}</span>
+        <Chip tone={running ? "orange" : status?.phase === "failed" ? "err" : readable ? "ok" : "muted"}>
+          {status?.phase ?? "idle"}
+        </Chip>
+        <span className="ml-auto truncate text-[10px] text-fg-muted">
+          {status ? status.progress.packets + " frames · " + status.progress.stored_pcap_bytes + " PCAP bytes" : "Native Linux Ethernet"}
+        </span>
       </div>
-      <div className="flex shrink-0 flex-wrap items-center gap-3 border-b border-line px-3 py-2 text-[11px] text-fg-muted">
+      <div className="flex shrink-0 flex-wrap items-center gap-3 border-b border-line px-3 py-1.5 text-[11px] text-fg-muted">
         <label>Packets <TextInput value={maxPackets} onChange={setMaxPackets} ariaLabel="Maximum packets" className="ml-1 inline-flex w-20" /></label>
         <label>Memory MiB <TextInput value={memoryMiB} onChange={setMemoryMiB} ariaLabel="Memory budget MiB" className="ml-1 inline-flex w-16" /></label>
         <label>Duration s <TextInput value={seconds} onChange={setSeconds} ariaLabel="Capture duration in seconds" className="ml-1 inline-flex w-16" /></label>
-        <span>{revision === null ? "Select a saved investigation case (temporary workspace cannot capture)." : "Case " + caseId + " · revision " + revision}</span>
-        <ToolButton disabled title="Immutable Save-to-Case requires the approved storage transaction and digest readback">Save to Case unavailable</ToolButton>
+        <span>{revision === null ? "Saved case required for live capture." : "Case " + caseId + " · rev " + revision}</span>
+        <ToolButton disabled title="Immutable Save-to-Case requires the approved storage transaction and digest readback">
+          Save to Case unavailable
+        </ToolButton>
       </div>
-      {(error || caseSession.error) ? <div role="alert" className="border-b border-err/50 bg-err/10 px-3 py-1 text-xs text-err">{error || caseSession.error}</div> : null}
-      <WorkspaceTabs items={["packets", "hosts", "flows"] as const} active={tab} onChange={setTab} ariaLabel="Captured packets and passive inventory" />
-      {status && <div className="flex shrink-0 flex-wrap gap-3 border-b border-line px-3 py-1 text-[10px] text-fg-muted">
-        <span>Session #{status.session_id} · {status.interface}</span>
-        <span>Packets {status.progress.packets}</span>
-        <span>Oversized discarded {status.progress.oversized_frames_discarded}</span>
-        <span>{status.stop_reason ? "Stop: " + status.stop_reason : "Capture active or pending"}</span>
-      </div>}
-      <div className="min-h-0 flex-1 flex flex-col">
-        {readable ? (
-          <>
-            <div className="min-h-0 flex-1 overflow-auto">
-              {tab === "packets" ? <table className="data-table">
-                <thead><tr><th>Frame</th><th>PCAP offset</th><th>Source</th><th>Destination</th><th>Length</th><th>Flow</th></tr></thead>
-                <tbody>{pages.packets.entries.map((entry) => (
-                  <tr key={entry.packet_index} className="cursor-pointer" onClick={() => void inspect(entry.packet_index)}>
-                    <td>{entry.packet_index}</td><td>{entry.pcap_frame_offset}</td>
-                    <td>{entry.source ?? "—"}</td><td>{entry.destination ?? "—"}</td>
-                    <td>{entry.captured_length}</td><td className="max-w-64 truncate" title={entry.stream_id ?? ""}>{entry.stream_id ?? "—"}</td>
-                  </tr>
-                ))}</tbody>
-              </table> : tab === "hosts" ? <table className="data-table">
-                <thead><tr><th>Host</th><th>First frame</th><th>Last frame</th><th>Sent</th><th>Received</th><th>Bytes</th></tr></thead>
-                <tbody>{pages.hosts.entries.map((entry) => (
-                  <tr key={entry.address} className="cursor-pointer" onClick={() => { setTab("packets"); void inspect(entry.first_packet_index); }}>
-                    <td>{entry.address}</td><td>{entry.first_packet_index}</td><td>{entry.last_packet_index}</td>
-                    <td>{entry.packets_sent}</td><td>{entry.packets_received}</td>
-                    <td>{entry.captured_bytes_sent + entry.captured_bytes_received}</td>
-                  </tr>
-                ))}</tbody>
-              </table> : <table className="data-table">
-                <thead><tr><th>Flow</th><th>First frame</th><th>Last frame</th><th>Packets</th><th>Bytes</th></tr></thead>
-                <tbody>{pages.flows.entries.map((entry) => (
-                  <tr key={entry.stream_id} className="cursor-pointer" onClick={() => { setTab("packets"); void inspect(entry.first_packet_index); }}>
-                    <td className="max-w-80 truncate" title={entry.stream_id}>{entry.stream_id}</td>
-                    <td>{entry.first_packet_index}</td><td>{entry.last_packet_index}</td><td>{entry.packet_count}</td><td>{entry.captured_bytes}</td>
-                  </tr>
-                ))}</tbody>
-              </table>}
-              {!page.entries.length && <EmptyState title="No observations returned" detail="Only real completed capture data is displayed." />}
+      {(error || caseSession.error) && (
+        <p role="alert" className="border-b border-err/50 bg-err/10 px-3 py-1 text-xs text-err">{error || caseSession.error}</p>
+      )}
+      {status && (
+        <div className="flex shrink-0 flex-wrap items-center gap-3 border-b border-line px-3 py-1 text-[10px] text-fg-muted">
+          <span>Session #{status.session_id} · {status.interface}</span>
+          <span>Packets {status.progress.packets}</span>
+          <span>Oversized discarded {status.progress.oversized_frames_discarded}</span>
+          {status.stop_reason && <span>Stop: {status.stop_reason}</span>}
+          {!readable && running && <span>Frame inspection available once capture completes</span>}
+        </div>
+      )}
+      <PacketPaneSplit
+        list={<div className="flex h-full min-h-0 flex-col">
+        <div className="min-h-0 flex-1 overflow-auto bg-panel">
+          {tab === "packets" ? (
+            <PacketTable
+              rows={pages.packets.entries.map(nativeCapturePacketRow)}
+              selectedIndex={selectedIndex}
+              onSelect={(index) => void inspect(index)}
+              empty={running
+                ? "Capturing frames… live progress is shown above; packet pages are published when the Rust capture finishes."
+                : readable ? "No captured frames in this page" : "Select an interface and start capture, or open a PCAP from Capture selection."}
+            />
+          ) : tab === "hosts" ? (
+            <table className="data-table w-full" aria-label="Captured hosts">
+              <thead><tr><th>Host</th><th>First frame</th><th>Last frame</th><th>Sent</th><th>Received</th><th>Bytes</th></tr></thead>
+              <tbody>{pages.hosts.entries.map((entry) => (
+                <tr key={entry.address} className="cursor-pointer" onClick={() => { setTab("packets"); void inspect(entry.first_packet_index); }}>
+                  <td>{entry.address}</td><td>{entry.first_packet_index + 1}</td><td>{entry.last_packet_index + 1}</td>
+                  <td>{entry.packets_sent}</td><td>{entry.packets_received}</td>
+                  <td>{entry.captured_bytes_sent + entry.captured_bytes_received}</td>
+                </tr>
+              ))}</tbody>
+            </table>
+          ) : tab === "flows" ? (
+            <table className="data-table w-full" aria-label="Captured flows">
+              <thead><tr><th>Flow</th><th>First frame</th><th>Last frame</th><th>Packets</th><th>Bytes</th></tr></thead>
+              <tbody>{pages.flows.entries.map((entry) => (
+                <tr key={entry.stream_id} className="cursor-pointer" onClick={() => { setTab("packets"); void inspect(entry.first_packet_index); }}>
+                  <td className="max-w-80 truncate" title={entry.stream_id}>{entry.stream_id}</td>
+                  <td>{entry.first_packet_index + 1}</td><td>{entry.last_packet_index + 1}</td>
+                  <td>{entry.packet_count}</td><td>{entry.captured_bytes}</td>
+                </tr>
+              ))}</tbody>
+            </table>
+          ) : (
+            <div className="grid gap-3 p-4 text-xs sm:grid-cols-2 lg:grid-cols-4" aria-label="Capture statistics">
+              {[
+                ["Captured packets", status?.progress.packets ?? 0],
+                ["Stored PCAP bytes", status?.progress.stored_pcap_bytes ?? 0],
+                ["Oversized discarded", status?.progress.oversized_frames_discarded ?? 0],
+                ["Captured hosts / flows", readable ? pages.hosts.total + " / " + pages.flows.total : "Available on completion"],
+              ].map(([label, value]) => (
+                <div key={label} className="rounded border border-line bg-panel p-3">
+                  <div className="text-fg-muted">{label}</div>
+                  <div className="mt-1 font-mono text-base text-fg">{value}</div>
+                </div>
+              ))}
             </div>
-            <div className="flex shrink-0 items-center justify-between border-y border-line px-3 py-1 text-xs text-fg-muted">
-              <span>{page.total ? String(page.offset + 1) + "–" + String(page.offset + page.entries.length) + " of " + String(page.total) : "No rows"}</span>
-              <div className="flex gap-1">
-                <ToolButton disabled={loadingPages || page.offset === 0} onClick={() => movePage(-1)}>Previous</ToolButton>
-                <ToolButton disabled={loadingPages || page.offset + SIZE >= page.total} onClick={() => movePage(1)}>Next</ToolButton>
-              </div>
+          )}
+        </div>
+        <div className="flex shrink-0 items-center justify-between border-b border-line px-2 py-1 text-[11px] text-fg-muted">
+          <span>{readable && tab !== "statistics" && page.total
+            ? page.offset + 1 + "–" + (page.offset + page.entries.length) + " of " + page.total
+            : running ? "Capture in progress" : readable ? "No rows" : "No completed native capture"}
+          </span>
+          <div className="flex gap-1">
+            <ToolButton disabled={!readable || tab === "statistics" || loadingPages || page.offset === 0} onClick={() => movePage(-1)}>Previous</ToolButton>
+            <ToolButton disabled={!readable || tab === "statistics" || loadingPages || page.offset + SIZE >= page.total} onClick={() => movePage(1)}>Next</ToolButton>
+          </div>
+        </div>
+</div>}
+        detailTitle={`Packet details: ${selectedIndex === null ? "no selection" : "frame " + (selectedIndex + 1)}`}
+        details={            <div className="min-h-0 flex-1 overflow-auto p-2 text-xs">
+              {selectedPacket ? (
+                <dl className="space-y-1 font-mono">
+                  <div><dt className="inline text-fg-muted">Frame: </dt><dd className="inline">{selectedPacket.packet_index + 1}</dd></div>
+                  <div><dt className="inline text-fg-muted">Source: </dt><dd className="inline">{selectedPacket.source ?? "Unknown"}</dd></div>
+                  <div><dt className="inline text-fg-muted">Destination: </dt><dd className="inline">{selectedPacket.destination ?? "Unknown"}</dd></div>
+                  <div><dt className="inline text-fg-muted">Captured / wire length: </dt><dd className="inline">{selectedPacket.captured_length} / {selectedPacket.wire_length} bytes</dd></div>
+                  <div><dt className="inline text-fg-muted">PCAP frame offset: </dt><dd className="inline">{selectedPacket.pcap_frame_offset}</dd></div>
+                  {selectedPacket.stream_id && <div><dt className="inline text-fg-muted">Stream: </dt><dd className="inline break-all">{selectedPacket.stream_id}</dd></div>}
+                  <p className="pt-2 text-[11px] leading-relaxed text-fg-muted">
+                    Native Capture V1 provides frame provenance. Timestamp and full protocol hierarchy need Agent 1's shared Rust dissection API.
+                  </p>
+                </dl>
+              ) : (
+                <EmptyState title="Select a captured packet" detail={running
+                  ? "The Rust capture worker is running; packet inspection becomes available after completion."
+                  : "Inspect the packet's native provenance after a completed capture."} />
+              )}
             </div>
-            <Pane className="max-h-[32%] shrink-0" title={selectedIndex === null ? "Original captured frame" : "Original frame #" + selectedIndex}
-              actions={frame && frame.offset + frame.bytes.length < frame.frame_length ?
-                <ToolButton onClick={() => void inspect(frame.index, frame.offset + frame.bytes.length)}>Next 4 KiB</ToolButton> : undefined}>
-              {frame ? <div className="p-2">
-                <div className="mb-1 text-[10px] text-fg-muted">Frame {frame.index} · offset {frame.offset} · {frame.bytes.length} / {frame.frame_length} bytes</div>
-                <pre className="overflow-auto whitespace-pre font-mono text-[11px] text-fg-dim">{bytesAsHex(frame.bytes, frame.offset)}</pre>
-              </div> : <EmptyState title="Select a captured packet" detail="Inspect byte-exact original frames in bounded 4 KiB pages." />}
-            </Pane>
-          </>
-        ) : <EmptyState title={running ? "Capturing native frames…" : "No completed live capture"}
-          detail={running ? "The Rust capture session keeps running during navigation. Return here for status and original frames." :
-            "Select an Ethernet interface and saved case, confirm the native consent prompt and capture. Linux raw-socket permission is required."} />}
-      </div>
+}
+        bytesTitle="Packet bytes (offset · hex · ASCII)"
+        bytesActions={<ToolButton disabled={!frame || frame.offset + frame.bytes.length >= frame.frame_length}
+                onClick={() => { if (frame) void inspect(frame.index, frame.offset + frame.bytes.length); }}>
+                Next 4 KiB
+              </ToolButton>}
+        bytes={            <div className="min-h-0 flex-1 overflow-auto p-2">
+              {frame ? (
+                <>
+                  <p className="mb-2 text-[10px] text-fg-muted">
+                    Original captured frame {frame.index + 1} · bytes {frame.offset}–{frame.offset + frame.bytes.length} of {frame.frame_length}
+                  </p>
+                  <pre className="whitespace-pre font-mono text-[11px] leading-relaxed text-fg-dim">{bytesAsHex(frame.bytes, frame.offset)}</pre>
+                </>
+              ) : (
+                <EmptyState title="No frame bytes selected" detail="Select a completed native capture frame to inspect byte-exact original content." />
+              )}
+            </div>
+}
+      />
+      <WorkspaceTabs items={["packets", "hosts", "flows", "statistics"] as const}
+        active={tab} onChange={setTab} placement="bottom" ariaLabel="Native packet investigation views" />
     </div>
   );
 }

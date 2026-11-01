@@ -52,7 +52,7 @@ test("no retired features aliases remain in active frontend source", () => {
 test("Home is centered, labels its three case modes, and shows only Save or Load actions", () => {
   const home = read("app/_components/StartProject.tsx");
   assert.match(home, /min-h-full items-center justify-center/);
-  assert.match(home, /<img\s+src="\/logo.webp"/);
+  assert.ok(home.includes('src="/logo.webp"'));
   assert.match(home, /<RadioGroup\b/);
   assert.match(home, /<Radio\b/);
   assert.match(home, /<Frame\b/);

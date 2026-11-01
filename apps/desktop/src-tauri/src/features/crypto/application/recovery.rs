@@ -2,8 +2,8 @@
 use std::io::BufRead;
 
 use cyberdeck_crypto::recovery::{
-    recover_wordlist_with_progress, RecoveryLimits, RecoveryTarget,
-    MAX_FAST_CANDIDATES, MAX_KDF_CANDIDATES, MAX_MATCHES,
+    recover_wordlist_with_progress, RecoveryLimits, RecoveryTarget, MAX_FAST_CANDIDATES,
+    MAX_KDF_CANDIDATES, MAX_MATCHES,
 };
 
 use super::domain::{CrackMatch, CrackProgress};
@@ -29,7 +29,11 @@ where
 {
     let target = RecoveryTarget::parse(algorithm, target_hash)?;
     let kdf = target.is_kdf();
-    let cap = if kdf { MAX_KDF_CANDIDATES } else { MAX_FAST_CANDIDATES };
+    let cap = if kdf {
+        MAX_KDF_CANDIDATES
+    } else {
+        MAX_FAST_CANDIDATES
+    };
     let result = recover_wordlist_with_progress(
         &target,
         reader,
@@ -83,7 +87,8 @@ mod tests {
             "5d41402abc4b2a76b9719d911017c592",
             3,
             |p| progress.push(p),
-        ).unwrap();
+        )
+        .unwrap();
         assert_eq!(outcome.format, "md5");
         assert_eq!(outcome.tried, 3);
         assert_eq!(outcome.matches.len(), 1);
@@ -96,7 +101,8 @@ mod tests {
     #[test]
     fn invalid_digest_is_rejected_before_reading_candidates() {
         let error = execute(Cursor::new(Vec::<u8>::new()), "sha256", "xyz", 0, |_| {})
-            .err().unwrap();
+            .err()
+            .unwrap();
         assert!(error.contains("digest"));
     }
 }

@@ -271,6 +271,13 @@ body {
 }
 .data-table tbody tr:hover { background: var(--accent); }
 .data-table tbody tr.selected { background: var(--secondary); }
+/* Shared Packet Analysis list: readable at standard desktop DPI without changing other data grids. */
+.cd-packet-table { font-size: 12px; line-height: 18px; }
+.cd-packet-table th { padding: 6px 10px; font-weight: 600; }
+.cd-packet-table td { padding: 3px 10px; }
+.cd-packet-table tbody tr[aria-selected="true"] { background: var(--secondary); }
+.cd-packet-table tbody tr:focus-visible { outline: 1px solid var(--ring); outline-offset: -1px; }
+
 
 /* Unified shell and feature toolbar contract. Keep layout geometry in one place. */
 .cd-workspace-toolbar {

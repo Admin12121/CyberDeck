@@ -79,6 +79,20 @@ struct Registry {
     current: Option<VerifiedScope>,
     jobs: HashMap<u64, Job>,
     secrets: RecoveryResultAccess,
+    selected_wordlist: Option<SelectedWordlist>,
+}
+
+#[derive(Clone)]
+struct SelectedWordlist {
+    path: PathBuf,
+    name: String,
+    size_bytes: u64,
+}
+
+#[derive(Clone, Serialize)]
+pub struct RecoveryWordlistInfo {
+    pub name: String,
+    pub size_bytes: u64,
 }
 impl Registry {
     fn reserve_job(&mut self) -> Result<(u64, RecoveryCancel), String> {
@@ -140,6 +154,7 @@ impl Default for Registry {
             current: None,
             jobs: HashMap::new(),
             secrets: RecoveryResultAccess::new(),
+            selected_wordlist: None,
         }
     }
 }
@@ -182,6 +197,7 @@ impl RecoveryCtx {
         }
         registry.jobs.clear();
         registry.secrets.revoke_all();
+        registry.selected_wordlist = None;
         registry.secrets.set_active(scope.clone());
         registry.current = Some(scope);
         Ok(())
@@ -194,6 +210,7 @@ impl RecoveryCtx {
             }
             registry.jobs.clear();
             registry.secrets.revoke_all();
+            registry.selected_wordlist = None;
             registry.current = None;
         }
     }
@@ -342,18 +359,73 @@ fn start_recovery_with_wordlist(
     Ok(job_id)
 }
 
+/// Select a wordlist by native OS dialog, authorize against the backend
+/// case/revision, and retain only the path in process memory. Never expose the
+/// raw filesystem path to the JavaScript interface.
+#[tauri::command]
+pub fn recovery_select_wordlist_v1(
+    app: AppHandle,
+    state: State<'_, RecoveryCtx>,
+    session: State<'_, CaseSessionCtx>,
+) -> Result<RecoveryWordlistInfo, String> {
+    let before = session.selected()?;
+    // Ensure a usable, already-authorized case before opening the OS dialog.
+    state.with_active(&session, |_, _| Ok(()))?;
+    let (path, name) = crate::features::crypto::ipc::crack::resolved_wordlist(&app, None)?;
+    session.ensure(&before)?;
+    let size_bytes = std::fs::metadata(&path)
+        .map_err(|_| "selected wordlist is no longer accessible")?
+        .len();
+    let info = RecoveryWordlistInfo {
+        name: name.clone(),
+        size_bytes,
+    };
+    state.with_active(&session, |registry, _| {
+        registry.selected_wordlist = Some(SelectedWordlist {
+            path,
+            name,
+            size_bytes,
+        });
+        Ok(())
+    })?;
+    Ok(info)
+}
+
+/// Re-read selection metadata from the authoritative session after route
+/// navigation. No raw path or file data is ever sent to React.
+#[tauri::command]
+pub fn recovery_wordlist_status_v1(
+    state: State<'_, RecoveryCtx>,
+    session: State<'_, CaseSessionCtx>,
+) -> Result<Option<RecoveryWordlistInfo>, String> {
+    state.with_active(&session, |registry, _| {
+        Ok(registry
+            .selected_wordlist
+            .as_ref()
+            .map(|selection| RecoveryWordlistInfo {
+                name: selection.name.clone(),
+                size_bytes: selection.size_bytes,
+            }))
+    })
+}
+
 #[tauri::command]
 pub fn recovery_start_v1(
-    app: AppHandle,
     request: RecoveryRequest,
     on_event: Channel<RecoveryEvent>,
     state: State<'_, RecoveryCtx>,
     session: State<'_, CaseSessionCtx>,
 ) -> Result<u64, String> {
-    let before = session.selected()?;
-    let (wordlist, _name) = crate::features::crypto::ipc::crack::resolved_wordlist(&app, None)?;
-    session.ensure(&before)?;
-    start_recovery_with_wordlist(&state, &session, request, wordlist, move |event| {
+    let selected = state.with_active(&session, |registry, _| {
+        registry
+            .selected_wordlist
+            .clone()
+            .ok_or_else(|| "choose a wordlist before starting recovery".to_owned())
+    })?;
+    // Revalidate that the selected file still exists and passes native
+    // wordlist inspection; do not accept an untrusted frontend-supplied path.
+    let _ = crate::features::crypto::ipc::crack::inspect_recovery_wordlist(&selected.path)?;
+    start_recovery_with_wordlist(&state, &session, request, selected.path, move |event| {
         let _ = on_event.send(event);
     })
 }
@@ -502,6 +574,52 @@ mod tests {
         assert!(token.is_cancelled());
         assert!(ctx.registry.lock().unwrap().jobs.is_empty());
     }
+    #[test]
+    fn selected_native_wordlist_is_cleared_on_case_revision_and_shutdown() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = cyberdeck_storage::ArtifactStore::open(&temp.path().join("cases.db")).unwrap();
+        let session = CaseSessionCtx::default();
+        session.select(&store, "scratchpad").unwrap();
+        let ctx = RecoveryCtx::default();
+        ctx.on_case_selected(&session).unwrap();
+        let path = temp.path().join("fixture-wordlist.txt");
+        std::fs::write(&path, b"wrong\nexample\n").unwrap();
+        ctx.with_active(&session, |registry, _| {
+            registry.selected_wordlist = Some(SelectedWordlist {
+                path: path.clone(),
+                name: "fixture-wordlist.txt".into(),
+                size_bytes: 14,
+            });
+            Ok(())
+        })
+        .unwrap();
+        assert!(ctx
+            .with_active(&session, |registry, _| {
+                Ok(registry.selected_wordlist.is_some())
+            })
+            .unwrap());
+
+        session.select(&store, "scratchpad").unwrap();
+        ctx.on_case_selected(&session).unwrap();
+        assert!(!ctx
+            .with_active(&session, |registry, _| {
+                Ok(registry.selected_wordlist.is_some())
+            })
+            .unwrap());
+
+        ctx.with_active(&session, |registry, _| {
+            registry.selected_wordlist = Some(SelectedWordlist {
+                path,
+                name: "fixture-wordlist.txt".into(),
+                size_bytes: 14,
+            });
+            Ok(())
+        })
+        .unwrap();
+        ctx.on_case_cleared();
+        assert!(ctx.registry.lock().unwrap().selected_wordlist.is_none());
+    }
+
     #[test]
     fn backend_registry_bounds_concurrency_and_owns_unique_job_ids() {
         let mut registry = Registry::default();
