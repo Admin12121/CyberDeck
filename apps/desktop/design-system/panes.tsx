@@ -26,7 +26,7 @@ export function Pane({
 }) {
   return (
     <section style={style} className={`flex min-h-0 min-w-0 flex-col bg-panel ${className}`}>
-      <header className="flex h-9 shrink-0 items-center justify-between gap-2 border-b border-line bg-sidebar px-3">
+      <header className="cd-workspace-toolbar justify-between gap-2 px-3">
         <span className="truncate text-xs font-semibold uppercase tracking-wider text-fg-muted">
           {title}
         </span>
@@ -34,6 +34,42 @@ export function Pane({
       </header>
       <div className={`min-h-0 flex-1 overflow-auto ${bodyClassName}`}>{children}</div>
     </section>
+  );
+}
+
+/** Shared local-workspace tabs. Primary category navigation stays in the sidebar. */
+export function WorkspaceTabs<T extends string>({
+  items, active, onChange, ariaLabel, placement = "top",
+}: {
+  items: readonly T[];
+  active: T;
+  onChange: (tab: T) => void;
+  ariaLabel: string;
+  placement?: "top" | "bottom";
+}) {
+  return (
+    <div role="tablist" aria-label={ariaLabel}
+      className="cd-workspace-toolbar min-w-0 gap-1 overflow-x-auto px-2"
+      data-placement={placement}>
+      {items.map((tab) => (
+        <button key={tab} type="button" role="tab" aria-selected={tab === active}
+          onClick={() => onChange(tab)}
+          onKeyDown={(event) => {
+            const index = items.indexOf(tab);
+            const next = event.key === "ArrowRight" ? (index + 1) % items.length
+              : event.key === "ArrowLeft" ? (index - 1 + items.length) % items.length
+              : event.key === "Home" ? 0 : event.key === "End" ? items.length - 1 : -1;
+            if (next < 0) return;
+            event.preventDefault();
+            onChange(items[next]);
+            event.currentTarget.parentElement?.querySelectorAll<HTMLButtonElement>('[role="tab"]')[next]?.focus();
+          }}
+          tabIndex={tab === active ? 0 : -1}
+          className={`h-6 shrink-0 rounded-sm border border-line px-2 font-mono text-[10px] uppercase tracking-wide transition-colors focus-visible:outline-2 focus-visible:outline-offset-0 focus-visible:outline-ring ${tab === active ? "bg-selected font-semibold text-fg" : "text-fg-muted hover:bg-raised hover:text-fg"}`}>
+          {tab}
+        </button>
+      ))}
+    </div>
   );
 }
 

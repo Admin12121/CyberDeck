@@ -5,6 +5,7 @@ import { Download, FileSearch, RefreshCcw } from "lucide-react";
 import { Chip, EmptyState, Pane, TextInput, ToolButton } from "@ds/panes";
 import { caseEventsList, caseFindingsList, caseReport, caseIntegrityVerify, isDesktop, type CaseEventWire, type FindingRecordWire, type CaseIntegritySummaryWire } from "@lib/ipc";
 import { useWorkbench } from "@state/workbench";
+import { downloadContent } from "@lib/download";
 
 export function CaseFindingsView() {
   const wb = useWorkbench();
@@ -88,13 +89,7 @@ export function CaseFindingsView() {
     try {
       const report = await caseReport(caseId);
       if (!isCurrent()) return;
-      const blob = new Blob([JSON.stringify(report, null, 2)], { type: "application/json" });
-      const url = URL.createObjectURL(blob);
-      const link = document.createElement("a");
-      link.href = url;
-      link.download = "cyberdeck-" + caseId + "-report.json";
-      link.click();
-      URL.revokeObjectURL(url);
+      downloadContent(JSON.stringify(report, null, 2), "cyberdeck-" + caseId + "-report.json", "application/json");
     } catch (cause) { if (isCurrent()) setError(String(cause)); }
     finally { if (isCurrent()) setExporting(false); }
   };
@@ -112,7 +107,7 @@ export function CaseFindingsView() {
 
   return (
     <div className="flex h-full min-h-0 flex-col">
-      <div className="flex h-8 shrink-0 items-center gap-2 border-b border-line bg-sidebar px-2">
+      <div className="cd-workspace-toolbar shrink-0 items-center gap-2  px-2">
         <FileSearch size={13} className="text-orange" />
         <span className="font-mono text-[10px] uppercase text-fg-muted">Case findings</span>
         <TextInput value={query} onChange={setQuery} placeholder="filter findings…" ariaLabel="Search case findings" className="w-64" />

@@ -38,3 +38,8 @@ export function outputCapabilities(
       || (mode === "image" && canImage && imageMime === "image/png" && supportsImageClipboard),
   };
 }
+
+/** A manually baked result belongs to one recipe revision and one case only. */
+export function recipeResultIdentity(caseId: string, input: string, steps: readonly unknown[]): string {
+  return JSON.stringify([caseId, input, steps]);
+}

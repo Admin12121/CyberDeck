@@ -162,7 +162,7 @@ export function BottomDock() {
           setDropTarget(null);
         }}>
         <div role="tablist" aria-label="Dock tabs"
-          className="flex h-9 shrink-0 items-center gap-0.5 overflow-x-auto border-b border-line bg-sidebar px-1">
+          className="cd-workspace-toolbar shrink-0 items-center gap-0.5 overflow-x-auto  px-1">
           {node.tabs.map((tab) => (
             <div key={tab} className={`flex h-7 shrink-0 items-center rounded-md ${node.active === tab ? "bg-selected text-fg" : "text-fg-muted hover:bg-raised"}`}>
               <button type="button" role="tab" aria-selected={node.active === tab}

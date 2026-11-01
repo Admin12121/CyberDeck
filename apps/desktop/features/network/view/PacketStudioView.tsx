@@ -1,7 +1,7 @@
 "use client";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { ChevronRight, FolderOpen, Play, ShieldAlert, Square } from "lucide-react";
-import { Chip, EmptyState, Pane, Resizer, Select, TextInput, ToolButton } from "@ds/panes";
+import { Chip, EmptyState, Pane, Resizer, Select, TextInput, ToolButton, WorkspaceTabs } from "@ds/panes";
 import { hexDump } from "@lib/hex";
 import {
   isDesktop,
@@ -140,7 +140,7 @@ export function PacketStudioView() {
 
   return (
     <div className="flex h-full min-h-0 flex-col">
-      <div className="flex h-8 shrink-0 items-center gap-2 border-b border-line bg-sidebar px-2">
+      <div className="cd-workspace-toolbar shrink-0 items-center gap-2  px-2">
         <ToolButton
           onClick={() => void openCapture()}
           disabled={!desktop || opening}
@@ -279,7 +279,7 @@ export function PacketStudioView() {
             className={detailsWidth === null ? "flex min-w-0 flex-1 flex-col overflow-hidden bg-panel" : "flex shrink-0 flex-col overflow-hidden bg-panel"}
             style={detailsWidth === null ? undefined : { width: detailsWidth }}
           >
-            <div className="flex h-8 shrink-0 items-center border-b border-line bg-sidebar px-2 text-[10px] font-medium uppercase tracking-wider text-fg-muted">
+            <div className="cd-workspace-toolbar shrink-0 items-center  px-2 text-[10px] font-medium uppercase tracking-wider text-fg-muted">
               Packet details: {current ? `frame ${current.index + 1}` : "no selection"}
             </div>
             <div className="min-h-0 flex-1 overflow-auto p-1">
@@ -311,7 +311,7 @@ export function PacketStudioView() {
             }}
           />
           <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden bg-panel">
-            <div className="flex h-8 shrink-0 items-center border-b border-line bg-sidebar px-2 text-[10px] font-medium uppercase tracking-wider text-fg-muted">
+            <div className="cd-workspace-toolbar shrink-0 items-center  px-2 text-[10px] font-medium uppercase tracking-wider text-fg-muted">
               <span className="flex-1">Packet bytes (offset · hex · ascii)</span>
               <ToolButton
                 disabled={!capture || !current || !currentBytes || currentBytes.rows.length === 0}
@@ -355,20 +355,8 @@ export function PacketStudioView() {
         </div>
       </div>
 
-      <div className="flex h-8 shrink-0 items-center gap-1 border-t border-line bg-sidebar px-2">
-        {(["packets", "conversations", "statistics", "streams"] as const).map((t) => (
-          <button
-            key={t}
-            type="button"
-            onClick={() => setTab(t)}
-            className={`h-5 border px-2 font-mono text-[10px] uppercase tracking-wide ${
-              tab === t ? "border-orange/50 text-orange" : "border-transparent text-fg-muted hover:text-fg"
-            }`}
-          >
-            {t}
-          </button>
-        ))}
-      </div>
+      <WorkspaceTabs items={["packets", "conversations", "statistics", "streams"] as const}
+        active={tab} onChange={setTab} placement="bottom" ariaLabel="Packet investigation views" />
     </div>
   );
 }

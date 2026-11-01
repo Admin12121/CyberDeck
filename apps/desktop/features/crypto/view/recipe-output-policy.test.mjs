@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { outputCapabilities } from "./recipe-output-policy.ts";
+import { outputCapabilities, recipeResultIdentity } from "./recipe-output-policy.ts";
 
 const value = (bytes, error) => ({ outputBytes: Uint8Array.from(bytes), error });
 
@@ -43,4 +43,12 @@ test("recognized image is previewable; PNG clipboard is feature-gated", () => {
   assert.equal(outputCapabilities(result, "image", "image/png", true).canCopy, true);
   assert.equal(outputCapabilities(result, "image", "image/jpeg", true).canCopy, false);
   assert.equal(outputCapabilities(result, "hex", "image/png").canCopy, true);
+});
+
+test("manual bake outputs are invalidated when case, input or steps change", () => {
+  const base = recipeResultIdentity("case-a", "abc", [{ opId: "to_hex", enabled: true }]);
+  assert.notEqual(base, recipeResultIdentity("case-b", "abc", [{ opId: "to_hex", enabled: true }]));
+  assert.notEqual(base, recipeResultIdentity("case-a", "abcd", [{ opId: "to_hex", enabled: true }]));
+  assert.notEqual(base, recipeResultIdentity("case-a", "abc", [{ opId: "to_base64", enabled: true }]));
+  assert.equal(base, recipeResultIdentity("case-a", "abc", [{ opId: "to_hex", enabled: true }]));
 });

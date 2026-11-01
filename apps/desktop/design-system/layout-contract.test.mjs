@@ -1,0 +1,53 @@
+import assert from "node:assert/strict";
+import { test } from "node:test";
+import fs from "node:fs";
+import path from "node:path";
+
+const desktop = path.resolve(import.meta.dirname, "..");
+const source = (relative) => fs.readFileSync(path.join(desktop, relative), "utf8");
+const features = ["crypto", "network", "forensics", "web"];
+const views = [];
+for (const feature of features) {
+  const directory = path.join(desktop, "features", feature, "view");
+  for (const file of fs.readdirSync(directory)) {
+    if (file.endsWith(".tsx")) views.push(path.join(directory, file));
+  }
+}
+
+test("all feature toolbar geometry is sourced from the common design contract", () => {
+  assert.match(source("app/globals.css"), /--cd-toolbar-height:\s*36px/);
+  assert.match(source("app/globals.css"), /\.cd-workspace-toolbar\s*\{/);
+  assert.match(source("design-system/panes.tsx"), /className="cd-workspace-toolbar/);
+  for (const file of views) {
+    const text = fs.readFileSync(file, "utf8");
+    assert.doesNotMatch(text, /className="flex h-(?:8|9) [^"]*border-b border-line bg-sidebar/, file);
+  }
+});
+
+test("workspace navigation lives in the sidebar, not duplicated tool tabs", () => {
+  for (const category of ["crypto", "network", "forensics"]) {
+    const directory = path.join(desktop, "features", category, "view");
+    for (const file of fs.readdirSync(directory).filter((name) => name.endsWith(".tsx"))) {
+      assert.doesNotMatch(fs.readFileSync(path.join(directory, file), "utf8"), /<ToolTabs\b|@shell\/ToolTabs/, file);
+    }
+  }
+  assert.match(source("components/shell/ContextNavigator.tsx"), /cd-workspace-toolbar/);
+});
+
+test("Web and Packet views use the same local tab primitive", () => {
+  assert.match(source("design-system/panes.tsx"), /export function WorkspaceTabs/);
+  assert.match(source("features/web/view/WebWorkspace.tsx"), /<WorkspaceTabs\b/);
+  assert.match(source("features/network/view/PacketStudioView.tsx"), /<WorkspaceTabs\b/);
+});
+
+test("all browser exports use one checked helper rather than local anchor implementations", () => {
+  for (const view of [
+    "features/crypto/view/RecipesView.tsx",
+    "features/forensics/view/CaseFindingsView.tsx",
+    "features/web/view/ProxyView.tsx",
+  ]) {
+    assert.match(source(view), /downloadContent\(/);
+    assert.doesNotMatch(source(view), /URL\.createObjectURL\(/);
+  }
+  assert.match(source("lib/download.ts"), /Cannot download empty content/);
+});

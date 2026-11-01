@@ -35,6 +35,7 @@
   --sidebar-ring: oklch(0.708 0 0);
   color-scheme: light;
   --cd-control-height: 32px;
+  --cd-toolbar-height: 36px;
   --cd-motion-fast: 120ms;
   --cd-motion-medium: 180ms;
 }
@@ -165,3 +166,20 @@ body {
 }
 .data-table tbody tr:hover { background: var(--accent); }
 .data-table tbody tr.selected { background: var(--secondary); }
+
+/* Unified shell and feature toolbar contract. Keep layout geometry in one place. */
+.cd-workspace-toolbar {
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+  height: var(--cd-toolbar-height);
+  min-height: var(--cd-toolbar-height);
+  box-sizing: border-box;
+  border-bottom: 1px solid var(--border);
+  background: var(--sidebar);
+}
+
+.cd-workspace-toolbar[data-placement="bottom"] {
+  border-bottom: 0;
+  border-top: 1px solid var(--border);
+}

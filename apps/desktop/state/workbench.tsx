@@ -16,7 +16,9 @@ import {
 } from "react";
 import { CATEGORIES, toolById, type CategoryId, type ToolId } from "@features/registry";
 import type { RecipeStep } from "@features/crypto/model";
-import { caseSessionClearV1, caseSessionSelectV1, isDesktop, jobCancel, jobStart } from "@lib/ipc";
+import { jobCancel, jobStart } from "@lib/ipc";
+import { useNativeCaseSession, type CaseSessionState } from "@state/case-session";
+import { usePanelPreferences } from "@state/panel-preferences";
 import { applyJobEvent, type JobView } from "@state/jobs-model";
 
 export interface RecipeHandoff {
@@ -25,12 +27,7 @@ export interface RecipeHandoff {
   source: string;
 }
 
-export interface CaseSessionState {
-  phase: "unavailable" | "idle" | "selecting" | "ready" | "error";
-  caseId: string | null;
-  revision: number | null;
-  error: string | null;
-}
+export type { CaseSessionState } from "@state/case-session";
 
 interface WorkbenchApi {
   caseSession: CaseSessionState;
@@ -74,37 +71,7 @@ interface WorkbenchApi {
 
 const WorkbenchContext = createContext<WorkbenchApi | null>(null);
 
-export const PANEL_LIMITS = {
-  navigator: { min: 180, max: 340, fallback: 224 },
-  dock: { min: 140, max: 640, fallback: 280 },
-} as const;
-
-type PanelSizes = { navigator: number; dock: number };
-
-const STORAGE_KEY = "cyberdeck.panel-sizes";
-
-function clamp(value: number, min: number, max: number): number {
-  return Math.min(max, Math.max(min, value));
-}
-
-function loadPanelSizes(): PanelSizes {
-  const fallback: PanelSizes = {
-    navigator: PANEL_LIMITS.navigator.fallback,
-    dock: PANEL_LIMITS.dock.fallback,
-  };
-  if (typeof window === "undefined") return fallback;
-  try {
-    const raw = window.localStorage.getItem(STORAGE_KEY) ?? window.localStorage.getItem("hacktool.panel-sizes");
-    if (!raw) return fallback;
-    const parsed = JSON.parse(raw) as Partial<PanelSizes>;
-    return {
-      navigator: clamp(Number(parsed.navigator) || fallback.navigator, PANEL_LIMITS.navigator.min, PANEL_LIMITS.navigator.max),
-      dock: clamp(Number(parsed.dock) || fallback.dock, PANEL_LIMITS.dock.min, PANEL_LIMITS.dock.max),
-    };
-  } catch {
-    return fallback;
-  }
-}
+export { PANEL_LIMITS } from "@state/panel-preferences";
 
 function firstToolOf(category: CategoryId): ToolId {
   const cat = CATEGORIES.find((c) => c.id === category);
@@ -113,9 +80,6 @@ function firstToolOf(category: CategoryId): ToolId {
 
 export function WorkbenchProvider({ children }: { children: React.ReactNode }) {
   const [caseId, setCaseId] = useState("scratchpad");
-  const [caseSession, setCaseSession] = useState<CaseSessionState>({ phase: "idle", caseId: null, revision: null, error: null });
-  const sessionGeneration = useRef(0);
-  const sessionQueue = useRef<Promise<void>>(Promise.resolve());
   const [category, setCategory] = useState<CategoryId>("crypto");
   const [tool, setTool] = useState<ToolId>("crypto.recipes");
   const recentTools = useRef<Partial<Record<CategoryId, ToolId>>>({ crypto: "crypto.recipes" });
@@ -135,14 +99,9 @@ export function WorkbenchProvider({ children }: { children: React.ReactNode }) {
   // First paint uses the fallback sizes so SSR and hydration match; persisted
   // sizes apply right after mount, and persistence stays off until then.
   const [locationLoaded, setLocationLoaded] = useState(false);
-  const [panels, setPanels] = useState<PanelSizes>(() => ({
-    navigator: PANEL_LIMITS.navigator.fallback,
-    dock: PANEL_LIMITS.dock.fallback,
-  }));
-  const [panelsLoaded, setPanelsLoaded] = useState(false);
+  const { panels, setNavigatorWidth, setDockHeight } = usePanelPreferences();
 
   useEffect(() => {
-    setPanels(loadPanelSizes());
     try {
       const value = window.localStorage.getItem("cyberdeck.navigator-open");
       if (value) {
@@ -154,7 +113,6 @@ export function WorkbenchProvider({ children }: { children: React.ReactNode }) {
       const savedCase = window.localStorage.getItem("cyberdeck.case-id");
       if (savedCase && /^[a-zA-Z0-9_-]{1,100}$/.test(savedCase)) setCaseId(savedCase);
     } catch { /* optional persistence */ }
-    setPanelsLoaded(true);
     // restore last workspace location
     try {
       const raw = window.localStorage.getItem("cyberdeck.location") ?? window.localStorage.getItem("hacktool.location");
@@ -190,52 +148,7 @@ export function WorkbenchProvider({ children }: { children: React.ReactNode }) {
     }
   }, [category, tool, locationLoaded]);
 
-  // Persist panel sizes after every user-driven change.
-  useEffect(() => {
-    if (!panelsLoaded) return;
-    try {
-      window.localStorage.setItem(STORAGE_KEY, JSON.stringify(panels));
-    } catch {
-      // private-mode or quota failure: sizing still works in-memory
-    }
-  }, [panels, panelsLoaded]);
-
-  useEffect(() => {
-    if (!locationLoaded) return;
-    const generation = ++sessionGeneration.current;
-    if (!isDesktop()) {
-      setCaseSession({ phase: "unavailable", caseId: null, revision: null, error: null });
-      return;
-    }
-
-    const scratchpad = caseId === "scratchpad";
-    setCaseSession({ phase: scratchpad ? "idle" : "selecting", caseId: null, revision: null, error: null });
-
-    const select = async () => {
-      if (generation !== sessionGeneration.current) return;
-      try {
-        const selected = scratchpad ? await caseSessionClearV1() : await caseSessionSelectV1(caseId);
-        if (generation !== sessionGeneration.current) return;
-        if (selected.case_id !== (scratchpad ? null : caseId)) {
-          throw new Error("Native case selection returned a different case");
-        }
-        setCaseSession({
-          phase: scratchpad ? "idle" : "ready",
-          caseId: selected.case_id,
-          revision: selected.revision,
-          error: null,
-        });
-      } catch (error) {
-        if (generation === sessionGeneration.current) {
-          setCaseSession({ phase: "error", caseId: null, revision: null, error: String(error) });
-        }
-      }
-    };
-    // Backend selection is authoritative. Serialized requests prevent an old
-    // in-flight selection from winning a rapid A → B → A switch.
-    sessionQueue.current = sessionQueue.current.then(select, select);
-    return () => { sessionGeneration.current++; };
-  }, [caseId, locationLoaded]);
+  const caseSession = useNativeCaseSession(caseId, locationLoaded);
 
   const changeCase = useCallback((id: string) => {
     setCaseId(id);
@@ -255,13 +168,6 @@ export function WorkbenchProvider({ children }: { children: React.ReactNode }) {
     if (!locationLoaded) return;
     try { window.localStorage.setItem("cyberdeck.navigator-open", JSON.stringify(navigatorByCategory)); } catch { /* optional */ }
   }, [navigatorByCategory, locationLoaded]);
-
-  const setNavigatorWidth = useCallback((px: number) => {
-    setPanels((p) => ({ ...p, navigator: clamp(px, PANEL_LIMITS.navigator.min, PANEL_LIMITS.navigator.max) }));
-  }, []);
-  const setDockHeight = useCallback((px: number) => {
-    setPanels((p) => ({ ...p, dock: clamp(px, PANEL_LIMITS.dock.min, PANEL_LIMITS.dock.max) }));
-  }, []);
 
   const selectCategory = useCallback((id: CategoryId) => {
     const category = CATEGORIES.find((item) => item.id === id);

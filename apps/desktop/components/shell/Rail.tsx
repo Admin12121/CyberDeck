@@ -29,7 +29,7 @@ export function Rail() {
 
   return (
     <nav className="flex w-12 shrink-0 flex-col items-center border-r border-line bg-sidebar" aria-label="Workspace categories and controls">
-      <div className="flex h-9 w-full shrink-0 items-center justify-center">
+      <div className="flex h-[var(--cd-toolbar-height)] w-full shrink-0 items-center justify-center">
         <img src="/logo.webp" alt="CyberDeck" className="size-6 grayscale" />
       </div>
       <button type="button" onClick={wb.toggleNavigator}

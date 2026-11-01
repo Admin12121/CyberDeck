@@ -26,7 +26,8 @@ import {
 } from "../controller";
 import { b64, fileImportDerived, isDesktop, recipeRun, type RecipeRunWire } from "@lib/ipc";
 import { useWorkbench } from "@state/workbench";
-import { outputCapabilities } from "./recipe-output-policy";
+import { outputCapabilities, recipeResultIdentity } from "./recipe-output-policy";
+import { downloadContent } from "@lib/download";
 
 /** Recipes: four-column pipeline with drag-and-drop, params, image preview. */
 
@@ -62,13 +63,15 @@ function nativeUiResult(wire: RecipeRunWire): RecipeResult {
 
 export function RecipesView() {
   const wb = useWorkbench();
+  const activeCase = useRef(wb.caseId);
+  activeCase.current = wb.caseId;
   const [savingCase, setSavingCase] = useState(false);
   const [caseSaveError, setCaseSaveError] = useState<string | null>(null);
   const [outputActionError, setOutputActionError] = useState<string | null>(null);
   const [sourceDescription, setSourceDescription] = useState<string | null>(null);
   const [state, setState] = useState<RecipeState>(initialRecipeState);
   const [search, setSearch] = useState("");
-  const [committed, setCommitted] = useState<RecipeResult | null>(null);
+  const [committed, setCommitted] = useState<{ key: string; value: RecipeResult; native: boolean } | null>(null);
   // Consume an explicit cross-workspace transfer once, without saving it
   // in localStorage (captured traffic may contain sensitive data).
   useEffect(() => {
@@ -78,7 +81,6 @@ export function RecipesView() {
     setState((previous) => ({ ...previous, input: transfer.input, steps: transfer.steps }));
     wb.consumeRecipeHandoff();
   }, [wb.recipeHandoff, wb.consumeRecipeHandoff]);
-  const [committedNative, setCommittedNative] = useState(false);
   const [nativeAuto, setNativeAuto] = useState<{ key: string; value: RecipeResult } | null>(null);
   const [opsWidth, setOpsWidth] = useState(224);
   const [recipeWidth, setRecipeWidth] = useState(256);
@@ -93,7 +95,7 @@ export function RecipesView() {
 
   const eligibleForNative = isDesktop() && state.steps.every((step) => !step.enabled || NATIVE_RECIPE_OPS.has(step.opId));
   const live = useMemo(() => eligibleForNative ? null : runRecipe(state.input, state.steps), [state.input, state.steps, eligibleForNative]);
-  const recipeKey = useMemo(() => JSON.stringify([state.input, state.steps]), [state.input, state.steps]);
+  const recipeKey = useMemo(() => recipeResultIdentity(wb.caseId, state.input, state.steps), [wb.caseId, state.input, state.steps]);
   useEffect(() => {
     if (!state.autoBake || !eligibleForNative) return;
     let active = true;
@@ -114,22 +116,19 @@ export function RecipesView() {
   }, [state.input, state.steps, state.autoBake, eligibleForNative, recipeKey]);
 
   const nativeReady = eligibleForNative && nativeAuto?.key === recipeKey;
-  const result = state.autoBake ? (nativeReady && nativeAuto ? nativeAuto.value : live) : committed;
-  const nativeResult = state.autoBake ? nativeReady : committedNative;
+  const result = state.autoBake ? (nativeReady && nativeAuto ? nativeAuto.value : live) : (committed?.key === recipeKey ? committed.value : null);
+  const nativeResult = state.autoBake ? nativeReady : committed?.key === recipeKey && committed.native;
   const bake = async () => {
     if (!eligibleForNative) {
-      setCommittedNative(false);
-      setCommitted(runRecipe(state.input, state.steps));
+      setCommitted({ key: recipeKey, value: runRecipe(state.input, state.steps), native: false });
       return;
     }
     try {
       const wire = await recipeRun(state.input, state.steps);
-      setCommitted(nativeUiResult(wire));
-      setCommittedNative(true);
+      setCommitted({ key: recipeKey, value: nativeUiResult(wire), native: true });
     } catch (error) {
-      setCommittedNative(false);
-      setCommitted({ output: "", outputBytes: new Uint8Array(), byteLength: 0, elapsedMs: 0,
-        error: { stepIndex: 0, opId: "native", message: String(error) } });
+      setCommitted({ key: recipeKey, native: false, value: { output: "", outputBytes: new Uint8Array(), byteLength: 0, elapsedMs: 0,
+        error: { stepIndex: 0, opId: "native", message: String(error) } } });
     }
   };
   const inputBytes = useMemo(() => new TextEncoder().encode(state.input).length, [state.input]);
@@ -174,13 +173,23 @@ export function RecipesView() {
     : null;
   const saveToCase = async () => {
     if (!output.hasBytes || !caseLinked || !result) return;
+    const caseId = wb.caseId;
+    const bytes = outMode === "image" && decodedImage ? decodedImage.bytes : result.outputBytes;
+    const format = outMode === "image" && decodedImage ? decodedImage.mime : "application/octet-stream";
+    const filename = format === "image/jpeg" ? "recipe-output.jpg"
+      : format === "image/png" ? "recipe-output.png"
+      : format === "image/gif" ? "recipe-output.gif"
+      : format === "image/webp" ? "recipe-output.webp"
+      : format === "image/bmp" ? "recipe-output.bmp"
+      : outMode === "text" && output.canText ? "recipe-output.txt" : "recipe-output.bin";
     setSavingCase(true);
     setCaseSaveError(null);
     try {
       const steps = state.steps.filter((step) => step.enabled).map((step) => step.opId).join(" > ");
-      const source = (sourceDescription ?? "Manual input") + (steps ? " | steps: " + steps : "");
-      const record = await fileImportDerived(wb.caseId, "recipe-output.bin", result.outputBytes, source.slice(0, 500));
-      wb.logConsole("saved derived evidence to case " + wb.caseId + ": " + record.sha256);
+      const source = (sourceDescription ?? "Manual input") + (steps ? " | steps: " + steps : "") + (format !== "application/octet-stream" ? " | output: " + format : "");
+      const record = await fileImportDerived(caseId, filename, bytes, source.slice(0, 500));
+      if (activeCase.current !== caseId) return;
+      wb.logConsole("saved derived evidence to case " + caseId + ": " + record.sha256);
       wb.selectTool("forensics.files");
     } catch (error) {
       setCaseSaveError(String(error));
@@ -195,13 +204,7 @@ export function RecipesView() {
     const bytes = image?.bytes ?? result.outputBytes;
     const ext = image?.mime === "image/jpeg" ? "jpg"
       : image?.mime?.split("/")[1] ?? (outMode === "text" && output.canText ? "txt" : "bin");
-    const blob = new Blob([Uint8Array.from(bytes)], { type: image?.mime ?? "application/octet-stream" });
-    const url = URL.createObjectURL(blob);
-    const anchor = document.createElement("a");
-    anchor.href = url;
-    anchor.download = `output.${ext}`;
-    anchor.click();
-    setTimeout(() => URL.revokeObjectURL(url), 0);
+    downloadContent(bytes, `output.${ext}`, image?.mime ?? (outMode === "text" && output.canText ? "text/plain;charset=utf-8" : "application/octet-stream"));
   };
 
   const copyOutput = async () => {

@@ -1,4 +1,5 @@
 /** Proxy view: listener control, intercept queue, match & replace. */
+import { downloadContent } from "@lib/download";
 import { useEffect, useRef, useState } from "react";
 import { Copy, Download, PlayCircle, Square, X } from "lucide-react";
 import { Chip, Pane, TextInput, ToolButton } from "@ds/panes";
@@ -166,13 +167,7 @@ export function ProxyView() {
     const pem = caPem ?? (await fetchCa());
     if (!pem) return;
     try {
-      const blob = new Blob([pem], { type: "application/x-x509-ca-cert" });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = "cyberdeck-root-ca.crt";
-      a.click();
-      URL.revokeObjectURL(url);
+      downloadContent(pem, "cyberdeck-root-ca.crt", "application/x-x509-ca-cert");
       setCaSaved(true);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -189,7 +184,7 @@ export function ProxyView() {
       <div className="w-full max-w-3xl space-y-3">
         {/* CA + trust */}
         <div className="border border-line bg-panel">
-          <div className="flex h-8 items-center justify-between border-b border-line bg-sidebar px-2">
+          <div className="cd-workspace-toolbar items-center justify-between  px-2">
             <span className="text-[10px] font-medium uppercase tracking-wider text-fg-muted">CA certificate & browser trust</span>
             <Chip tone={caSaved ? "ok" : "muted"}>{caSaved ? "downloaded" : "per install"}</Chip>
           </div>
@@ -210,7 +205,7 @@ export function ProxyView() {
 
         {/* listener */}
         <div className="border border-line bg-panel">
-          <div className="flex h-8 items-center justify-between border-b border-line bg-sidebar px-2">
+          <div className="cd-workspace-toolbar items-center justify-between  px-2">
             <span className="text-[10px] font-medium uppercase tracking-wider text-fg-muted">Local interception proxy</span>
             <Chip tone={status.running ? "ok" : "muted"}>{status.running ? `running on 127.0.0.1:${status.port}` : "stopped"}</Chip>
           </div>
