@@ -228,7 +228,7 @@ export function FileAnalysisView({ active }: { active: boolean }) {
           </ToolButton>
           <ToolButton onClick={() => void runCarvePreview()}
             disabled={!ctx.selectedArtifact || !ctx.desktop || !active || carveBusy}
-            title="Read-only structural PNG / RIFF-WAVE / JPEG / GIF boundary preview from selected evidence offset, max 4 MiB; full source SHA-256 verified">
+            title="Read-only structural PNG / RIFF-WAVE / JPEG / GIF plus CRC-checked U-Boot uImage boundary preview from selected evidence offset, max 4 MiB; full source SHA-256 verified">
             {carveBusy ? "Validating boundaries…" : "Preview Structural Carving"}
           </ToolButton>
           {binary ? (
@@ -252,7 +252,7 @@ export function FileAnalysisView({ active }: { active: boolean }) {
           {carveError ? <div className="text-xs text-err">{carveError}</div> : null}
           {carve ? (
             <div className="space-y-1 border-t border-line py-2 font-mono text-[10px] text-fg-dim">
-              <div className="text-fg">Read-only PNG / RIFF-WAVE / JPEG / GIF structural candidates: {carve.candidates.length} (max 32)</div>
+              <div className="text-fg">Read-only PNG / RIFF-WAVE / JPEG / GIF / U-Boot uImage candidates: {carve.candidates.length} (max 32)</div>
               <div>
                 Verified source: {carve.integrity_checked ? "yes" : "no"} ·
                 {" "}{carve.analyzed_bytes} bytes starting at 0x{carve.analyzed_offset.toString(16)}
@@ -261,7 +261,7 @@ export function FileAnalysisView({ active }: { active: boolean }) {
                 {carve.candidate_limit_reached ? " · candidate limit reached" : ""}
                 {carve.rejected_or_incomplete ? ` · ${carve.rejected_or_incomplete} rejected/incomplete` : ""}
               </div>
-              <div>Structural bounds only: PNG chunks/CRC, RIFF-WAVE framing, JPEG markers/restarts, GIF palettes/subblocks/trailer. No image pixels decoded, compressed payload decompression, fragment recovery, automatic extraction or evidence changes.</div>
+              <div>Structural validation: PNG chunks/CRC, RIFF-WAVE framing, JPEG markers/restarts, GIF palettes/subblocks/trailer, legacy U-Boot uImage header and payload CRC32. No image/audio decoding, firmware unpacking, signature-authenticity verification, fragment recovery, automatic extraction or evidence changes.</div>
               {carve.candidates.map((candidate, index) => (
                 <div key={index} className="flex gap-2 border-t border-line py-1">
                   <ToolButton title="Navigate to verified source offset" onClick={() => ctx.setHexOffset(candidate.offset)}>
@@ -270,7 +270,7 @@ export function FileAnalysisView({ active }: { active: boolean }) {
                   <span>{candidate.format.toUpperCase()} · {candidate.length} bytes</span>
                 </div>
               ))}
-              {carve.candidates.length === 0 ? <div>No structurally validated PNG / RIFF-WAVE / JPEG / GIF members in this window.</div> : null}
+              {carve.candidates.length === 0 ? <div>No validated PNG / RIFF-WAVE / JPEG / GIF / U-Boot uImage members in this window.</div> : null}
             </div>
           ) : null}
           {extractNote ? <div role="status" className="text-xs text-fg">{extractNote}</div> : null}

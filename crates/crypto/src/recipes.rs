@@ -93,6 +93,8 @@ pub fn native_operation(id: &str) -> bool {
             | "morse_decode"
             | "escape_string"
             | "unescape_string"
+            | "extract_urls"
+            | "extract_ips"
     )
 }
 
@@ -360,6 +362,9 @@ fn transform(op: &str, bytes: &[u8], param: Option<&str>) -> Result<Vec<u8>, Str
     }
     if crate::recipe_escape_parity::supports(op) {
         return crate::recipe_escape_parity::apply(op, bytes);
+    }
+    if crate::recipe_ioc_parity::supports(op) {
+        return crate::recipe_ioc_parity::apply(op, bytes);
     }
     match op {
         "to_base64" => Ok(STANDARD.encode(bytes).into_bytes()),

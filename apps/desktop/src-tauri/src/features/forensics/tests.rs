@@ -995,7 +995,14 @@ fn case_backed_uboot_image_carving_checks_both_crcs_and_source_provenance() {
     source.extend_from_slice(b"unrelated suffix after checked member");
     let dir = tempfile::tempdir().unwrap();
     let ctx = test_ctx(dir.path());
-    let imported = import_bytes(&ctx, Path::new("firmware-container.raw"), &source, DEFAULT_CASE, true).unwrap();
+    let imported = import_bytes(
+        &ctx,
+        Path::new("firmware-container.raw"),
+        &source,
+        DEFAULT_CASE,
+        true,
+    )
+    .unwrap();
     let before = list_artifacts(&ctx, DEFAULT_CASE).unwrap().len();
     let preview = carve_preview(&ctx, DEFAULT_CASE, &imported.id, 0, source.len()).unwrap();
     assert!(preview.integrity_checked && !preview.coverage_truncated);

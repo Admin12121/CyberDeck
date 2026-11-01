@@ -214,7 +214,7 @@ async fn spider_get_forms_reach_only_same_origin_without_post_submission() {
                 let body = if path == "/" {
                     "<form action='/safe' method='GET'></form>                     <form method='post' action='/submit'></form>                     <form action=/default></form>                     <form action='http://outside.invalid/escape'></form>"
                 } else { "" };
-                let response = format!("HTTP/1.1 200 OK\\r\\nContent-Type: text/html\\r\\nContent-Length: {}\\r\\nConnection: close\\r\\n\\r\\n", body.len());
+                let response = format!("HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len());
                 stream.write_all(response.as_bytes()).await.unwrap();
                 stream.write_all(body.as_bytes()).await.unwrap();
             }

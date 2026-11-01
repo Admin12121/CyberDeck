@@ -2,12 +2,12 @@
 import { useEffect, useRef, useState } from "react";
 import { Play, Square } from "lucide-react";
 import { Chip, EmptyState, Pane, TextInput, ToolButton } from "@ds/panes";
-import { caseFindingsAdd, isDesktop } from "@lib/ipc";
+import { isDesktop } from "@lib/ipc";
 import { useWebWorkflow } from "./WebWorkflow";
 import { useWorkbench, useWorkbenchCase } from "@state/workbench";
 import { useWorkspaceDraft } from "@state/workspace-sessions";
 import {
-  cancelWebAssessment, startWebAssessment, webAssessmentStatus, waitForWebAssessment,
+  cancelWebAssessment, startWebAssessment, webAssessmentStatus, waitForWebAssessment, saveWebAssessmentFindings,
   type WebAssessmentJob,
 } from "./controller/assessment-jobs";
 
@@ -94,12 +94,9 @@ export function ScannerView() {
       const current = await webAssessmentStatus(selectedJob);
       if (current.state !== "completed") throw new Error("Scan result is no longer available");
       if (context.current.caseId !== selectedCase) return;
-      const saved = await caseFindingsAdd(selectedCase, "web.native", current.findings.slice(0, 128).map((item) => ({
-        title: item.title.slice(0, 200),
-        severity: (["info", "low", "medium", "high", "critical"].includes(item.severity)
-          ? item.severity : "info") as "info" | "low" | "medium" | "high" | "critical",
-        details: `Target: ${normalized}\n${item.detail}\nEvidence: ${item.evidence}`.slice(0, 8192),
-      })));
+      // Case identity, source and findings come only from the completed
+      // backend job. Frontend must never choose the destination case.
+      const saved = await saveWebAssessmentFindings(selectedJob);
       if (context.current.caseId === selectedCase) setSavedCount(saved);
     } catch (cause) { setError(String(cause)); }
     finally { setSaving(false); }

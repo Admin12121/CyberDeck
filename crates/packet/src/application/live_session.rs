@@ -163,6 +163,44 @@ impl CaptureSessionManager {
         })
     }
 
+    /// Start one case-scoped Windows capture via CyberDeck's own kernel device.
+    /// Frontend permission confirmation remains in the trusted Tauri boundary.
+    #[cfg(target_os = "windows")]
+    pub fn start_windows(
+        &self,
+        case_id: &str,
+        interface_name: &str,
+        expected_luid: u64,
+        limits: CaptureLimits,
+    ) -> Result<CaptureStatus, SessionError> {
+        limits
+            .validate()
+            .map_err(|e| SessionError::new(SessionErrorCode::InvalidPage, e.message))?;
+        let devices = live::discover_interfaces()
+            .map_err(|e| SessionError::new(SessionErrorCode::Internal, e.message))?;
+        let selected = live::select_interface(&devices, interface_name)
+            .map_err(|e| SessionError::new(SessionErrorCode::InvalidPage, e.message))?;
+        let current_luid = live::authorized_windows_interface_luid(interface_name)
+            .map_err(|e| SessionError::new(SessionErrorCode::InvalidPage, e.message))?;
+        if current_luid != expected_luid {
+            return Err(SessionError::new(
+                SessionErrorCode::UnauthorizedSession,
+                "selected Windows interface identity changed after operator consent",
+            ));
+        }
+        let interface = selected.name;
+        let worker_interface = interface.clone();
+        self.start_with(case_id, &interface, move |cancel, progress| {
+            live::capture_windows_with_progress(
+                &worker_interface,
+                expected_luid,
+                &limits,
+                &cancel,
+                progress,
+            )
+        })
+    }
+
     /// Injectable worker for deterministic lifecycle tests. The engine owns
     /// the stop flag; the worker must honor it within its bounded poll period.
     pub fn start_with<F>(

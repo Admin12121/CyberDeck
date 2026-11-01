@@ -23,7 +23,7 @@ test("real Forensics route consumes metadata, case evidence, carving and derived
   const workspace = source("./ForensicsWorkspace.tsx");
   assert.match(workspace, /<EvidenceProvider key={caseId}>/);
   assert.match(files, /fileCarvePreview\(wb\.caseId, artifact\.id, offset, len\)/);
-  assert.match(files, /PNG \/ RIFF-WAVE \/ JPEG \/ GIF structural candidates/);
+  assert.match(files, /PNG \/ RIFF-WAVE \/ JPEG \/ GIF \/ U-Boot uImage candidates/);
   assert.match(files, /extractedRecords\.slice\(0, 128\)/);
   assert.match(metadata, /fileMetadataScan\(wb\.caseId, artifact\.id\)/);
   assert.match(metadata, /availableMetadataGroups/);

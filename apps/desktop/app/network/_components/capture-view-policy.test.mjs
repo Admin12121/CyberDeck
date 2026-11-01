@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { captureLimits, activeCaptureId, matchesCaptureIdentity, boundedPageOffset } from "./capture-view-policy.ts";
+import { captureLimits, activeCaptureId, matchesCaptureIdentity, boundedPageOffset, captureInterfaceEligible } from "./capture-view-policy.ts";
 
 test("native capture limits enforce wire bounds without floating-point coercion", () => {
   assert.deepEqual(captureLimits("4000", "8", "60"), {
@@ -35,4 +35,14 @@ test("pagination cannot request negative or out-of-bounds pages", () => {
   assert.equal(boundedPageOffset(200, 240, -1), 100);
   assert.equal(boundedPageOffset(0, 0, 1), null);
   assert.equal(boundedPageOffset(0, 100, 1, 300), null);
+});
+
+test("discovered Windows interface is not capture ready without a compatible CyberDeck driver", () => {
+  const nic = { up: true, ethernet: true, loopback: false };
+  assert.equal(captureInterfaceEligible({ ...nic, capture_supported: false }), false);
+  assert.equal(captureInterfaceEligible({ ...nic, capture_supported: true }), true);
+  assert.equal(captureInterfaceEligible({ ...nic }), true); // existing Linux wire compatibility
+  assert.equal(captureInterfaceEligible({ ...nic, up: false }), false);
+  assert.equal(captureInterfaceEligible({ ...nic, loopback: true }), false);
+  assert.equal(captureInterfaceEligible({ ...nic, ethernet: false }), false);
 });

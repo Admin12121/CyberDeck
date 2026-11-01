@@ -20,7 +20,7 @@ import {
 } from "@lib/ipc";
 import { useWorkbenchCase } from "@state/workbench";
 import { useWorkspaceDraft } from "@state/workspace-sessions";
-import { activeCaptureId, boundedPageOffset, captureLimits, matchesCaptureIdentity } from "./capture-view-policy";
+import { activeCaptureId, boundedPageOffset, captureLimits, captureInterfaceEligible, matchesCaptureIdentity } from "./capture-view-policy";
 import { currentNativeSession, dropNativeSession, rememberNativeSession, subscribeNativeSessions } from "./capture-session-registry";
 
 type DataTab = "packets" | "hosts" | "flows";
@@ -90,7 +90,7 @@ export function LiveCaptureView({ presentation = "full", onCaptureStarted, onRet
 
   const valid = useCallback((key: string, version: number) =>
     currentIdentity.current === key && token.current === version, []);
-  const eligible = devices.filter((entry) => entry.up && entry.ethernet && !entry.loopback && entry.capture_supported !== false);
+  const eligible = devices.filter(captureInterfaceEligible);
   const running = status?.phase === "running" || status?.phase === "stopping";
   const readable = status?.results_available === true && matchesCaptureIdentity(status, sessionId, caseId);
   const canStart = desktop && revision !== null && !running && !working && eligible.some((entry) => entry.name === device);
@@ -112,8 +112,8 @@ export function LiveCaptureView({ presentation = "full", onCaptureStarted, onRet
       const list = await captureInterfacesV1();
       if (!valid(key, version)) return;
       setDevices(list);
-      if (!list.some((entry) => entry.name === device && entry.up && entry.ethernet && !entry.loopback)) {
-        setDevice(list.find((entry) => entry.up && entry.ethernet && !entry.loopback)?.name ?? "");
+      if (!list.some((entry) => entry.name === device && captureInterfaceEligible(entry))) {
+        setDevice(list.find((entry) => captureInterfaceEligible(entry))?.name ?? "");
       }
     } catch (cause) {
       if (valid(key, version)) setError("Interface discovery: " + message(cause));
@@ -315,7 +315,7 @@ export function LiveCaptureView({ presentation = "full", onCaptureStarted, onRet
           <div className="min-w-0">
             {devices.length === 0 ? (
               <p className="px-4 py-4 text-sm text-fg-muted">
-                No interfaces found. Use Refresh to retry.
+                No native network adapters found. Use Refresh to retry.
               </p>
             ) : (
               <div aria-label="Native capture interfaces" className="max-h-52 overflow-y-auto">
@@ -334,13 +334,18 @@ export function LiveCaptureView({ presentation = "full", onCaptureStarted, onRet
                       <span className="shrink-0 text-xs text-fg-muted">
                         {entry.loopback ? "Loopback" : entry.ethernet ? "Ethernet" : "Other"}
                       </span>
-                      <span className={`shrink-0 text-xs ${supported ? "text-fg-dim" : "text-fg-muted"}`}>
-                        {entry.up ? supported ? "Ready" : entry.capture_supported === false ? "Native capture pending" : "Unsupported" : "Down"}
+                      <span title={entry.capture_unavailable_reason ?? undefined} className={`shrink-0 text-xs ${supported ? "text-fg-dim" : "text-fg-muted"}`}>
+                        {entry.up ? supported ? "Ready" : entry.capture_supported === false ? "Driver unavailable" : "Unsupported" : "Down"}
                       </span>
                     </Button>
                   );
                 })}
               </div>
+            )}
+            {eligible.length === 0 && devices.some((entry) => entry.capture_unavailable_reason) && (
+              <p role="status" className="mt-2 px-4 text-xs text-fg-muted">
+                {devices.find((entry) => entry.capture_unavailable_reason)?.capture_unavailable_reason}
+              </p>
             )}
           </div>
         )}
@@ -414,7 +419,7 @@ export function LiveCaptureView({ presentation = "full", onCaptureStarted, onRet
           </ToolButton>
         ) : (
           <ToolButton tone="primary" onClick={() => void start()} disabled={!canStart}
-            title="Requires a saved case, native confirmation and Linux CAP_NET_RAW">
+            title="Requires a saved case, explicit native confirmation and OS capture permissions; Windows also requires the independently signed CyberDeck capture driver">
             <Play size={12} /> {working ? "Confirming…" : "Start Capture"}
           </ToolButton>
         )}

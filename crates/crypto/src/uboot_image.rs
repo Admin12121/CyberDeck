@@ -7,9 +7,8 @@ pub(super) fn validated_uimage_length(data: &[u8]) -> Result<usize, String> {
     if data.len() < HEADER || data[..4] != MAGIC {
         return Err("invalid/truncated U-Boot legacy image header".into());
     }
-    let read32 = |at: usize| {
-        u32::from_be_bytes([data[at], data[at + 1], data[at + 2], data[at + 3]])
-    };
+    let read32 =
+        |at: usize| u32::from_be_bytes([data[at], data[at + 1], data[at + 2], data[at + 3]]);
     let length = read32(12) as usize;
     let total = HEADER.checked_add(length).ok_or("uImage size overflow")?;
     if length == 0 || total > data.len() {
@@ -61,7 +60,10 @@ mod tests {
     fn uimage_rejects_incomplete_header_bad_crcs_size_and_tamper() {
         let original = image(b"native-test-firmware");
         for end in [0, 3, 31, 63, 64, original.len() - 1] {
-            assert!(validated_uimage_length(&original[..end]).is_err(), "end={end}");
+            assert!(
+                validated_uimage_length(&original[..end]).is_err(),
+                "end={end}"
+            );
         }
         let mut invalid = original.clone();
         invalid[0] ^= 1;

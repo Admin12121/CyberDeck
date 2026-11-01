@@ -24,6 +24,14 @@ export async function webAssessmentStatus(jobId: number): Promise<WebAssessmentJ
   return invoke<WebAssessmentJob>("web_assessment_status_v1", { jobId });
 }
 
+/** Save only completed backend-owned Scanner findings to the selected
+ * non-Scratchpad case. No client supplied case ID or findings are accepted. */
+export async function saveWebAssessmentFindings(jobId: number): Promise<number> {
+  if (!isDesktop()) throw new Error("Web findings need the native desktop runtime");
+  if (!Number.isSafeInteger(jobId) || jobId < 1) throw new Error("Invalid Web job ID");
+  return invoke<number>("web_assessment_save_findings_v1", { jobId });
+}
+
 export async function cancelWebAssessment(jobId: number): Promise<WebAssessmentJob> {
   if (!Number.isSafeInteger(jobId) || jobId < 1) throw new Error("Invalid Web job ID");
   return invoke<WebAssessmentJob>("web_assessment_cancel_v1", { jobId });

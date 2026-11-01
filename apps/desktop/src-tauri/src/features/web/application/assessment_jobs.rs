@@ -3,7 +3,9 @@ use super::{
     authorize_pinned_assessment, crawl_application, execute_case_scoped_assessment,
     scan_application, scan_domain, target_scope, Finding,
 };
+use crate::features::forensics::ipc::evidence::EvidenceCtx;
 use crate::features::shared::session::{CaseSessionCtx, CaseSessionWire};
+use cyberdeck_storage::{ArtifactStore, NewFinding};
 use serde::Serialize;
 use std::collections::VecDeque;
 use std::sync::{
@@ -53,12 +55,14 @@ struct Job {
     scope: CaseSessionWire,
     cancel: AtomicBool,
     snapshot: Mutex<WebAssessmentJobWire>,
+    saved_count: Mutex<Option<usize>>,
 }
 impl Job {
     fn new(id: u64, scope: CaseSessionWire, kind: Kind) -> Self {
         Self {
             scope,
             cancel: AtomicBool::new(false),
+            saved_count: Mutex::new(None),
             snapshot: Mutex::new(WebAssessmentJobWire {
                 job_id: id,
                 kind: kind.name().into(),
@@ -120,6 +124,64 @@ impl Job {
             }
         }
     }
+    /// Exactly-once manual case save. The caller must hold the backend
+    /// selected revision's publication gate and the existing case store lock.
+    /// Never serialize an authoritative case_id or findings payload from UI.
+    fn save_completed(&self, store: &ArtifactStore, case_id: &str) -> Result<usize, String> {
+        if case_id == "scratchpad" || self.scope.case_id.as_deref() != Some(case_id) {
+            return Err("select a saved investigation case before saving findings".into());
+        }
+        let mut receipt = self
+            .saved_count
+            .lock()
+            .map_err(|_| "Web finding save receipt unavailable")?;
+        if let Some(count) = *receipt {
+            return Ok(count);
+        }
+        let state = self
+            .snapshot
+            .lock()
+            .map_err(|_| "Web job status unavailable")?;
+        if state.state != "completed" || state.kind != "scanner" {
+            return Err("only completed native Scanner jobs may save findings".into());
+        }
+        if self.cancel.load(Ordering::Acquire) {
+            return Err("cancelled Web assessment cannot save findings".into());
+        }
+        let records: Vec<NewFinding> = state
+            .findings
+            .iter()
+            .take(128)
+            .map(|f| {
+                // Byte-safe UTF-8 truncation follows existing Storage constraints.
+                fn capped(text: &str, max: usize) -> String {
+                    let mut end = text.len().min(max);
+                    while !text.is_char_boundary(end) {
+                        end -= 1;
+                    }
+                    text[..end].to_string()
+                }
+                NewFinding {
+                    title: capped(&f.title, 200),
+                    severity: if matches!(
+                        f.severity.as_str(),
+                        "info" | "low" | "medium" | "high" | "critical"
+                    ) {
+                        f.severity.clone()
+                    } else {
+                        "info".into()
+                    },
+                    details: capped(&format!("{}\nEvidence: {}", f.detail, f.evidence), 8192),
+                }
+            })
+            .collect();
+        // The source field identifies the native producer, and these bounded
+        // non-secret findings have no borrowed/foreign artifact references.
+        let written = store.add_findings(case_id, "web.native", None, &records)?;
+        *receipt = Some(written);
+        Ok(written)
+    }
+
     fn view(&self) -> Result<WebAssessmentJobWire, String> {
         self.snapshot
             .lock()
@@ -307,9 +369,94 @@ pub fn web_assessment_cancel_v1(
     })
 }
 
+/// Explicit, backend-authoritative Save to Case. Lock order is
+/// EvidenceCtx.store -> CaseSessionCtx.publication, matching case_session_select_v1.
+/// Do not hold either across network awaits. Duplicate saves return the first
+/// receipt and never duplicate storage records.
+#[tauri::command]
+pub fn web_assessment_save_findings_v1(
+    job_id: u64,
+    evidence: State<'_, EvidenceCtx>,
+    session: State<'_, CaseSessionCtx>,
+) -> Result<usize, String> {
+    let selected = session.selected()?;
+    let case_id = selected.case_id.as_deref().ok_or("select a case first")?;
+    if case_id == "scratchpad" {
+        return Err("select a saved case to store scanner findings".into());
+    }
+    // Existing native case-switch command takes store before publication.
+    // Taking locks in that exact order avoids a case-change deadlock.
+    let store = evidence
+        .store
+        .lock()
+        .map_err(|_| "Case findings storage unavailable")?;
+    session.with_current_publication(&selected, || {
+        let job = registry()
+            .lock()
+            .map_err(|_| "Web job registry unavailable")?
+            .get(job_id, &selected)?;
+        job.save_completed(&store, case_id)
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_scan_findings_commit_is_exactly_once_and_case_scoped() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = ArtifactStore::open(&temp.path().join("db.sqlite")).unwrap();
+        let record = store.create_case("Web findings", "").unwrap();
+        let session = CaseSessionCtx::default();
+        let selected = session.select(&store, &record.id).unwrap();
+        let job = Job::new(55, selected.clone(), Kind::Scanner);
+        job.finish(Ok(Outcome::Findings(vec![Finding {
+            severity: "medium".into(),
+            title: "Origin reflection".into(),
+            detail: "Validated on owned lab".into(),
+            evidence: "http://127.0.0.1/".into(),
+        }])));
+        let first = session
+            .with_current_publication(&selected, || job.save_completed(&store, &record.id))
+            .unwrap();
+        assert_eq!(first, 1);
+        assert_eq!(
+            session
+                .with_current_publication(&selected, || { job.save_completed(&store, &record.id) })
+                .unwrap(),
+            1
+        );
+        assert_eq!(store.list_findings(&record.id).unwrap().len(), 1);
+        let changed = session.select(&store, &record.id).unwrap();
+        assert_ne!(selected.revision, changed.revision);
+        assert!(session
+            .with_current_publication(&selected, || { job.save_completed(&store, &record.id) })
+            .is_err());
+        assert_eq!(store.list_findings(&record.id).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn native_scan_findings_refuse_scratchpad_pending_cancelled_and_spider() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = ArtifactStore::open(&temp.path().join("db.sqlite")).unwrap();
+        let other = store.create_case("Web evidence", "").unwrap();
+        let case = CaseSessionWire {
+            case_id: Some(other.id.clone()),
+            revision: 2,
+        };
+        let pending = Job::new(7, case.clone(), Kind::Scanner);
+        assert!(pending.save_completed(&store, &other.id).is_err());
+        pending.cancelled();
+        assert!(pending.save_completed(&store, &other.id).is_err());
+        let spider = Job::new(8, case.clone(), Kind::Spider);
+        spider.finish(Ok(Outcome::Urls(vec!["http://127.0.0.1".into()])));
+        assert!(spider.save_completed(&store, &other.id).is_err());
+        let finished = Job::new(9, case, Kind::Scanner);
+        finished.finish(Ok(Outcome::Findings(vec![])));
+        assert!(finished.save_completed(&store, "scratchpad").is_err());
+        assert!(finished.save_completed(&store, "anothercase").is_err());
+    }
 
     #[test]
     fn registry_is_bounded_and_case_revision_is_authoritative() {

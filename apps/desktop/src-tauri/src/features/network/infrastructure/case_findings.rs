@@ -1,6 +1,7 @@
 //! Persist authorized TCP scan observations into the selected evidence case.
 use super::ScanEntry;
 use crate::features::forensics::ipc::evidence::EvidenceCtx;
+use crate::features::shared::session::{CaseSessionCtx, CaseSessionWire};
 use cyberdeck_storage::NewFinding;
 use tauri::{AppHandle, Manager};
 
@@ -8,6 +9,7 @@ use tauri::{AppHandle, Manager};
 pub(super) fn save_scan(
     app: &AppHandle,
     case_id: &str,
+    expected: &CaseSessionWire,
     scan_id: u64,
     entries: &[ScanEntry],
 ) -> Result<usize, String> {
@@ -17,11 +19,16 @@ pub(super) fn save_scan(
     let findings = build_findings(entries, scan_id);
     let context = app.state::<EvidenceCtx>();
     let store = context.store.lock().map_err(|_| "case store unavailable")?;
-    let mut count = 0;
-    for batch in findings.chunks(128) {
-        count += store.add_findings(case_id, "network.tcp", None, batch)?;
-    }
-    Ok(count)
+    let case_selection = app.state::<CaseSessionCtx>();
+    case_selection.with_current_publication(expected, || {
+        // The store mutex was acquired first, matching case_session_select.
+        // A stale worker cannot add findings after a case switch/reselection.
+        let mut count = 0;
+        for batch in findings.chunks(128) {
+            count += store.add_findings(case_id, "network.tcp", None, batch)?;
+        }
+        Ok(count)
+    })
 }
 
 fn build_findings(entries: &[ScanEntry], scan_id: u64) -> Vec<NewFinding> {

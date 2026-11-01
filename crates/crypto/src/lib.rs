@@ -5,6 +5,7 @@ pub mod recipes;
 mod recipe_native_parity;
 mod recipe_text_parity;
 mod recipe_escape_parity;
+mod recipe_ioc_parity;
 pub mod key_derivation;
 pub mod hkdf;
 pub mod recovery;

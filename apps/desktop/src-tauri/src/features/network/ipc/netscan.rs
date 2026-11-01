@@ -5,6 +5,7 @@ use std::net::IpAddr;
 use std::sync::{Arc, Mutex as StdMutex};
 
 use crate::features::forensics::ipc::evidence::EvidenceCtx;
+use crate::features::shared::session::CaseSessionCtx;
 use tauri::ipc::Channel;
 use tauri::{AppHandle, State};
 
@@ -65,8 +66,11 @@ pub fn run_scan(
 }
 
 #[tauri::command]
-pub fn netscan_status(ctx: State<'_, ScanCtx>) -> NetscanStatusWire {
-    scan_commands::status(ctx)
+pub fn netscan_status(
+    ctx: State<'_, ScanCtx>,
+    selected: State<'_, CaseSessionCtx>,
+) -> NetscanStatusWire {
+    scan_commands::status(ctx, selected)
 }
 
 #[tauri::command]
@@ -78,6 +82,7 @@ pub fn netscan_start(
     case_id: String,
     app: AppHandle,
     evidence: State<'_, EvidenceCtx>,
+    selected: State<'_, CaseSessionCtx>,
     ctx: State<'_, ScanCtx>,
 ) -> Result<ScanSummaryWire, String> {
     scan_commands::start(
@@ -88,13 +93,17 @@ pub fn netscan_start(
         case_id,
         app,
         evidence,
+        selected,
         ctx,
     )
 }
 
 #[tauri::command]
-pub fn netscan_results(ctx: State<'_, ScanCtx>) -> Vec<ScanEntry> {
-    scan_commands::results(ctx)
+pub fn netscan_results(
+    ctx: State<'_, ScanCtx>,
+    selected: State<'_, CaseSessionCtx>,
+) -> Vec<ScanEntry> {
+    scan_commands::results(ctx, selected)
 }
 
 #[tauri::command]
@@ -103,8 +112,11 @@ pub fn netscan_stop(ctx: State<'_, ScanCtx>) {
 }
 
 #[tauri::command]
-pub fn netscan_history(ctx: State<'_, ScanCtx>) -> Vec<ScanHistoryItem> {
-    scan_commands::history(ctx)
+pub fn netscan_history(
+    ctx: State<'_, ScanCtx>,
+    selected: State<'_, CaseSessionCtx>,
+) -> Vec<ScanHistoryItem> {
+    scan_commands::history(ctx, selected)
 }
 
 #[tauri::command]
@@ -112,13 +124,19 @@ pub fn netscan_export(
     app: AppHandle,
     format: String,
     ctx: State<'_, ScanCtx>,
+    selected: State<'_, CaseSessionCtx>,
 ) -> Result<String, String> {
-    scan_commands::export(app, format, ctx)
+    scan_commands::export(app, format, ctx, selected)
 }
 
 #[tauri::command]
-pub fn netscan_discover_hosts(targets: String, authorized: bool) -> Result<Vec<String>, String> {
-    scan_commands::discover_hosts(targets, authorized)
+pub fn netscan_discover_hosts(
+    targets: String,
+    authorized: bool,
+    app: AppHandle,
+    selected: State<'_, CaseSessionCtx>,
+) -> Result<Vec<String>, String> {
+    scan_commands::discover_hosts(targets, authorized, app, selected)
 }
 
 #[cfg(test)]

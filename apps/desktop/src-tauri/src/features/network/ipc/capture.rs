@@ -94,22 +94,30 @@ pub struct CaptureInterfaceWire {
     #[serde(flatten)]
     interface: CaptureInterface,
     capture_supported: bool,
+    capture_unavailable_reason: Option<String>,
 }
 
 #[tauri::command]
 pub fn capture_interfaces_v1() -> Result<Vec<CaptureInterfaceWire>, String> {
-    Ok(live::discover_interfaces()
-        .map_err(|error| error.message)?
+    let interfaces = live::discover_interfaces().map_err(|error| error.message)?;
+    #[cfg(target_os = "windows")]
+    let support = live::probe_windows_capture().map_err(|e| e.message);
+    #[cfg(target_os = "linux")]
+    let support: Result<(), String> = Ok(());
+    #[cfg(not(any(target_os = "windows", target_os = "linux")))]
+    let support: Result<(), String> = Err("native Ethernet capture unsupported on this OS".into());
+    Ok(interfaces
         .into_iter()
         .map(|interface| CaptureInterfaceWire {
             interface,
-            capture_supported: cfg!(target_os = "linux"),
+            capture_supported: support.is_ok(),
+            capture_unavailable_reason: support.as_ref().err().cloned(),
         })
         .collect())
 }
 
-/// The operator must select a real Linux interface. The OS prompt is a
-/// deliberate confirmation, never a substitute for OS CAP_NET_RAW.
+/// The operator must select a real NIC and confirm capture. Platform
+/// privilege and compatible native device authorization are enforced separately.
 #[tauri::command]
 pub async fn capture_start_v1(
     app: AppHandle,
@@ -118,17 +126,22 @@ pub async fn capture_start_v1(
     session: State<'_, CaseSessionCtx>,
     capture: State<'_, CaptureCtx>,
 ) -> Result<CaptureStatus, String> {
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
     {
         let _ = (app, interface_name, limits, session, capture);
-        return Err("native live capture is currently available only on Linux".into());
+        return Err("native Ethernet capture unsupported on this OS".into());
     }
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
     {
         let scope = session.selected()?;
         let limits = limits.into_native()?;
+        #[cfg(target_os = "windows")]
+        live::probe_windows_capture().map_err(|e| format!("{:?}: {}", e.code, e.message))?;
+        #[cfg(target_os = "windows")]
+        let expected_luid = live::authorized_windows_interface_luid(&interface_name)
+            .map_err(|e| format!("{:?}: {}", e.code, e.message))?;
         let message = format!(
-            "Capture passive Ethernet frames from interface '{}' in the currently selected case? Capturing may include sensitive network metadata. The OS must independently authorize raw sockets.",
+            "Capture passive Ethernet frames from interface '{}' in the currently selected case? Capturing may include sensitive network metadata. The OS must authorize the native capture device; no promiscuous mode is requested.",
             interface_name
         );
         let accepted = tokio::task::spawn_blocking(move || {
@@ -145,9 +158,15 @@ pub async fn capture_start_v1(
         }
         session.ensure(&scope)?;
         let case = scope.case_id.as_deref().ok_or("no selected case")?;
+        #[cfg(target_os = "linux")]
         let status = capture
             .manager
             .start_linux(case, &interface_name, limits)
+            .map_err(|e| format!("{:?}: {}", e.code, e.message))?;
+        #[cfg(target_os = "windows")]
+        let status = capture
+            .manager
+            .start_windows(case, &interface_name, expected_luid, limits)
             .map_err(|e| format!("{:?}: {}", e.code, e.message))?;
         let owner = Owner {
             scope: scope.clone(),

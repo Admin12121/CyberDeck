@@ -660,6 +660,7 @@ export async function fileExtractNestedArchive(
 
 export interface CaptureInterfaceV1 {
   capture_supported?: boolean;
+  capture_unavailable_reason?: string | null;
   name: string;
   index: number;
   ethernet: boolean;

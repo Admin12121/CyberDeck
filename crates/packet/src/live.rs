@@ -440,6 +440,36 @@ pub fn capture_linux_with_progress(
     capture_from_with_progress(&mut source, selected, limits, cancel, progress)
 }
 
+/// Uses the CyberDeck-owned native driver when actually installed and
+/// authorized; Windows adapter discovery alone does not enable capture.
+#[cfg(target_os = "windows")]
+pub fn authorized_windows_interface_luid(interface_name: &str) -> Result<u64, CaptureError> {
+    let selected = select_interface(&discover_interfaces()?, interface_name)?;
+    crate::infrastructure::windows_capture::interface_luid(selected.index)
+}
+
+#[cfg(target_os = "windows")]
+pub fn capture_windows_with_progress(
+    interface_name: &str,
+    expected_luid: u64,
+    limits: &CaptureLimits,
+    cancel: &AtomicBool,
+    progress: impl FnMut(CaptureProgress),
+) -> Result<CaptureResult, CaptureError> {
+    crate::infrastructure::windows_capture::capture_with_progress(
+        interface_name,
+        expected_luid,
+        limits,
+        cancel,
+        progress,
+    )
+}
+
+#[cfg(target_os = "windows")]
+pub fn probe_windows_capture() -> Result<(), CaptureError> {
+    crate::infrastructure::windows_capture::probe_driver()
+}
+
 #[cfg(not(target_os = "linux"))]
 pub fn capture_linux_with_progress(
     _interface_name: &str,

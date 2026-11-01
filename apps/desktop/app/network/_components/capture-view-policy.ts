@@ -38,3 +38,13 @@ export function boundedPageOffset(current: number, total: number, delta: number,
   const next = current + delta * size;
   return next >= 0 && next < total ? next : null;
 }
+
+/** An OS NIC is capture-ready only if native backend probes succeed. */
+export function captureInterfaceEligible(nic: {
+  up: boolean;
+  ethernet: boolean;
+  loopback: boolean;
+  capture_supported?: boolean;
+}): boolean {
+  return nic.up && nic.ethernet && !nic.loopback && nic.capture_supported !== false;
+}

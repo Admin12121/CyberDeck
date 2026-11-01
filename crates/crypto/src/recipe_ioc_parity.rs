@@ -160,6 +160,39 @@ mod tests {
     }
 
     #[test]
+    fn production_recipe_dispatch_preserves_reference_matches() {
+        use base64::Engine as _;
+        let examples = [
+            (
+                "extract_urls",
+                "Visit http://example.org/a?x=1; https://t.example/ok\nbad HTTP://BAD",
+                "http://example.org/a?x=1;\nhttps://t.example/ok",
+            ),
+            (
+                "extract_ips",
+                "127.0.0.1 256.2.3.4 001.002.003.004 8.8.8.8! 1x8.8.4.4",
+                "127.0.0.1\n8.8.8.8",
+            ),
+        ];
+        for (id, source, expected) in examples {
+            assert!(crate::recipes::native_operation(id));
+            let result = crate::recipes::execute_recipe(
+                source,
+                &[crate::recipes::RecipeStep {
+                    op_id: id.into(),
+                    enabled: true,
+                    param: None,
+                }],
+            );
+            assert!(result.error.is_none(), "{id}: {:?}", result.error);
+            let bytes = base64::engine::general_purpose::STANDARD
+                .decode(result.output_b64)
+                .unwrap();
+            assert_eq!(bytes, expected.as_bytes(), "{id} JS reference parity");
+        }
+    }
+
+    #[test]
     fn bounded_extraction_large_fixture() {
         assert!(extract_ips(&"1.1.1.1 ".repeat(1_300_000).into_bytes()).is_err());
         assert!(extract_urls(&"http://x ".repeat(1_000_000).into_bytes()).is_err());

@@ -6,6 +6,7 @@ use std::time::Instant;
 
 use super::scan_service;
 use super::{ScanCtx, ScanEntry, ScanHistoryItem, ScanProgress};
+use crate::features::shared::session::CaseSessionWire;
 
 pub(super) fn now_ms() -> u64 {
     std::time::SystemTime::now()
@@ -18,6 +19,7 @@ pub(super) fn now_ms() -> u64 {
 /// callback port: only the infrastructure adapter knows about the case store.
 pub(super) fn start<P, F>(
     ctx: &ScanCtx,
+    scope: CaseSessionWire,
     hosts: Vec<IpAddr>,
     port_list: Vec<u16>,
     targets: String,
@@ -33,6 +35,20 @@ where
     scan_service::scan_probe_count(host_count, port_list.len())?;
     if ctx.running.swap(true, Ordering::AcqRel) {
         return Err("a scan is already running; stop it first".into());
+    }
+
+    {
+        let mut active = ctx
+            .active_scope
+            .lock()
+            .map_err(|_| "scan scope unavailable")?;
+        if active.as_ref() != Some(&scope) {
+            ctx.history
+                .lock()
+                .map_err(|_| "scan history unavailable")?
+                .clear();
+        }
+        *active = Some(scope);
     }
 
     *ctx.last_save_error
@@ -96,6 +112,10 @@ mod tests {
         let (tx, rx) = channel();
         let id = start(
             &ctx,
+            CaseSessionWire {
+                case_id: Some("test-case".into()),
+                revision: 1,
+            },
             vec![],
             vec![80],
             "127.0.0.1".into(),

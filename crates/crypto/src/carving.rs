@@ -55,7 +55,9 @@ fn preview_carving_impl(data: &[u8], base: u64, include_wav: bool) -> Result<Car
     let mut rejected_or_incomplete = 0usize;
     let mut candidate_limit_reached = scanner_cap_reached;
     for hit in signatures {
-        if hit.format != "png" && !(include_wav && matches!(hit.format, "riff" | "jpeg" | "gif" | "uimage")) {
+        if hit.format != "png"
+            && !(include_wav && matches!(hit.format, "riff" | "jpeg" | "gif" | "uimage"))
+        {
             continue;
         }
         if candidates.len() + rejected_or_incomplete >= MAX_CARVE_CANDIDATES {

@@ -130,7 +130,8 @@ pub fn scan_signatures(bytes: &[u8], max_hits: usize) -> Vec<SignatureHit> {
         // Cheap dispatch avoids a full signature table check on most bytes.
         let candidate = if matches!(
             first,
-            0x27 | 0xfe | 0xce
+            0x27 | 0xfe
+                | 0xce
                 | 0xcf
                 | 0x89
                 | b'%'
