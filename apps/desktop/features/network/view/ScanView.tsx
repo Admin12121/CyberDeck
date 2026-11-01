@@ -1,18 +1,16 @@
 "use client";
 /** Scan view: real multithreaded TCP connect scanning via the Rust core (§5.3). */
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Play, Square } from "lucide-react";
 import { Chip, EmptyState, Pane, Resizer, Select, TextInput, ToolButton } from "@ds/panes";
 import {
   isDesktop,
   netscanExport,
-  netscanHistory,
   netscanResults,
   netscanStart,
   netscanStatus,
   netscanStop,
   type ScanEntryWire,
-  type ScanHistoryItemWire,
   type ScanProgressWire,
   type NetscanStatusWire,
 } from "@lib/ipc";
@@ -36,39 +34,75 @@ export function ScanView() {
   const [results, setResults] = useState<ScanEntryWire[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [status, setStatus] = useState<NetscanStatusWire>({ running: false, results: 0, saved_findings: 0, save_error: null });
-  const [history, setHistory] = useState<ScanHistoryItemWire[]>([]);
+  // Scanner state is global today; never show its results as another case's evidence.
+  const activeCase = useRef(wb.caseId);
+  activeCase.current = wb.caseId;
+  const scanCase = useRef<string | null>(null);
+  const scanTicket = useRef(0);
+  const pollTicket = useRef(0);
 
-  const poll = useCallback(() => {
-    netscanStatus().then(setStatus).catch(() => undefined);
-    netscanResults().then(setResults).catch(() => undefined);
-    netscanHistory().then(setHistory).catch(() => undefined);
-  }, []);
+  useEffect(() => {
+    scanTicket.current += 1;
+    pollTicket.current += 1;
+    setResults([]);
+    setProgress(null);
+    setError(null);
+    if (scanCase.current !== wb.caseId) setRunning(false);
+  }, [wb.caseId]);
+
+  const poll = useCallback(async () => {
+    const caseId = wb.caseId;
+    const ticket = ++pollTicket.current;
+    const isCurrent = () => activeCase.current === caseId && ticket === pollTicket.current;
+    try {
+      const currentStatus = await netscanStatus();
+      if (!isCurrent()) return;
+      setStatus(currentStatus);
+      if (scanCase.current !== caseId) return;
+      const currentResults = await netscanResults();
+      if (isCurrent() && scanCase.current === caseId) setResults(currentResults);
+    } catch (cause) {
+      if (isCurrent()) setError("Scanner status unavailable: " + String(cause));
+    }
+  }, [wb.caseId]);
 
   useEffect(() => {
     if (!desktop) return;
-    const timer = setInterval(poll, 900);
+    void poll();
+    const timer = setInterval(() => void poll(), 900);
     return () => clearInterval(timer);
   }, [poll, desktop]);
 
   const start = async () => {
+    if (running || status.running) return;
+    const caseId = wb.caseId;
+    const ticket = ++scanTicket.current;
+    scanCase.current = caseId;
+    const isCurrent = () => activeCase.current === caseId && scanTicket.current === ticket;
     setRunning(true);
     setError(null);
     setResults([]);
     setProgress({ tried: 0, total: 0, percent: 0 });
     try {
-      await netscanStart(target, ports, wb.caseId, authorized, (p) => setProgress(p));
+      await netscanStart(target, ports, caseId, authorized, (p) => {
+        if (isCurrent()) setProgress(p);
+      });
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      if (isCurrent()) setError(err instanceof Error ? err.message : String(err));
     } finally {
-      setRunning(false);
-      setProgress(null);
-      poll();
+      if (isCurrent()) {
+        setRunning(false);
+        setProgress(null);
+        void poll();
+      }
     }
   };
 
   const stop = async () => {
+    if (scanCase.current !== wb.caseId) return;
     try {
       await netscanStop();
+      void poll();
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     }
@@ -77,13 +111,15 @@ export function ScanView() {
   const openCount = results.filter((r) => r.state === "open").length;
 
   const exportResults = async (format: "json" | "csv") => {
+    if (scanCase.current !== wb.caseId) return;
+    const caseId = wb.caseId;
     setError(null);
     try {
       const path = await netscanExport(format);
-      wb.logConsole(`scan exported: ${path}`);
+      if (activeCase.current === caseId) wb.logConsole(`scan exported for case ${caseId}: ${path}`);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      if (message !== "cancelled") setError(message);
+      if (message !== "cancelled" && activeCase.current === caseId) setError(message);
     }
   };
   const isPreset = PORT_PRESETS.some((p) => p.value === ports);
@@ -107,7 +143,7 @@ export function ScanView() {
         {!isPreset ? (
           <TextInput value={ports} onChange={setPorts} placeholder="80,443,8000-8100" ariaLabel="Custom ports" className="w-40" />
         ) : null}
-        {running ? (
+        {running && scanCase.current === wb.caseId ? (
           <ToolButton tone="danger" onClick={() => void stop()}>
             <Square size={11} /> Stop
           </ToolButton>
@@ -115,14 +151,16 @@ export function ScanView() {
           <ToolButton
             tone="primary"
             onClick={() => void start()}
-            disabled={!desktop || !authorized || !target.trim()}
+            disabled={!desktop || !authorized || !target.trim() || status.running || running}
             title={desktop ? "TCP connect scan across all cores" : "Scanning requires the desktop runtime"}
           >
             <Play size={11} /> {running ? "scanning…" : "Run scan"}
           </ToolButton>
         )}
-        <Chip tone={running ? "orange" : "muted"}>{running ? "running" : "idle"}</Chip>
-        {results.length > 0 ? (
+        <Chip tone={status.running || running ? "orange" : "muted"}>
+          {running ? "running" : status.running ? "other session running" : "idle"}
+        </Chip>
+        {results.length > 0 && scanCase.current === wb.caseId ? (
           <>
             <ToolButton onClick={() => void exportResults("json")} title="Save results as JSON">JSON</ToolButton>
             <ToolButton onClick={() => void exportResults("csv")} title="Save results as CSV">CSV</ToolButton>
@@ -205,19 +243,9 @@ export function ScanView() {
           <div className="border-t border-line p-2">
             <span className="text-fg-muted">Live scan status appears above; completed scans are listed below.</span>
           </div>
-          <div className="border-t border-line p-2">
-            <div className="mb-1 text-[10px] uppercase tracking-wider text-fg-muted">Scan history ({history.length})</div>
-            {history.length === 0 ? (
-              <div className="font-mono text-[10px] text-fg-muted">completed scans appear here</div>
-            ) : (
-              <div className="max-h-40 space-y-0.5 overflow-auto">
-                {[...history].reverse().map((h) => (
-                  <div key={h.id} className="font-mono text-[10px] text-fg-dim">
-                    {h.targets} · {h.open_ports} open · {(h.duration_ms / 1000).toFixed(1)}s
-                  </div>
-                ))}
-              </div>
-            )}
+          <div className="border-t border-line p-2 text-[10px] text-fg-muted">
+            Global scan history is withheld from case-specific views until the native API
+            exposes a verified case identifier for each record.
           </div>
         </Pane>
       </div>

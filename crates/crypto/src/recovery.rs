@@ -257,6 +257,84 @@ where
     )
 }
 
+/// Explicit recovery device selection for a single SHA-256 wordlist session.
+/// The first desktop integration slice is SHA-256 only. GPU availability is
+/// not implied by the presence of the OpenCL Cargo feature.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(tag = "backend", rename_all = "snake_case")]
+pub enum RecoveryBackend {
+    Cpu,
+    OpenCl {
+        device_index: usize,
+        batch_size: usize,
+    },
+}
+
+/// One native SHA-256 wordlist service shared by future desktop CPU and GPU
+/// handlers. Hits are returned to the caller; this service never persists them.
+/// Progress reports contain only completed verifications, not wordlist content.
+pub fn recover_sha256_wordlist_on_backend<R, F, P>(
+    backend: RecoveryBackend,
+    target_hex: &str,
+    reader: R,
+    limits: RecoveryLimits,
+    cancel: F,
+    mut on_progress: P,
+) -> Result<RecoveryResult, String>
+where
+    R: std::io::BufRead,
+    F: FnMut() -> bool,
+    P: FnMut(RecoveryProgress),
+{
+    // Validate target and limits before touching the candidate stream.
+    let target = RecoveryTarget::parse("sha256", target_hex)?;
+    if limits.max_candidates == 0 || limits.max_matches == 0 || limits.max_matches > MAX_MATCHES {
+        return Err("invalid limits".into());
+    }
+    match backend {
+        RecoveryBackend::Cpu => {
+            recover_wordlist_with_progress(&target, reader, limits, cancel, on_progress)
+        }
+        RecoveryBackend::OpenCl {
+            device_index,
+            batch_size,
+        } => {
+            let cap = limits.max_candidates.min(MAX_FAST_CANDIDATES);
+            let result = crate::gpu::recover_results_on_device_with_batch_progress(
+                crate::gpu::GpuHash::Sha256,
+                device_index,
+                batch_size,
+                target_hex,
+                crate::candidates::WordlistCandidates::new(reader),
+                cap,
+                limits.max_matches,
+                cancel,
+                |snapshot| {
+                    on_progress(RecoveryProgress {
+                        tried: snapshot.tried,
+                        budget: cap,
+                        matches: snapshot.matches,
+                    });
+                },
+            )?;
+            Ok(RecoveryResult {
+                engine: result.engine,
+                tried: result.tried,
+                hits: result
+                    .hits
+                    .into_iter()
+                    .map(|hit| RecoveryHit {
+                        index: hit.index,
+                        candidate: hit.candidate,
+                    })
+                    .collect(),
+                cancelled: result.cancelled,
+                limit_reached: result.limit_reached,
+            })
+        }
+    }
+}
+
 /// Streams per-word compiled rule variants into the same globally limited
 /// CPU recovery service. Never materializes the expanded dictionary.
 pub fn recover_wordlist_with_rules<R, F, P>(

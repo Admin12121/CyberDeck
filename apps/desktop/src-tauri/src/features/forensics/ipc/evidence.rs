@@ -27,7 +27,8 @@ use domain::{
 #[path = "../application/analysis.rs"]
 mod analysis;
 use analysis::{
-    binary_inspect, entropy_scan, hex_view, metadata_scan, signature_scan, strings, strings_scan,
+    binary_inspect, carve_preview, entropy_scan, hex_view, metadata_scan, signature_scan, strings,
+    strings_scan,
 };
 
 #[path = "../application/extraction.rs"]
@@ -46,8 +47,8 @@ use imports::{
 #[path = "models.rs"]
 mod ipc_models;
 pub use ipc_models::{
-    FileDigestsWire, ForensicEntropyResponse, ForensicMetadataResponse, ForensicStringsResponse,
-    HexResponse, HexRow, SignatureScanResponse, StringHit,
+    FileCarveResponse, FileDigestsWire, ForensicEntropyResponse, ForensicMetadataResponse,
+    ForensicStringsResponse, HexResponse, HexRow, SignatureScanResponse, StringHit,
 };
 
 pub struct EvidenceCtx {

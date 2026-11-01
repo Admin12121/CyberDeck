@@ -184,7 +184,8 @@ pub(super) async fn connect_tunnel_with_ws_connector(
         .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
         .await;
     let ca = ca.expect("ca checked");
-    let acceptor = crate::features::web::webtls::tls_acceptor(&ca, &host).map_err(|e| std::io::Error::other(e))?;
+    let acceptor = crate::features::web::webtls::tls_acceptor(&ca, &host)
+        .map_err(|e| std::io::Error::other(e))?;
     let mut tls_stream = acceptor
         .accept(stream)
         .await
@@ -281,7 +282,17 @@ pub(super) async fn connect_tunnel_with_ws_connector(
         tls_stream.write_all(handshake.as_bytes()).await?;
         tls_stream.flush().await?;
         if !verified_switch {
-            relay_upgrade_rejection_body(&handshake, &mut upstream, &mut tls_stream).await?;
+            tokio::time::timeout(
+                Duration::from_secs(15),
+                relay_upgrade_rejection_body(&handshake, &mut upstream, &mut tls_stream),
+            )
+            .await
+            .map_err(|_| {
+                std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "ws upgrade rejection body timed out",
+                )
+            })??;
             return Ok(());
         }
         let (mut c_read, mut c_write) = tokio::io::split(tls_stream);

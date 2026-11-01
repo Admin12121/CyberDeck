@@ -1,5 +1,7 @@
 //! Whole-case verification without retaining evidence bytes in memory.
-use crate::{integrity, ArtifactRecord, ProvenanceVerification};
+#[cfg(not(unix))]
+use crate::integrity;
+use crate::{ArtifactRecord, ProvenanceVerification};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
@@ -27,8 +29,11 @@ impl CaseIntegrityPlan {
         let mut verified_bytes = 0_u64;
         let mut verified_artifacts = 0_u64;
         for record in &self.artifacts {
-            integrity::verify_artifact_file(record, artifacts_root)
-                .map_err(|e| format!("artifact {} integrity failure: {e}", record.id))?;
+            #[cfg(unix)]
+            let checked = crate::open_verified_case_artifact(record, artifacts_root).map(|_| ());
+            #[cfg(not(unix))]
+            let checked = integrity::verify_artifact_file(record, artifacts_root);
+            checked.map_err(|e| format!("artifact {} integrity failure: {e}", record.id))?;
             verified_bytes = verified_bytes
                 .checked_add(record.size)
                 .ok_or_else(|| "case evidence size overflow".to_string())?;
@@ -47,6 +52,7 @@ impl CaseIntegrityPlan {
 mod tests {
     use super::*;
     use crate::{ArtifactRecord, ArtifactStore, DEFAULT_CASE};
+    use crate::integrity;
     use sha2::{Digest, Sha256};
 
     fn sample(path: &Path, id: &str, bytes: &[u8]) -> ArtifactRecord {

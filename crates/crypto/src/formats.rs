@@ -7,6 +7,8 @@
 
 #[path = "binary.rs"]
 pub mod binary;
+#[path = "carving.rs"]
+pub mod carving;
 #[path = "forensic_native.rs"]
 pub mod forensic_native;
 

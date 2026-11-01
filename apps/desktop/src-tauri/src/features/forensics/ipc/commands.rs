@@ -1,11 +1,12 @@
 //! Stable Tauri command entry points. They delegate to application services.
 //! This module owns IPC protocol shape, not filesystem/storage algorithms.
 use super::{
-    binary_inspect, digest_disk_file, entropy_scan, extract_archive_from_evidence,
+    binary_inspect, carve_preview, digest_disk_file, entropy_scan, extract_archive_from_evidence,
     extract_gzip_from_evidence, extract_nested_from_evidence, hex_view, import_derived,
     import_file_from_path, list_artifacts, metadata_scan, signature_scan, strings, strings_scan,
-    EvidenceCtx, FileDigestsWire, ForensicEntropyResponse, ForensicMetadataResponse,
-    ForensicStringsResponse, HexResponse, SignatureScanResponse, StringHit,
+    EvidenceCtx, FileCarveResponse, FileDigestsWire, ForensicEntropyResponse,
+    ForensicMetadataResponse, ForensicStringsResponse, HexResponse, SignatureScanResponse,
+    StringHit,
 };
 use cyberdeck_storage::{ArtifactRecord, DEFAULT_CASE};
 use tauri::{AppHandle, State};
@@ -180,4 +181,17 @@ pub fn file_extract_nested_archive(
     max_depth: usize,
 ) -> Result<Vec<ArtifactRecord>, String> {
     extract_nested_from_evidence(&ctx, &case_id, &id, &format, offset, max_depth)
+}
+
+/// Read-only native PNG carving preview of a verified, case-scoped artifact.
+/// Does not extract bytes or insert artifacts/findings into the case store.
+#[tauri::command]
+pub fn file_carve_preview(
+    ctx: State<'_, EvidenceCtx>,
+    case_id: String,
+    id: String,
+    offset: u64,
+    len: usize,
+) -> Result<FileCarveResponse, String> {
+    carve_preview(&ctx, &case_id, &id, offset, len)
 }

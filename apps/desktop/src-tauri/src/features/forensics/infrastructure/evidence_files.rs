@@ -109,18 +109,37 @@ pub(super) fn verified_record_window(
     len: usize,
     max: usize,
 ) -> Result<(ArtifactRecord, Vec<u8>), String> {
+    if len == 0 || len > max || max > 16 * 1024 * 1024 {
+        return Err("evidence window limit exceeded".into());
+    }
     let record = scoped_case_artifact(ctx, case_id, id, "artifact not found in selected case")?;
-    cyberdeck_storage::verify_artifact_file(&record, &ctx.artifacts_dir)?;
-    let mut file = std::fs::File::open(&record.stored_path)
-        .map_err(|e| format!("cannot open case evidence: {e}"))?;
-    let data = cyberdeck_crypto::formats::forensic_native::verified_window(
-        &mut file,
-        record.size,
-        &record.sha256,
-        offset,
-        len,
-        max,
-    )?;
+    // Agent5's verified handle pins the same case-contained descriptor for
+    // SHA-256 verification and bounded windows. No verified pathname reopen.
+    #[cfg(unix)]
+    let data = {
+        let mut verified =
+            cyberdeck_storage::open_verified_case_artifact(&record, &ctx.artifacts_dir)?;
+        let start = offset.min(verified.size());
+        let count = (verified.size() - start).min(len as u64) as usize;
+        verified.read_window(start, count, max)?
+    };
+    // The new storage handle intentionally fails closed on Windows until a
+    // reparse-aware adapter is tested. Preserve the prior Windows read path,
+    // including both integrity passes, rather than breaking user workflows.
+    #[cfg(not(unix))]
+    let data = {
+        cyberdeck_storage::verify_artifact_file(&record, &ctx.artifacts_dir)?;
+        let mut file = std::fs::File::open(&record.stored_path)
+            .map_err(|e| format!("cannot open case evidence: {e}"))?;
+        cyberdeck_crypto::formats::forensic_native::verified_window(
+            &mut file,
+            record.size,
+            &record.sha256,
+            offset,
+            len,
+            max,
+        )?
+    };
     Ok((record, data))
 }
 

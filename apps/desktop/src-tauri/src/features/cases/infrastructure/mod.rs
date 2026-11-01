@@ -88,6 +88,9 @@ pub const EVIDENCE_VERIFIER: FilesystemEvidenceVerifier = FilesystemEvidenceVeri
 
 impl EvidenceVerifier for FilesystemEvidenceVerifier {
     fn verify_artifact(&self, artifact: &ArtifactRecord, root: &Path) -> Result<(), String> {
+        #[cfg(unix)]
+        return cyberdeck_storage::open_verified_case_artifact(artifact, root).map(|_| ());
+        #[cfg(not(unix))]
         cyberdeck_storage::verify_artifact_file(artifact, root)
     }
 

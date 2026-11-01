@@ -46,7 +46,22 @@ where
         if line.is_empty() {
             break;
         }
-        if let Some((key, value)) = line.split_once(':') {
+        if line.starts_with(' ') || line.starts_with('\t') {
+            return Err(std::io::Error::other("folded upgrade rejection header"));
+        }
+        let Some((key, value)) = line.split_once(':') else {
+            return Err(std::io::Error::other("malformed upgrade rejection header"));
+        };
+        if key.is_empty()
+            || !key
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&b))
+        {
+            return Err(std::io::Error::other(
+                "invalid upgrade rejection header name",
+            ));
+        }
+        {
             if key.eq_ignore_ascii_case("content-length") {
                 if content_length.is_some() {
                     return Err(std::io::Error::other(
@@ -70,16 +85,25 @@ where
                 content_length = Some(parsed);
             }
             if key.eq_ignore_ascii_case("transfer-encoding") {
+                if transfer_encoding || !value.trim().eq_ignore_ascii_case("chunked") {
+                    return Err(std::io::Error::other(
+                        "unsupported or duplicate upgrade rejection Transfer-Encoding",
+                    ));
+                }
                 transfer_encoding = true;
             }
         }
     }
     if transfer_encoding {
-        // Chunked upgrade rejection is not yet supported; do not reinterpret
-        // a chunked body or mix content-length and transfer-encoding.
-        return Err(std::io::Error::other(
-            "upgrade rejection transfer encoding unsupported",
-        ));
+        if content_length.is_some() {
+            return Err(std::io::Error::other(
+                "ambiguous upgrade rejection Content-Length and Transfer-Encoding",
+            ));
+        }
+        // Preserve the original chunk-size lines, binary payloads and
+        // terminating chunk instead of relaying unbounded EOF-delimited data.
+        relay_chunked_rejection(reader, writer, MAX_BODY).await?;
+        return writer.flush().await;
     }
     if let Some(length) = content_length {
         let copied = tokio::io::copy(&mut (&mut *reader).take(length), &mut *writer).await?;
@@ -108,6 +132,134 @@ where
         }
     }
     writer.flush().await
+}
+
+/// Read exactly one CRLF-terminated chunk metadata/trailer line.
+async fn rejection_line<R: tokio::io::AsyncRead + Unpin>(
+    reader: &mut R,
+    max: usize,
+) -> std::io::Result<Vec<u8>> {
+    use tokio::io::AsyncReadExt;
+    let mut line = Vec::with_capacity(32);
+    let mut byte = [0u8; 1];
+    loop {
+        if line.len() >= max {
+            return Err(std::io::Error::other(
+                "upgrade rejection chunk metadata limit exceeded",
+            ));
+        }
+        reader.read_exact(&mut byte).await?;
+        line.push(byte[0]);
+        if line.ends_with(b"\r\n") {
+            return Ok(line);
+        }
+    }
+}
+
+/// Byte-for-byte relay of chunked HTTP/1.1 rejection bodies with a decoded
+/// payload cap, bounded metadata/trailers and strict CRLF framing.
+async fn relay_chunked_rejection<R, W>(
+    reader: &mut R,
+    writer: &mut W,
+    max_body: u64,
+) -> std::io::Result<()>
+where
+    R: tokio::io::AsyncRead + Unpin,
+    W: tokio::io::AsyncWrite + Unpin,
+{
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let mut decoded = 0_u64;
+    let mut framing_overhead = 0usize;
+    const MAX_FRAMING_OVERHEAD: usize = 64 * 1024;
+    loop {
+        let line = rejection_line(reader, 2048).await?;
+        framing_overhead = framing_overhead.saturating_add(line.len());
+        if framing_overhead > MAX_FRAMING_OVERHEAD {
+            return Err(std::io::Error::other(
+                "upgrade rejection chunk overhead exceeded",
+            ));
+        }
+        let token = line[..line.len() - 2]
+            .split(|b| *b == b';')
+            .next()
+            .unwrap_or_default();
+        if token.is_empty() || !token.iter().all(u8::is_ascii_hexdigit) {
+            return Err(std::io::Error::other(
+                "invalid upgrade rejection chunk size",
+            ));
+        }
+        let token = std::str::from_utf8(token)
+            .map_err(|_| std::io::Error::other("invalid chunk size encoding"))?;
+        let size = u64::from_str_radix(token, 16)
+            .map_err(|_| std::io::Error::other("chunk size overflow"))?;
+        if size > max_body.saturating_sub(decoded) {
+            return Err(std::io::Error::other(
+                "upgrade rejection body exceeds limit",
+            ));
+        }
+        writer.write_all(&line).await?;
+        if size == 0 {
+            let mut trailer_bytes = 0usize;
+            for _ in 0..32 {
+                let trailer = rejection_line(reader, 2048).await?;
+                trailer_bytes = trailer_bytes.saturating_add(trailer.len());
+                framing_overhead = framing_overhead.saturating_add(trailer.len());
+                if framing_overhead > MAX_FRAMING_OVERHEAD {
+                    return Err(std::io::Error::other(
+                        "upgrade rejection chunk overhead exceeded",
+                    ));
+                }
+                if trailer_bytes > 8192 {
+                    return Err(std::io::Error::other(
+                        "upgrade rejection trailers too large",
+                    ));
+                }
+                if trailer != b"\r\n" {
+                    let raw = &trailer[..trailer.len() - 2];
+                    let Some(colon) = raw.iter().position(|b| *b == b':') else {
+                        return Err(std::io::Error::other("malformed upgrade rejection trailer"));
+                    };
+                    let name = &raw[..colon];
+                    if name.is_empty()
+                        || !name
+                            .iter()
+                            .all(|b| b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(b))
+                        || name.eq_ignore_ascii_case(b"content-length")
+                        || name.eq_ignore_ascii_case(b"transfer-encoding")
+                    {
+                        return Err(std::io::Error::other("forbidden upgrade rejection trailer"));
+                    }
+                }
+                writer.write_all(&trailer).await?;
+                if trailer == b"\r\n" {
+                    return Ok(());
+                }
+            }
+            return Err(std::io::Error::other("too many upgrade rejection trailers"));
+        }
+        let copied = tokio::io::copy(&mut (&mut *reader).take(size), &mut *writer).await?;
+        if copied != size {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "truncated upgrade rejection chunk",
+            ));
+        }
+        framing_overhead = framing_overhead.saturating_add(2);
+        if framing_overhead > MAX_FRAMING_OVERHEAD {
+            return Err(std::io::Error::other(
+                "upgrade rejection chunk overhead exceeded",
+            ));
+        }
+        let mut delimiter = [0u8; 2];
+        reader.read_exact(&mut delimiter).await?;
+        if delimiter != *b"\r\n" {
+            return Err(std::io::Error::other(
+                "invalid upgrade rejection chunk delimiter",
+            ));
+        }
+        writer.write_all(&delimiter).await?;
+        decoded += size;
+    }
 }
 
 /// Read only the HTTP response header for WebSocket upgrade handling.
@@ -216,4 +368,66 @@ pub(super) fn websocket_accept_matches(request: &str, response: &str) -> bool {
         }
     }
     accepted == Some(expected.as_str())
+}
+
+#[cfg(test)]
+mod rejection_framing_tests {
+    use super::relay_upgrade_rejection_body;
+    use tokio::io::{duplex, AsyncReadExt, AsyncWriteExt};
+
+    #[tokio::test]
+    async fn chunked_rejection_keeps_binary_framing_and_extensions_exact() {
+        let body = b"3;tag=a\r\n\xff\x00\x7f\r\n2\r\nOK\r\n0\r\nX-Trace: yes\r\n\r\n";
+        let (mut input_tx, mut input_rx) = duplex(128);
+        input_tx.write_all(body).await.unwrap();
+        drop(input_tx);
+        let (mut output_tx, mut output_rx) = duplex(128);
+        relay_upgrade_rejection_body(
+            "HTTP/1.1 403 Forbidden\r\nTransfer-Encoding: chunked\r\n\r\n",
+            &mut input_rx,
+            &mut output_tx,
+        )
+        .await
+        .unwrap();
+        drop(output_tx);
+        let mut actual = Vec::new();
+        output_rx.read_to_end(&mut actual).await.unwrap();
+        assert_eq!(actual, body);
+    }
+
+    #[tokio::test]
+    async fn rejection_refuses_ambiguous_or_malformed_chunked_responses() {
+        for head in [
+            "HTTP/1.1 403\r\nContent-Length: 3\r\nTransfer-Encoding: chunked\r\n\r\n",
+            "HTTP/1.1 403\r\nTransfer-Encoding: gzip, chunked\r\n\r\n",
+            "HTTP/1.1 403\r\nTransfer-Encoding: chunked\r\nTransfer-Encoding: chunked\r\n\r\n",
+        ] {
+            let (mut input_tx, mut input_rx) = duplex(128);
+            input_tx.write_all(b"0\r\n\r\n").await.unwrap();
+            drop(input_tx);
+            let (mut output_tx, _) = duplex(128);
+            assert!(
+                relay_upgrade_rejection_body(head, &mut input_rx, &mut output_tx)
+                    .await
+                    .is_err()
+            );
+        }
+        for body in [
+            &b"x\r\n0\r\n\r\n"[..],
+            &b"2\r\nA!\n0\r\n\r\n"[..],
+            &b"0\r\nContent-Length: 2\r\n\r\n"[..],
+        ] {
+            let (mut input_tx, mut input_rx) = duplex(128);
+            input_tx.write_all(body).await.unwrap();
+            drop(input_tx);
+            let (mut output_tx, _) = duplex(128);
+            assert!(relay_upgrade_rejection_body(
+                "HTTP/1.1 403\r\nTransfer-Encoding: chunked\r\n\r\n",
+                &mut input_rx,
+                &mut output_tx,
+            )
+            .await
+            .is_err());
+        }
+    }
 }

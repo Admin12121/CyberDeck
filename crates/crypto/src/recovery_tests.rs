@@ -308,3 +308,70 @@ fn masks_and_rules_are_bounded() {
     assert_eq!(apply_rule(b"Pass", Rule::Lower).unwrap(), b"pass");
     assert!(apply_rule(&vec![b'x'; 4096], Rule::Duplicate).is_err());
 }
+
+#[test]
+fn sha256_backend_cpu_known_vector_progress_and_limit() {
+    let target = hex::encode(crate::apply_op("sha256", b"secret", None).unwrap());
+    let mut snapshots = Vec::new();
+    let outcome = recover_sha256_wordlist_on_backend(
+        RecoveryBackend::Cpu,
+        &target,
+        std::io::Cursor::new(b"wrong\nsecret\nignored\n".as_slice()),
+        RecoveryLimits {
+            max_candidates: 3,
+            max_matches: 1,
+        },
+        || false,
+        |snapshot| snapshots.push(snapshot),
+    )
+    .unwrap();
+    assert_eq!(outcome.tried, 2);
+    assert_eq!(outcome.hits.len(), 1);
+    assert_eq!(outcome.hits[0].index, 1);
+    assert_eq!(outcome.hits[0].candidate, b"secret");
+    assert_eq!(snapshots.last().unwrap().tried, 2);
+    assert_eq!(snapshots.last().unwrap().budget, 3);
+}
+
+#[test]
+fn sha256_selected_gpu_cancel_before_hardware_and_no_secret_progress() {
+    let mut snapshots = Vec::new();
+    let result = recover_sha256_wordlist_on_backend(
+        RecoveryBackend::OpenCl {
+            device_index: 0,
+            batch_size: 16,
+        },
+        &"00".repeat(32),
+        std::io::Cursor::new(b"secret\n".as_slice()),
+        RecoveryLimits {
+            max_candidates: 1,
+            max_matches: 1,
+        },
+        || true,
+        |snapshot| snapshots.push(snapshot),
+    )
+    .unwrap();
+    assert!(result.cancelled);
+    assert_eq!(result.tried, 0);
+    assert!(result.hits.is_empty());
+    assert_eq!(snapshots.last().unwrap().tried, 0);
+    assert!(!serde_json::to_string(snapshots.last().unwrap())
+        .unwrap()
+        .contains("secret"));
+}
+
+#[test]
+fn sha256_backend_rejects_bad_target_without_reading() {
+    let outcome = recover_sha256_wordlist_on_backend(
+        RecoveryBackend::OpenCl {
+            device_index: 0,
+            batch_size: 16,
+        },
+        "not-a-hash",
+        std::io::Cursor::new(b"anything\n".as_slice()),
+        RecoveryLimits::default(),
+        || false,
+        |_| panic!("invalid target must never report completed work"),
+    );
+    assert!(outcome.is_err());
+}

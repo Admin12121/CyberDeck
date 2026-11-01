@@ -525,3 +525,44 @@ fn no_gpu_feature_never_claims_availability() {
         assert!(recover_sha256(&"00".repeat(32), &[b"x"]).is_err());
     }
 }
+
+#[test]
+fn gpu_batch_progress_reports_only_verified_candidates() {
+    let mut snapshots = Vec::new();
+    let outcome = streaming::stream_with_batch_results_progress(
+        &"00".repeat(32),
+        [
+            Ok::<Vec<u8>, String>(b"bad1".to_vec()),
+            Ok(b"bad2".to_vec()),
+            Ok(b"secret".to_vec()),
+        ],
+        3,
+        1,
+        2,
+        32,
+        "mock-gpu",
+        || false,
+        |_, batch| {
+            Ok(batch
+                .iter()
+                .enumerate()
+                .filter_map(|(i, c)| (*c == b"secret").then_some(i))
+                .collect())
+        },
+        |snapshot| snapshots.push(snapshot),
+    )
+    .unwrap();
+    assert_eq!(outcome.tried, 3);
+    assert_eq!(outcome.hits.len(), 1);
+    assert_eq!(outcome.hits[0].index, 2);
+    assert_eq!(
+        snapshots
+            .iter()
+            .map(|p| (p.tried, p.batches, p.matches))
+            .collect::<Vec<_>>(),
+        vec![(2, 1, 0), (3, 2, 1)]
+    );
+    assert!(!serde_json::to_string(&snapshots)
+        .unwrap()
+        .contains("secret"));
+}

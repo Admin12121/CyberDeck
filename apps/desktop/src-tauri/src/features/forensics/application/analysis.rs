@@ -1,9 +1,9 @@
 //! Case-scoped analysis application services. No Tauri bindings.
 //! All byte acquisition uses the verified, bounded infrastructure window.
 use super::{
-    scoped_case_artifact, verified_record_window, EvidenceCtx, ForensicEntropyResponse,
-    ForensicMetadataResponse, ForensicStringsResponse, HexResponse, HexRow, SignatureScanResponse,
-    StringHit, MAX_HEX_REQUEST, MAX_STRINGS_HITS, MAX_STRINGS_SCAN,
+    scoped_case_artifact, verified_record_window, EvidenceCtx, FileCarveResponse,
+    ForensicEntropyResponse, ForensicMetadataResponse, ForensicStringsResponse, HexResponse,
+    HexRow, SignatureScanResponse, StringHit, MAX_HEX_REQUEST, MAX_STRINGS_HITS, MAX_STRINGS_SCAN,
 };
 
 pub(super) fn binary_inspect(
@@ -221,5 +221,36 @@ pub(super) fn metadata_scan(
         file_bytes: record.size,
         integrity_checked: true,
         coverage_truncated,
+    })
+}
+
+/// Preview CRC-validated PNG carving boundaries without modifying case evidence.
+/// Every byte is read through the same scoped integrity-checking adapter as
+/// hex, extraction and metadata. The returned offsets refer to the source file.
+pub(super) fn carve_preview(
+    ctx: &EvidenceCtx,
+    case_id: &str,
+    id: &str,
+    offset: u64,
+    len: usize,
+) -> Result<FileCarveResponse, String> {
+    use cyberdeck_crypto::formats::carving::{preview_png_carving, MAX_CARVE_SCAN_BYTES};
+    if len == 0 || len > MAX_CARVE_SCAN_BYTES {
+        return Err("carving preview window must be 1..4MiB".into());
+    }
+    let (record, bytes) =
+        verified_record_window(ctx, case_id, id, offset, len, MAX_CARVE_SCAN_BYTES)?;
+    let analyzed_offset = offset.min(record.size);
+    let report = preview_png_carving(&bytes, analyzed_offset)?;
+    Ok(FileCarveResponse {
+        candidates: report.candidates,
+        analyzed_offset,
+        analyzed_bytes: bytes.len(),
+        file_bytes: record.size,
+        integrity_checked: true,
+        coverage_truncated: analyzed_offset != 0
+            || analyzed_offset + (bytes.len() as u64) < record.size,
+        rejected_or_incomplete: report.rejected_or_incomplete,
+        candidate_limit_reached: report.candidate_limit_reached,
     })
 }

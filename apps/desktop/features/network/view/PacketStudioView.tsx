@@ -58,23 +58,40 @@ export function PacketStudioView() {
   const [packetBytes, setPacketBytes] = useState<{ frameIndex: number; data: HexResponseWire } | null>(null);
   // null: details and bytes share the row evenly; dragging pins px.
   const [detailsWidth, setDetailsWidth] = useState<number | null>(null);
+  const currentCase = useRef(wb.caseId);
+  currentCase.current = wb.caseId;
+  const openSequence = useRef(0);
+
+  useEffect(() => {
+    openSequence.current += 1;
+    setCapture(null);
+    setShowSample(false);
+    setSelected(0);
+    setPacketBytes(null);
+    setOpening(false);
+    setOpenError(null);
+  }, [wb.caseId]);
 
   const packets = capture?.packets ?? (showSample ? SAMPLE_DISPLAY : []);
 
   const openCapture = async () => {
+    const caseId = wb.caseId;
+    const ticket = ++openSequence.current;
+    const isCurrent = () => currentCase.current === caseId && ticket === openSequence.current;
     setOpening(true);
     setOpenError(null);
     try {
       const wire = await pcapOpenDialog();
+      if (!isCurrent()) return;
       setCapture(wire);
       setShowSample(false);
       setSelected(0);
       setPacketBytes(null);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      if (message !== "cancelled") setOpenError(message);
+      if (isCurrent() && message !== "cancelled") setOpenError(message);
     } finally {
-      setOpening(false);
+      if (isCurrent()) setOpening(false);
     }
   };
 
@@ -100,16 +117,19 @@ export function PacketStudioView() {
   useEffect(() => {
     if (!capture || currentIndex === null) return;
     let cancelled = false;
+    const caseId = wb.caseId;
     setPacketBytes(null);
     pcapPacketBytes(currentIndex, 0, 512)
       .then((data) => {
-        if (!cancelled) setPacketBytes({ frameIndex: currentIndex, data });
+        if (!cancelled && currentCase.current === caseId) setPacketBytes({ frameIndex: currentIndex, data });
       })
       .catch((err) => {
-        if (!cancelled) console.error("pcap_packet_bytes failed:", err);
+        if (!cancelled && currentCase.current === caseId) {
+          setOpenError("Could not inspect the selected frame: " + String(err));
+        }
       });
     return () => { cancelled = true; };
-  }, [capture, currentIndex]);
+  }, [capture, currentIndex, wb.caseId]);
 
   const sampleBytes = useMemo(
     () => (!capture && current ? sampleFrameBytes(current.index + 1, Math.min(current.length, 160)) : new Uint8Array()),

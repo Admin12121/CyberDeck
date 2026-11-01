@@ -44,11 +44,17 @@ pub(super) async fn start_proxy(
     let connection_slots = Arc::new(tokio::sync::Semaphore::new(MAX_ACTIVE_CONNECTIONS));
     let handle = tokio::spawn(async move {
         let mut expiry = tokio::time::interval(Duration::from_secs(5));
+        let mut shutdown_check = tokio::time::interval(Duration::from_millis(100));
+        // Own every accepted task. Dropping only the listener must never
+        // leave established CONNECT / WebSocket tunnels behind.
+        let mut connections = tokio::task::JoinSet::new();
         loop {
             if !shared.running.load(Ordering::Relaxed) {
                 break;
             }
             tokio::select! {
+                _ = shutdown_check.tick() => {}
+                _ = connections.join_next(), if !connections.is_empty() => {}
                 accepted = listener.accept() => {
                     let Ok((stream, _)) = accepted else { continue };
                     let Ok(slot) = Arc::clone(&connection_slots).try_acquire_owned() else {
@@ -57,7 +63,7 @@ pub(super) async fn start_proxy(
                         continue;
                     };
                     let shared = Arc::clone(&shared);
-                    tokio::spawn(async move {
+                    connections.spawn(async move {
                         let _slot = slot;
                         let _ = handle_conn(stream, shared).await;
                     });
@@ -79,6 +85,10 @@ pub(super) async fn start_proxy(
                 }
             }
         }
+        // Complete cancellation before proxy_stop may return. Active sockets
+        // are released even when a peer holds a tunnel open indefinitely.
+        connections.abort_all();
+        while connections.join_next().await.is_some() {}
     });
     *ctx.proxy_handle.lock().expect("proxy handle poisoned") = Some(handle);
     Ok(ProxyStatusWire {
@@ -126,18 +136,36 @@ pub(super) async fn stop_proxy(ctx: &WebCtx) -> Result<ProxyStatusWire, String> 
         ctx.shared.running.store(false, Ordering::Relaxed);
         std::mem::take(&mut *pending)
     };
+    // Pending peers can stop reading. Notify with a bounded deadline in
+    // parallel so one blocked TLS socket does not stall the entire shutdown.
+    let mut notifications = tokio::task::JoinSet::new();
     for (_, mut request) in held {
-        let _ = request.stream.write_all(
-            b"HTTP/1.1 503 Service Unavailable\r\ncontent-length: 0\r\nconnection: close\r\n\r\n"
-        ).await;
+        notifications.spawn(async move {
+            let _ = tokio::time::timeout(
+                Duration::from_secs(1),
+                request.stream.write_all(
+                    b"HTTP/1.1 503 Service Unavailable\r\ncontent-length: 0\r\nconnection: close\r\n\r\n"
+                ),
+            ).await;
+        });
     }
-    if let Some(handle) = ctx
+    while notifications.join_next().await.is_some() {}
+    let listener = ctx
         .proxy_handle
         .lock()
         .expect("proxy handle poisoned")
-        .take()
-    {
-        handle.abort();
+        .take();
+    if let Some(mut handle) = listener {
+        // Shutdown includes child cancellation and joins. An unresponsive
+        // listener is forcibly aborted and reported, not silently accepted.
+        if tokio::time::timeout(Duration::from_secs(3), &mut handle)
+            .await
+            .is_err()
+        {
+            handle.abort();
+            let _ = handle.await;
+            return Err("proxy listener shutdown timed out".to_string());
+        }
     }
     Ok(proxy_status_inner(&ctx))
 }
@@ -147,6 +175,12 @@ pub(super) fn proxy_status_inner(ctx: &WebCtx) -> ProxyStatusWire {
         running: ctx.shared.running.load(Ordering::Relaxed),
         port: ctx.shared.port.load(Ordering::Relaxed),
         captured: ctx.shared.captured.lock().expect("captured poisoned").len(),
+    }
+}
+
+async fn wait_until_stopped(shared: &ProxyShared) {
+    while shared.running.load(Ordering::Acquire) {
+        tokio::time::sleep(Duration::from_millis(50)).await;
     }
 }
 
@@ -174,7 +208,18 @@ pub(super) async fn forward(id: u64, ctx: &WebCtx) -> Result<u16, String> {
     );
     let history_stamp = pending.history_stamp;
     let mut stream = pending.stream;
-    let (status, resp_headers, resp_body) = execute_request(&method, &url, &headers, &body).await;
+    if !ctx.shared.running.load(Ordering::Acquire) {
+        return Err("proxy stopped before forwarding".to_string());
+    }
+    let (status, resp_headers, resp_body) = tokio::select! {
+        result = execute_request(&method, &url, &headers, &body) => result,
+        _ = wait_until_stopped(&ctx.shared) => {
+            return Err("proxy stopped during forwarding".to_string());
+        }
+    };
+    if !ctx.shared.running.load(Ordering::Acquire) {
+        return Err("proxy stopped during forwarding".to_string());
+    }
     webhistory::capture(
         history_stamp,
         id,
@@ -200,8 +245,16 @@ pub(super) async fn forward(id: u64, ctx: &WebCtx) -> Result<u16, String> {
         "content-length: {}\r\nconnection: close\r\n\r\n",
         resp_body.len()
     ));
-    let _ = stream.write_all(response.as_bytes()).await;
-    let _ = stream.write_all(&resp_body).await;
+    tokio::time::timeout(Duration::from_secs(10), async {
+        stream.write_all(response.as_bytes()).await?;
+        stream.write_all(&resp_body).await
+    })
+    .await
+    .map_err(|_| "proxy forward response write timed out".to_string())?
+    .map_err(|e| format!("proxy forward response write failed: {e}"))?;
+    if !ctx.shared.running.load(Ordering::Acquire) {
+        return Err("proxy stopped during forwarding".to_string());
+    }
     push_capture(
         &ctx.shared,
         CapturedRequest {
@@ -225,10 +278,12 @@ pub(super) async fn drop_pending(id: u64, ctx: &WebCtx) -> Result<(), String> {
         .expect("pending poisoned")
         .remove(&id);
     if let Some(mut pending) = pending {
-        let _ = pending
-            .stream
-            .write_all(b"HTTP/1.1 502 CyberDeck: request dropped by interceptor\r\ncontent-length: 0\r\nconnection: close\r\n\r\n")
-            .await;
+        let _ = tokio::time::timeout(
+            Duration::from_secs(2),
+            pending.stream.write_all(
+                b"HTTP/1.1 502 CyberDeck: request dropped by interceptor\r\ncontent-length: 0\r\nconnection: close\r\n\r\n"
+            ),
+        ).await;
     }
     Ok(())
 }

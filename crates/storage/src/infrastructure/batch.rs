@@ -77,6 +77,9 @@ impl ArtifactStore {
                     return Err("invalid finding metadata".into());
                 }
             }
+            #[cfg(unix)]
+            drop(crate::open_verified_case_artifact(record, artifacts_root)?);
+            #[cfg(not(unix))]
             integrity::verify_artifact_file(record, artifacts_root)?;
         }
 

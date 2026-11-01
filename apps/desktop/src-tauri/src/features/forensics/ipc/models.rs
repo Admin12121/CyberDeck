@@ -76,3 +76,17 @@ pub struct ForensicMetadataResponse {
     pub integrity_checked: bool,
     pub coverage_truncated: bool,
 }
+
+/// Read-only carving preview. Candidate offsets and lengths identify regions
+/// of the *existing* verified case evidence; no bytes or new IDs are returned.
+#[derive(Debug, Serialize)]
+pub struct FileCarveResponse {
+    pub candidates: Vec<cyberdeck_crypto::formats::carving::CarveCandidate>,
+    pub analyzed_offset: u64,
+    pub analyzed_bytes: usize,
+    pub file_bytes: u64,
+    pub integrity_checked: bool,
+    pub coverage_truncated: bool,
+    pub rejected_or_incomplete: usize,
+    pub candidate_limit_reached: bool,
+}

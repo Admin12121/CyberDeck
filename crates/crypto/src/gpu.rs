@@ -278,6 +278,38 @@ where
     B: AsRef<[u8]>,
     F: FnMut() -> bool,
 {
+    recover_results_on_device_with_batch_progress(
+        algorithm,
+        device_index,
+        batch_size,
+        target_hex,
+        candidates,
+        max_attempts,
+        max_matches,
+        cancel,
+        |_| {},
+    )
+}
+
+/// Execute selected-device OpenCL batches with completed-check progress.
+/// Does not silently fall back to CPU or serialize recovered passwords in events.
+pub fn recover_results_on_device_with_batch_progress<I, B, F, P>(
+    algorithm: GpuHash,
+    device_index: usize,
+    batch_size: usize,
+    target_hex: &str,
+    candidates: I,
+    max_attempts: u64,
+    max_matches: usize,
+    cancel: F,
+    on_progress: P,
+) -> Result<GpuStreamResult, String>
+where
+    I: IntoIterator<Item = Result<B, String>>,
+    B: AsRef<[u8]>,
+    F: FnMut() -> bool,
+    P: FnMut(GpuStreamProgress),
+{
     // Reject unsupported NTLM inputs even without an OpenCL loader. A
     // candidate validation error must not be disguised as a driver failure.
     let candidates = candidates.into_iter().map(|entry| {
@@ -294,7 +326,7 @@ where
     #[cfg(feature = "gpu")]
     {
         let mut session: Option<native::Session> = None;
-        stream_with_batch_results(
+        streaming::stream_with_batch_results_progress(
             target_hex,
             candidates,
             max_attempts,
@@ -317,12 +349,13 @@ where
                     .expect("GPU session initialized")
                     .execute(&target, batch)
             },
+            on_progress,
         )
     }
     #[cfg(not(feature = "gpu"))]
     {
         let _ = device_index;
-        stream_with_batch_results(
+        streaming::stream_with_batch_results_progress(
             target_hex,
             candidates,
             max_attempts,
@@ -332,6 +365,7 @@ where
             algorithm.engine(),
             cancel,
             |_, _| Err("GPU feature not enabled; no OpenCL work was performed".into()),
+            on_progress,
         )
     }
 }
@@ -425,7 +459,7 @@ pub fn recover_ntlm(target_hex: &str, candidates: &[&[u8]]) -> Result<Vec<usize>
 mod streaming;
 pub use streaming::{
     recover_md5_stream, recover_ntlm_stream, recover_sha1_stream, recover_sha256_stream,
-    GpuStreamHit, GpuStreamResult, GPU_STREAM_BATCH, MAX_GPU_STREAM_CANDIDATES,
+    GpuStreamHit, GpuStreamProgress, GpuStreamResult, GPU_STREAM_BATCH, MAX_GPU_STREAM_CANDIDATES,
     MAX_GPU_STREAM_MATCHES,
 };
 #[cfg(test)]

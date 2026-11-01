@@ -1,5 +1,5 @@
 /** Proxy view: listener control, intercept queue, match & replace. */
-import { useCallback, useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Copy, Download, PlayCircle, Square, X } from "lucide-react";
 import { Chip, Pane, TextInput, ToolButton } from "@ds/panes";
 import {
@@ -7,7 +7,6 @@ import {
   proxyCaPem,
   proxyDrop,
   proxyForward,
-  proxyHistory,
   proxyIntercept,
   proxyPending,
   proxySetRules,
@@ -28,63 +27,128 @@ export function ProxyView() {
   const [error, setError] = useState<string | null>(null);
   const [caSaved, setCaSaved] = useState(false);
   const [caPem, setCaPem] = useState<string | null>(null);
-
-  const refresh = useCallback(() => {
-    proxyStatus().then(setStatus).catch(() => undefined);
-    if (interceptOn) proxyPending().then(setPending).catch(() => undefined);
-  }, [interceptOn]);
+  const [busy, setBusy] = useState(false);
+  const [pendingBusy, setPendingBusy] = useState<number | null>(null);
+  const [rulesSaving, setRulesSaving] = useState(false);
+  const [rulesApplied, setRulesApplied] = useState(false);
+  const ruleQueue = useRef<Promise<void>>(Promise.resolve());
+  const ruleRevision = useRef(0);
 
   useEffect(() => {
-    const timer = setInterval(refresh, interceptOn ? 1200 : 3000);
-    return () => clearInterval(timer);
-  }, [refresh, interceptOn]);
+    if (!desktop) return;
+    let disposed = false;
+    let inFlight = false;
+    const refresh = async () => {
+      if (inFlight) return;
+      inFlight = true;
+      try {
+        const current = await proxyStatus();
+        if (disposed) return;
+        setStatus(current);
+        if (interceptOn && current.running) {
+          const waiting = await proxyPending();
+          if (!disposed) setPending(waiting);
+        } else {
+          setPending([]);
+        }
+      } catch (cause) {
+        if (!disposed) setError("Proxy status unavailable: " + String(cause));
+      } finally {
+        inFlight = false;
+      }
+    };
+    void refresh();
+    const timer = setInterval(() => void refresh(), interceptOn ? 1200 : 3000);
+    return () => { disposed = true; clearInterval(timer); };
+  }, [desktop, interceptOn]);
+
+  // Apply only the latest draft, in order. Individual keystrokes must not race
+  // independent native proxy_set_rules commands and overwrite newer rules.
+  useEffect(() => {
+    if (!desktop) return;
+    const revision = ++ruleRevision.current;
+    setRulesApplied(false);
+    const timer = setTimeout(() => {
+      const next = rules.map((rule) => ({ ...rule }));
+      setRulesSaving(true);
+      const operation = ruleQueue.current.then(() => proxySetRules(next));
+      ruleQueue.current = operation.then(() => undefined, () => undefined);
+      void operation.then(() => {
+        if (ruleRevision.current === revision) {
+          setRulesApplied(true);
+          setError(null);
+        }
+      }).catch((cause) => {
+        if (ruleRevision.current === revision) setError("Cannot apply proxy rules: " + String(cause));
+      }).finally(() => {
+        if (ruleRevision.current === revision) setRulesSaving(false);
+      });
+    }, 300);
+    return () => clearTimeout(timer);
+  }, [desktop, rules]);
 
   const start = async () => {
+    if (!desktop || busy) return;
+    const requestedPort = Number(port.trim());
+    if (!/^\d+$/.test(port.trim()) || !Number.isInteger(requestedPort) || requestedPort < 1 || requestedPort > 65535) {
+      setError("Choose a valid TCP port (1–65535)");
+      return;
+    }
+    setBusy(true);
     setError(null);
     try {
-      setStatus(await proxyStart(Number.parseInt(port, 10) || 8080));
+      setStatus(await proxyStart(requestedPort));
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
-    }
+    } finally { setBusy(false); }
   };
   const stop = async () => {
+    if (!desktop || busy) return;
+    setBusy(true);
     setError(null);
     try {
       setStatus(await proxyStop());
+      setInterceptOn(false);
+      setPending([]);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
-    }
+    } finally { setBusy(false); }
   };
   const toggleIntercept = async () => {
+    if (!desktop || busy || !status.running) return;
+    setBusy(true);
     setError(null);
     try {
       const on = await proxyIntercept(!interceptOn);
       setInterceptOn(on);
+      if (!on) setPending([]);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
-    }
+    } finally { setBusy(false); }
   };
   const forward = async (id: number) => {
+    if (pendingBusy !== null) return;
+    setPendingBusy(id);
+    setError(null);
     try {
       await proxyForward(id);
       setPending(await proxyPending());
-      proxyHistory().then(() => undefined).catch(() => undefined);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
-    }
+    } finally { setPendingBusy(null); }
   };
   const drop = async (id: number) => {
+    if (pendingBusy !== null) return;
+    setPendingBusy(id);
+    setError(null);
     try {
       await proxyDrop(id);
       setPending(await proxyPending());
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
-    }
+    } finally { setPendingBusy(null); }
   };
-  const saveRules = (next: { find: string; replace: string }[]) => {
-    setRules(next);
-    void proxySetRules(next);
-  };
+  const saveRules = (next: { find: string; replace: string }[]) => setRules(next);
 
   const fetchCa = async (): Promise<string | null> => {
     setError(null);
@@ -158,11 +222,11 @@ export function ProxyView() {
               <span className="font-mono text-[10px] uppercase text-fg-muted">port</span>
               <TextInput value={port} onChange={setPort} ariaLabel="Proxy port" className="w-24" />
               {status.running ? (
-                <ToolButton tone="danger" onClick={() => void stop()}>
+                <ToolButton tone="danger" onClick={() => void stop()} disabled={busy}>
                   <Square size={11} /> Stop
                 </ToolButton>
               ) : (
-                <ToolButton tone="primary" onClick={() => void start()} disabled={!desktop} title={desktop ? "Bind 127.0.0.1 and start capturing" : "The proxy requires the desktop runtime"}>
+                <ToolButton tone="primary" onClick={() => void start()} disabled={!desktop || busy} title={desktop ? "Bind 127.0.0.1 and start capturing" : "The proxy requires the desktop runtime"}>
                   <PlayCircle size={11} /> Start
                 </ToolButton>
               )}
@@ -170,7 +234,7 @@ export function ProxyView() {
               <ToolButton
                 tone={interceptOn ? "danger" : "default"}
                 onClick={() => void toggleIntercept()}
-                disabled={!desktop || !status.running}
+                disabled={!desktop || !status.running || busy}
                 title={desktop ? "Hold requests here until you forward or drop them" : "The proxy requires the desktop runtime"}
               >
                 {interceptOn ? "Intercept: ON" : "Intercept: OFF"}
@@ -197,8 +261,8 @@ export function ProxyView() {
                     <span className="min-w-0 flex-1 truncate font-mono text-[10px] text-fg-dim" title={p.url}>
                       {p.host}{p.path}
                     </span>
-                    <ToolButton tone="primary" onClick={() => void forward(p.id)}>Forward</ToolButton>
-                    <ToolButton tone="danger" onClick={() => void drop(p.id)}>Drop</ToolButton>
+                    <ToolButton tone="primary" onClick={() => void forward(p.id)} disabled={pendingBusy !== null}>Forward</ToolButton>
+                    <ToolButton tone="danger" onClick={() => void drop(p.id)} disabled={pendingBusy !== null}>Drop</ToolButton>
                   </div>
                 ))
               )}
@@ -208,7 +272,7 @@ export function ProxyView() {
 
         {/* match and replace */}
         <Pane
-          title={`Match & replace (${rules.length})`}
+          title={`Match & replace (${rules.length}) · ${rulesSaving ? "applying…" : rulesApplied ? "applied" : "draft"}`}
           actions={
             <ToolButton onClick={() => saveRules([...rules, { find: "", replace: "" }])} disabled={!desktop} title="Add a rule applied to proxied requests">
               + rule

@@ -321,7 +321,47 @@ where
     )
 }
 
+/// Non-secret completed-batch progress; no password bytes or target hash.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+pub struct GpuStreamProgress {
+    pub tried: u64,
+    pub batches: u64,
+    pub matches: usize,
+}
+
 pub(super) fn stream_with_batch_results<I, B, F, E>(
+    target_hex: &str,
+    candidates: I,
+    max_attempts: u64,
+    max_matches: usize,
+    batch_size: usize,
+    digest_bytes: usize,
+    engine: &'static str,
+    cancel: F,
+    executor: E,
+) -> Result<GpuStreamResult, String>
+where
+    I: IntoIterator<Item = Result<B, String>>,
+    B: AsRef<[u8]>,
+    F: FnMut() -> bool,
+    E: FnMut(&str, &[&[u8]]) -> Result<Vec<usize>, String>,
+{
+    stream_with_batch_results_progress(
+        target_hex,
+        candidates,
+        max_attempts,
+        max_matches,
+        batch_size,
+        digest_bytes,
+        engine,
+        cancel,
+        executor,
+        |_| {},
+    )
+}
+
+/// Reports only completed GPU batches, never queued candidates.
+pub(super) fn stream_with_batch_results_progress<I, B, F, E, P>(
     target_hex: &str,
     candidates: I,
     max_attempts: u64,
@@ -331,12 +371,14 @@ pub(super) fn stream_with_batch_results<I, B, F, E>(
     engine: &'static str,
     mut cancel: F,
     mut executor: E,
+    mut on_progress: P,
 ) -> Result<GpuStreamResult, String>
 where
     I: IntoIterator<Item = Result<B, String>>,
     B: AsRef<[u8]>,
     F: FnMut() -> bool,
     E: FnMut(&str, &[&[u8]]) -> Result<Vec<usize>, String>,
+    P: FnMut(GpuStreamProgress),
 {
     if hex::decode(target_hex)
         .map_err(|_| "invalid GPU digest")?
@@ -395,12 +437,17 @@ where
                 max_matches,
                 &mut executor,
             )?;
+            on_progress(GpuStreamProgress {
+                tried: result.tried,
+                batches: result.batches,
+                matches: result.hits.len(),
+            });
             if result.hits.len() >= max_matches {
                 return Ok(result);
             }
         }
     }
-    if !result.cancelled {
+    if !result.cancelled && !batch.is_empty() {
         dispatch_batch(
             target_hex,
             &mut batch,
@@ -408,6 +455,18 @@ where
             max_matches,
             &mut executor,
         )?;
+        on_progress(GpuStreamProgress {
+            tried: result.tried,
+            batches: result.batches,
+            matches: result.hits.len(),
+        });
+    }
+    if result.tried == 0 {
+        on_progress(GpuStreamProgress {
+            tried: 0,
+            batches: 0,
+            matches: 0,
+        });
     }
     Ok(result)
 }

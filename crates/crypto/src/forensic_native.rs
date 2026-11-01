@@ -389,13 +389,25 @@ fn exif(data: &[u8], base: u64) -> Result<Vec<MetadataField>, String> {
     }
     Ok(fields)
 }
+/// Metadata mode preserves partial/metadata-only PNG compatibility.
 pub fn metadata(data: &[u8], base: u64) -> Result<MetadataReport, String> {
+    metadata_impl(data, base, false)
+}
+
+/// Carving mode additionally requires an IDAT before IEND. This validates
+/// PNG chunk framing, ordering and CRCs, not compressed pixel contents.
+pub fn carving_png_metadata(data: &[u8], base: u64) -> Result<MetadataReport, String> {
+    metadata_impl(data, base, true)
+}
+
+fn metadata_impl(data: &[u8], base: u64, require_png_idat: bool) -> Result<MetadataReport, String> {
     if data.len() > MAX_METADATA_INPUT {
         return Err("metadata scan window exceeds 4MiB".into());
     }
     if data.starts_with(b"\x89PNG\r\n\x1a\n") {
         let mut i = 8usize;
         let mut found_ihdr = false;
+        let mut seen_idat = false;
         let mut end_found = false;
         let mut fields = Vec::new();
         while i < data.len() {
@@ -457,9 +469,14 @@ pub fn metadata(data: &[u8], base: u64) -> Result<MetadataReport, String> {
                         });
                     }
                 }
+            } else if tag == b"IDAT" {
+                seen_idat = true;
             } else if tag == b"IEND" {
                 if n != 0 {
                     return Err("PNG IEND not empty".into());
+                }
+                if require_png_idat && !seen_idat {
+                    return Err("PNG carving requires image data before IEND".into());
                 }
                 end_found = true;
                 i = end;

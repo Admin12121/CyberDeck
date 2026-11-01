@@ -18,11 +18,21 @@ export function CaseFindingsView() {
   const [verification, setVerification] = useState<CaseIntegritySummaryWire | null>(null);
   const [verifying, setVerifying] = useState(false);
   const verificationSerial = useRef(0);
+  const refreshSerial = useRef(0);
+  const activeCase = useRef(wb.caseId);
+  activeCase.current = wb.caseId;
 
   useEffect(() => {
     verificationSerial.current += 1;
+    refreshSerial.current += 1;
     setVerification(null);
     setVerifying(false);
+    setExporting(false);
+    setLoading(false);
+    setFindings([]);
+    setEvents([]);
+    setSelected(null);
+    setError(null);
   }, [wb.caseId]);
 
   const verifyCase = async () => {
@@ -42,19 +52,24 @@ export function CaseFindingsView() {
 
   const refresh = useCallback(async () => {
     if (!isDesktop()) return;
+    const caseId = wb.caseId;
+    const ticket = ++refreshSerial.current;
+    const isCurrent = () => ticket === refreshSerial.current && activeCase.current === caseId;
     setLoading(true);
     setError(null);
     try {
-      const [data, activity] = await Promise.all([caseFindingsList(wb.caseId), caseEventsList(wb.caseId)]);
+      const [data, activity] = await Promise.all([caseFindingsList(caseId), caseEventsList(caseId)]);
+      if (!isCurrent()) return;
       setEvents(activity);
       setFindings(data);
       setSelected(data[0]?.id ?? null);
     } catch (cause) {
+      if (!isCurrent()) return;
       setError(String(cause));
       setFindings([]);
       setEvents([]);
     } finally {
-      setLoading(false);
+      if (isCurrent()) setLoading(false);
     }
   }, [wb.caseId]);
 
@@ -63,19 +78,21 @@ export function CaseFindingsView() {
   const exportReport = async () => {
     if (!isDesktop()) return;
     if (!window.confirm("Export this case report? Finding details may contain sensitive information. The JSON will include case metadata, artifact hashes, findings and activity (but not raw evidence or local file paths).")) return;
+    const caseId = wb.caseId;
     setExporting(true);
     setError(null);
     try {
-      const report = await caseReport(wb.caseId);
+      const report = await caseReport(caseId);
+      if (activeCase.current !== caseId) return;
       const blob = new Blob([JSON.stringify(report, null, 2)], { type: "application/json" });
       const url = URL.createObjectURL(blob);
       const link = document.createElement("a");
       link.href = url;
-      link.download = "cyberdeck-" + wb.caseId + "-report.json";
+      link.download = "cyberdeck-" + caseId + "-report.json";
       link.click();
       URL.revokeObjectURL(url);
-    } catch (cause) { setError(String(cause)); }
-    finally { setExporting(false); }
+    } catch (cause) { if (activeCase.current === caseId) setError(String(cause)); }
+    finally { if (activeCase.current === caseId) setExporting(false); }
   };
 
   const filtered = useMemo(() => {

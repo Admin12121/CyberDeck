@@ -508,3 +508,82 @@ fn streamed_dialog_digest_matches_import_record() {
     assert_eq!(imported.crc32, hashes.crc32);
     assert_eq!(std::fs::read(&imported.stored_path).unwrap(), input);
 }
+
+#[test]
+fn case_backed_png_carve_preview_requires_source_integrity() {
+    use flate2::write::ZlibEncoder;
+    use flate2::Compression;
+    fn chunk(tag: &[u8; 4], payload: &[u8]) -> Vec<u8> {
+        let mut out = (payload.len() as u32).to_be_bytes().to_vec();
+        out.extend_from_slice(tag);
+        out.extend_from_slice(payload);
+        let crc_hex = cyberdeck_crypto::apply_op("crc32", &out[4..], None).unwrap();
+        let crc = u32::from_str_radix(std::str::from_utf8(&crc_hex).unwrap(), 16).unwrap();
+        out.extend_from_slice(&crc.to_be_bytes());
+        out
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = test_ctx(dir.path());
+    let mut compressed = ZlibEncoder::new(Vec::new(), Compression::default());
+    compressed.write_all(&[0, 34, 51, 68]).unwrap(); // 1x1 RGB filter 0
+    let compressed = compressed.finish().unwrap();
+    let mut picture = b"\x89PNG\r\n\x1a\n".to_vec();
+    picture.extend(chunk(
+        b"IHDR",
+        &[0, 0, 0, 1, 0, 0, 0, 1, 8, 2, 0, 0, 0].as_slice(),
+    ));
+    picture.extend(chunk(b"IDAT", &compressed));
+    picture.extend(chunk(b"IEND", &[]));
+    let mut source = b"embedded-forensic-source".to_vec();
+    let expected_offset = source.len() as u64;
+    source.extend_from_slice(&picture);
+    source.extend_from_slice(b"unrelated trailing bytes");
+    let record =
+        import_bytes(&ctx, Path::new("firmware.img"), &source, DEFAULT_CASE, true).unwrap();
+    let before = list_artifacts(&ctx, DEFAULT_CASE).unwrap().len();
+    let result = carve_preview(&ctx, DEFAULT_CASE, &record.id, 0, source.len()).unwrap();
+    assert!(result.integrity_checked);
+    assert!(!result.coverage_truncated);
+    assert_eq!(result.candidates.len(), 1);
+    assert_eq!(result.candidates[0].offset, expected_offset);
+    assert_eq!(result.candidates[0].length, picture.len());
+    assert_eq!(list_artifacts(&ctx, DEFAULT_CASE).unwrap().len(), before);
+    assert!(carve_preview(&ctx, "another-case", &record.id, 0, source.len()).is_err());
+    let mut changed = source.clone();
+    *changed.last_mut().unwrap() ^= 1;
+    std::fs::write(&record.stored_path, &changed).unwrap();
+    assert!(carve_preview(&ctx, DEFAULT_CASE, &record.id, 0, source.len()).is_err());
+}
+
+#[test]
+fn scoped_verified_window_clamps_reads_without_reopening() {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = test_ctx(dir.path());
+    let bytes = b"verified immutable source";
+    let evidence = import_bytes(&ctx, Path::new("sample.bin"), bytes, DEFAULT_CASE, true).unwrap();
+    let (_, tail) = verified_record_window(
+        &ctx,
+        DEFAULT_CASE,
+        &evidence.id,
+        bytes.len() as u64 - 6,
+        1024,
+        1024,
+    )
+    .unwrap();
+    assert_eq!(tail, &bytes[bytes.len() - 6..]);
+    let (_, past_end) = verified_record_window(
+        &ctx,
+        DEFAULT_CASE,
+        &evidence.id,
+        bytes.len() as u64 + 10,
+        1024,
+        1024,
+    )
+    .unwrap();
+    assert!(past_end.is_empty());
+    assert!(verified_record_window(&ctx, "wrong-case", &evidence.id, 0, 8, 8).is_err());
+    let mut changed = bytes.to_vec();
+    changed[0] ^= 1;
+    std::fs::write(&evidence.stored_path, &changed).unwrap();
+    assert!(verified_record_window(&ctx, DEFAULT_CASE, &evidence.id, 0, 8, 8).is_err());
+}
