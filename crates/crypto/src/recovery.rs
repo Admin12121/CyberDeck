@@ -288,6 +288,15 @@ where
 {
     // Validate target and limits before touching the candidate stream.
     let target = RecoveryTarget::parse("sha256", target_hex)?;
+    if !matches!(
+        target,
+        RecoveryTarget::Digest {
+            algorithm: FastHash::Sha256,
+            ..
+        }
+    ) {
+        return Err("selected-backend service requires a raw SHA-256 digest".into());
+    }
     if limits.max_candidates == 0 || limits.max_matches == 0 || limits.max_matches > MAX_MATCHES {
         return Err("invalid limits".into());
     }

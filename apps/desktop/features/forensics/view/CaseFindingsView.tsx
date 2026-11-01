@@ -19,12 +19,14 @@ export function CaseFindingsView() {
   const [verifying, setVerifying] = useState(false);
   const verificationSerial = useRef(0);
   const refreshSerial = useRef(0);
+  const exportSerial = useRef(0);
   const activeCase = useRef(wb.caseId);
   activeCase.current = wb.caseId;
 
   useEffect(() => {
     verificationSerial.current += 1;
     refreshSerial.current += 1;
+    exportSerial.current += 1;
     setVerification(null);
     setVerifying(false);
     setExporting(false);
@@ -79,11 +81,13 @@ export function CaseFindingsView() {
     if (!isDesktop()) return;
     if (!window.confirm("Export this case report? Finding details may contain sensitive information. The JSON will include case metadata, artifact hashes, findings and activity (but not raw evidence or local file paths).")) return;
     const caseId = wb.caseId;
+    const ticket = ++exportSerial.current;
+    const isCurrent = () => activeCase.current === caseId && exportSerial.current === ticket;
     setExporting(true);
     setError(null);
     try {
       const report = await caseReport(caseId);
-      if (activeCase.current !== caseId) return;
+      if (!isCurrent()) return;
       const blob = new Blob([JSON.stringify(report, null, 2)], { type: "application/json" });
       const url = URL.createObjectURL(blob);
       const link = document.createElement("a");
@@ -91,8 +95,8 @@ export function CaseFindingsView() {
       link.download = "cyberdeck-" + caseId + "-report.json";
       link.click();
       URL.revokeObjectURL(url);
-    } catch (cause) { if (activeCase.current === caseId) setError(String(cause)); }
-    finally { if (activeCase.current === caseId) setExporting(false); }
+    } catch (cause) { if (isCurrent()) setError(String(cause)); }
+    finally { if (isCurrent()) setExporting(false); }
   };
 
   const filtered = useMemo(() => {

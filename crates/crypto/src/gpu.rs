@@ -457,6 +457,9 @@ pub fn recover_ntlm(target_hex: &str, candidates: &[&[u8]]) -> Result<Vec<usize>
 
 #[path = "gpu_stream.rs"]
 mod streaming;
+use streaming::stream_with_batch;
+#[cfg(test)]
+use streaming::stream_with_batch_results;
 pub use streaming::{
     recover_md5_stream, recover_ntlm_stream, recover_sha1_stream, recover_sha256_stream,
     GpuStreamHit, GpuStreamProgress, GpuStreamResult, GPU_STREAM_BATCH, MAX_GPU_STREAM_CANDIDATES,
@@ -464,7 +467,6 @@ pub use streaming::{
 };
 #[cfg(test)]
 use streaming::{stream_with, stream_with_checked};
-use streaming::{stream_with_batch, stream_with_batch_results};
 
 #[cfg(feature = "gpu")]
 mod native {

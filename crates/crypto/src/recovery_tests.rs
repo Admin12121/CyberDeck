@@ -375,3 +375,21 @@ fn sha256_backend_rejects_bad_target_without_reading() {
     );
     assert!(outcome.is_err());
 }
+
+#[test]
+fn sha256_backend_rejects_modular_kdf_targets() {
+    let kdf = "$2b$04$CCCCCCCCCCCCCCCCCCCCCCabcdefghijklmnopqrstuvwxyZ1234567890AB";
+    assert!(matches!(
+        RecoveryTarget::parse("sha256", kdf),
+        Ok(RecoveryTarget::Kdf { .. })
+    ));
+    let outcome = recover_sha256_wordlist_on_backend(
+        RecoveryBackend::Cpu,
+        kdf,
+        std::io::Cursor::new(b"secret\n".as_slice()),
+        RecoveryLimits::default(),
+        || false,
+        |_| panic!("non-SHA256 targets must be rejected before processing"),
+    );
+    assert!(outcome.unwrap_err().contains("raw SHA-256 digest"));
+}

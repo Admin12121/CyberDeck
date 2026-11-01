@@ -51,8 +51,8 @@ impl CaseIntegrityPlan {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{ArtifactRecord, ArtifactStore, DEFAULT_CASE};
     use crate::integrity;
+    use crate::{ArtifactRecord, ArtifactStore, DEFAULT_CASE};
     use sha2::{Digest, Sha256};
 
     fn sample(path: &Path, id: &str, bytes: &[u8]) -> ArtifactRecord {

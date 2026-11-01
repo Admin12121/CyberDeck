@@ -77,6 +77,7 @@ export function ScanView() {
     if (running || status.running) return;
     const caseId = wb.caseId;
     const ticket = ++scanTicket.current;
+    pollTicket.current += 1;
     scanCase.current = caseId;
     const isCurrent = () => activeCase.current === caseId && scanTicket.current === ticket;
     setRunning(true);
@@ -237,7 +238,9 @@ export function ScanView() {
             our own code.
           </div>
           <div className="border-t border-line px-2 py-1.5 font-mono text-[10px] text-fg-muted">
-            status: {status.running ? "scan running" : "idle"} · {status.results} stored results · {status.saved_findings} case findings
+            {scanCase.current === wb.caseId
+              ? `status: ${status.running ? "scan running" : "idle"} · ${status.results} stored results · ${status.saved_findings} case findings`
+              : "Native scan status is global; results and findings withheld until a scan is started in this case"}
           </div>
           {status.save_error ? <div className="border-t border-line p-2 text-xs text-err">Case save failed: {status.save_error}</div> : null}
           <div className="border-t border-line p-2">

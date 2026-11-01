@@ -15,6 +15,7 @@ const MAX_UNKNOWN_HASH_BYTES: u64 = 64 * 1024 * 1024;
 #[serde(rename_all = "snake_case")]
 pub enum ReconciliationState {
     IndexedVerified,
+    IndexedUnverified,
     IndexedMissing,
     IndexedTampered,
     UnindexedPublished,
@@ -228,6 +229,9 @@ impl ArtifactStore {
             );
         }
         names.sort();
+        // Hard cap on aggregate unknown-file hashing during one audit.
+        let mut unknown_hash_budget = MAX_UNKNOWN_HASH_BYTES;
+        let mut indexed_hash_budget = 256 * 1024 * 1024_u64;
         for path in names {
             let name = path
                 .file_name()
@@ -239,14 +243,22 @@ impl ArtifactStore {
                 .map_err(|e| format!("cannot stat case entry: {e}"))?;
             if let Some(records) = by_name.get(&name) {
                 for record in records {
+                    let within_budget = record.size <= indexed_hash_budget;
+                    if within_budget {
+                        indexed_hash_budget -= record.size;
+                    }
                     #[cfg(unix)]
-                    let verified = crate::open_verified_case_artifact(record, root).is_ok();
+                    let verified =
+                        within_budget && crate::open_verified_case_artifact(record, root).is_ok();
                     #[cfg(not(unix))]
-                    let verified = crate::verify_artifact_file(record, root).is_ok();
+                    let verified =
+                        within_budget && crate::verify_artifact_file(record, root).is_ok();
                     entries.push(ReconciliationEntry {
                         name: name.clone(),
                         artifact_id: Some(record.id.clone()),
-                        state: if verified {
+                        state: if !within_budget {
+                            ReconciliationState::IndexedUnverified
+                        } else if verified {
                             ReconciliationState::IndexedVerified
                         } else {
                             ReconciliationState::IndexedTampered
@@ -270,7 +282,11 @@ impl ArtifactStore {
                 } else {
                     ReconciliationState::UnrecognizedFile
                 };
-                let digest = if normal {
+                let within_budget = normal && metadata.len() <= unknown_hash_budget;
+                if within_budget {
+                    unknown_hash_budget -= metadata.len();
+                }
+                let digest = if within_budget {
                     path.file_name()
                         .and_then(|leaf| hash_unknown(&case_dir, leaf, metadata.len()))
                 } else {
@@ -324,16 +340,17 @@ impl ArtifactStore {
                 && indexed.sha256.eq_ignore_ascii_case(&record.sha256)
                 && indexed.size == record.size
             {
+                #[cfg(unix)]
+                drop(crate::open_verified_case_artifact(&indexed, root)?);
+                #[cfg(not(unix))]
                 crate::verify_artifact_file(&indexed, root)?;
                 return Ok(ExplicitRecovery::AlreadyIndexed);
             }
             return Err("recovery artifact ID conflicts with existing evidence".into());
         }
-        // A file is never adopted just because its name resembles a digest.
-        #[cfg(unix)]
-        drop(crate::open_verified_case_artifact(record, root)?);
-        #[cfg(not(unix))]
-        crate::verify_artifact_file(record, root)?;
+        // commit_artifact_batch reopens through the confined verifier on Unix
+        // and checks the expected digest before beginning its SQLite transaction.
+        // Do not hash the entire file a second time here.
         let event = [ImportEvent {
             source: "cases.reconciliation",
             action: "recover",
@@ -459,6 +476,28 @@ mod tests {
             .iter()
             .all(|entry| entry.state == ReconciliationState::IndexedVerified));
         assert_ne!(report.entries[0].artifact_id, report.entries[1].artifact_id);
+    }
+
+    #[test]
+    fn massive_indexed_file_is_reported_as_unverified_without_full_scan() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("artifacts");
+        let mut record = sample(&root, "huge.evidence", b"", "huge");
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&record.stored_path)
+            .unwrap();
+        file.set_len(257 * 1024 * 1024).unwrap();
+        record.size = 257 * 1024 * 1024;
+        let store = ArtifactStore::open(&temp.path().join("cases.db")).unwrap();
+        store.upsert_artifact(&record).unwrap();
+        let scan = store.reconcile_case_artifacts(DEFAULT_CASE, &root).unwrap();
+        assert_eq!(
+            scan.entries[0].state,
+            ReconciliationState::IndexedUnverified
+        );
+        assert!(scan.entries[0].sha256.is_none());
+        assert!(Path::new(&record.stored_path).exists());
     }
 
     #[cfg(unix)]
