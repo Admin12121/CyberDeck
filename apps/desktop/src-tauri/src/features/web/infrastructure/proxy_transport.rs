@@ -89,9 +89,10 @@ pub(super) async fn handle_conn(
     let original = webhistory::snapshot_original(history_stamp, &url, &body);
     let rules = shared.rules.lock().expect("rules poisoned").clone();
     let (method, url, headers, body) = apply_rules(method, url, headers, body, &rules);
+    let forwarded = webhistory::snapshot_forwarded(history_stamp, &method, &url, &headers, &body);
     let (status, resp_headers, resp_body) = execute_request(&method, &url, &headers, &body).await;
     let id = shared.next_id.fetch_add(1, Ordering::Relaxed);
-    webhistory::capture(
+    webhistory::capture_forwarded(
         history_stamp,
         id,
         original,
@@ -99,6 +100,7 @@ pub(super) async fn handle_conn(
         status,
         &resp_headers,
         &resp_body,
+        forwarded,
     );
     push_capture(
         &shared,
@@ -374,10 +376,12 @@ pub(super) async fn connect_tunnel_with_ws_connector(
     let rules = shared.rules.lock().expect("rules poisoned").clone();
     let (r_method, r_url, r_headers, r_body) =
         apply_rules(method.clone(), url, headers, body, &rules);
+    let forwarded =
+        webhistory::snapshot_forwarded(history_stamp, &r_method, &r_url, &r_headers, &r_body);
     let (status, resp_headers, resp_body) =
         execute_request(&r_method, &r_url, &r_headers, &r_body).await;
     let id = shared.next_id.fetch_add(1, Ordering::Relaxed);
-    webhistory::capture(
+    webhistory::capture_forwarded(
         history_stamp,
         id,
         original,
@@ -385,6 +389,7 @@ pub(super) async fn connect_tunnel_with_ws_connector(
         status,
         &resp_headers,
         &resp_body,
+        forwarded,
     );
     push_capture(
         &shared,

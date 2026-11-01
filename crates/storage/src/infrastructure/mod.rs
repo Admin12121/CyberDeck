@@ -9,3 +9,5 @@ mod provenance;
 mod recovery;
 mod schema;
 pub(crate) mod verified_handle;
+#[cfg(windows)]
+mod windows_verified_handle;

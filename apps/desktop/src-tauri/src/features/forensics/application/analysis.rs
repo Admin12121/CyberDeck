@@ -2,8 +2,9 @@
 //! All byte acquisition uses the verified, bounded infrastructure window.
 use super::{
     scoped_case_artifact, verified_record_window, EvidenceCtx, FileCarveResponse,
-    ForensicEntropyResponse, ForensicMetadataResponse, ForensicStringsResponse, HexResponse,
-    HexRow, SignatureScanResponse, StringHit, MAX_HEX_REQUEST, MAX_STRINGS_HITS, MAX_STRINGS_SCAN,
+    ForensicEntropyResponse, ForensicMetadataResponse, ForensicStringsResponse,
+    ForensicYaraSubsetHit, ForensicYaraSubsetResponse, HexResponse, HexRow, SignatureScanResponse,
+    StringHit, MAX_HEX_REQUEST, MAX_STRINGS_HITS, MAX_STRINGS_SCAN,
 };
 
 pub(super) fn binary_inspect(
@@ -224,7 +225,7 @@ pub(super) fn metadata_scan(
     })
 }
 
-/// Preview CRC-validated PNG carving boundaries without modifying case evidence.
+/// Preview bounded PNG and RIFF/WAVE carving boundaries without modifying evidence.
 /// Every byte is read through the same scoped integrity-checking adapter as
 /// hex, extraction and metadata. The returned offsets refer to the source file.
 pub(super) fn carve_preview(
@@ -234,14 +235,14 @@ pub(super) fn carve_preview(
     offset: u64,
     len: usize,
 ) -> Result<FileCarveResponse, String> {
-    use cyberdeck_crypto::formats::carving::{preview_png_carving, MAX_CARVE_SCAN_BYTES};
+    use cyberdeck_crypto::formats::carving::{preview_validated_carving, MAX_CARVE_SCAN_BYTES};
     if len == 0 || len > MAX_CARVE_SCAN_BYTES {
         return Err("carving preview window must be 1..4MiB".into());
     }
     let (record, bytes) =
         verified_record_window(ctx, case_id, id, offset, len, MAX_CARVE_SCAN_BYTES)?;
     let analyzed_offset = offset.min(record.size);
-    let report = preview_png_carving(&bytes, analyzed_offset)?;
+    let report = preview_validated_carving(&bytes, analyzed_offset)?;
     Ok(FileCarveResponse {
         candidates: report.candidates,
         analyzed_offset,
@@ -252,5 +253,47 @@ pub(super) fn carve_preview(
             || analyzed_offset + (bytes.len() as u64) < record.size,
         rejected_or_incomplete: report.rejected_or_incomplete,
         candidate_limit_reached: report.candidate_limit_reached,
+    })
+}
+
+/// Case-backed, read-only detection using only bounded YARA-style ASCII/hex
+/// strings and the "any/all of them" condition. Unsupported rule features fail.
+pub(super) fn yara_subset_scan(
+    ctx: &EvidenceCtx,
+    case_id: &str,
+    id: &str,
+    offset: u64,
+    len: usize,
+    source_rule: &str,
+) -> Result<ForensicYaraSubsetResponse, String> {
+    use cyberdeck_crypto::formats::yara_subset::{
+        compile_yara_subset, evaluate_yara_subset, MAX_RULE_SCAN_BYTES,
+    };
+    if len == 0 || len > MAX_RULE_SCAN_BYTES {
+        return Err("YARA subset scan window must be 1..1MiB".into());
+    }
+    let rule = compile_yara_subset(source_rule)?;
+    let (record, bytes) =
+        verified_record_window(ctx, case_id, id, offset, len, MAX_RULE_SCAN_BYTES)?;
+    let analyzed_offset = offset.min(record.size);
+    let evaluation = evaluate_yara_subset(&rule, &bytes, analyzed_offset)?;
+    Ok(ForensicYaraSubsetResponse {
+        rule: evaluation.rule,
+        matched: evaluation.matched,
+        hits: evaluation
+            .hits
+            .into_iter()
+            .map(|hit| ForensicYaraSubsetHit {
+                identifier: hit.identifier,
+                offset: hit.offset,
+            })
+            .collect(),
+        analyzed_offset,
+        analyzed_bytes: bytes.len(),
+        file_bytes: record.size,
+        integrity_checked: true,
+        coverage_truncated: analyzed_offset != 0
+            || analyzed_offset + (bytes.len() as u64) < record.size,
+        language_subset: "YARA-literal-hex-any-all-v1",
     })
 }

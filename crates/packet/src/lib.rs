@@ -7,6 +7,7 @@ pub mod domain;
 pub mod fragments;
 pub mod infrastructure;
 pub mod inventory;
+pub mod live;
 pub mod streams;
 
 pub use application::capture::parse_capture;

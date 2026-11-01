@@ -407,6 +407,37 @@ export async function fileMetadataScan(caseId: string, id: string): Promise<Fore
   return invoke<ForensicMetadataResponseWire>("file_metadata_scan", { caseId, id });
 }
 
+/** Read-only, case-scoped, SHA-verified PNG carving candidate preview.
+ * Offsets are absolute within the original evidence; candidates are not extracted.
+ * The native service enforces a maximum four-megabyte window and candidate budget.
+ */
+export interface FileCarveCandidateWire {
+  offset: number;
+  length: number;
+  format: string;
+}
+
+export interface FileCarveResponseWire {
+  candidates: FileCarveCandidateWire[];
+  analyzed_offset: number;
+  analyzed_bytes: number;
+  file_bytes: number;
+  integrity_checked: boolean;
+  coverage_truncated: boolean;
+  rejected_or_incomplete: number;
+  candidate_limit_reached: boolean;
+}
+
+export async function fileCarvePreview(
+  caseId: string, id: string, offset: number, len: number,
+): Promise<FileCarveResponseWire> {
+  if (!inTauri) throw new Error("Native carving preview requires the desktop runtime");
+  if (!Number.isSafeInteger(offset) || offset < 0 || !Number.isSafeInteger(len) || len < 1 || len > 4 * 1024 * 1024) {
+    throw new Error("Carving preview requires a safe offset and a 1–4 MiB window");
+  }
+  return invoke<FileCarveResponseWire>("file_carve_preview", { caseId, id, offset, len });
+}
+
 /** Explicit action, never automatic, for bounded nested archive extraction. */
 export async function fileExtractNestedArchive(
   caseId: string, id: string, format: "zip" | "tar" | "gzip", offset: number, maxDepth: number,

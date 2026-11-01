@@ -86,6 +86,43 @@ use scan_domain::{confirmed_exposure, require_authorization, session_cookie_find
 const MAX_CAPTURED_REQUESTS: usize = 10_000;
 const MAX_PENDING_REQUESTS: usize = 100;
 
+/// Integration-only API: Agent6 supplies a grant minted from Agent5's
+/// *server-owned*, case-existence-verified policy after explicit user consent.
+/// This is never callable from an unregistered caller-owned IPC boolean.
+pub(crate) fn bind_backend_case_capture(
+    policy: Arc<std::sync::Mutex<cyberdeck_storage::ActiveCaseHistoryPolicy>>,
+    grant: cyberdeck_storage::HistoryCaptureGrant,
+) -> Result<u64, String> {
+    webhistory::arm_backend_capture(policy, grant)
+}
+
+pub(crate) fn revoke_backend_case_capture() {
+    webhistory::clear_session();
+}
+
+/// Backend-authorized history body reveal (requires a separately verified
+/// user-confirmed reveal action in Agent6's state, not an IPC bool alone).
+pub(crate) fn case_history_authorized_detail(
+    grant: &cyberdeck_storage::HistoryCaptureGrant,
+    permit: cyberdeck_storage::HistoryRevealPermit,
+    id: u64,
+) -> Result<Option<webhistory::Detail>, String> {
+    webhistory::read_detail_authorized(grant, permit, id)
+}
+
+/// Replays a *logical* original or post-edit message with exact binary body.
+/// Refuses truncated history and rechecks the active backend grant. Outbound
+/// HTTP headers/framing will still be normalized by reqwest.
+pub(crate) async fn replay_authorized_case_message(
+    grant: &cyberdeck_storage::HistoryCaptureGrant,
+    permit: cyberdeck_storage::HistoryRevealPermit,
+    id: u64,
+    forwarded: bool,
+) -> Result<HttpResponseWire, String> {
+    let request = webhistory::replay_draft_authorized(grant, permit, id, forwarded)?;
+    repeater_application::send_binary(request).await
+}
+
 /// Send an editable raw request using the native Repeater service.
 #[tauri::command]
 pub async fn http_send(request_raw: String) -> Result<HttpResponseWire, String> {

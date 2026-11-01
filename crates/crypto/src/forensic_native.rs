@@ -322,6 +322,99 @@ fn tiff_u32(data: &[u8], at: usize, le: bool) -> Result<u32, String> {
         u32::from_be_bytes(x.try_into().unwrap())
     })
 }
+/// Parse the TIFF GPS IFD through checked, nonrecursive offsets. Only bounded
+/// hemisphere references and three-component latitude/longitude rationals are
+/// supported; unsupported GPS tags are ignored rather than interpreted.
+fn gps_ifd(data: &[u8], base: u64, at: usize, le: bool) -> Result<Vec<MetadataField>, String> {
+    let count = tiff_u16(data, at, le)? as usize;
+    if count > 64 {
+        return Err("too many GPS EXIF fields".into());
+    }
+    let start = at.checked_add(2).ok_or("GPS IFD overflow")?;
+    let end = start
+        .checked_add(count.checked_mul(12).ok_or("GPS IFD overflow")?)
+        .and_then(|e| e.checked_add(4))
+        .ok_or("GPS IFD overflow")?;
+    if end > data.len() {
+        return Err("truncated GPS EXIF IFD".into());
+    }
+    let mut lat_ref = None;
+    let mut lon_ref = None;
+    let mut lat = None;
+    let mut lon = None;
+    for i in 0..count {
+        let entry = start + i * 12;
+        let tag = tiff_u16(data, entry, le)?;
+        let kind = tiff_u16(data, entry + 2, le)?;
+        let num = tiff_u32(data, entry + 4, le)?;
+        if matches!(tag, 1 | 3) {
+            if kind != 2 || num != 2 {
+                return Err("invalid GPS hemisphere reference".into());
+            }
+            let reference = *data.get(entry + 8).ok_or("missing GPS reference")? as char;
+            let nul = *data.get(entry + 9).ok_or("missing GPS reference NUL")?;
+            if nul != 0
+                || (tag == 1 && !matches!(reference, 'N' | 'S'))
+                || (tag == 3 && !matches!(reference, 'E' | 'W'))
+            {
+                return Err("invalid GPS hemisphere".into());
+            }
+            if tag == 1 {
+                lat_ref = Some(reference);
+            } else {
+                lon_ref = Some(reference);
+            }
+        } else if matches!(tag, 2 | 4) {
+            if kind != 5 || num != 3 {
+                return Err("invalid GPS rational vector".into());
+            }
+            let value_at = tiff_u32(data, entry + 8, le)? as usize;
+            if value_at.checked_add(24).ok_or("GPS rational overflow")? > data.len() {
+                return Err("truncated GPS rationals".into());
+            }
+            let mut components = [0.0f64; 3];
+            for (component, slot) in components.iter_mut().enumerate() {
+                let at = value_at + component * 8;
+                let numerator = tiff_u32(data, at, le)?;
+                let denominator = tiff_u32(data, at + 4, le)?;
+                if denominator == 0 {
+                    return Err("zero GPS rational denominator".into());
+                }
+                *slot = numerator as f64 / denominator as f64;
+            }
+            let max_degrees = if tag == 2 { 90.0 } else { 180.0 };
+            if components[0] > max_degrees || components[1] >= 60.0 || components[2] >= 60.0 {
+                return Err("out-of-range GPS coordinate".into());
+            }
+            let degrees = components[0] + components[1] / 60.0 + components[2] / 3600.0;
+            let offset = base
+                .checked_add(value_at as u64)
+                .ok_or("GPS offset overflow")?;
+            if tag == 2 {
+                lat = Some((degrees, offset));
+            } else {
+                lon = Some((degrees, offset));
+            }
+        }
+    }
+    let mut fields = Vec::with_capacity(2);
+    for (key, coordinate, reference, negative) in [
+        ("latitude", lat, lat_ref, 'S'),
+        ("longitude", lon, lon_ref, 'W'),
+    ] {
+        if let Some((value, offset)) = coordinate {
+            let direction = reference.ok_or("GPS coordinate lacks hemisphere")?;
+            fields.push(MetadataField {
+                namespace: "exif.gps",
+                key,
+                value: format!("{:.6}", if direction == negative { -value } else { value }),
+                offset,
+            });
+        }
+    }
+    Ok(fields)
+}
+
 fn exif(data: &[u8], base: u64) -> Result<Vec<MetadataField>, String> {
     if data.len() < 8 {
         return Err("short Exif TIFF".into());
@@ -347,11 +440,19 @@ fn exif(data: &[u8], base: u64) -> Result<Vec<MetadataField>, String> {
         return Err("truncated EXIF IFD".into());
     }
     let mut fields = Vec::new();
+    let mut gps_pointer = None;
     for i in 0..count {
         let at = start + i * 12;
         let tag = tiff_u16(data, at, le)?;
         let typ = tiff_u16(data, at + 2, le)?;
         let n = tiff_u32(data, at + 4, le)? as usize;
+        if tag == 0x8825 {
+            if typ != 4 || n != 1 || gps_pointer.is_some() {
+                return Err("invalid EXIF GPS IFD pointer".into());
+            }
+            gps_pointer = Some(tiff_u32(data, at + 8, le)? as usize);
+            continue;
+        }
         let key = match tag {
             0x010f => "make",
             0x0110 => "model",
@@ -387,6 +488,9 @@ fn exif(data: &[u8], base: u64) -> Result<Vec<MetadataField>, String> {
             offset: base + at as u64,
         });
     }
+    if let Some(pointer) = gps_pointer {
+        fields.extend(gps_ifd(data, base, pointer, le)?);
+    }
     Ok(fields)
 }
 /// Metadata mode preserves partial/metadata-only PNG compatibility.
@@ -401,6 +505,8 @@ pub fn carving_png_metadata(data: &[u8], base: u64) -> Result<MetadataReport, St
 }
 
 fn metadata_impl(data: &[u8], base: u64, require_png_idat: bool) -> Result<MetadataReport, String> {
+    base.checked_add(data.len() as u64)
+        .ok_or("metadata absolute offset overflow")?;
     if data.len() > MAX_METADATA_INPUT {
         return Err("metadata scan window exceeds 4MiB".into());
     }
@@ -647,6 +753,86 @@ mod tests {
             .iter()
             .any(|f| f.key == "make" && f.value == "ACME"));
         assert!(m.complete);
+    }
+
+    #[test]
+    fn exif_gps_ifd_decodes_both_endiannesses_and_rejects_adversarial_offsets() {
+        fn put16(data: &mut [u8], at: usize, value: u16, le: bool) {
+            data[at..at + 2].copy_from_slice(&if le {
+                value.to_le_bytes()
+            } else {
+                value.to_be_bytes()
+            });
+        }
+        fn put32(data: &mut [u8], at: usize, value: u32, le: bool) {
+            data[at..at + 4].copy_from_slice(&if le {
+                value.to_le_bytes()
+            } else {
+                value.to_be_bytes()
+            });
+        }
+        fn tiff(le: bool) -> Vec<u8> {
+            let mut data = vec![0u8; 128];
+            data[..2].copy_from_slice(if le { b"II" } else { b"MM" });
+            put16(&mut data, 2, 42, le);
+            put32(&mut data, 4, 8, le);
+            put16(&mut data, 8, 1, le); // one IFD0 GPS pointer
+            put16(&mut data, 10, 0x8825, le);
+            put16(&mut data, 12, 4, le);
+            put32(&mut data, 14, 1, le);
+            put32(&mut data, 18, 26, le);
+            put16(&mut data, 26, 4, le); // four GPS entries
+            for (index, tag, kind, count, value) in [
+                (0usize, 1u16, 2u16, 2u32, 0u32),
+                (1, 2, 5, 3, 80),
+                (2, 3, 2, 2, 0),
+                (3, 4, 5, 3, 104),
+            ] {
+                let pos = 28 + index * 12;
+                put16(&mut data, pos, tag, le);
+                put16(&mut data, pos + 2, kind, le);
+                put32(&mut data, pos + 4, count, le);
+                if matches!(tag, 1 | 3) {
+                    data[pos + 8] = if tag == 1 { b'N' } else { b'E' };
+                    data[pos + 9] = 0;
+                } else {
+                    put32(&mut data, pos + 8, value, le);
+                }
+            }
+            for (i, n) in [27u32, 59, 30, 85, 19, 0].iter().enumerate() {
+                let at = 80 + i * 8;
+                put32(&mut data, at, *n, le);
+                put32(&mut data, at + 4, 1, le);
+            }
+            data
+        }
+        fn jpeg(tiff: &[u8]) -> Vec<u8> {
+            let mut out = b"\xff\xd8\xff\xe1".to_vec();
+            out.extend_from_slice(&((tiff.len() + 8) as u16).to_be_bytes());
+            out.extend_from_slice(b"Exif\0\0");
+            out.extend_from_slice(tiff);
+            out.extend_from_slice(b"\xff\xd9");
+            out
+        }
+        for le in [true, false] {
+            let original = tiff(le);
+            let report = metadata(&jpeg(&original), 0).unwrap();
+            assert!(report.complete);
+            assert!(report.fields.iter().any(|f| f.namespace == "exif.gps"
+                && f.key == "latitude"
+                && f.value == "27.991667"));
+            assert!(report.fields.iter().any(|f| f.namespace == "exif.gps"
+                && f.key == "longitude"
+                && f.value == "85.316667"));
+
+            let mut zero_denominator = original.clone();
+            put32(&mut zero_denominator, 84, 0, le);
+            assert!(metadata(&jpeg(&zero_denominator), 0).is_err());
+            let mut invalid_pointer = original.clone();
+            put32(&mut invalid_pointer, 18, 4096, le);
+            assert!(metadata(&jpeg(&invalid_pointer), 0).is_err());
+            assert!(metadata(&jpeg(&original), u64::MAX).is_err());
+        }
     }
 }
 

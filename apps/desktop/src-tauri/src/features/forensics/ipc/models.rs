@@ -90,3 +90,24 @@ pub struct FileCarveResponse {
     pub rejected_or_incomplete: usize,
     pub candidate_limit_reached: bool,
 }
+
+/// Read-only, bounded detection using a documented subset of YARA strings
+/// syntax. This is not a general YARA interpreter, only literal/hex patterns.
+#[derive(Debug, Serialize)]
+pub struct ForensicYaraSubsetHit {
+    pub identifier: String,
+    pub offset: u64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ForensicYaraSubsetResponse {
+    pub rule: String,
+    pub matched: bool,
+    pub hits: Vec<ForensicYaraSubsetHit>,
+    pub analyzed_offset: u64,
+    pub analyzed_bytes: usize,
+    pub file_bytes: u64,
+    pub integrity_checked: bool,
+    pub coverage_truncated: bool,
+    pub language_subset: &'static str,
+}

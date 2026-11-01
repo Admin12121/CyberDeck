@@ -11,6 +11,10 @@ pub mod binary;
 pub mod carving;
 #[path = "forensic_native.rs"]
 pub mod forensic_native;
+#[path = "riff_wave.rs"]
+pub mod riff_wave;
+#[path = "yara_subset.rs"]
+pub mod yara_subset;
 
 use serde::Serialize;
 

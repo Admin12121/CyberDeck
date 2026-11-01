@@ -16,8 +16,9 @@ mod case_integrity;
 #[path = "application/ingest.rs"]
 mod ingest;
 pub use application::active_case_policy::{
-    ActiveCaseHistoryPolicy, HistoryCaptureGrant, HistoryRetentionLimits, MAX_CAPTURE_BODY_BYTES,
-    MAX_CAPTURE_DURATION, MAX_CAPTURE_EVENTS, MAX_CAPTURE_TOTAL_BYTES,
+    ActiveCaseHistoryPolicy, HistoryCaptureGrant, HistoryRetentionLimits, HistoryRevealPermit,
+    MAX_CAPTURE_BODY_BYTES, MAX_CAPTURE_DURATION, MAX_CAPTURE_EVENTS, MAX_CAPTURE_TOTAL_BYTES,
+    MAX_REVEAL_DURATION,
 };
 pub use case_integrity::{CaseIntegrityPlan, CaseIntegritySummary};
 pub use ingest::ImportEvent;

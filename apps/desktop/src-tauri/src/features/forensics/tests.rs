@@ -587,3 +587,83 @@ fn scoped_verified_window_clamps_reads_without_reopening() {
     std::fs::write(&evidence.stored_path, &changed).unwrap();
     assert!(verified_record_window(&ctx, DEFAULT_CASE, &evidence.id, 0, 8, 8).is_err());
 }
+
+#[test]
+fn case_backed_riff_wave_carve_preview_is_read_only() {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = test_ctx(dir.path());
+    // Valid PCM mono 8-bit 8000Hz, three sample bytes with an odd-byte pad.
+    let fmt = [
+        &[1, 0, 1, 0][..],
+        &8_000u32.to_le_bytes(),
+        &8_000u32.to_le_bytes(),
+        &[1, 0, 8, 0],
+    ]
+    .concat();
+    let mut wave_body = b"WAVE".to_vec();
+    for (tag, data) in [(b"fmt ", fmt.as_slice()), (b"data", &[1, 2, 3][..])] {
+        wave_body.extend_from_slice(tag);
+        wave_body.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        wave_body.extend_from_slice(data);
+        if data.len() & 1 == 1 {
+            wave_body.push(0);
+        }
+    }
+    let mut wav = b"RIFF".to_vec();
+    wav.extend_from_slice(&(wave_body.len() as u32).to_le_bytes());
+    wav.extend(wave_body);
+    let mut source = b"prefix-block".to_vec();
+    let offset = source.len() as u64;
+    source.extend_from_slice(&wav);
+    source.extend_from_slice(b"irrelevant trailer");
+    let record = import_bytes(&ctx, Path::new("memory.dump"), &source, DEFAULT_CASE, true).unwrap();
+    let before = list_artifacts(&ctx, DEFAULT_CASE).unwrap().len();
+    let response = carve_preview(&ctx, DEFAULT_CASE, &record.id, 0, source.len()).unwrap();
+    assert!(response.integrity_checked);
+    assert!(!response.coverage_truncated);
+    assert_eq!(response.candidates.len(), 1);
+    assert_eq!(response.candidates[0].format, "wav");
+    assert_eq!(response.candidates[0].offset, offset);
+    assert_eq!(response.candidates[0].length, wav.len());
+    assert_eq!(list_artifacts(&ctx, DEFAULT_CASE).unwrap().len(), before);
+    assert!(carve_preview(&ctx, "unrelated-case", &record.id, 0, source.len()).is_err());
+}
+
+#[test]
+fn case_backed_yara_subset_is_bounded_reproducible_and_immutable() {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = test_ctx(dir.path());
+    let source = b"prefix-PAYLOAD--MZ\x01\x90-suffix";
+    let record = import_bytes(&ctx, Path::new("suspect.bin"), source, DEFAULT_CASE, true).unwrap();
+    let count = list_artifacts(&ctx, DEFAULT_CASE).unwrap().len();
+    let rule = "rule marker {\nstrings:\n$a = \"payload\" nocase\n$b = { 4D 5A ?? 90 }\ncondition:\nall of them\n}";
+    let result = yara_subset_scan(&ctx, DEFAULT_CASE, &record.id, 0, source.len(), rule).unwrap();
+    assert!(result.integrity_checked);
+    assert!(!result.coverage_truncated);
+    assert!(result.matched);
+    assert_eq!(result.hits.len(), 2);
+    assert_eq!(result.hits[0].offset, 7);
+    assert_eq!(result.hits[1].offset, 16);
+    assert_eq!(list_artifacts(&ctx, DEFAULT_CASE).unwrap().len(), count);
+    let negative = "rule none {\nstrings:\n$a = \"not-present\"\ncondition:\nany of them\n}";
+    assert!(
+        !yara_subset_scan(&ctx, DEFAULT_CASE, &record.id, 0, source.len(), negative)
+            .unwrap()
+            .matched
+    );
+    assert!(yara_subset_scan(
+        &ctx,
+        DEFAULT_CASE,
+        &record.id,
+        0,
+        source.len(),
+        "import \"pe\""
+    )
+    .is_err());
+    assert!(yara_subset_scan(&ctx, DEFAULT_CASE, &record.id, 0, 2 * 1024 * 1024, rule).is_err());
+    assert!(yara_subset_scan(&ctx, "wrong-case", &record.id, 0, source.len(), rule).is_err());
+    let mut altered = source.to_vec();
+    altered[0] ^= 1;
+    std::fs::write(&record.stored_path, &altered).unwrap();
+    assert!(yara_subset_scan(&ctx, DEFAULT_CASE, &record.id, 0, source.len(), rule).is_err());
+}

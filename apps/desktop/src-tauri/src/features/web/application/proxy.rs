@@ -207,6 +207,7 @@ pub(super) async fn forward(id: u64, ctx: &WebCtx) -> Result<u16, String> {
         &rules,
     );
     let history_stamp = pending.history_stamp;
+    let forwarded = webhistory::snapshot_forwarded(history_stamp, &method, &url, &headers, &body);
     let mut stream = pending.stream;
     if !ctx.shared.running.load(Ordering::Acquire) {
         return Err("proxy stopped before forwarding".to_string());
@@ -220,7 +221,7 @@ pub(super) async fn forward(id: u64, ctx: &WebCtx) -> Result<u16, String> {
     if !ctx.shared.running.load(Ordering::Acquire) {
         return Err("proxy stopped during forwarding".to_string());
     }
-    webhistory::capture(
+    webhistory::capture_forwarded(
         history_stamp,
         id,
         original,
@@ -228,6 +229,7 @@ pub(super) async fn forward(id: u64, ctx: &WebCtx) -> Result<u16, String> {
         status,
         &resp_headers,
         &resp_body,
+        forwarded,
     );
     let mut response = format!(
         "HTTP/1.1 {status} {reason}\r\n",

@@ -4,9 +4,9 @@ use super::{
     binary_inspect, carve_preview, digest_disk_file, entropy_scan, extract_archive_from_evidence,
     extract_gzip_from_evidence, extract_nested_from_evidence, hex_view, import_derived,
     import_file_from_path, list_artifacts, metadata_scan, signature_scan, strings, strings_scan,
-    EvidenceCtx, FileCarveResponse, FileDigestsWire, ForensicEntropyResponse,
-    ForensicMetadataResponse, ForensicStringsResponse, HexResponse, SignatureScanResponse,
-    StringHit,
+    yara_subset_scan, EvidenceCtx, FileCarveResponse, FileDigestsWire, ForensicEntropyResponse,
+    ForensicMetadataResponse, ForensicStringsResponse, ForensicYaraSubsetResponse, HexResponse,
+    SignatureScanResponse, StringHit,
 };
 use cyberdeck_storage::{ArtifactRecord, DEFAULT_CASE};
 use tauri::{AppHandle, State};
@@ -194,4 +194,19 @@ pub fn file_carve_preview(
     len: usize,
 ) -> Result<FileCarveResponse, String> {
     carve_preview(&ctx, &case_id, &id, offset, len)
+}
+
+/// Deterministic YARA-style ASCII/hex subset detection on verified case source.
+/// Unsupported YARA grammar fails closed. This command is read-only and
+/// deliberately unregistered until Agent6 completes typed IPC/UI integration.
+#[tauri::command]
+pub fn file_yara_subset_scan(
+    ctx: State<'_, EvidenceCtx>,
+    case_id: String,
+    id: String,
+    offset: u64,
+    len: usize,
+    rule_source: String,
+) -> Result<ForensicYaraSubsetResponse, String> {
+    yara_subset_scan(&ctx, &case_id, &id, offset, len, &rule_source)
 }

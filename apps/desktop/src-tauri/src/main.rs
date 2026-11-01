@@ -70,6 +70,7 @@ fn main() {
             features::forensics::ipc::evidence::file_list,
             features::forensics::ipc::evidence::file_hex,
             features::forensics::ipc::evidence::file_signature_scan,
+            features::forensics::ipc::evidence::file_carve_preview,
             features::forensics::ipc::evidence::file_binary_inspect,
             features::forensics::ipc::evidence::file_extract_gzip,
             features::forensics::ipc::evidence::file_extract_archive,

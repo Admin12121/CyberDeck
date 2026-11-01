@@ -5,12 +5,14 @@ import { hexDump } from "@lib/hex";
 import {
   fileHex,
   fileSignatureScan,
+  fileCarvePreview,
   fileExtractGzip,
   fileExtractArchive,
   fileExtractNestedArchive,
   fileBinaryInspect,
   type BinaryInfoWire,
   type SignatureScanWire,
+  type FileCarveResponseWire,
   fileImportDialog,
   fileList,
   fileStrings,
@@ -30,6 +32,10 @@ export function FileAnalysisView({ active }: { active: boolean }) {
   const ctx = useEvidence();
   const wb = useWorkbench();
   const [scan, setScan] = useState<SignatureScanWire | null>(null);
+  const [carve, setCarve] = useState<FileCarveResponseWire | null>(null);
+  const [carveBusy, setCarveBusy] = useState(false);
+  const [carveError, setCarveError] = useState<string | null>(null);
+  const carveSerial = useRef(0);
   const [binary, setBinary] = useState<BinaryInfoWire | null>(null);
   const [binaryBusy, setBinaryBusy] = useState(false);
   const [scanBusy, setScanBusy] = useState(false);
@@ -42,7 +48,11 @@ export function FileAnalysisView({ active }: { active: boolean }) {
   const stillActive = (scope: string) => activeScope.current === scope;
 
   useEffect(() => {
+    carveSerial.current += 1;
     setScan(null);
+    setCarve(null);
+    setCarveError(null);
+    setCarveBusy(false);
     setBinary(null);
     setScanError(null);
     setExtractNote(null);
@@ -133,6 +143,31 @@ export function FileAnalysisView({ active }: { active: boolean }) {
       if (stillActive(scope)) setScanError(String(cause));
     } finally { if (stillActive(scope)) setScanBusy(false); }
   };
+  const runCarvePreview = async () => {
+    const artifact = ctx.selectedArtifact;
+    if (!active || !ctx.desktop || !artifact || carveBusy) return;
+    const scope = activeScope.current;
+    const ticket = ++carveSerial.current;
+    const isCurrent = () => stillActive(scope) && ticket === carveSerial.current;
+    const offset = ctx.hexOffset;
+    const size = artifact.size;
+    if (!Number.isSafeInteger(offset) || !Number.isSafeInteger(size) || offset < 0 || offset >= size) {
+      setCarveError("Select a valid source offset within this evidence file.");
+      return;
+    }
+    const len = Math.min(4 * 1024 * 1024, size - offset);
+    setCarve(null);
+    setCarveError(null);
+    setCarveBusy(true);
+    try {
+      const result = await fileCarvePreview(wb.caseId, artifact.id, offset, len);
+      if (isCurrent()) setCarve(result);
+    } catch (cause) {
+      if (isCurrent()) setCarveError(String(cause));
+    } finally {
+      if (isCurrent()) setCarveBusy(false);
+    }
+  };
   const highEntropy =
     ctx.selectedArtifact
       ? ctx.selectedArtifact.entropy > 7.5
@@ -180,6 +215,11 @@ export function FileAnalysisView({ active }: { active: boolean }) {
             title="Native PE, ELF and Mach-O structural inspection with SHA-256 verification and strict size limits">
             {binaryBusy ? "Inspecting…" : "Inspect Executable"}
           </ToolButton>
+          <ToolButton onClick={() => void runCarvePreview()}
+            disabled={!ctx.selectedArtifact || !ctx.desktop || !active || carveBusy}
+            title="Explicit read-only PNG carving preview from the current hex offset; maximum 4 MiB with full evidence SHA-256 verification">
+            {carveBusy ? "Checking PNG boundaries…" : "Preview PNG Carving"}
+          </ToolButton>
           {binary ? (
             <div className="space-y-1 border-t border-line py-2 font-mono text-[10px] text-fg-dim">
               <div className="text-fg">{binary.format.toUpperCase()} · {binary.architecture} · {binary.bits}-bit</div>
@@ -198,6 +238,32 @@ export function FileAnalysisView({ active }: { active: boolean }) {
             </div>
           ) : null}
           {scanError ? <div className="text-xs text-err">{scanError}</div> : null}
+          {carveError ? <div className="text-xs text-err">{carveError}</div> : null}
+          {carve ? (
+            <div className="space-y-1 border-t border-line py-2 font-mono text-[10px] text-fg-dim">
+              <div className="text-fg">Read-only PNG carving candidates: {carve.candidates.length}</div>
+              <div>
+                Verified source: {carve.integrity_checked ? "yes" : "no"} ·
+                {" "}{carve.analyzed_bytes} bytes starting at 0x{carve.analyzed_offset.toString(16)}
+                {" "}of {carve.file_bytes} total
+                {carve.coverage_truncated ? " · partial window" : ""}
+                {carve.candidate_limit_reached ? " · candidate limit reached" : ""}
+                {carve.rejected_or_incomplete ? ` · ${carve.rejected_or_incomplete} rejected/incomplete` : ""}
+              </div>
+              <div>CRC-checked PNG chunk boundaries only. No pixel decoding, extraction, or evidence changes.</div>
+              {carve.candidates.map((candidate, index) => (
+                <div key={index} className="flex gap-2 border-t border-line py-1">
+                  <button type="button" className="shrink-0 text-orange hover:underline"
+                    title="Navigate to source evidence offset"
+                    onClick={() => ctx.setHexOffset(candidate.offset)}>
+                    0x{candidate.offset.toString(16)}
+                  </button>
+                  <span>{candidate.format.toUpperCase()} · {candidate.length} bytes</span>
+                </div>
+              ))}
+              {carve.candidates.length === 0 ? <div>No valid PNG member boundaries in this window.</div> : null}
+            </div>
+          ) : null}
           {extractNote ? <div className="text-xs text-fg">{extractNote}</div> : null}
           {scan ? (
             <div className="space-y-1 font-mono text-[10px] text-fg-dim">

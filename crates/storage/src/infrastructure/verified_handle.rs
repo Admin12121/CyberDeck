@@ -42,15 +42,20 @@ impl VerifiedArtifactHandle {
     }
 }
 
-fn verified_file(
+pub(super) fn verified_file(
     mut file: File,
     record: &ArtifactRecord,
 ) -> Result<VerifiedArtifactHandle, String> {
     let metadata = file
         .metadata()
         .map_err(|e| format!("cannot stat evidence descriptor: {e}"))?;
-    if !metadata.file_type().is_file() || metadata.len() != record.size {
-        return Err("evidence handle is not a regular file of indexed size".into());
+    if !metadata.file_type().is_file() {
+        return Err("evidence handle is not a regular file".into());
+    }
+    if metadata.len() != record.size {
+        return Err(
+            "evidence size integrity failure: opened file differs from indexed size".into(),
+        );
     }
     let mut hash = Sha256::new();
     let mut buffer = [0_u8; 64 * 1024];
@@ -165,7 +170,15 @@ pub fn open_verified_case_artifact(
 /// Never silently fall back to an unconfined pathname open on Windows.
 /// The existing verification API stays available until a native reparse-aware
 /// open-by-handle adapter receives its Windows security tests.
-#[cfg(not(unix))]
+#[cfg(windows)]
+pub fn open_verified_case_artifact(
+    record: &ArtifactRecord,
+    root: &Path,
+) -> Result<VerifiedArtifactHandle, String> {
+    super::windows_verified_handle::open_windows_verified_case_artifact(record, root)
+}
+
+#[cfg(not(any(unix, windows)))]
 pub fn open_verified_case_artifact(
     _record: &ArtifactRecord,
     _root: &Path,
@@ -216,6 +229,45 @@ mod tests {
         // The handle is pinned to the verified original, not the path.
         assert_eq!(handle.read_window(0, 16, 16).unwrap(), b"immutable sample");
         assert!(open_verified_case_artifact(&record, &root).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn changed_evidence_size_and_digest_fail_with_integrity_diagnostics() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("artifacts");
+        let bytes = b"immutable original";
+        let record = sample(&root, "length.evidence", bytes);
+        let path = Path::new(&record.stored_path);
+
+        std::fs::write(path, b"short").unwrap();
+        let too_short = open_verified_case_artifact(&record, &root).unwrap_err();
+        assert!(too_short.contains("integrity"), "{too_short}");
+        assert!(too_short.contains("size"), "{too_short}");
+
+        std::fs::write(path, b"longer than immutable original").unwrap();
+        let too_long = open_verified_case_artifact(&record, &root).unwrap_err();
+        assert!(too_long.contains("integrity"), "{too_long}");
+        assert!(too_long.contains("size"), "{too_long}");
+
+        let mut altered = bytes.to_vec();
+        altered[0] ^= 0x20;
+        std::fs::write(path, altered).unwrap();
+        let digest_mismatch = open_verified_case_artifact(&record, &root).unwrap_err();
+        assert!(digest_mismatch.contains("integrity"), "{digest_mismatch}");
+        assert!(digest_mismatch.contains("SHA-256"), "{digest_mismatch}");
+
+        std::fs::remove_file(path).unwrap();
+        std::fs::create_dir(path).unwrap();
+        let unsafe_file_type = open_verified_case_artifact(&record, &root).unwrap_err();
+        assert!(
+            unsafe_file_type.contains("regular file"),
+            "{unsafe_file_type}"
+        );
+        assert!(
+            !unsafe_file_type.contains("integrity"),
+            "{unsafe_file_type}"
+        );
     }
 
     #[cfg(unix)]
