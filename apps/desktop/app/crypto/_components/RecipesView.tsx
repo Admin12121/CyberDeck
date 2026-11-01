@@ -26,6 +26,7 @@ import {
 } from "./controller";
 import { b64, fileImportDerived, isDesktop, recipeRun, type RecipeRunWire } from "@lib/ipc";
 import { useWorkbench } from "@state/workbench";
+import { useWorkspaceDraft } from "@state/workspace-sessions";
 import { outputCapabilities, recipeResultIdentity } from "./recipe-output-policy";
 import { downloadContent } from "@lib/download";
 
@@ -39,10 +40,10 @@ const STEP_MIME = "application/x-cyberdeck-step";
 
 const NATIVE_RECIPE_OPS = new Set([
   "to_base64", "from_base64", "to_base64url", "from_base64url",
-  "to_hex", "from_hex", "to_binary", "from_binary",
+  "to_base32", "from_base32", "url_encode", "url_decode", "to_hex", "from_hex", "to_binary", "from_binary",
   "to_decimal", "from_decimal", "rot_n", "rot13", "rot47", "atbash",
   "xor", "reverse", "swap_endianness", "rotate_bytes", "bit_shift_left",
-  "bit_shift_right", "to_uppercase", "to_lowercase", "trim_lines",
+  "bit_shift_right", "to_uppercase", "to_lowercase", "trim_lines", "add_line_numbers", "defang", "refang",
   "unique_lines", "reverse_lines", "filter_lines", "head_lines",
   "tail_lines", "text_split", "find_replace", "json_beautify",
   "json_minify", "slice_bytes", "to_utf8",
@@ -69,8 +70,9 @@ export function RecipesView() {
   const [caseSaveError, setCaseSaveError] = useState<string | null>(null);
   const [outputActionError, setOutputActionError] = useState<string | null>(null);
   const [sourceDescription, setSourceDescription] = useState<string | null>(null);
-  const [state, setState] = useState<RecipeState>(initialRecipeState);
-  const [search, setSearch] = useState("");
+  const initialDraft = useMemo(initialRecipeState, []);
+  const [state, setState] = useWorkspaceDraft<RecipeState>(wb.caseId, "crypto", "recipes", initialDraft);
+  const [search, setSearch] = useWorkspaceDraft(wb.caseId, "crypto", "operation-search", "");
   const [committed, setCommitted] = useState<{ key: string; value: RecipeResult; native: boolean } | null>(null);
   // Consume an explicit cross-workspace transfer once, without saving it
   // in localStorage (captured traffic may contain sensitive data).
@@ -82,10 +84,10 @@ export function RecipesView() {
     wb.consumeRecipeHandoff();
   }, [wb.recipeHandoff, wb.consumeRecipeHandoff]);
   const [nativeAuto, setNativeAuto] = useState<{ key: string; value: RecipeResult } | null>(null);
-  const [opsWidth, setOpsWidth] = useState(224);
-  const [recipeWidth, setRecipeWidth] = useState(256);
+  const [opsWidth, setOpsWidth] = useWorkspaceDraft(wb.caseId, "crypto", "operations-width", 224);
+  const [recipeWidth, setRecipeWidth] = useWorkspaceDraft(wb.caseId, "crypto", "recipe-width", 256);
   // null keeps input and output at an even 50/50 split; dragging pins px.
-  const [inputHeight, setInputHeight] = useState<number | null>(null);
+  const [inputHeight, setInputHeight] = useWorkspaceDraft<number | null>(wb.caseId, "crypto", "input-height", null);
   const [dropIndex, setDropIndex] = useState<number | null>(null);
   const inputPaneRef = useRef<HTMLDivElement>(null);
   // elapsedMs is real timing, which differs between prerender and hydration,

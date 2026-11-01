@@ -1,1 +1,1 @@
-export { CryptoRoute } from "./CryptoRoute";
+export { CryptoWorkspace } from "./CryptoWorkspace";

@@ -53,11 +53,11 @@ test("all browser exports use one checked helper rather than local anchor implem
 });
 
 test("shell and status bar consume focused state contexts rather than terminal/job state", () => {
-  const shell = source("components/shell/Workbench.tsx");
+  const shell = source("components/shell/AppShell.tsx");
   const status = source("components/shell/StatusBar.tsx");
   const navigator = source("components/shell/ContextNavigator.tsx");
   assert.match(shell, /useWorkbenchLayout/);
-  assert.match(shell, /useWorkbenchLocation/);
+  assert.match(source("app/crypto/page.tsx"), /useWorkbenchLocation/);
   assert.doesNotMatch(shell, /useWorkbench\(\)/);
   assert.match(status, /useWorkbenchCase\(\)/);
   assert.doesNotMatch(status, /useWorkbench\(\)/);

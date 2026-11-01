@@ -1,5 +1,7 @@
 "use client";
 import { createContext, useContext, useMemo, useRef, useState, type ReactNode } from "react";
+import { useWorkspaceDraft } from "@state/workspace-sessions";
+import { useWorkbenchCase } from "@state/workbench";
 
 export type WebTab = "proxy" | "history" | "repeater" | "scanner" | "spider";
 interface RequestHandoff {
@@ -20,8 +22,9 @@ interface WebWorkflowState {
 const Context = createContext<WebWorkflowState | null>(null);
 
 export function WebWorkflowProvider({ children }: { children: ReactNode }) {
-  const [tab, setTab] = useState<WebTab>("proxy");
-  const [target, setTarget] = useState("");
+  const { caseId } = useWorkbenchCase();
+  const [tab, setTab] = useWorkspaceDraft<WebTab>(caseId, "web", "active-tab", "proxy");
+  const [target, setTarget] = useWorkspaceDraft(caseId, "web", "target-draft", "");
   const [repeaterHandoff, setRepeaterHandoff] = useState<RequestHandoff | null>(null);
   const sequence = useRef(0);
   const normalized = useMemo(() => {

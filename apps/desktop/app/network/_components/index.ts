@@ -1,1 +1,1 @@
-export { NetworkRoute } from "./NetworkRoute";
+export { NetworkWorkspace } from "./NetworkWorkspace";

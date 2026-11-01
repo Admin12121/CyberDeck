@@ -1,5 +1,5 @@
 "use client";
-import { useCallback, useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Globe, Play, PlayCircle, Square } from "lucide-react";
 import { Chip, EmptyState, Pane, Resizer, Select, TextInput, ToolButton } from "@ds/panes";
 import {
@@ -22,7 +22,7 @@ import {
   type WebFindingWire,
 } from "@lib/ipc";
 import { buildSitesTree, filterCaptured, useTarget } from "./controller";
-import { useWorkbench } from "@state/workbench";
+import { useWorkbench, useWorkbenchCase } from "@state/workbench";
 import { useWebWorkflow } from "./WebWorkflow";
 
 // ---------------------------------------------------------------- scanner ---
@@ -30,6 +30,10 @@ import { useWebWorkflow } from "./WebWorkflow";
 export function ScannerView() {
   const desktop = isDesktop();
   const wb = useWorkbench();
+  const { caseId } = useWorkbenchCase();
+  const activeContext = useRef({ caseId, target: "" });
+  const scanRevision = useRef(0);
+  const engineRevision = useRef(0);
   const { target, setTarget, normalized } = useWebWorkflow();
   const [findings, setFindings] = useState<WebFindingWire[]>([]);
   const [busy, setBusy] = useState(false);
@@ -41,6 +45,17 @@ export function ScannerView() {
   const [engineOut, setEngineOut] = useState<EngineScanResultWire | null>(null);
   const [engineBusy, setEngineBusy] = useState<string | null>(null);
   const [engineWidth, setEngineWidth] = useState(384);
+  activeContext.current = { caseId, target: normalized };
+  useEffect(() => {
+    scanRevision.current += 1;
+    engineRevision.current += 1;
+    setFindings([]);
+    setEngineOut(null);
+    setSavedCount(0);
+    setBusy(false);
+    setEngineBusy(null);
+    setError(null);
+  }, [caseId, normalized]);
 
   useEffect(() => {
     if (!desktop) return;
@@ -48,41 +63,54 @@ export function ScannerView() {
   }, [desktop]);
 
   const scan = async () => {
+    if (busy || !normalized || !authorized) return;
+    const revision = ++scanRevision.current;
+    const selectedCase = caseId;
+    const selectedTarget = normalized;
+    const current = () => revision === scanRevision.current &&
+      activeContext.current.caseId === selectedCase && activeContext.current.target === selectedTarget;
     setBusy(true);
     setError(null);
     setFindings([]);
     setSavedCount(0);
-    const caseId = wb.caseId;
     try {
-      const found = await wb.trackOperation("Web scan", () => webScan(normalized, authorized));
+      const found = await wb.trackOperation("Web scan", () => webScan(selectedTarget, authorized));
+      if (!current()) return;
       setFindings(found);
       if (found.length > 0) {
         try {
-          const saved = await caseFindingsAdd(caseId, "web.native", found.slice(0, 128).map((f) => ({
+          const saved = await caseFindingsAdd(selectedCase, "web.native", found.slice(0, 128).map((f) => ({
             title: f.title.slice(0, 200),
             severity: ["info", "low", "medium", "high", "critical"].includes(f.severity)
               ? f.severity as "info" | "low" | "medium" | "high" | "critical" : "info",
-            details: `Target: ${normalized}\n${f.detail}\nEvidence: ${f.evidence}`.slice(0, 8192),
+            details: `Target: ${selectedTarget}\n${f.detail}\nEvidence: ${f.evidence}`.slice(0, 8192),
           })));
-          setSavedCount(saved);
-        } catch (error) { setError(`Scan completed, but findings were not saved: ${String(error)}`); }
+          if (current()) setSavedCount(saved);
+        } catch (error) { if (current()) setError(`Scan completed, but findings were not saved: ${String(error)}`); }
       }
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      if (current()) setError(err instanceof Error ? err.message : String(err));
     } finally {
-      setBusy(false);
+      if (revision === scanRevision.current) setBusy(false);
     }
   };
 
   const runEngine = async (tool: string) => {
+    if (engineBusy || !authorized || !normalized) return;
+    const revision = ++engineRevision.current;
+    const selectedCase = caseId;
+    const selectedTarget = normalized;
+    const current = () => revision === engineRevision.current &&
+      activeContext.current.caseId === selectedCase && activeContext.current.target === selectedTarget;
     setEngineBusy(tool);
     setEngineOut(null);
     try {
-      setEngineOut(await wb.trackOperation(`Engine: ${tool}`, () => engineScan(tool, normalized, authorized)));
+      const output = await wb.trackOperation(`Engine: ${tool}`, () => engineScan(tool, selectedTarget, authorized));
+      if (current()) setEngineOut(output);
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      if (current()) setError(err instanceof Error ? err.message : String(err));
     } finally {
-      setEngineBusy(null);
+      if (revision === engineRevision.current) setEngineBusy(null);
     }
   };
 
@@ -92,8 +120,8 @@ export function ScannerView() {
     <div className="flex h-full min-h-0 flex-col">
       <div className="cd-workspace-toolbar shrink-0 items-center gap-2  px-2">
         <span className="font-mono text-[10px] uppercase text-fg-muted">target</span>
-        <TextInput value={target} onChange={setTarget} placeholder="http://host" ariaLabel="Scan target" className="w-72" />
-        <ToolButton tone="primary" onClick={() => void scan()} disabled={busy || !desktop || !normalized || !authorized} title={desktop ? "Native review: paths, headers, banners" : "Scanning requires the desktop runtime"}>
+        <TextInput value={target} onChange={setTarget} placeholder="http://127.0.0.1:3000" ariaLabel="Scan target" className="w-72" />
+        <ToolButton tone="primary" onClick={() => void scan()} disabled={busy || !desktop || !normalized || !authorized} title={desktop ? "Native scope-checked review of private/loopback IP targets; OS approval is required" : "Scanning requires the desktop runtime"}>
           <Play size={11} /> {busy ? "scanning…" : "Native scan"}
         </ToolButton>
         <span className="ml-auto font-mono text-[10px] text-fg-muted">{findings.length} findings · {savedCount} saved to case</span>
@@ -101,7 +129,7 @@ export function ScannerView() {
       {error ? <div className="border-b border-err/50 bg-err/10 px-2 py-1 font-mono text-[10px] text-err">{error}</div> : null}
       <label className="flex items-center gap-2 border-b border-line bg-panel px-3 py-2 text-xs text-fg-dim">
         <input type="checkbox" checked={authorized} onChange={(e) => setAuthorized(e.target.checked)} className="accent-[var(--color-orange)]" />
-        I confirm that I own this target or have written authorization for active assessment.
+        I confirm I own this target or have written permission. The native backend also requires a selected case, literal private/loopback IP target, and one-request OS confirmation. DNS hostnames are not enabled until address pinning is verified.
       </label>
       <div className="flex min-h-0 flex-1 gap-px bg-line">
         <Pane title="Findings" className="min-w-0 flex-1">
@@ -140,7 +168,7 @@ export function ScannerView() {
                     {engine.label} <span className="text-fg-muted">{engine.available ? engine.version : "not detected"}</span>
                   </span>
                   <Chip tone={engine.available ? "ok" : "muted"}>{engine.license.split("-")[0]}</Chip>
-                  <ToolButton onClick={() => void runEngine(engine.id)} disabled={!engine.available || !normalized || !authorized || engineBusy !== null} title={engine.available ? `Run ${engine.label} against the target` : "Not on PATH; bundled sidecars arrive with the installer"}>
+                  <ToolButton onClick={() => void runEngine(engine.id)} disabled={!engine.available || !normalized || !authorized || engineBusy !== null} title={engine.available ? `Run ${engine.label} against the target` : "Optional external sidecar not installed; native scanner operates independently"}>
                     {engineBusy === engine.id ? "…" : <Play size={11} />}
                   </ToolButton>
                 </div>

@@ -1,1 +1,1 @@
-export { WebRoute } from "./WebRoute";
+export { WebWorkspace } from "./WebWorkspace";

@@ -14,7 +14,9 @@ import {
   type StreamTranscriptWire,
 } from "@lib/ipc";
 import { useWorkbench } from "@state/workbench";
+import { useWorkspaceDraft } from "@state/workspace-sessions";
 import type { ToolId } from "@state/tool-registry";
+import { LiveCaptureView } from "./LiveCaptureView";
 import {
   PROTOCOL_COLORS,
   SAMPLE_HOSTS,
@@ -44,17 +46,32 @@ const SAMPLE_DISPLAY: DisplayPacket[] = SAMPLE_PACKETS.map((p, i) => ({
 }));
 
 export function PacketStudioView() {
+  const { caseId } = useWorkbench();
+  const [source, setSource] = useWorkspaceDraft<"files" | "live">(caseId, "network", "packet-source", "files");
+  return (
+    <div className="flex h-full min-h-0 flex-col">
+      <div className="flex shrink-0 gap-1 border-b border-line px-2 py-1">
+        <ToolButton tone={source === "files" ? "primary" : "default"} onClick={() => setSource("files")}>Opened PCAP / Sample</ToolButton>
+        <ToolButton tone={source === "live" ? "primary" : "default"} onClick={() => setSource("live")}>Native Live Capture</ToolButton>
+      </div>
+      <div className={source === "files" ? "min-h-0 flex-1" : "hidden"}><ImportedCaptureView /></div>
+      <div className={source === "live" ? "min-h-0 flex-1" : "hidden"}><LiveCaptureView /></div>
+    </div>
+  );
+}
+
+function ImportedCaptureView() {
   const desktop = isDesktop();
   const wb = useWorkbench();
   const [capture, setCapture] = useState<PcapOpenWire | null>(null);
   const [showSample, setShowSample] = useState(false);
   const [openError, setOpenError] = useState<string | null>(null);
   const [opening, setOpening] = useState(false);
-  const [filter, setFilter] = useState("");
+  const [filter, setFilter] = useWorkspaceDraft(wb.caseId, "network", "packet-filter", "");
   const [packetScrollTop, setPacketScrollTop] = useState(0);
   const packetScrollRef = useRef<HTMLDivElement>(null);
   const [selected, setSelected] = useState(0);
-  const [tab, setTab] = useState<"packets" | "conversations" | "statistics" | "streams">("packets");
+  const [tab, setTab] = useWorkspaceDraft<"packets" | "conversations" | "statistics" | "streams">(wb.caseId, "network", "packet-view", "packets");
   const [packetBytes, setPacketBytes] = useState<{ frameIndex: number; data: HexResponseWire } | null>(null);
   // null: details and bytes share the row evenly; dragging pins px.
   const [detailsWidth, setDetailsWidth] = useState<number | null>(null);
@@ -149,9 +166,7 @@ export function PacketStudioView() {
           <FolderOpen size={11} /> {opening ? "opening…" : "Open…"}
         </ToolButton>
         {!capture && <ToolButton onClick={() => { setShowSample(true); setSelected(0); }} title="Open explicitly labeled demonstration data, not case evidence">Sample</ToolButton>}
-        <ToolButton disabled title="Live capture requires platform driver clearance (§7.2)">
-          <Play size={11} /> Capture
-        </ToolButton>
+
         <TextInput
           value={filter}
           onChange={setFilter}

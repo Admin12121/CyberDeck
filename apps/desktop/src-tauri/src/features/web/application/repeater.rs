@@ -37,9 +37,47 @@ pub(super) async fn send_binary(request: BinaryReplayRequest) -> Result<HttpResp
     send_binary_with_client(&client, request).await
 }
 
+/// The check is a trusted backend-only case/consent authority. It is rerun
+/// before dispatch, during header/body waits and on completion. Network
+/// futures are dropped on revocation/expiry; remote bytes cannot be recalled.
+pub(super) async fn send_binary_authorized(
+    request: BinaryReplayRequest,
+    authorize: &impl Fn() -> Result<(), String>,
+) -> Result<HttpResponseWire, String> {
+    let client = http_client();
+    send_binary_with_client_authorized(&client, request, authorize).await
+}
+
+async fn await_authorized<T>(
+    future: impl std::future::Future<Output = Result<T, String>>,
+    authorize: &impl Fn() -> Result<(), String>,
+) -> Result<T, String> {
+    authorize()?;
+    tokio::pin!(future);
+    let mut ticker = tokio::time::interval(std::time::Duration::from_millis(100));
+    loop {
+        tokio::select! {
+            biased;
+            _ = ticker.tick() => authorize()?,
+            result = &mut future => {
+                authorize()?;
+                return result;
+            }
+        }
+    }
+}
+
 pub(super) async fn send_binary_with_client(
     client: &reqwest::Client,
     request: BinaryReplayRequest,
+) -> Result<HttpResponseWire, String> {
+    send_binary_with_client_authorized(client, request, &|| Ok(())).await
+}
+
+async fn send_binary_with_client_authorized(
+    client: &reqwest::Client,
+    request: BinaryReplayRequest,
+    authorize: &impl Fn() -> Result<(), String>,
 ) -> Result<HttpResponseWire, String> {
     let method = reqwest::Method::from_bytes(request.method.as_bytes())
         .map_err(|e| format!("bad method: {e}"))?;
@@ -71,10 +109,16 @@ pub(super) async fn send_binary_with_client(
         builder = builder.body(request.body);
     }
     let started = Instant::now();
-    let mut response = builder
-        .send()
-        .await
-        .map_err(|e| format!("request failed: {e}"))?;
+    let mut response = await_authorized(
+        async {
+            builder
+                .send()
+                .await
+                .map_err(|_| "request failed".to_string())
+        },
+        authorize,
+    )
+    .await?;
     let status = response.status().as_u16();
     let headers: Vec<(String, String)> = response
         .headers()
@@ -87,10 +131,16 @@ pub(super) async fn send_binary_with_client(
         .min(usize::MAX as u64) as usize;
     let mut body_bytes = Vec::new();
     let mut truncated = false;
-    while let Some(chunk) = response
-        .chunk()
-        .await
-        .map_err(|e| format!("body read failed: {e}"))?
+    while let Some(chunk) = await_authorized(
+        async {
+            response
+                .chunk()
+                .await
+                .map_err(|_| "body read failed".to_string())
+        },
+        authorize,
+    )
+    .await?
     {
         let space = MAX_BODY_BYTES.saturating_sub(body_bytes.len());
         if chunk.len() > space {
@@ -110,6 +160,7 @@ pub(super) async fn send_binary_with_client(
     // Legacy text field is for display only. Base64 is the exact binary body.
     let body_text = String::from_utf8_lossy(&body_bytes).to_string();
     let body_base64 = base64::engine::general_purpose::STANDARD.encode(&body_bytes);
+    authorize()?;
     Ok(HttpResponseWire {
         status,
         headers,
@@ -169,6 +220,119 @@ mod binary_replay_tests {
         })
         .await
         .expect("binary replay fixture timed out");
+    }
+
+    fn authorized(allowed: &std::sync::atomic::AtomicBool) -> Result<(), String> {
+        if allowed.load(std::sync::atomic::Ordering::Acquire) {
+            Ok(())
+        } else {
+            Err("HTTP replay authorization revoked".into())
+        }
+    }
+
+    #[tokio::test]
+    async fn revoked_before_dispatch_never_enters_network() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/no-dispatch", listener.local_addr().unwrap());
+        let allowed = std::sync::atomic::AtomicBool::new(false);
+        let result = send_binary_authorized(
+            BinaryReplayRequest {
+                method: "GET".into(),
+                url,
+                headers: vec![],
+                body: vec![],
+            },
+            &|| authorized(&allowed),
+        )
+        .await;
+        assert!(result.unwrap_err().contains("revoked"));
+        // No socket can be accepted: authorization executes before send().
+        let nonblocking =
+            tokio::time::timeout(std::time::Duration::from_millis(25), listener.accept()).await;
+        assert!(nonblocking.is_err());
+    }
+
+    #[tokio::test]
+    async fn revoke_while_upstream_waits_for_headers_cancels_inflight() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use tokio::sync::oneshot;
+        tokio::time::timeout(std::time::Duration::from_secs(7), async {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let url = format!("http://{}/pending", listener.local_addr().unwrap());
+            let (seen_tx, seen_rx) = oneshot::channel();
+            let (release_tx, release_rx) = oneshot::channel::<()>();
+            let server = tokio::spawn(async move {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let (_, body) = crate::features::web::webtls::read_http_message(&mut stream)
+                    .await
+                    .unwrap();
+                assert_eq!(body, [0xff, 0, 0x7f]);
+                let _ = seen_tx.send(());
+                let _ = release_rx.await;
+            });
+            let allowed = std::sync::Arc::new(AtomicBool::new(true));
+            let state = allowed.clone();
+            let job = tokio::spawn(async move {
+                send_binary_authorized(
+                    BinaryReplayRequest {
+                        method: "POST".into(),
+                        url,
+                        headers: vec![],
+                        body: vec![0xff, 0, 0x7f],
+                    },
+                    &|| authorized(&state),
+                )
+                .await
+            });
+            seen_rx.await.unwrap();
+            allowed.store(false, Ordering::Release);
+            let error = tokio::time::timeout(std::time::Duration::from_secs(2), job)
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap_err();
+            assert!(error.contains("revoked"), "{error}");
+            let _ = release_tx.send(());
+            server.await.unwrap();
+        })
+        .await
+        .expect("pending-header revocation fixture timed out");
+    }
+
+    #[tokio::test]
+    async fn revoke_during_binary_response_stream_prevents_publication() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use tokio::sync::oneshot;
+        tokio::time::timeout(std::time::Duration::from_secs(7), async {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let url = format!("http://{}/partial", listener.local_addr().unwrap());
+            let (chunk_tx, chunk_rx) = oneshot::channel();
+            let (release_tx, release_rx) = oneshot::channel::<()>();
+            let server = tokio::spawn(async move {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let _ = crate::features::web::webtls::read_http_message(&mut stream).await.unwrap();
+                stream.write_all(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n3\r\n").await.unwrap();
+                stream.write_all(&[0xff, 0, 0x7f]).await.unwrap();
+                stream.write_all(b"\r\n").await.unwrap();
+                stream.flush().await.unwrap();
+                let _ = chunk_tx.send(());
+                let _ = release_rx.await;
+            });
+            let allowed = std::sync::Arc::new(AtomicBool::new(true));
+            let state = allowed.clone();
+            let job = tokio::spawn(async move {
+                send_binary_authorized(BinaryReplayRequest {
+                    method: "GET".into(), url, headers: vec![], body: vec![],
+                }, &|| authorized(&state)).await
+            });
+            chunk_rx.await.unwrap();
+            allowed.store(false, Ordering::Release);
+            let error = tokio::time::timeout(std::time::Duration::from_secs(2), job)
+                .await.unwrap().unwrap().unwrap_err();
+            assert!(error.contains("revoked"), "{error}");
+            let _ = release_tx.send(());
+            server.await.unwrap();
+        }).await.expect("partial-stream revocation fixture timed out");
     }
 
     #[tokio::test]

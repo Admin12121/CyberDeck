@@ -4,6 +4,7 @@ import type { ReactNode } from "react";
 import { usePathname } from "next/navigation";
 import { WorkbenchProvider, useWorkbenchLayout } from "@state/workbench";
 import { WorkspaceSessionProvider } from "@state/workspace-sessions";
+import { JobNotificationProvider } from "@state/job-notifications";
 import { PANEL_LIMITS } from "@state/panel-preferences";
 import { Rail } from "./Rail";
 import { ContextNavigator } from "./ContextNavigator";
@@ -48,7 +49,7 @@ function DesktopFrame({ children }: { children: ReactNode }) {
             </div>
           </div>
         </div>
-        <StatusBar />
+        {!home && <StatusBar />}
       </div>
       <CommandPalette />
     </div>
@@ -59,7 +60,9 @@ export function AppShell({ children }: { children: ReactNode }) {
   return (
     <WorkbenchProvider>
       <WorkspaceSessionProvider>
-        <DesktopFrame>{children}</DesktopFrame>
+        <JobNotificationProvider>
+          <DesktopFrame>{children}</DesktopFrame>
+        </JobNotificationProvider>
       </WorkspaceSessionProvider>
     </WorkbenchProvider>
   );

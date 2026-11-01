@@ -6,6 +6,10 @@
  */
 import type { LucideIcon } from "lucide-react";
 import type { CSSProperties, ReactNode } from "react";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Select as CossSelect, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Tabs, TabsList, TabsTab } from "@/components/ui/tabs";
 
 export { Resizer } from "./Resizer";
 
@@ -48,28 +52,18 @@ export function WorkspaceTabs<T extends string>({
   placement?: "top" | "bottom";
 }) {
   return (
-    <div role="tablist" aria-label={ariaLabel}
-      className="cd-workspace-toolbar min-w-0 gap-1 overflow-x-auto px-2"
-      data-placement={placement}>
-      {items.map((tab) => (
-        <button key={tab} type="button" role="tab" aria-selected={tab === active}
-          onClick={() => onChange(tab)}
-          onKeyDown={(event) => {
-            const index = items.indexOf(tab);
-            const next = event.key === "ArrowRight" ? (index + 1) % items.length
-              : event.key === "ArrowLeft" ? (index - 1 + items.length) % items.length
-              : event.key === "Home" ? 0 : event.key === "End" ? items.length - 1 : -1;
-            if (next < 0) return;
-            event.preventDefault();
-            onChange(items[next]);
-            event.currentTarget.parentElement?.querySelectorAll<HTMLButtonElement>('[role="tab"]')[next]?.focus();
-          }}
-          tabIndex={tab === active ? 0 : -1}
-          className={`h-6 shrink-0 rounded-sm border border-line px-2 font-mono text-[10px] uppercase tracking-wide transition-colors focus-visible:outline-2 focus-visible:outline-offset-0 focus-visible:outline-ring ${tab === active ? "bg-selected font-semibold text-fg" : "text-fg-muted hover:bg-raised hover:text-fg"}`}>
-          {tab}
-        </button>
-      ))}
-    </div>
+    <Tabs value={active} onValueChange={(value) => onChange(value as T)}
+      className="w-full gap-0">
+      <TabsList aria-label={ariaLabel} size="sm" variant="underline"
+        className="cd-workspace-toolbar w-full min-w-0 justify-start gap-1 overflow-x-auto px-2"
+        data-placement={placement}>
+        {items.map((tab) => (
+          <TabsTab key={tab} value={tab} className="h-7 shrink-0 rounded-sm px-2 font-mono text-[10px] uppercase tracking-wide">
+            {tab}
+          </TabsTab>
+        ))}
+      </TabsList>
+    </Tabs>
   );
 }
 
@@ -142,21 +136,12 @@ export function ToolButton({
   title?: string;
   tone?: "default" | "primary" | "danger";
 }) {
-  const tones: Record<string, string> = {
-    default: "border-line text-fg-dim hover:text-fg",
-    primary: "border-orange/50 text-orange hover:bg-orange-dim",
-    danger: "border-err/40 text-err hover:bg-err/10",
-  };
   return (
-    <button
-      type="button"
-      onClick={onClick}
-      disabled={disabled}
-      title={title}
-      className={`inline-flex h-8 items-center gap-1 border px-3 font-mono text-xs transition-colors disabled:cursor-not-allowed disabled:opacity-40 ${tones[tone]}`}
-    >
+    <Button variant={tone === "danger" ? "destructive-outline" : tone === "primary" ? "secondary" : "outline"}
+      size="sm" onClick={onClick} disabled={disabled} title={title}
+      className="h-8 gap-1 rounded-sm px-3 font-mono text-xs">
       {children}
-    </button>
+    </Button>
   );
 }
 
@@ -178,14 +163,9 @@ export function TextInput({
   ariaLabel?: string;
 }) {
   return (
-    <input
-      value={value}
-      onChange={(e) => onChange(e.target.value)}
-      onKeyDown={onKeyDown}
-      placeholder={placeholder}
-      aria-label={ariaLabel}
-      className={`h-8 border border-line bg-app px-2 text-[13px] text-fg placeholder:text-fg-muted ${mono ? "font-mono" : ""} ${className}`}
-    />
+    <Input size="sm" value={value} onChange={(e) => onChange(e.target.value)}
+      onKeyDown={onKeyDown} placeholder={placeholder} aria-label={ariaLabel}
+      className={`min-w-0 rounded-sm ${mono ? "font-mono" : ""} ${className}`} />
   );
 }
 
@@ -203,17 +183,19 @@ export function Select({
   className?: string;
 }) {
   return (
-    <select
-      value={value}
-      onChange={(e) => onChange(e.target.value)}
-      aria-label={ariaLabel}
-      className={`h-8 border border-line bg-app px-2 font-mono text-xs text-fg-dim ${className}`}
-    >
-      {options.map((opt) => (
-        <option key={opt.value} value={opt.value}>
-          {opt.label}
-        </option>
-      ))}
-    </select>
+    <CossSelect items={options} value={value}
+      onValueChange={(next) => { if (typeof next === "string") onChange(next); }}>
+      <SelectTrigger size="sm" aria-label={ariaLabel}
+        className={`h-8 min-w-0 rounded-sm font-mono text-xs ${className}`}>
+        <SelectValue />
+      </SelectTrigger>
+      <SelectPopup alignItemWithTrigger={false} className="max-h-72">
+        {options.map((option) => (
+          <SelectItem key={option.value} value={option.value}>
+            {option.label}
+          </SelectItem>
+        ))}
+      </SelectPopup>
+    </CossSelect>
   );
 }

@@ -5,6 +5,7 @@ import { Chip, EmptyState, Pane, ToolButton } from "@ds/panes";
 import { httpSend, isDesktop, type HttpResponseWire } from "@lib/ipc";
 import { hexDump } from "@lib/hex";
 import { useWebWorkflow } from "./WebWorkflow";
+import { useWorkbenchCase } from "@state/workbench";
 
 interface RepeaterTab {
   name: string;
@@ -13,17 +14,43 @@ interface RepeaterTab {
   error: string | null;
 }
 
-const SAMPLE_REQUEST = `GET / HTTP/1.1\r\nHost: example.com\r\nUser-Agent: CyberDeck-Workbench/0.1\r\nAccept: */*\r\n\r\n`;
+const SAMPLE_REQUEST = `GET / HTTP/1.1\r\nHost: 127.0.0.1:8080\r\nUser-Agent: CyberDeck-Workbench/0.1\r\nAccept: */*\r\n\r\n`;
+
+// Decode the authoritative binary wire field, never re-encode displayed UTF-8.
+function binaryResponseBytes(reply: HttpResponseWire): Uint8Array {
+  try {
+    // The Rust wire contains body_base64; older frontend IPC typings omit it.
+    // Do not fabricate binary bytes from the lossy display-text field.
+    const encoded = (reply as HttpResponseWire & { body_base64?: string }).body_base64;
+    if (!encoded) return new Uint8Array();
+    const decoded = atob(encoded);
+    return Uint8Array.from(decoded, (symbol) => symbol.charCodeAt(0));
+  } catch {
+    return new Uint8Array();
+  }
+}
 
 export function RepeaterView() {
   const desktop = isDesktop();
   const { repeaterHandoff } = useWebWorkflow();
+  const { caseId } = useWorkbenchCase();
+  const caseRef = useRef(caseId);
+  caseRef.current = caseId;
+  const inFlightRevision = useRef(0);
   const nextTabId = useRef(2);
   const lastHandoff = useRef(0);
   const [tabs, setTabs] = useState<RepeaterTab[]>([{ name: "R1", request: SAMPLE_REQUEST, response: null, error: null }]);
   const [active, setActive] = useState(0);
   const [busy, setBusy] = useState(false);
   const [bodyMode, setBodyMode] = useState<"inspector" | "raw" | "hex">("inspector");
+
+  // A native case switch invalidates all pending UI response publication.
+  // Retain editable drafts, but never present a previous case's response.
+  useEffect(() => {
+    inFlightRevision.current += 1;
+    setTabs((previous) => previous.map((tab) => ({ ...tab, response: null, error: null })));
+    setBusy(false);
+  }, [caseId]);
 
   useEffect(() => {
     if (!repeaterHandoff || repeaterHandoff.id === lastHandoff.current) return;
@@ -38,21 +65,34 @@ export function RepeaterView() {
     setTabs((prev) => prev.map((t, i) => (i === active ? { ...t, ...patch } : t)));
 
   const send = async () => {
+    if (busy || !current) return;
+    const revision = ++inFlightRevision.current;
+    const selectedCase = caseId;
+    const name = current.name;
+    const request = current.request;
     setBusy(true);
-    update({ error: null });
+    setTabs((previous) => previous.map((tab) =>
+      tab.name === name ? { ...tab, response: null, error: null } : tab));
     try {
-      const response = await httpSend(current.request);
-      update({ response });
-    } catch (err) {
-      update({ error: err instanceof Error ? err.message : String(err) });
+      // The registered native wrapper enforces backend case authority, literal
+      // private/loopback scope, and an explicit one-request OS approval dialog.
+      const response = await httpSend(request);
+      if (revision !== inFlightRevision.current || caseRef.current !== selectedCase) return;
+      setTabs((previous) => previous.map((tab) =>
+        tab.name === name && tab.request === request
+          ? { ...tab, response, error: null } : tab));
+    } catch (cause) {
+      if (revision !== inFlightRevision.current || caseRef.current !== selectedCase) return;
+      setTabs((previous) => previous.map((tab) =>
+        tab.name === name && tab.request === request
+          ? { ...tab, error: cause instanceof Error ? cause.message : String(cause) } : tab));
     } finally {
-      setBusy(false);
+      if (revision === inFlightRevision.current) setBusy(false);
     }
   };
 
-  // This is an encoding of response.body text, not original network bytes.
-  const hexRows = current.response
-    ? hexDump(new TextEncoder().encode(current.response.body).slice(0, 2048))
+  const hexRows = current?.response
+    ? hexDump(binaryResponseBytes(current.response).slice(0, 2048))
     : [];
 
   return (
@@ -84,8 +124,8 @@ export function RepeaterView() {
         <ToolButton tone="primary" onClick={() => void send()} disabled={busy || !desktop} title={desktop ? "Send the raw request through the native HTTP engine" : "Sending requires the desktop runtime"}>
           <Play size={11} /> {busy ? "sending…" : "Send"}
         </ToolButton>
-        <span className="ml-auto font-mono text-[10px] text-fg-muted">
-          {current.response ? `${current.response.status} · ${current.response.size} B · ${current.response.duration_ms} ms` : ""}
+        <span className="ml-auto font-mono text-[10px] text-fg-muted" title="A native selected case, a private/loopback literal-IP target and per-request OS confirmation are required">
+          {current.response ? `${current.response.status} · ${current.response.size} B · ${current.response.duration_ms} ms` : "Native approval · scoped private/loopback IP only"}
         </span>
       </div>
       <div className="flex min-h-0 flex-1 gap-px bg-line">
@@ -112,7 +152,7 @@ export function RepeaterView() {
                     onClick={() => setBodyMode(mode)}
                     className={`flex h-6 items-center border px-1.5 font-mono text-[10px] uppercase ${bodyMode === mode ? "border-line bg-selected text-fg" : "border-line text-fg-muted"}`}
                   >
-                    {mode === "hex" ? "Text hex" : mode}
+                    {mode === "hex" ? "Binary hex" : mode}
                   </button>
                 ))}
                 <ToolButton onClick={() => void navigator.clipboard?.writeText(current.response?.body ?? "")}>
@@ -147,7 +187,7 @@ export function RepeaterView() {
               </div>
             ) : (
               <pre className="h-full overflow-auto p-2 font-mono text-[11px] leading-relaxed text-fg-dim">
-                <div className="mb-2 text-warn">UTF-8 encoding of displayed text; not original HTTP response bytes.</div>
+                <div className="mb-2 text-warn">Exact decoded response bytes from the bounded Base64 payload (first 2048 bytes).</div>
                 {hexRows.map((row) => (
                   <div key={row.offset}>
                     <span className="text-fg-muted">{row.offset.toString(16).padStart(8, "0")}</span>

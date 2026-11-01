@@ -114,13 +114,42 @@ pub(crate) fn case_history_authorized_detail(
 /// Refuses truncated history and rechecks the active backend grant. Outbound
 /// HTTP headers/framing will still be normalized by reqwest.
 pub(crate) async fn replay_authorized_case_message(
+    session: &crate::features::shared::session::CaseSessionCtx,
+    selected: &crate::features::shared::session::CaseSessionWire,
+    proxy: &WebCtx,
     grant: &cyberdeck_storage::HistoryCaptureGrant,
     permit: cyberdeck_storage::HistoryRevealPermit,
     id: u64,
     forwarded: bool,
 ) -> Result<HttpResponseWire, String> {
+    // Only backend-held case revision and Agent5's live grant are authority.
+    // All synchronous locks are released before HTTP network awaits.
+    let authorize = || -> Result<(), String> {
+        session.ensure(selected)?;
+        if selected.case_id.as_deref() != Some(grant.case_id.as_str()) {
+            return Err("replay case does not match selected case".into());
+        }
+        if !proxy.shared.running.load(Ordering::Acquire) {
+            return Err("proxy stopped during replay".into());
+        }
+        session
+            .history_policy
+            .lock()
+            .map_err(|_| "Web replay policy unavailable")?
+            .authorize_grant(grant)?;
+        session.ensure(selected)
+    };
+    authorize()?;
     let request = webhistory::replay_draft_authorized(grant, permit, id, forwarded)?;
-    repeater_application::send_binary(request).await
+    authorize()?;
+    // The authorized transport polls the backend authority while waiting for
+    // headers and each response chunk; passive consent expiry also cancels.
+    let reply = repeater_application::send_binary_authorized(request, &authorize).await?;
+    // Shared publication lock serializes final check/return against reselect.
+    session.with_current_publication(selected, || {
+        authorize()?;
+        Ok(reply)
+    })
 }
 
 /// Send an editable raw request using the native Repeater service.
@@ -131,9 +160,114 @@ pub async fn http_send(request_raw: String) -> Result<HttpResponseWire, String> 
 
 // --- Native web review: thin IPC over feature-first application services ----
 
+/// Active scanner and crawler operations are independently authorized. The
+/// legacy frontend checkbox is an acknowledgment, NOT a backend scope grant.
+/// Until pinned-DNS support is verified, no hostname is resolved over the wire.
+fn validate_assessment_target(target: &str) -> Result<reqwest::Url, String> {
+    use std::net::IpAddr;
+    if target.len() > 4096 {
+        return Err("Web assessment target exceeds 4096-byte limit".into());
+    }
+    let url = reqwest::Url::parse(target.trim()).map_err(|_| "invalid Web assessment URL")?;
+    if !matches!(url.scheme(), "http" | "https")
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.port_or_known_default().is_none()
+    {
+        return Err("assessment requires an HTTP(S) URL without credentials".into());
+    }
+    let host = url.host_str().ok_or("assessment URL host missing")?;
+    let address: IpAddr = host
+        .trim_start_matches('[')
+        .trim_end_matches(']')
+        .parse()
+        .map_err(|_| "DNS hostname assessments require verified pinned-address transport")?;
+    let allowed = match address {
+        IpAddr::V4(ip) => ip.is_loopback() || ip.is_private(),
+        IpAddr::V6(ip) => {
+            ip.is_loopback()
+                || ip.is_unique_local()
+                || ip
+                    .to_ipv4_mapped()
+                    .is_some_and(|v4| v4.is_loopback() || v4.is_private())
+        }
+    };
+    if !allowed {
+        return Err("assessment target is not an authorized private/loopback address".into());
+    }
+    Ok(url)
+}
+
+async fn authorize_assessment(
+    app: tauri::AppHandle,
+    session: &crate::features::shared::session::CaseSessionCtx,
+    selected: &crate::features::shared::session::CaseSessionWire,
+    target: &reqwest::Url,
+) -> Result<(), String> {
+    use tauri_plugin_dialog::{DialogExt, MessageDialogButtons};
+    let origin = target.origin().ascii_serialization();
+    let accepted = tauri::async_runtime::spawn_blocking(move || {
+        app.dialog()
+            .message(format!(
+                "Authorize a bounded Web security assessment of {origin}?                  Only test systems you own or are explicitly permitted to assess."
+            ))
+            .title("Authorize active Web assessment")
+            .buttons(MessageDialogButtons::YesNo)
+            .blocking_show()
+    })
+    .await
+    .map_err(|_| "Web assessment confirmation unavailable")?;
+    if !accepted {
+        return Err("Web assessment rejected by operator".into());
+    }
+    session.ensure(selected)
+}
+
+async fn execute_case_scoped_assessment<T>(
+    session: &crate::features::shared::session::CaseSessionCtx,
+    selected: &crate::features::shared::session::CaseSessionWire,
+    operation: impl std::future::Future<Output = Result<T, String>>,
+) -> Result<T, String> {
+    // Bound concurrent active scans/crawls, independent of UI toggles.
+    static WORK: std::sync::OnceLock<tokio::sync::Semaphore> = std::sync::OnceLock::new();
+    let permit = WORK
+        .get_or_init(|| tokio::sync::Semaphore::new(2))
+        .try_acquire()
+        .map_err(|_| "maximum concurrent Web assessments reached")?;
+    session.ensure(selected)?;
+    let expiry = tokio::time::sleep(std::time::Duration::from_secs(60));
+    tokio::pin!(expiry);
+    tokio::pin!(operation);
+    let mut interval = tokio::time::interval(std::time::Duration::from_millis(100));
+    let result = loop {
+        tokio::select! {
+            biased;
+            _ = interval.tick() => session.ensure(selected)?,
+            _ = &mut expiry => return Err("Web assessment exceeded 60-second limit".into()),
+            reply = &mut operation => break reply?,
+        }
+    };
+    session.with_current_publication(selected, || Ok(result))
+}
+
 #[tauri::command]
-pub async fn web_scan(target_url: String, authorized: bool) -> Result<Vec<Finding>, String> {
-    scan_application::run_scan(&http_client(), target_url, authorized).await
+pub async fn web_scan(
+    target_url: String,
+    authorized: bool,
+    app: tauri::AppHandle,
+    session: State<'_, crate::features::shared::session::CaseSessionCtx>,
+) -> Result<Vec<Finding>, String> {
+    scan_domain::require_authorization(authorized)?;
+    let url = validate_assessment_target(&target_url)?;
+    let selected = session.selected()?;
+    authorize_assessment(app, &session, &selected, &url).await?;
+    let client = http_client();
+    execute_case_scoped_assessment(
+        &session,
+        &selected,
+        scan_application::run_scan(&client, url.to_string(), true),
+    )
+    .await
 }
 
 #[tauri::command]
@@ -141,8 +275,82 @@ pub async fn spider_scan(
     target_url: String,
     max_depth: u8,
     authorized: bool,
+    app: tauri::AppHandle,
+    session: State<'_, crate::features::shared::session::CaseSessionCtx>,
 ) -> Result<Vec<String>, String> {
-    crawl_application::run_spider(&http_client(), target_url, max_depth, authorized).await
+    scan_domain::require_authorization(authorized)?;
+    let url = validate_assessment_target(&target_url)?;
+    let selected = session.selected()?;
+    authorize_assessment(app, &session, &selected, &url).await?;
+    let client = http_client();
+    execute_case_scoped_assessment(
+        &session,
+        &selected,
+        crawl_application::run_spider(&client, url.to_string(), max_depth, true),
+    )
+    .await
+}
+
+#[cfg(test)]
+mod assessment_authorization_tests {
+    use super::*;
+
+    #[test]
+    fn authorized_internal_literal_targets_only() {
+        for target in [
+            "http://127.0.0.1:8080/",
+            "https://10.0.0.2/",
+            "http://192.168.1.15:1234/",
+            "http://[::1]:8080/",
+            "https://[fd00::1]/",
+            "http://[::ffff:127.0.0.1]/",
+        ] {
+            assert!(validate_assessment_target(target).is_ok(), "{target}");
+        }
+    }
+
+    #[test]
+    fn reject_dns_rebinding_and_metadata_address_surfaces() {
+        for target in [
+            "https://example.com/",
+            "http://localhost/",
+            "http://169.254.169.254/",
+            "http://[fe80::1]/",
+            "http://[::ffff:169.254.169.254]/",
+            "http://0.0.0.0/",
+            "http://8.8.8.8/",
+            "http://224.0.0.1/",
+            "http://user:password@127.0.0.1/",
+            "file:///etc/passwd",
+        ] {
+            assert!(validate_assessment_target(target).is_err(), "{target}");
+        }
+        assert!(
+            validate_assessment_target(&format!("http://127.0.0.1/{}", "a".repeat(4100))).is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn case_revision_revoked_during_assessment_fails_before_publishing() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = cyberdeck_storage::ArtifactStore::open(&temp.path().join("cases.db")).unwrap();
+        let session = crate::features::shared::session::CaseSessionCtx::default();
+        let initial = session.select(&store, "scratchpad").unwrap();
+        let (accepted, proceeding) = tokio::sync::oneshot::channel::<()>();
+        let (resume, release) = tokio::sync::oneshot::channel::<()>();
+        let job = execute_case_scoped_assessment(&session, &initial, async move {
+            let _ = accepted.send(());
+            let _ = release.await;
+            Ok::<_, String>(42)
+        });
+        let decision = async {
+            proceeding.await.unwrap();
+            session.select(&store, "scratchpad").unwrap();
+            let _ = resume.send(());
+        };
+        let (result, ()) = tokio::join!(job, decision);
+        assert!(result.is_err());
+    }
 }
 
 #[cfg(test)]
@@ -170,6 +378,9 @@ pub async fn proxy_start(
 
 #[tauri::command]
 pub async fn proxy_stop(ctx: State<'_, WebCtx>) -> Result<ProxyStatusWire, String> {
+    // Revokes Agent5's still-current consent before awaiting listener shutdown.
+    // In-flight authorized replays observe revocation within 100ms.
+    revoke_backend_case_capture();
     proxy_application::stop_proxy(&ctx).await
 }
 
@@ -212,12 +423,35 @@ pub fn proxy_history_detail(
 }
 
 #[tauri::command]
-pub fn proxy_history(ctx: State<'_, WebCtx>) -> Vec<CapturedRequest> {
-    ctx.shared
-        .captured
-        .lock()
-        .expect("captured poisoned")
-        .clone()
+pub fn proxy_history(
+    ctx: State<'_, WebCtx>,
+    session: State<'_, crate::features::shared::session::CaseSessionCtx>,
+) -> Vec<CapturedRequest> {
+    // The legacy listener summary cache may contain events from earlier cases.
+    // Never publish them unless their IDs are present in the current live
+    // backend-consented volatile history generation. The publication mutex
+    // serializes this read with backend case reselect/clear.
+    let Ok(selected) = session.selected() else {
+        return Vec::new();
+    };
+    session
+        .with_current_publication(&selected, || {
+            let permitted = webhistory::authorized_entry_ids();
+            if permitted.is_empty() {
+                return Ok(Vec::new());
+            }
+            let rows = ctx
+                .shared
+                .captured
+                .lock()
+                .map_err(|_| "proxy metadata unavailable")?;
+            Ok(rows
+                .iter()
+                .filter(|row| permitted.contains(&row.id))
+                .cloned()
+                .collect())
+        })
+        .unwrap_or_default()
 }
 
 /// Toggle request interception. When on, requests are held in the pending
@@ -279,8 +513,21 @@ pub async fn engine_scan(
     tool: String,
     target: String,
     authorized: bool,
+    app: tauri::AppHandle,
+    session: State<'_, crate::features::shared::session::CaseSessionCtx>,
 ) -> Result<EngineScanResult, String> {
-    engine_infrastructure::run_engine(tool, target, authorized).await
+    scan_domain::require_authorization(authorized)?;
+    let url = validate_assessment_target(&target)?;
+    let selected = session.selected()?;
+    // External engines are optional, separately licensed sidecars; require
+    // the same per-operation native authorization and backend case gate.
+    authorize_assessment(app, &session, &selected, &url).await?;
+    execute_case_scoped_assessment(
+        &session,
+        &selected,
+        engine_infrastructure::run_engine(tool, url.to_string(), true),
+    )
+    .await
 }
 
 #[cfg(test)]

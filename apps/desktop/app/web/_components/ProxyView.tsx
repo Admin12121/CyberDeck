@@ -5,6 +5,10 @@ import { Copy, Download, PlayCircle, Square, X } from "lucide-react";
 import { Chip, Pane, TextInput, ToolButton } from "@ds/panes";
 import {
   isDesktop,
+  webCaptureConsentStartV1,
+  webCaptureConsentRevokeV1,
+  webCaptureConsentStatusV1,
+  type WebCaptureConsentV1,
   proxyCaPem,
   proxyDrop,
   proxyForward,
@@ -24,6 +28,9 @@ export function ProxyView() {
   const [port, setPort] = useState("8080");
   const [interceptOn, setInterceptOn] = useState(false);
   const [pending, setPending] = useState<PendingRequestWire[]>([]);
+  const [consent, setConsent] = useState<WebCaptureConsentV1 | null>(null);
+  const [consentBusy, setConsentBusy] = useState(false);
+  const [consentError, setConsentError] = useState<string | null>(null);
   const [rules, setRules] = useState<{ find: string; replace: string }[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [caSaved, setCaSaved] = useState(false);
@@ -46,6 +53,12 @@ export function ProxyView() {
         const current = await proxyStatus();
         if (disposed) return;
         setStatus(current);
+        try {
+          const authorization = await webCaptureConsentStatusV1();
+          if (!disposed) setConsent(authorization);
+        } catch (cause) {
+          if (!disposed) setConsentError("Capture consent unavailable: " + String(cause));
+        }
         if (interceptOn && current.running) {
           const waiting = await proxyPending();
           if (!disposed) setPending(waiting);
@@ -109,11 +122,36 @@ export function ProxyView() {
     setError(null);
     try {
       setStatus(await proxyStop());
+      setConsent((previous) => previous ? { ...previous, enabled: false, generation: null } : null);
       setInterceptOn(false);
       setPending([]);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally { setBusy(false); }
+  };
+  const requestCaptureConsent = async () => {
+    if (!desktop || consentBusy || !status.running) return;
+    setConsentBusy(true);
+    setConsentError(null);
+    try {
+      setConsent(await webCaptureConsentStartV1());
+    } catch (cause) {
+      setConsentError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setConsentBusy(false);
+    }
+  };
+  const revokeCaptureConsent = async () => {
+    if (!desktop || consentBusy) return;
+    setConsentBusy(true);
+    setConsentError(null);
+    try {
+      setConsent(await webCaptureConsentRevokeV1());
+    } catch (cause) {
+      setConsentError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setConsentBusy(false);
+    }
   };
   const toggleIntercept = async () => {
     if (!desktop || busy || !status.running) return;
@@ -240,6 +278,40 @@ export function ProxyView() {
             </ToolButton>
             {error ? <div className="font-mono text-[10px] text-err">{error}</div> : null}
             {!desktop ? <div className="font-mono text-[10px] text-fg-muted">proxy control requires the desktop runtime</div> : null}
+          </div>
+        </div>
+
+        {/* Backend-authorized, volatile HTTP history consent. Never expose the
+            unregistered sensitive detail/replay commands here. */}
+        <div className="border border-line bg-panel">
+          <div className="cd-workspace-toolbar items-center justify-between px-2">
+            <span className="text-[10px] font-medium uppercase tracking-wider text-fg-muted">Case-bound volatile capture consent</span>
+            <Chip tone={consent?.enabled && status.running ? "ok" : "muted"}>
+              {consent?.enabled && status.running ? "enabled" : "off"}
+            </Chip>
+          </div>
+          <div className="space-y-2 p-3 text-xs text-fg-dim">
+            <p>
+              The proxy can run without storing sensitive traffic. Enable history only for a
+              backend-selected investigation case, after the native confirmation dialog.
+              Captured details remain restricted; metadata-only proxy history is separate.
+            </p>
+            <div className="flex flex-wrap items-center gap-2">
+              <ToolButton tone="primary" disabled={!desktop || !status.running || consentBusy || !!consent?.enabled}
+                onClick={() => void requestCaptureConsent()} title="Requires an active native case and explicit OS confirmation">
+                {consentBusy ? "Checking…" : "Authorize capture"}
+              </ToolButton>
+              <ToolButton tone="danger" disabled={!desktop || consentBusy || !consent?.enabled}
+                onClick={() => void revokeCaptureConsent()} title="Revoke consent and erase volatile captured history">
+                Revoke & clear
+              </ToolButton>
+              <span className="font-mono text-[10px] text-fg-muted">
+                {consent?.enabled
+                  ? `Case: ${consent.case_id ?? "none"} · generation ${consent.generation} · max ${consent.max_entries} entries / ${Math.round(consent.max_total_bytes / 1024)} KiB · ${Math.round(consent.duration_seconds / 60)} min`
+                  : "No active confidential-history consent"}
+              </span>
+            </div>
+            {consentError ? <div role="alert" className="font-mono text-[10px] text-err">{consentError}</div> : null}
           </div>
         </div>
 

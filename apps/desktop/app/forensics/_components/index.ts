@@ -1,1 +1,1 @@
-export { ForensicsRoute } from "./ForensicsRoute";
+export { ForensicsWorkspace } from "./ForensicsWorkspace";

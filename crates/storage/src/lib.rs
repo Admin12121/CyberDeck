@@ -6,6 +6,7 @@ mod application;
 mod domain;
 mod infrastructure;
 pub use application::lineage::{ArtifactLineageHop, CaseLineageReport};
+pub use application::network_capture::{NetworkCaptureSource, MAX_ORIGINAL_PCAP_BYTES};
 pub use application::search::{CaseSearchPage, SearchFinding};
 pub use domain::*;
 #[path = "infrastructure/batch.rs"]

@@ -1,5 +1,6 @@
 //! Native crypto operations with reference test vectors.
 
+pub mod aead;
 pub mod recipes;
 pub mod key_derivation;
 pub mod hkdf;

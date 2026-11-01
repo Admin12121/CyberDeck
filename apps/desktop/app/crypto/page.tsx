@@ -1,5 +1,7 @@
-import { CryptoRoute } from "./_components";
-
+"use client";
+import { CryptoWorkspace } from "./_components";
+import { useWorkbenchLocation } from "@state/workbench";
 export default function CryptoPage() {
-  return <CryptoRoute />;
+  const { tool } = useWorkbenchLocation();
+  return <CryptoWorkspace tool={tool} />;
 }

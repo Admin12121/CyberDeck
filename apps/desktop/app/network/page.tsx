@@ -1,5 +1,7 @@
-import { NetworkRoute } from "./_components";
-
+"use client";
+import { NetworkWorkspace } from "./_components";
+import { useWorkbenchLocation } from "@state/workbench";
 export default function NetworkPage() {
-  return <NetworkRoute />;
+  const { tool } = useWorkbenchLocation();
+  return <NetworkWorkspace tool={tool} />;
 }

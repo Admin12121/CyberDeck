@@ -26,6 +26,7 @@ import { extractStrings, formatEntropy, shannonEntropy } from "./controller";
 import { SAMPLE_EVIDENCE, sampleContent, sampleMetadata } from "./model";
 
 import { EvidenceTree, HexBody, useArtifactBytes, useEvidence } from "./shared";
+import { YaraSubsetPanel } from "./YaraSubsetPanel";
 import { useWorkbench } from "@state/workbench";
 
 export function FileAnalysisView({ active }: { active: boolean }) {
@@ -43,6 +44,7 @@ export function FileAnalysisView({ active }: { active: boolean }) {
   const [inspectorWidth, setInspectorWidth] = useState(320);
   const [extracting, setExtracting] = useState<number | null>(null);
   const [extractNote, setExtractNote] = useState<string | null>(null);
+  const [extractedRecords, setExtractedRecords] = useState<ArtifactRecord[]>([]);
   const activeScope = useRef("");
   activeScope.current = wb.caseId + ":" + (ctx.selectedArtifact?.id ?? "");
   const stillActive = (scope: string) => activeScope.current === scope;
@@ -55,11 +57,14 @@ export function FileAnalysisView({ active }: { active: boolean }) {
     setCarveBusy(false);
     setBinary(null);
     setScanError(null);
-    setExtractNote(null);
     setExtracting(null);
     setScanBusy(false);
     setBinaryBusy(false);
   }, [ctx.selectedArtifact?.id, wb.caseId]);
+  useEffect(() => {
+    setExtractNote(null);
+    setExtractedRecords([]);
+  }, [wb.caseId]);
   const extract = async (offset: number) => {
     const artifact = ctx.selectedArtifact;
     if (!artifact || extracting !== null) return;
@@ -67,10 +72,12 @@ export function FileAnalysisView({ active }: { active: boolean }) {
     setExtracting(offset);
     setScanError(null);
     setExtractNote(null);
+    setExtractedRecords([]);
     try {
       const output = await fileExtractGzip(wb.caseId, artifact.id, offset);
       if (!stillActive(scope)) return;
       setExtractNote("Extracted into this case: " + output.name);
+      setExtractedRecords([output]);
       await ctx.refresh();
       ctx.setSelected({ id: output.id, real: true });
       ctx.setHexOffset(0);
@@ -84,10 +91,12 @@ export function FileAnalysisView({ active }: { active: boolean }) {
     setExtracting(offset);
     setScanError(null);
     setExtractNote(null);
+    setExtractedRecords([]);
     try {
       const outputs = await fileExtractArchive(wb.caseId, artifact.id, format, offset);
       if (!stillActive(scope)) return;
       setExtractNote(`Extracted ${outputs.length} ${format.toUpperCase()} files into this case`);
+      setExtractedRecords(outputs);
       await ctx.refresh();
       if (outputs[0]) {
         ctx.setSelected({ id: outputs[0].id, real: true });
@@ -104,10 +113,12 @@ export function FileAnalysisView({ active }: { active: boolean }) {
     setExtracting(offset);
     setScanError(null);
     setExtractNote(null);
+    setExtractedRecords([]);
     try {
       const children = await fileExtractNestedArchive(wb.caseId, artifact.id, format, offset, 2);
       if (!stillActive(scope)) return;
       setExtractNote("Extracted " + children.length + " nested members into this case");
+      setExtractedRecords(children);
       await ctx.refresh();
       if (children[0]) {
         ctx.setSelected({ id: children[0].id, real: true });
@@ -217,8 +228,8 @@ export function FileAnalysisView({ active }: { active: boolean }) {
           </ToolButton>
           <ToolButton onClick={() => void runCarvePreview()}
             disabled={!ctx.selectedArtifact || !ctx.desktop || !active || carveBusy}
-            title="Explicit read-only PNG carving preview from the current hex offset; maximum 4 MiB with full evidence SHA-256 verification">
-            {carveBusy ? "Checking PNG boundaries…" : "Preview PNG Carving"}
+            title="Read-only structural PNG / RIFF-WAVE / JPEG boundary preview from selected evidence offset, max 4 MiB; full source SHA-256 verified">
+            {carveBusy ? "Validating boundaries…" : "Preview Structural Carving"}
           </ToolButton>
           {binary ? (
             <div className="space-y-1 border-t border-line py-2 font-mono text-[10px] text-fg-dim">
@@ -241,7 +252,7 @@ export function FileAnalysisView({ active }: { active: boolean }) {
           {carveError ? <div className="text-xs text-err">{carveError}</div> : null}
           {carve ? (
             <div className="space-y-1 border-t border-line py-2 font-mono text-[10px] text-fg-dim">
-              <div className="text-fg">Read-only PNG carving candidates: {carve.candidates.length}</div>
+              <div className="text-fg">Read-only PNG / RIFF-WAVE / JPEG structural candidates: {carve.candidates.length} (max 32)</div>
               <div>
                 Verified source: {carve.integrity_checked ? "yes" : "no"} ·
                 {" "}{carve.analyzed_bytes} bytes starting at 0x{carve.analyzed_offset.toString(16)}
@@ -250,21 +261,34 @@ export function FileAnalysisView({ active }: { active: boolean }) {
                 {carve.candidate_limit_reached ? " · candidate limit reached" : ""}
                 {carve.rejected_or_incomplete ? ` · ${carve.rejected_or_incomplete} rejected/incomplete` : ""}
               </div>
-              <div>CRC-checked PNG chunk boundaries only. No pixel decoding, extraction, or evidence changes.</div>
+              <div>Structural bounds only: PNG chunks/CRC, RIFF-WAVE framing and JPEG markers/restarts. No image pixels decoded, compressed payload decompression, fragment recovery, automatic extraction or evidence changes.</div>
               {carve.candidates.map((candidate, index) => (
                 <div key={index} className="flex gap-2 border-t border-line py-1">
-                  <button type="button" className="shrink-0 text-orange hover:underline"
-                    title="Navigate to source evidence offset"
-                    onClick={() => ctx.setHexOffset(candidate.offset)}>
+                  <ToolButton title="Navigate to verified source offset" onClick={() => ctx.setHexOffset(candidate.offset)}>
                     0x{candidate.offset.toString(16)}
-                  </button>
+                  </ToolButton>
                   <span>{candidate.format.toUpperCase()} · {candidate.length} bytes</span>
                 </div>
               ))}
-              {carve.candidates.length === 0 ? <div>No valid PNG member boundaries in this window.</div> : null}
+              {carve.candidates.length === 0 ? <div>No structurally validated PNG / RIFF-WAVE / JPEG members in this window.</div> : null}
             </div>
           ) : null}
-          {extractNote ? <div className="text-xs text-fg">{extractNote}</div> : null}
+          {extractNote ? <div role="status" className="text-xs text-fg">{extractNote}</div> : null}
+          {extractedRecords.length > 0 ? (
+            <section aria-label="Derived case artifacts" className="space-y-1 border-t border-line py-2">
+              <h4 className="font-mono text-xs font-semibold text-fg">Derived evidence · {extractedRecords.length} case record(s)</h4>
+              <p className="text-[10px] text-fg-muted">Read-only list of backend-created case artifacts. Choose any record to inspect its verified source bytes; provenance remains in the case store.</p>
+              {extractedRecords.slice(0, 128).map((record) => (
+                <div key={record.id} className="flex flex-wrap items-center gap-2 border-b border-line/50 py-1 font-mono text-[10px]">
+                  <ToolButton onClick={() => { if (ctx.artifacts.some((a) => a.id === record.id && a.case_id === wb.caseId)) { ctx.setSelected({ id: record.id, real: true }); ctx.setHexOffset(0); } }}
+                    disabled={!ctx.artifacts.some((a) => a.id === record.id && a.case_id === wb.caseId)}
+                    title="Inspect this derived artifact in the current case">{record.name}</ToolButton>
+                  <span className="break-all text-fg-muted">{record.size.toLocaleString()} bytes · SHA-256 {record.sha256.slice(0, 16)}…</span>
+                </div>
+              ))}
+              {extractedRecords.length > 128 ? <p className="text-[10px] text-fg-muted">Showing 128 of {extractedRecords.length} case records.</p> : null}
+            </section>
+          ) : null}
           {scan ? (
             <div className="space-y-1 font-mono text-[10px] text-fg-dim">
               <div>{scan.hits.length} candidate signatures · {scan.scanned_bytes} of {scan.file_bytes} bytes scanned
@@ -274,8 +298,8 @@ export function FileAnalysisView({ active }: { active: boolean }) {
               </div>
               {scan.hits.map((hit, index) => (
                 <div key={index} className="flex gap-2 border-t border-line py-1">
-                  <button type="button" className="shrink-0 text-orange hover:underline" title="Open signature offset in hex"
-                    onClick={() => ctx.setHexOffset(hit.offset)}>0x{hit.offset.toString(16)}</button>
+                  <ToolButton title="Open signature candidate in verified source hex"
+                    onClick={() => ctx.setHexOffset(hit.offset)}>0x{hit.offset.toString(16)}</ToolButton>
                   <span className="flex-1">{hit.format}: {hit.description}</span>
                   {(hit.format === "zip" || hit.format === "tar") && (
                     <ToolButton
@@ -308,6 +332,9 @@ export function FileAnalysisView({ active }: { active: boolean }) {
             </div>
           ) : null}
 
+          <YaraSubsetPanel caseId={wb.caseId} artifactId={ctx.selectedArtifact?.id ?? null}
+            size={ctx.selectedArtifact?.size ?? 0} offset={ctx.hexOffset} desktop={ctx.desktop} active={active}
+            onOpenOffset={(offset) => ctx.setHexOffset(offset)} />
         </div>
       </Pane>
     </div>

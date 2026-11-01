@@ -1,10 +1,13 @@
 "use client";
 
-import { useWorkbenchJobs } from "@state/workbench";
+import { useWorkbenchJobs, useWorkbenchLocation } from "@state/workbench";
+import { useJobNotifications } from "@state/job-notifications";
 import { EmptyState, ToolButton } from "@ds/panes";
 
 export function JobsDock() {
   const wb = useWorkbenchJobs();
+  const notice = useJobNotifications();
+  const navigation = useWorkbenchLocation();
   const jobs = Object.values(wb.jobs).sort((a, b) => b.startedAt - a.startedAt);
   return (
     <div className="h-full min-h-0 overflow-auto bg-panel" role="region" aria-label="All jobs">
@@ -29,6 +32,26 @@ export function JobsDock() {
             ))}
           </tbody>
         </table>
+      )}
+      {notice.notifications.length > 0 && (
+        <section aria-label="Recent job notifications" className="border-t border-line px-2 py-2 text-xs">
+          <h2 className="pb-1 font-semibold text-fg">Recent activity</h2>
+          <ul className="space-y-1">
+            {notice.notifications.slice(0, 12).map((item) => (
+              <li key={item.id}>
+                <button type="button" disabled={!item.feature} onClick={() => {
+                  if (!item.feature) return;
+                  notice.markRead(item.feature);
+                  navigation.selectCategory(item.feature);
+                }}
+                  className="flex w-full items-center justify-between gap-2 rounded px-2 py-1 text-left hover:bg-raised disabled:cursor-default disabled:opacity-70">
+                  <span className="truncate">{item.feature ?? "Job"} #{item.jobId} · {item.status}</span>
+                  {!item.read && <span aria-label="Unread" className="size-1.5 shrink-0 rounded-full bg-fg" />}
+                </button>
+              </li>
+            ))}
+          </ul>
+        </section>
       )}
     </div>
   );

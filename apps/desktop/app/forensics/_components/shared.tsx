@@ -45,6 +45,8 @@ function useEvidenceState() {
     setArtifacts([]);
     setSelected(null);
     setHexOffset(0);
+    setQuery("");
+    setImportError(null);
   }, [wb.caseId]);
 
   const refresh = useCallback(async () => {
@@ -55,6 +57,7 @@ function useEvidenceState() {
       const list = await fileList(caseId);
       if (activeCase.current !== caseId || refreshSequence.current !== sequence) return;
       setArtifacts(list);
+      setImportError(null);
       setSelected((prev) => {
         if (prev?.real && list.some((a) => a.id === prev.id)) return prev;
         return list[0] ? { id: list[0].id, real: true } : null;
@@ -144,22 +147,25 @@ export function EvidenceTree({ ctx }: { ctx: EvidenceContext }) {
       className="shrink-0"
       style={{ width: ctx.treeWidth }}
       bodyClassName="p-1"
-      actions={
-        <ToolButton
-          onClick={() => void ctx.importEvidence()}
-          disabled={ctx.busy || !ctx.desktop}
-          title={ctx.desktop ? "Pick a file; it is copied immutably into the case store" : "Import requires the desktop runtime"}
-        >
-          {ctx.busy ? "importing…" : "Import…"}
+      actions={<div className="flex items-center gap-1">
+        <ToolButton onClick={() => void ctx.refresh()} disabled={!ctx.desktop || ctx.busy}
+          title="Reload case evidence from the backend">Refresh</ToolButton>
+        <ToolButton onClick={() => void ctx.importEvidence()} disabled={ctx.busy || !ctx.desktop}
+          title={ctx.desktop ? "Select a file for immutable, hashed case import" : "Import requires the native desktop runtime"}>
+          {ctx.busy ? "Importing…" : "Import…"}
         </ToolButton>
-      }
+      </div>}
     >
       {ctx.importError ? (
         <div className="m-1 border border-err/50 p-2 font-mono text-[10px] text-err">{ctx.importError}</div>
       ) : null}
       {ctx.desktop ? (
         <>
-          <div className="px-2 py-1 text-[10px] uppercase tracking-wider text-fg-muted">▾ imported ({realFiles.length})</div>
+          <div className="px-2 py-2">
+            <TextInput value={ctx.query} onChange={ctx.setQuery} ariaLabel="Filter case evidence by filename"
+              placeholder="Filter imported evidence…" className="w-full" />
+          </div>
+          <div className="px-2 py-1 text-[10px] uppercase tracking-wider text-fg-muted">▾ imported ({realFiles.length} of {ctx.artifacts.length})</div>
           {realFiles.map((artifact) => (
             <button
               key={artifact.id}
@@ -175,7 +181,7 @@ export function EvidenceTree({ ctx }: { ctx: EvidenceContext }) {
           ))}
           {realFiles.length === 0 ? (
             <div className="p-2 font-mono text-[10px] leading-relaxed text-fg-muted">
-              no evidence in this case yet. Import a file; originals are copied into the case store and hashed.
+              {ctx.artifacts.length ? "No imported filenames match the filter." : "No evidence in this case yet. Import a file; originals are copied into the case store and hashed."}
             </div>
           ) : null}
         </>

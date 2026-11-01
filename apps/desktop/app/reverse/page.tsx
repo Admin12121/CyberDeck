@@ -1,2 +1,4 @@
-import { ReverseRoute } from "./_components";
-export default function ReversePage() { return <ReverseRoute />; }
+import { ReverseWorkspace } from "./_components";
+export default function ReversePage() {
+  return <ReverseWorkspace />;
+}

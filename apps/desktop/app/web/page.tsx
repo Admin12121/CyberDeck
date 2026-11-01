@@ -1,2 +1,4 @@
-import { WebRoute } from "./_components";
-export default function WebPage() { return <WebRoute />; }
+import { WebWorkspace } from "./_components";
+export default function WebPage() {
+  return <WebWorkspace />;
+}

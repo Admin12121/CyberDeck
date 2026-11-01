@@ -58,6 +58,7 @@ import {
   type WordlistInfoWire,
 } from "@lib/ipc";
 import type { ToolId } from "@state/tool-registry";
+import { NativeRecoveryV1 } from "./NativeRecoveryV1";
 
 // ---------------------------------------------------------- hash analysis ---
 
@@ -128,6 +129,7 @@ export function HashAnalysisView() {
   const [wordlistBusy, setWordlistBusy] = useState(false);
   const [crackProgress, setCrackProgress] = useState<CrackProgressWire | null>(null);
   const desktop = isDesktop();
+  const [legacyRecoveryEnabled] = useState(false);
   const candidates = useMemo(() => detectHashFormats(input), [input]);
   // Auto-detection decides the hash family from the pasted string itself; the
   // dropdown only exists as an override when detection fails.
@@ -149,9 +151,6 @@ export function HashAnalysisView() {
     enginesDetect()
       .then(setEngines)
       .catch(() => setEngines([]));
-    crackHistoryList()
-      .then(setHistory)
-      .catch(() => setHistory([]));
   }, [desktop]);
 
   const chooseWordlist = async (which: "first" | "second" = "first") => {
@@ -330,18 +329,19 @@ export function HashAnalysisView() {
                       {candidate.confidence}
                     </Chip>
                   </td>
-                  <td><span className="text-orange">GPU/CPU</span></td>
+                  <td><span className="text-fg-muted">depends on verified engine</span></td>
                   <td className="text-fg-muted">{candidate.note}</td>
                 </tr>
               ))}
             </tbody>
           </table>
         </Pane>
-        <CrackedHistory
-          history={history}
-          desktop={desktop}
-          onReload={loadHistory}
-        />
+        <Pane title="Confidential recovery history" className="max-h-36 shrink-0">
+          <p className="p-2 text-[11px] text-fg-muted">
+            Legacy plaintext history is disabled in the Crypto screen. Native Recovery V1
+            keeps masked results transient and requires separate OS authorization to reveal.
+          </p>
+        </Pane>
       </div>
       <Resizer direction="horizontal" flip ariaLabel="Resize recovery operations" value={operationsWidth} onChange={setOperationsWidth} min={280} max={560} />
       <Pane title="Operations" className="shrink-0" style={{ width: operationsWidth }} bodyClassName="overflow-auto">
@@ -376,9 +376,11 @@ export function HashAnalysisView() {
             {verifyError ? <span className="font-mono text-[10px] text-err">{verifyError}</span> : null}
           </div>
         </div>
+        <NativeRecoveryV1 targetHash={input} />
+        {legacyRecoveryEnabled ? (
         <div className="border-b border-line p-2">
           <div className="mb-1 flex items-center justify-between">
-            <span className="text-[10px] uppercase tracking-wider text-fg-muted">Recovery</span>
+            <span className="text-[10px] uppercase tracking-wider text-fg-muted">Legacy recovery disabled pending confidential-result migration</span>
             <Chip tone={desktop ? "ok" : "muted"}>{desktop ? "live" : "desktop"}</Chip>
           </div>
           <div className="mb-1 flex items-center gap-1">
@@ -553,7 +555,8 @@ export function HashAnalysisView() {
           {crackError ? <div className="mt-1 font-mono text-[10px] text-err">{crackError}</div> : null}
           {attackResult ? resultView(attackResult) : null}
         </div>
-                <div className="border-b border-line p-2">
+        ) : null}
+        <div className="border-b border-line p-2">
           <div className="mb-1 flex items-center justify-between">
             <span className="text-[10px] uppercase tracking-wider text-fg-muted">Devices & engines</span>
             <Chip tone={desktop ? "ok" : "muted"}>{desktop ? "probed" : "desktop"}</Chip>

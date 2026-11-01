@@ -183,7 +183,7 @@ pub fn file_extract_nested_archive(
     extract_nested_from_evidence(&ctx, &case_id, &id, &format, offset, max_depth)
 }
 
-/// Read-only native PNG carving preview of a verified, case-scoped artifact.
+/// Read-only native PNG / RIFF-WAVE / JPEG structural carving preview of verified case evidence.
 /// Does not extract bytes or insert artifacts/findings into the case store.
 #[tauri::command]
 pub fn file_carve_preview(
@@ -198,7 +198,7 @@ pub fn file_carve_preview(
 
 /// Deterministic YARA-style ASCII/hex subset detection on verified case source.
 /// Unsupported YARA grammar fails closed. This command is read-only and
-/// deliberately unregistered until Agent6 completes typed IPC/UI integration.
+/// registered through the feature's native desktop IPC for bounded explicit scans.
 #[tauri::command]
 pub fn file_yara_subset_scan(
     ctx: State<'_, EvidenceCtx>,

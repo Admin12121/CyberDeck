@@ -249,7 +249,8 @@ body {
 ::-webkit-scrollbar-thumb:hover { background: var(--ring); }
 ::-webkit-scrollbar-track, ::-webkit-scrollbar-corner { background: transparent; }
 ::selection { background: var(--accent); color: var(--accent-foreground); }
-:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
+/* Native fallback focus only. coss controls own their focused state/ring. */
+:focus-visible:not([data-slot]) { outline: 2px solid var(--ring); outline-offset: 2px; }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after {
     animation-duration: 0.01ms !important;

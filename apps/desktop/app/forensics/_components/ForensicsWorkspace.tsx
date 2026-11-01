@@ -6,11 +6,13 @@ import { MetadataView } from "./MetadataView";
 import { StringsView } from "./StringsView";
 import { EvidenceProvider } from "./shared";
 import type { ToolId } from "@state/tool-registry";
+import { useWorkbench } from "@state/workbench";
 
 export function ForensicsWorkspace({ tool }: { tool: ToolId }) {
+  const { caseId } = useWorkbench();
   const show = (id: ToolId) => (tool === id ? "h-full" : "hidden h-full");
   return (
-    <EvidenceProvider><div className="flex h-full min-h-0 flex-col">
+    <EvidenceProvider key={caseId}><div className="flex h-full min-h-0 flex-col">
       <div className="min-h-0 flex-1">
 
       <div className={show("forensics.findings")}><CaseFindingsView /></div>

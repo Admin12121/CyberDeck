@@ -13,6 +13,21 @@ const MAX_RETAINED: usize = 2 * 1024 * 1024;
 const MAX_BODY: usize = 64 * 1024;
 const MAX_HEADER: usize = 32 * 1024;
 
+/// Best-effort overwrite of the owned live UTF-8 bytes before deallocation.
+/// This does not guarantee erasure of earlier copies or physical memory.
+fn clear_sensitive_text(text: &mut String) {
+    let mut bytes = std::mem::take(text).into_bytes();
+    bytes.fill(0);
+}
+
+fn clear_sensitive_headers(headers: &mut Vec<(String, String)>) {
+    for (name, value) in headers.iter_mut() {
+        clear_sensitive_text(name);
+        clear_sensitive_text(value);
+    }
+    headers.clear();
+}
+
 struct Entry {
     id: u64,
     url: String,
@@ -30,12 +45,18 @@ impl Entry {
     fn erase(&mut self) {
         self.request.fill(0);
         self.response.fill(0);
-        self.head.clear();
-        self.url.clear();
-        self.headers.clear();
+        clear_sensitive_text(&mut self.head);
+        clear_sensitive_text(&mut self.url);
+        clear_sensitive_headers(&mut self.headers);
         if let Some(forwarded) = self.forwarded.as_mut() {
             forwarded.erase();
         }
+    }
+}
+
+impl Drop for Entry {
+    fn drop(&mut self) {
+        self.erase();
     }
 }
 
@@ -68,9 +89,9 @@ pub struct ForwardedSnapshot {
 impl ForwardedSnapshot {
     fn erase(&mut self) {
         self.body_prefix.fill(0);
-        self.method.clear();
-        self.url.clear();
-        self.headers.clear();
+        clear_sensitive_text(&mut self.method);
+        clear_sensitive_text(&mut self.url);
+        clear_sensitive_headers(&mut self.headers);
     }
 }
 impl Drop for ForwardedSnapshot {
@@ -109,7 +130,7 @@ pub fn snapshot_forwarded(
 impl Drop for OriginalSnapshot {
     fn drop(&mut self) {
         self.body_prefix.fill(0);
-        self.url.clear();
+        clear_sensitive_text(&mut self.url);
     }
 }
 
@@ -235,7 +256,9 @@ impl HistoryStore {
         self.entries.clear();
         self.bytes = 0;
         self.limits = HistoryRetentionLimits::default();
-        self.case_id = None;
+        if let Some(mut case_id) = self.case_id.take() {
+            clear_sensitive_text(&mut case_id);
+        }
         self.generation = self.generation.wrapping_add(1);
     }
     /// Never promote an old in-flight request to a newly selected case.
@@ -523,6 +546,13 @@ struct BoundHistory {
 }
 
 impl BoundHistory {
+    fn authorized_ids(&mut self) -> std::collections::HashSet<u64> {
+        if self.authorized().is_none() {
+            return std::collections::HashSet::new();
+        }
+        self.store.entries.iter().map(|entry| entry.id).collect()
+    }
+
     fn wipe_local(&mut self) {
         self.binding.take();
         self.store.clear();
@@ -778,6 +808,15 @@ pub fn configure_session(case_id: Option<&str>) -> Result<(), String> {
 pub fn capture_generation() -> Option<u64> {
     global().lock().expect("web history poisoned").authorized()
 }
+
+/// Redacted listener summaries are visible only for entries accepted into
+/// the current backend-consented history generation, never a previous case.
+pub(crate) fn authorized_entry_ids() -> std::collections::HashSet<u64> {
+    global()
+        .lock()
+        .expect("web history poisoned")
+        .authorized_ids()
+}
 pub fn capture(
     stamp: Option<u64>,
     id: u64,
@@ -853,6 +892,53 @@ pub(crate) fn read_detail_authorized(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn volatile_confidential_text_and_binary_are_cleared_on_invalidation() {
+        let mut entry = Entry {
+            id: 42,
+            url: "https://host/?token=CONFIDENTIAL".into(),
+            head: "Authorization: Bearer CONFIDENTIAL".into(),
+            request: b"CONFIDENTIAL-request".to_vec(),
+            status: 200,
+            headers: vec![("Set-Cookie".into(), "CONFIDENTIAL-cookie".into())],
+            response: b"CONFIDENTIAL-response".to_vec(),
+            request_truncated: false,
+            response_truncated: false,
+            charge: 0,
+            forwarded: Some(ForwardedSnapshot {
+                method: "POST".into(),
+                url: "https://host/?secret=CONFIDENTIAL".into(),
+                headers: vec![("Authorization".into(), "CONFIDENTIAL".into())],
+                body_prefix: b"CONFIDENTIAL-forwarded".to_vec(),
+                body_original_len: 21,
+            }),
+        };
+        entry.erase();
+        assert!(entry.url.is_empty() && entry.head.is_empty() && entry.headers.is_empty());
+        assert!(entry.request.iter().all(|b| *b == 0));
+        assert!(entry.response.iter().all(|b| *b == 0));
+        let forwarded = entry.forwarded.as_ref().unwrap();
+        assert!(forwarded.url.is_empty() && forwarded.headers.is_empty());
+        assert!(forwarded.body_prefix.iter().all(|b| *b == 0));
+
+        let mut store = HistoryStore::new();
+        store.configure(Some("scratchpad")).unwrap();
+        store.record(
+            12,
+            "http://host/?token=CONFIDENTIAL",
+            "GET /?token=CONFIDENTIAL HTTP/1.1\r\nAuthorization: Bearer CONFIDENTIAL\r\n\r\n",
+            b"CONFIDENTIAL-request",
+            200,
+            &[("Set-Cookie".into(), "CONFIDENTIAL".into())],
+            b"CONFIDENTIAL-response",
+        );
+        let view = serde_json::to_string(&store.detail("scratchpad", 12, false).unwrap()).unwrap();
+        assert!(!view.contains("CONFIDENTIAL"));
+        store.clear();
+        assert_eq!(store.len(), 0);
+        assert!(store.detail("scratchpad", 12, true).is_none());
+    }
     #[test]
     fn off_by_default_and_isolated_by_case() {
         let mut store = HistoryStore::new();
@@ -1059,6 +1145,7 @@ mod tests {
             &[0xfe, 0, 0x44],
             None,
         );
+        assert!(bound.authorized_ids().contains(&5));
         let redacted = bound.detail("scratchpad", 5).unwrap();
         assert!(!serde_json::to_string(&redacted)
             .unwrap()
@@ -1095,6 +1182,7 @@ mod tests {
         assert!(bound.detail("scratchpad", 5).is_none());
         policy.lock().unwrap().revoke();
         assert_eq!(bound.authorized(), None);
+        assert!(bound.authorized_ids().is_empty());
         assert_eq!(bound.store.len(), 0);
         assert!(bound.detail("scratchpad", 6).is_none());
         assert!(bound.arm(Arc::clone(&policy), grant).is_err());

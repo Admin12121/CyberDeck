@@ -1,5 +1,5 @@
 "use client";
-import { useCallback, useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Globe, Play, PlayCircle, Square } from "lucide-react";
 import { Chip, EmptyState, Pane, Select, TextInput, ToolButton } from "@ds/panes";
 import {
@@ -22,13 +22,23 @@ import {
 } from "@lib/ipc";
 import { buildSitesTree, filterCaptured, useTarget } from "./controller";
 import { makeGetDraft, useWebWorkflow } from "./WebWorkflow";
-import { useWorkbench } from "@state/workbench";
+import { useWorkbench, useWorkbenchCase } from "@state/workbench";
 
 // ----------------------------------------------------------------- spider ---
 
 export function SpiderView() {
   const desktop = isDesktop();
   const wb = useWorkbench();
+  const { caseId } = useWorkbenchCase();
+  const caseRef = useRef(caseId);
+  caseRef.current = caseId;
+  const crawlRevision = useRef(0);
+  useEffect(() => {
+    crawlRevision.current += 1;
+    setLinks([]);
+    setBusy(false);
+    setError(null);
+  }, [caseId]);
   const { target, setTarget, normalized, scanTarget, draftInRepeater } = useWebWorkflow();
   const [depth, setDepth] = useState("2");
   const [links, setLinks] = useState<string[]>([]);
@@ -38,15 +48,22 @@ export function SpiderView() {
   const [error, setError] = useState<string | null>(null);
 
   const crawl = async () => {
+    if (busy || !normalized || !authorized) return;
+    const revision = ++crawlRevision.current;
+    const startingCase = caseId;
+    const target = normalized;
     setBusy(true);
     setError(null);
     setLinks([]);
     try {
-      setLinks(await wb.trackOperation("Web spider", () => spiderScan(normalized, Math.max(1, Math.min(4, Number.parseInt(depth, 10) || 2)), authorized)));
+      const found = await wb.trackOperation("Web spider", () => spiderScan(target, Math.max(1, Math.min(4, Number.parseInt(depth, 10) || 2)), authorized));
+      if (revision === crawlRevision.current && caseRef.current === startingCase) setLinks(found);
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      if (revision === crawlRevision.current && caseRef.current === startingCase) {
+        setError(err instanceof Error ? err.message : String(err));
+      }
     } finally {
-      setBusy(false);
+      if (revision === crawlRevision.current) setBusy(false);
     }
   };
 
@@ -54,7 +71,7 @@ export function SpiderView() {
     <div className="flex h-full min-h-0 flex-col">
       <div className="cd-workspace-toolbar shrink-0 items-center gap-2  px-2">
         <span className="font-mono text-[10px] uppercase text-fg-muted">target</span>
-        <TextInput value={target} onChange={setTarget} placeholder="http://host" ariaLabel="Spider target" className="w-72" />
+        <TextInput value={target} onChange={setTarget} placeholder="http://127.0.0.1:3000" ariaLabel="Spider target" className="w-72" />
         <span className="font-mono text-[10px] uppercase text-fg-muted">depth</span>
         <Select
           value={depth}
@@ -67,7 +84,7 @@ export function SpiderView() {
           ]}
           ariaLabel="Spider depth"
         />
-        <ToolButton tone="primary" onClick={() => void crawl()} disabled={busy || !desktop || !normalized || !authorized} title={desktop ? "Same-host crawl, GET only" : "Spidering requires the desktop runtime"}>
+        <ToolButton tone="primary" onClick={() => void crawl()} disabled={busy || !desktop || !normalized || !authorized} title={desktop ? "Native scope-checked same-host crawl, private/loopback literal IP only" : "Spidering requires the desktop runtime"}>
           <Play size={11} /> {busy ? "crawling…" : "Start spider"}
         </ToolButton>
         <span className="ml-auto font-mono text-[10px] text-fg-muted">{links.length} urls</span>
@@ -75,7 +92,7 @@ export function SpiderView() {
       {error ? <div className="border-b border-err/50 bg-err/10 px-2 py-1 font-mono text-[10px] text-err">{error}</div> : null}
       <label className="flex items-center gap-2 border-b border-line bg-panel px-3 py-2 text-xs text-fg-dim">
         <input type="checkbox" checked={authorized} onChange={(e) => setAuthorized(e.target.checked)} className="accent-[var(--color-orange)]" />
-        I confirm that I own this target or have written authorization for active assessment.
+        I confirm I own this target or have written permission. The native backend also requires a selected case, literal private/loopback IP target, and one-request OS confirmation. DNS hostnames are not enabled until address pinning is verified.
       </label>
       <Pane title="Discovered URLs" className="min-h-0 flex-1">
         {links.length === 0 ? (

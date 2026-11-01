@@ -3,6 +3,9 @@
 import { caseCreate, caseList, isDesktop, type CaseRecordWire } from "@lib/ipc";
 import { useEffect, useState } from "react";
 import { useWorkbenchCase } from "@state/workbench";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "@/components/ui/select";
 
 export function StatusBar() {
   const wb = useWorkbenchCase();
@@ -15,22 +18,35 @@ export function StatusBar() {
   const [casesLoaded, setCasesLoaded] = useState(false);
   useEffect(() => {
     let active = true;
-    void caseList().then((list) => { if (active) { setCases(list); setCasesLoaded(true); } })
-      .catch((error: unknown) => { if (active) { setCaseError(String(error)); setCasesLoaded(true); } });
-    return () => { active = false; };
+    const reload = () => {
+      void caseList().then((list) => {
+        if (!active) return;
+        setCases(list);
+        setCaseError(null);
+        setCasesLoaded(true);
+      }).catch((error: unknown) => {
+        if (!active) return;
+        setCaseError(String(error));
+        setCasesLoaded(true);
+      });
+    };
+    reload();
+    // A newly created case must become visible without recreating the global shell.
+    window.addEventListener("cyberdeck:cases-changed", reload);
+    return () => {
+      active = false;
+      window.removeEventListener("cyberdeck:cases-changed", reload);
+    };
   }, []);
-  useEffect(() => {
-    if (!casesLoaded) return;
-    if (wb.caseId === "scratchpad") return; // temporary workspace is always an explicit choice
-    // Unknown/deleted cases cannot be silently replaced by another real case.
-    if (!cases.some((item) => item.id === wb.caseId)) wb.setCaseId("scratchpad");
-  }, [cases, casesLoaded, wb.caseId, wb.setCaseId]);
+  // Never select a different case because a stale case-list snapshot lacks the
+  // current ID. Backend session selection remains the authority for validity.
 
   const createCase = async () => {
     if (!caseTitle.trim()) return;
     try {
       const created = await caseCreate(caseTitle.trim());
       setCases((previous) => [created, ...previous]);
+      window.dispatchEvent(new Event("cyberdeck:cases-changed"));
       wb.setCaseId(created.id);
       setCaseTitle("");
       setCreating(false);
@@ -41,29 +57,47 @@ export function StatusBar() {
   const linked = wb.caseSession.phase === "ready" && wb.caseSession.caseId === wb.caseId;
   return (
     <footer className="flex min-h-9 shrink-0 items-center gap-2 overflow-x-auto whitespace-nowrap border-t border-line bg-sidebar px-3 text-xs text-fg-muted" aria-label="Case and runtime status">
-      <label className="flex shrink-0 items-center gap-2">
+      <div className="flex shrink-0 items-center gap-2">
         <span>Case</span>
-        <select aria-label="Active case" disabled={!casesLoaded || !!caseError}
-          value={wb.caseId} onChange={(event) => wb.setCaseId(event.target.value)}
-          className="h-7 max-w-52 min-w-28 rounded-md border border-line bg-panel px-2 text-xs text-fg">
-          <option value="scratchpad">Temporary workspace</option>
-          {cases.filter((item) => item.id !== "scratchpad").map((item) => <option key={item.id} value={item.id}>{item.title}</option>)}
-          {!cases.some((item) => item.id === wb.caseId) && wb.caseId !== "scratchpad" ? (
-            <option value={wb.caseId}>{!casesLoaded ? "Loading…" : wb.caseId === "scratchpad" ? "Scratchpad" : "Resolving…"}</option>
-          ) : null}
-        </select>
-      </label>
+        <Select items={[
+            { label: "Temporary workspace", value: "scratchpad" },
+            ...cases.filter((item) => item.id !== "scratchpad").map((item) => ({ label: item.title, value: item.id })),
+            ...(!cases.some((item) => item.id === wb.caseId) && wb.caseId !== "scratchpad"
+              ? [{ label: "Resolving…", value: wb.caseId }] : []),
+          ]} value={wb.caseId}
+          onValueChange={(next) => { if (typeof next === "string") wb.setCaseId(next); }}>
+          <SelectTrigger aria-label="Active case" size="sm"
+            disabled={!casesLoaded || !!caseError}
+            className="h-7 max-w-60 min-w-36 rounded-md text-xs">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectPopup alignItemWithTrigger={false} className="max-h-64">
+            <SelectItem value="scratchpad">Temporary workspace</SelectItem>
+            {cases.filter((item) => item.id !== "scratchpad").map((item) => (
+              <SelectItem key={item.id} value={item.id}>{item.title}</SelectItem>
+            ))}
+            {!cases.some((item) => item.id === wb.caseId) && wb.caseId !== "scratchpad" ? (
+              <SelectItem value={wb.caseId}>Resolving…</SelectItem>
+            ) : null}
+          </SelectPopup>
+        </Select>
+      </div>
       {creating ? (
-        <form onSubmit={(event) => { event.preventDefault(); void createCase(); }} className="flex items-center gap-1">
-          <input value={caseTitle} onChange={(event) => setCaseTitle(event.target.value)} maxLength={120}
-            aria-label="New case title" placeholder="Case title" className="h-7 w-32 rounded-md border border-line bg-app px-2 text-xs text-fg" />
-          <button type="submit" disabled={!caseTitle.trim() || runtime !== "native"}
-            className="h-7 px-2 text-fg disabled:opacity-40">Save</button>
-          <button type="button" onClick={() => setCreating(false)} className="h-7 px-2">Cancel</button>
+        <form onSubmit={(event) => { event.preventDefault(); void createCase(); }}
+          className="flex items-center gap-1">
+          <Input size="sm" value={caseTitle} onChange={(event) => setCaseTitle(event.target.value)}
+            maxLength={120} aria-label="New case title" placeholder="Case title"
+            className="w-36" />
+          <Button size="xs" type="submit" disabled={!caseTitle.trim() || runtime !== "native"}>
+            Save
+          </Button>
+          <Button size="xs" variant="ghost" onClick={() => setCreating(false)}>
+            Cancel
+          </Button>
         </form>
       ) : (
-        <button type="button" disabled={runtime !== "native"} onClick={() => setCreating(true)}
-          title="Create case" className="h-7 rounded-md px-2 text-fg hover:bg-raised disabled:opacity-40">+ Case</button>
+        <Button size="xs" variant="ghost" disabled={runtime !== "native"}
+          onClick={() => setCreating(true)} title="Create case">+ Case</Button>
       )}
       {wb.caseSession.phase === "selecting" ? <span role="status">Linking…</span> : null}
       {linked ? <span role="status" title="Backend-selected active case">Linked</span> : null}
