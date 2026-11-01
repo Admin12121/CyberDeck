@@ -18,7 +18,10 @@ import { FileSearch, FolderPlus, RefreshCcw, ShieldCheck, Search } from "lucide-
 import {
   reviewSelectedEvidence, resumeSelectedCase, verifySelectedCase,
   scopedArtifactReference, copySelectedArtifactToExisting,
+  stageTemporarySha256, temporaryOverview, discardTemporary, promoteTemporary,
+  reviewUnregisteredCaseFolders,
   type EvidenceReview, type CaseArtifactReference, type CopyReceiptV1,
+  type TemporaryOverviewWire, type UnregisteredCaseReviewWire,
 } from "./native";
 
 type View = "evidence" | "findings" | "timeline" | "lineage";
@@ -41,11 +44,15 @@ export function CasesWorkspace() {
   const [offset, setOffset] = useState(0);
   const [reference, setReference] = useState<CaseArtifactReference | null>(null);
   const [copyReceipt, setCopyReceipt] = useState<CopyReceiptV1 | null>(null);
+  const [quickInput, setQuickInput] = useState("");
+  const [temp, setTemp] = useState<TemporaryOverviewWire | null>(null);
+  const [unregistered, setUnregistered] = useState<UnregisteredCaseReviewWire | null>(null);
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
   const selected = wb.caseSession;
   const ready = native && selected.phase === "ready" &&
     selected.caseId === wb.caseId && wb.caseId !== "scratchpad";
+  const temporary = native && wb.caseId === "scratchpad" && selected.phase === "idle";
   const selectedKey = ready ? String(selected.caseId) + ":" + String(selected.revision) : "";
 
   const refreshCases = useCallback(async () => {
@@ -55,6 +62,15 @@ export function CasesWorkspace() {
   }, []);
 
   useEffect(() => { void refreshCases(); }, [refreshCases]);
+
+  useEffect(() => {
+    let active = true;
+    setTemp(null);
+    if (temporary) void temporaryOverview().then((data) => {
+      if (active) setTemp(data);
+    }).catch((cause) => { if (active) setError(describeError(cause)); });
+    return () => { active = false; };
+  }, [temporary]);
 
   useEffect(() => {
     let active = true;
@@ -108,8 +124,17 @@ export function CasesWorkspace() {
             {ready ? "Case selected" : "No saved case selected"}
           </Badge>
         </div>
-        <Button size="sm" variant="outline" disabled={Boolean(busy)}
-          onClick={() => void refreshCases()}><RefreshCcw className="size-3.5" /> Refresh</Button>
+        <div className="flex gap-2">
+          <Button size="sm" variant="outline" disabled={!native || Boolean(busy)}
+            onClick={() => void (async () => {
+              setBusy("Reviewing unregistered evidence"); setError("");
+              try { setUnregistered(await reviewUnregisteredCaseFolders()); }
+              catch (cause) { setError(describeError(cause)); }
+              finally { setBusy(""); }
+            })()}>Review unregistered case folders</Button>
+          <Button size="sm" variant="outline" disabled={Boolean(busy)}
+            onClick={() => void refreshCases()}><RefreshCcw className="size-3.5" /> Refresh</Button>
+        </div>
       </div>
       <div className="grid min-h-0 flex-1 grid-cols-1 gap-3 overflow-y-auto p-3 lg:grid-cols-[260px_minmax(0,1fr)] lg:overflow-hidden">
         <Frame className="min-h-0 overflow-hidden">
@@ -157,11 +182,92 @@ export function CasesWorkspace() {
           <FramePanel className="min-h-0 flex-1 overflow-y-auto p-3">
             {error && <p role="alert" className="mb-3 rounded-md border border-destructive/40 p-3 text-xs text-destructive">{error}</p>}
             {busy && <p role="status" className="mb-3 text-xs text-fg-muted">{busy}…</p>}
+            {unregistered && <div className="mb-3 rounded-md border border-line p-3 text-xs">
+              <strong>Unregistered case evidence folders ({unregistered.folders.length})</strong>
+              <p className="mt-1 text-fg-muted">Read-only orphan review. No uncertain evidence is automatically adopted or deleted.</p>
+              {unregistered.truncated && <Badge variant="warning">Directory scan truncated</Badge>}
+              {unregistered.folders.map((folder) => (
+                <div key={folder.case_id} className="mt-1 flex justify-between gap-2 border-t border-line py-2">
+                  <span className="font-mono">{folder.case_id}</span>
+                  <span>{folder.member_count} files{folder.member_scan_truncated ? " (incomplete)" : ""}</span>
+                </div>
+              ))}
+              {!unregistered.folders.length && <p className="mt-2 text-fg-muted">No unregistered case evidence folders were found.</p>}
+            </div>}
             {!ready ? (
-              <p className="p-4 text-sm text-fg-muted">
-                Temporary Quick Tools operate without a saved case. To preserve evidence,
-                first select a case. Sensitive results are never promoted automatically.
-              </p>
+              <div className="space-y-4 p-3">
+                <h3 className="text-sm font-semibold">Temporary Quick Tools</h3>
+                <p className="text-xs text-fg-muted">
+                  Temporary outputs stay in backend memory for up to 15 minutes. There is no automatic
+                  case persistence, and recovered passwords, keys, original inputs and confidential job
+                  results are not eligible. Only explicitly staged SHA-256 digest outputs can be saved.
+                </p>
+                {temporary && <>
+                  <label htmlFor="case-quick-input" className="block text-xs font-medium">Compute a SHA-256 digest</label>
+                  <div className="flex gap-2">
+                    <Input id="case-quick-input" size="sm" value={quickInput} maxLength={65536}
+                      onChange={(e) => setQuickInput(e.target.value)}
+                      placeholder="Input is hashed, never staged or persisted"
+                      disabled={Boolean(busy)} />
+                    <Button size="sm" disabled={!quickInput || Boolean(busy)}
+                      onClick={() => void (async () => {
+                        setBusy("Staging digest"); setError("");
+                        try {
+                          await stageTemporarySha256(quickInput);
+                          setQuickInput("");
+                          setTemp(await temporaryOverview());
+                        } catch (cause) { setError(describeError(cause)); }
+                        finally { setBusy(""); }
+                      })()}>Stage digest</Button>
+                  </div>
+                  <div className="rounded-md border border-line p-3 text-xs">
+                    <div className="flex items-center justify-between">
+                      <strong>Volatile outputs ({temp?.outputs.length ?? 0}/{temp?.max_artifacts ?? 8})</strong>
+                      <Button size="sm" variant="ghost" disabled={!temp?.outputs.length || Boolean(busy)}
+                        onClick={() => void (async () => {
+                          setBusy("Discarding temporary outputs"); setError("");
+                          try { setTemp(await discardTemporary()); } catch (cause) { setError(describeError(cause)); }
+                          finally { setBusy(""); }
+                        })()}>Discard all</Button>
+                    </div>
+                    {(temp?.outputs ?? []).map((item) => (
+                      <div key={item.id} className="flex justify-between gap-2 border-t border-line py-2">
+                        <span>{item.name}</span><span className="text-fg-muted">{item.kind} · {item.bytes} B</span>
+                      </div>
+                    ))}
+                    {!temp?.outputs.length && <p className="py-2 text-fg-muted">No saved or staged temporary output.</p>}
+                  </div>
+                  {Boolean(temp?.outputs.length) && <div className="space-y-2">
+                    <h3 className="text-xs font-semibold">Save Current Work as Case</h3>
+                    <p className="text-xs text-fg-muted">A separate native confirmation is required for every promotion. Original input is never saved.</p>
+                    <Button size="sm" disabled={Boolean(busy) || !title.trim()}
+                      onClick={() => void (async () => {
+                        setBusy("Saving new investigation"); setError("");
+                        try {
+                          const saved = await promoteTemporary(title, undefined, description);
+                          setTemp(null); setQuickInput(""); setTitle(""); setDescription("");
+                          await refreshCases(); wb.setCaseId(saved.case.id);
+                        } catch (cause) { setError(describeError(cause)); }
+                        finally { setBusy(""); }
+                      })()}>Save as New Case{title.trim() ? ": " + title : " (enter a case name on the left)"}</Button>
+                    <div className="flex flex-wrap gap-2">
+                      {cases.map((item) => (
+                        <Button key={item.id} size="sm" variant="outline" disabled={Boolean(busy)}
+                          onClick={() => void (async () => {
+                            setBusy("Adding to saved investigation"); setError("");
+                            try {
+                              const saved = await promoteTemporary(undefined, item.id);
+                              setTemp(null); setQuickInput("");
+                              wb.setCaseId(saved.case.id);
+                            } catch (cause) { setError(describeError(cause)); }
+                            finally { setBusy(""); }
+                          })()}>Add to {item.title}</Button>
+                      ))}
+                    </div>
+                  </div>}
+                </>}
+                {!native && <p className="text-xs text-fg-muted">Use the installed CyberDeck desktop to stage and promote work.</p>}
+              </div>
             ) : (
               <>
                 <div className="mb-3 flex flex-wrap items-center gap-2">

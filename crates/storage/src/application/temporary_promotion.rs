@@ -1,8 +1,11 @@
 //! Explicit all-or-nothing SQL promotion of bounded nonsecret volatile results.
 //! The caller owns temporary-session generation, eligibility and OS consent.
 //! New-case creation and every artifact/provenance event share ONE transaction.
-use crate::{integrity, timestamp_ms, ArtifactRecord, ArtifactStore, CaseEvent, CaseRecord, DEFAULT_CASE, GENESIS_HASH};
 use crate::application::network_capture::publish_no_replace;
+use crate::{
+    integrity, timestamp_ms, ArtifactRecord, ArtifactStore, CaseEvent, CaseRecord, DEFAULT_CASE,
+    GENESIS_HASH,
+};
 use rusqlite::{params, OptionalExtension};
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
@@ -23,7 +26,10 @@ pub struct TemporaryEvidence<'a> {
 
 #[derive(Clone, Copy)]
 pub enum PromotionDestination<'a> {
-    New { title: &'a str, description: &'a str },
+    New {
+        title: &'a str,
+        description: &'a str,
+    },
     Existing(&'a str),
 }
 
@@ -48,15 +54,26 @@ impl ArtifactStore {
         let mut total = 0usize;
         let mut digests = HashSet::new();
         for item in artifacts {
-            if item.name.is_empty() || item.name.len() > 100
-                || item.name == "." || item.name == ".."
-                || item.name.chars().any(|c| c.is_control() || c == '/' || c == '\\')
-                || item.bytes.is_empty() || item.bytes.len() > TEMP_MAX_EACH_BYTES
-                || !matches!(item.source, "temporary.sha256" | "temporary.public-diagnostic")
+            if item.name.is_empty()
+                || item.name.len() > 100
+                || item.name == "."
+                || item.name == ".."
+                || item
+                    .name
+                    .chars()
+                    .any(|c| c.is_control() || c == '/' || c == '\\')
+                || item.bytes.is_empty()
+                || item.bytes.len() > TEMP_MAX_EACH_BYTES
+                || !matches!(
+                    item.source,
+                    "temporary.sha256" | "temporary.public-diagnostic"
+                )
             {
                 return Err("ineligible temporary output or invalid artifact name".into());
             }
-            total = total.checked_add(item.bytes.len()).ok_or("temporary output budget overflow")?;
+            total = total
+                .checked_add(item.bytes.len())
+                .ok_or("temporary output budget overflow")?;
             if total > TEMP_MAX_TOTAL_BYTES {
                 return Err("temporary promotion byte limit exceeded".into());
             }
@@ -72,25 +89,33 @@ impl ArtifactStore {
                     return Err("invalid case title or description".into());
                 }
                 let nanos = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH).map_err(|e| e.to_string())?
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_err(|e| e.to_string())?
                     .as_nanos();
                 Some(CaseRecord {
                     id: format!("case-{nanos:x}-{:x}", std::process::id()),
-                    title: title.into(), description: description.into(),
+                    title: title.into(),
+                    description: description.into(),
                     created_ms: timestamp_ms(),
                 })
             }
             PromotionDestination::Existing(id) => {
                 crate::validate_case_id(id)?;
-                if id == DEFAULT_CASE { return Err("Scratchpad cannot be a promotion destination".into()); }
+                if id == DEFAULT_CASE {
+                    return Err("Scratchpad cannot be a promotion destination".into());
+                }
                 None
             }
         };
         let case = if let Some(ref record) = new_case {
             record.clone()
         } else {
-            let PromotionDestination::Existing(id) = destination else { unreachable!() };
-            self.list_cases()?.into_iter().find(|c| c.id == id)
+            let PromotionDestination::Existing(id) = destination else {
+                unreachable!()
+            };
+            self.list_cases()?
+                .into_iter()
+                .find(|c| c.id == id)
                 .ok_or("promotion destination case not found")?
         };
         fs::create_dir_all(root).map_err(|e| format!("cannot initialize evidence root: {e}"))?;
@@ -102,8 +127,10 @@ impl ArtifactStore {
         let dir = root.join(&case.id);
         fs::create_dir_all(&dir).map_err(|e| format!("cannot create case evidence folder: {e}"))?;
         let meta = fs::symlink_metadata(&dir).map_err(|e| e.to_string())?;
-        if !meta.is_dir() || meta.file_type().is_symlink()
-            || fs::canonicalize(&dir).map_err(|e| e.to_string())?.parent() != Some(root.as_path()) {
+        if !meta.is_dir()
+            || meta.file_type().is_symlink()
+            || fs::canonicalize(&dir).map_err(|e| e.to_string())?.parent() != Some(root.as_path())
+        {
             return Err("unsafe case evidence folder".into());
         }
         let mut records = Vec::with_capacity(artifacts.len());
@@ -114,19 +141,28 @@ impl ArtifactStore {
             let path = dir.join(format!("{digest}.evidence"));
             let existing = self.get_artifact(&id)?;
             if let Some(ref old) = existing {
-                if old.case_id != case.id || old.sha256 != digest
+                if old.case_id != case.id
+                    || old.sha256 != digest
                     || old.size != item.bytes.len() as u64
-                    || Path::new(&old.stored_path) != path {
+                    || Path::new(&old.stored_path) != path
+                {
                     return Err("immutable promotion destination identity conflict".into());
                 }
             }
             publish_no_replace(&dir, &path, item.bytes)?;
             let record = existing.unwrap_or_else(|| ArtifactRecord {
-                id, case_id: case.id.clone(), name: item.name.to_owned(),
-                stored_path: path.to_string_lossy().into_owned(), original_path: None,
-                size: item.bytes.len() as u64, sha256: digest,
-                md5: String::new(), sha1: String::new(), crc32: String::new(),
-                signature: Some("Volatile verified output".into()), entropy: 0.0,
+                id,
+                case_id: case.id.clone(),
+                name: item.name.to_owned(),
+                stored_path: path.to_string_lossy().into_owned(),
+                original_path: None,
+                size: item.bytes.len() as u64,
+                sha256: digest,
+                md5: String::new(),
+                sha1: String::new(),
+                crc32: String::new(),
+                signature: Some("Volatile verified output".into()),
+                entropy: 0.0,
                 imported_at: now.to_string(),
             });
             let mut verified = crate::open_verified_case_artifact(&record, &root)?;
@@ -136,21 +172,36 @@ impl ArtifactStore {
             records.push(record);
         }
 
-        let tx = self.conn.unchecked_transaction()
+        let tx = self
+            .conn
+            .unchecked_transaction()
             .map_err(|e| format!("cannot start promotion transaction: {e}"))?;
         if let Some(ref fresh) = new_case {
-            tx.execute("INSERT INTO cases(id,title,description,created_ms) VALUES(?1,?2,?3,?4)",
-                params![fresh.id,fresh.title,fresh.description,fresh.created_ms])
-                .map_err(|e| format!("cannot create new saved case atomically: {e}"))?;
+            tx.execute(
+                "INSERT INTO cases(id,title,description,created_ms) VALUES(?1,?2,?3,?4)",
+                params![fresh.id, fresh.title, fresh.description, fresh.created_ms],
+            )
+            .map_err(|e| format!("cannot create new saved case atomically: {e}"))?;
         } else {
-            let exists: i64 = tx.query_row(
-                "SELECT count(*) FROM cases WHERE id=?1", params![case.id], |r| r.get(0))
+            let exists: i64 = tx
+                .query_row(
+                    "SELECT count(*) FROM cases WHERE id=?1",
+                    params![case.id],
+                    |r| r.get(0),
+                )
                 .map_err(|e| e.to_string())?;
-            if exists != 1 { return Err("case changed during promotion".into()); }
+            if exists != 1 {
+                return Err("case changed during promotion".into());
+            }
         }
-        let tail: Option<i64> = tx.query_row(
-            "SELECT id FROM case_events WHERE case_id=?1 ORDER BY id DESC LIMIT 1",
-            params![case.id], |r| r.get(0)).optional().map_err(|e| e.to_string())?;
+        let tail: Option<i64> = tx
+            .query_row(
+                "SELECT id FROM case_events WHERE case_id=?1 ORDER BY id DESC LIMIT 1",
+                params![case.id],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(|e| e.to_string())?;
         let head: Option<(i64,String)> = tx.query_row(
             "SELECT event_id,event_hash FROM case_event_integrity WHERE case_id=?1 ORDER BY event_id DESC LIMIT 1",
             params![case.id], |r| Ok((r.get(0)?,r.get(1)?)))
@@ -158,7 +209,9 @@ impl ArtifactStore {
         if tail != head.as_ref().map(|(id, _)| *id) {
             return Err("provenance history incomplete; promotion aborted".into());
         }
-        let mut prior = head.map(|(_,hash)| hash).unwrap_or_else(|| GENESIS_HASH.to_owned());
+        let mut prior = head
+            .map(|(_, hash)| hash)
+            .unwrap_or_else(|| GENESIS_HASH.to_owned());
         for (record, staged) in records.iter().zip(artifacts) {
             let inserted = tx.execute(
                 "INSERT INTO artifacts(id,case_id,name,stored_path,original_path,size,sha256,md5,sha1,crc32,signature,entropy,imported_at)
@@ -169,12 +222,18 @@ impl ArtifactStore {
                     record.signature,record.entropy,record.imported_at])
                 .map_err(|e| format!("cannot index promoted output: {e}"))?;
             if inserted == 0 {
-                let existing: (String,String,i64,String) = tx.query_row(
-                    "SELECT case_id,sha256,size,stored_path FROM artifacts WHERE id=?1",
-                    params![record.id], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?)))
+                let existing: (String, String, i64, String) = tx
+                    .query_row(
+                        "SELECT case_id,sha256,size,stored_path FROM artifacts WHERE id=?1",
+                        params![record.id],
+                        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+                    )
                     .map_err(|e| e.to_string())?;
-                if existing.0 != case.id || existing.1 != record.sha256
-                    || existing.2 != record.size as i64 || existing.3 != record.stored_path {
+                if existing.0 != case.id
+                    || existing.1 != record.sha256
+                    || existing.2 != record.size as i64
+                    || existing.3 != record.stored_path
+                {
                     return Err("promoted evidence identity conflicts with existing index".into());
                 }
             }
@@ -186,20 +245,29 @@ impl ArtifactStore {
                 .map_err(|e| format!("cannot append promotion event: {e}"))?;
             let id = tx.last_insert_rowid();
             let event = CaseEvent {
-                id, case_id: case.id.clone(), source: staged.source.to_owned(),
-                action: "promote".into(), artifact_id: Some(record.id.clone()),
-                source_description: desc, created_ms: now,
+                id,
+                case_id: case.id.clone(),
+                source: staged.source.to_owned(),
+                action: "promote".into(),
+                artifact_id: Some(record.id.clone()),
+                source_description: desc,
+                created_ms: now,
             };
             let hash = integrity::event_hash(&event, &prior);
             tx.execute(
                 "INSERT INTO case_event_integrity(event_id,case_id,previous_hash,event_hash)
                  VALUES(?1,?2,?3,?4)",
-                params![id,case.id,prior,hash])
-                .map_err(|e| format!("cannot chain promotion provenance: {e}"))?;
+                params![id, case.id, prior, hash],
+            )
+            .map_err(|e| format!("cannot chain promotion provenance: {e}"))?;
             prior = hash;
         }
-        tx.commit().map_err(|e| format!("cannot commit temporary promotion: {e}"))?;
-        Ok(PromotionReceipt { case, artifacts: records })
+        tx.commit()
+            .map_err(|e| format!("cannot commit temporary promotion: {e}"))?;
+        Ok(PromotionReceipt {
+            case,
+            artifacts: records,
+        })
     }
 }
 
@@ -207,7 +275,11 @@ impl ArtifactStore {
 mod tests {
     use super::*;
     fn staged<'a>(bytes: &'a [u8]) -> TemporaryEvidence<'a> {
-        TemporaryEvidence { name: "sha256-digest.txt", bytes, source: "temporary.sha256" }
+        TemporaryEvidence {
+            name: "sha256-digest.txt",
+            bytes,
+            source: "temporary.sha256",
+        }
     }
     #[cfg(unix)]
     #[test]
@@ -217,17 +289,30 @@ mod tests {
         let root = tmp.path().join("artifacts");
         let store = ArtifactStore::open(&db).unwrap();
         let b = b"sha256:abcd1234\n";
-        let receipt = store.promote_temporary_evidence(
-            &root, PromotionDestination::New {title:"Investigation",description:""},
-            &[staged(b)]).unwrap();
-        assert_eq!(receipt.artifacts.len(),1);
+        let receipt = store
+            .promote_temporary_evidence(
+                &root,
+                PromotionDestination::New {
+                    title: "Investigation",
+                    description: "",
+                },
+                &[staged(b)],
+            )
+            .unwrap();
+        assert_eq!(receipt.artifacts.len(), 1);
         assert_ne!(receipt.case.id, DEFAULT_CASE);
         drop(store);
         let reopened = ArtifactStore::open(&db).unwrap();
-        assert_eq!(reopened.list_artifacts(&receipt.case.id).unwrap().len(),1);
-        let mut f = crate::open_verified_case_artifact(&receipt.artifacts[0],&root).unwrap();
-        assert_eq!(f.read_window(0,b.len(),TEMP_MAX_EACH_BYTES).unwrap(),b);
-        assert_eq!(reopened.verify_case_provenance(&receipt.case.id).unwrap().verified_events,1);
+        assert_eq!(reopened.list_artifacts(&receipt.case.id).unwrap().len(), 1);
+        let mut f = crate::open_verified_case_artifact(&receipt.artifacts[0], &root).unwrap();
+        assert_eq!(f.read_window(0, b.len(), TEMP_MAX_EACH_BYTES).unwrap(), b);
+        assert_eq!(
+            reopened
+                .verify_case_provenance(&receipt.case.id)
+                .unwrap()
+                .verified_events,
+            1
+        );
     }
     #[cfg(unix)]
     #[test]
@@ -235,17 +320,30 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path().join("artifacts");
         let store = ArtifactStore::open(&tmp.path().join("db.sqlite")).unwrap();
-        let case = store.create_case("Target","").unwrap();
+        let case = store.create_case("Target", "").unwrap();
         store.conn.execute_batch(
             "CREATE TRIGGER fail_second BEFORE INSERT ON case_events WHEN NEW.source_description LIKE '%second%' BEGIN SELECT RAISE(ABORT,'fixture'); END;"
         ).unwrap();
-        let a = TemporaryEvidence{name:"first",bytes:b"alpha",source:"temporary.sha256"};
-        let b = TemporaryEvidence{name:"second",bytes:b"bravo",source:"temporary.sha256"};
-        assert!(store.promote_temporary_evidence(&root,PromotionDestination::Existing(&case.id),&[a,b]).is_err());
+        let a = TemporaryEvidence {
+            name: "first",
+            bytes: b"alpha",
+            source: "temporary.sha256",
+        };
+        let b = TemporaryEvidence {
+            name: "second",
+            bytes: b"bravo",
+            source: "temporary.sha256",
+        };
+        assert!(store
+            .promote_temporary_evidence(&root, PromotionDestination::Existing(&case.id), &[a, b])
+            .is_err());
         assert!(store.list_artifacts(&case.id).unwrap().is_empty());
         assert!(store.list_events(&case.id).unwrap().is_empty());
-        let scan = store.reconcile_case_artifacts(&case.id,&root).unwrap();
-        assert!(scan.entries.iter().any(|e| e.state == crate::ReconciliationState::UnindexedPublished));
+        let scan = store.reconcile_case_artifacts(&case.id, &root).unwrap();
+        assert!(scan
+            .entries
+            .iter()
+            .any(|e| e.state == crate::ReconciliationState::UnindexedPublished));
     }
     #[cfg(unix)]
     #[test]
@@ -253,12 +351,69 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path().join("artifacts");
         let store = ArtifactStore::open(&tmp.path().join("db.sqlite")).unwrap();
-        let case = store.create_case("Saved","").unwrap();
+        let case = store.create_case("Saved", "").unwrap();
         let item = staged(b"safe digest");
-        assert!(store.promote_temporary_evidence(&root,PromotionDestination::Existing(DEFAULT_CASE),&[item]).is_err());
-        assert!(store.promote_temporary_evidence(&root,PromotionDestination::Existing(&case.id),&[item,item]).is_err());
-        let bad = TemporaryEvidence { name:"secret",bytes:b"password=hi",source:"recovery.password" };
-        assert!(store.promote_temporary_evidence(&root,PromotionDestination::Existing(&case.id),&[bad]).is_err());
+        assert!(store
+            .promote_temporary_evidence(
+                &root,
+                PromotionDestination::Existing(DEFAULT_CASE),
+                &[item]
+            )
+            .is_err());
+        assert!(store
+            .promote_temporary_evidence(
+                &root,
+                PromotionDestination::Existing(&case.id),
+                &[item, item]
+            )
+            .is_err());
+        let bad = TemporaryEvidence {
+            name: "secret",
+            bytes: b"password=hi",
+            source: "recovery.password",
+        };
+        assert!(store
+            .promote_temporary_evidence(&root, PromotionDestination::Existing(&case.id), &[bad])
+            .is_err());
         assert!(store.list_artifacts(&case.id).unwrap().is_empty());
+    }
+    #[cfg(unix)]
+    #[test]
+    fn failed_new_case_provenance_does_not_create_a_visible_partial_case() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("evidence");
+        let store = ArtifactStore::open(&tmp.path().join("cases.db")).unwrap();
+        store
+            .conn
+            .execute_batch(
+                "CREATE TRIGGER reject_new_promotion BEFORE INSERT ON case_events
+             WHEN NEW.source='temporary.sha256'
+             BEGIN SELECT RAISE(ABORT,'provenance-failure'); END;",
+            )
+            .unwrap();
+        let before = store.list_cases().unwrap();
+        let result = store.promote_temporary_evidence(
+            &root,
+            PromotionDestination::New {
+                title: "Atomic New",
+                description: "",
+            },
+            &[staged(b"SHA-256:example\n")],
+        );
+        assert!(result.is_err());
+        assert_eq!(store.list_cases().unwrap().len(), before.len());
+        assert!(!store
+            .list_cases()
+            .unwrap()
+            .iter()
+            .any(|c| c.title == "Atomic New"));
+        // Publication was no-clobber and not deleted; unknown case folders
+        // require separate operator-guided reconciliation.
+        let entries: Vec<_> = fs::read_dir(&root).unwrap().collect();
+        assert_eq!(entries.len(), 1);
+        let review = store.review_unregistered_case_folders(&root).unwrap();
+        assert_eq!(review.folders.len(), 1);
+        assert_eq!(review.folders[0].member_count, 1);
+        assert!(!review.truncated);
     }
 }

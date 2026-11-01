@@ -1,6 +1,8 @@
 "use client";
 import { createContext, useCallback, useContext, useEffect, useRef, useState, type ReactNode } from "react";
-import { Play, Square, Trash2, Eye, EyeOff, Info, FileUp } from "lucide-react";
+import { Play, Square, Trash2, Eye, EyeOff, Info, FileUp, SlidersHorizontal, FileText } from "lucide-react";
+import { Phosphor } from "@lucasmarkes/hairline/react";
+import { Accordion, AccordionItem, AccordionTrigger, AccordionPanel } from "@/components/ui/accordion";
 import { Chip } from "@ds/panes";
 import { hasCurrentRecoveryScope, isSha256WordlistTarget, recoveryDisplay } from "./recovery-presentation";
 import { chooseRecoveryBackend, DEFAULT_CANDIDATES, DEFAULT_MATCHES, DEFAULT_OPENCL_BATCH } from "./recovery-auto";
@@ -244,134 +246,165 @@ export function NativeRecoveryV1({
 
 export function NativeRecoveryControls() {
   const r = useRecovery();
+  const jobInProgress = r.busy || r.running || (r.jobId !== null && r.status === null);
+  const fileLabel = r.selectedWordlist?.name ?? "No wordlist selected";
+  const statusText = !r.desktop
+    ? "Open the desktop app to run recovery."
+    : !r.scope
+      ? "Select a saved case to authorize recovery."
+      : r.disabledReason && r.hash.length > 0 && !r.validHash
+        ? "Recovery V1 requires a 64-character SHA-256 digest."
+        : r.wordlistError
+          ? r.wordlistError
+          : null;
+
   return (
-    <section aria-label="Recovery controls" className="space-y-3 border-b border-line px-3 py-3">
+    <section aria-label="Recovery controls" className="border-b border-line px-3 pb-3 pt-3">
       <div className="flex items-center justify-between gap-2">
-        <div className="text-xs font-semibold text-fg">Recovery</div>
+        <h3 className="text-xs font-semibold text-fg">Recovery</h3>
         <Chip tone={r.scope ? "ok" : "muted"}>{r.scope ? "Case ready" : "Case required"}</Chip>
       </div>
-      <div className="flex flex-wrap items-center justify-between gap-2">
-        <span className="text-[11px] text-fg-dim">SHA-256 wordlist recovery · CPU/OpenCL</span>
-        <details className="relative text-[11px] text-fg-muted">
-          <summary className="inline-flex cursor-pointer items-center gap-1 rounded px-1 focus-visible:outline focus-visible:outline-2" aria-label="Recovery security and limits information">
+      <div className="mt-2 flex items-center justify-between gap-2 text-[11px]">
+        <span className="min-w-0 truncate text-fg-dim">SHA-256 · Wordlist · {r.selection.backend === "cpu" ? "CPU" : "OpenCL"}</span>
+        <details className="shrink-0 text-fg-muted">
+          <summary className="inline-flex cursor-pointer items-center gap-1 rounded px-1 outline-none focus-visible:ring-2 focus-visible:ring-orange"
+            aria-label="Recovery security and limits information">
             <Info size={13} aria-hidden="true" /> Info
           </summary>
-          <div className="mt-2 max-w-sm rounded border border-line bg-app p-2 leading-relaxed">
-            Choose a local wordlist before starting. Running jobs can be stopped.
-            Results are masked; each Reveal requires native OS confirmation.
-            Results expire and are never saved automatically. Auto never assumes
-            that GPU enumeration proves correct kernel execution.
-          </div>
+          <p className="mt-2 max-w-sm rounded-md border border-line bg-app px-3 py-2 text-[11px] leading-relaxed">
+            Native recovery needs an authorized case. Results remain masked until
+            explicit OS confirmation, expire, and are not saved automatically.
+            Auto uses CPU until OpenCL hardware is independently verified.
+          </p>
         </details>
       </div>
-      <div className="flex flex-wrap items-center justify-between gap-2 text-[11px] text-fg-dim">
-        <span>Auto · {r.selection.backend === "cpu" ? "CPU" : "verified OpenCL device " + r.selection.device_index}</span>
-        <span>Wordlist · SHA-256</span>
-      </div>
-      <details className="rounded-sm border border-line/70 px-2.5 py-2 text-xs">
-        <summary className="cursor-pointer font-medium text-fg" aria-label="Advanced recovery settings">Advanced</summary>
-        <div className="mt-3 grid grid-cols-2 gap-3">
-          <label className="col-span-2 space-y-1">
-            <span className="text-[11px] text-fg-muted">Compute device</span>
-            <Select ariaLabel="Recovery V1 backend" value={r.backend}
-              onChange={(value) => { r.setBackend(value); r.clearReveal(); }}
-              options={[
-                { value: "auto", label: "Auto · verified GPU or CPU" },
-                { value: "cpu", label: "CPU · Native Rust" },
-                ...(r.inventory?.devices ?? []).map((device) => ({
-                  value: "open_cl:" + device.device_index,
-                  label: "OpenCL " + device.device_index + " · " + device.name
-                    + (device.hardware_verified ? "" : " (unverified)"),
-                })),
-              ]} className="w-full" />
-          </label>
-          <label className="space-y-1">
-            <span className="text-[11px] text-fg-muted">Candidate limit</span>
-            <input type="number" aria-label="Recovery candidate budget" min={1} max={1000000}
-              value={r.maxCandidates} onChange={(event) => {
-                const value = Number(event.target.value);
-                if (Number.isSafeInteger(value)) r.setMaxCandidates(Math.max(1, Math.min(1000000, value)));
-              }} className="h-8 w-full rounded-sm border border-line bg-app px-2 font-mono text-xs text-fg" />
-          </label>
-          <label className="space-y-1">
-            <span className="text-[11px] text-fg-muted">Max matches</span>
-            <input type="number" aria-label="Maximum matches" min={1} max={4}
-              value={r.maxMatches} onChange={(event) => {
-                const value = Number(event.target.value);
-                if (Number.isSafeInteger(value)) r.setMaxMatches(Math.max(1, Math.min(4, value)));
-              }} className="h-8 w-full rounded-sm border border-line bg-app px-2 font-mono text-xs text-fg" />
-          </label>
-          {r.selectedDevice !== null ? (
-            <label className="col-span-2 space-y-1">
-              <span className="text-[11px] text-fg-muted">OpenCL batch size</span>
-              <input type="number" aria-label="OpenCL batch size" min={1} max={65536}
-                value={r.batchSize} onChange={(event) => {
-                  const value = Number(event.target.value);
-                  if (Number.isSafeInteger(value)) r.setBatchSize(Math.max(1, Math.min(65536, value)));
-                }} className="h-8 w-full rounded-sm border border-line bg-app px-2 font-mono text-xs text-fg" />
-            </label>
-          ) : null}
-          <p className="col-span-2 text-[11px] leading-relaxed text-fg-muted">
-            Strategy: wordlist only. Rules, masks and hybrid combinations are not
-            available in this authorized Recovery V1 workflow.
-            Auto uses CPU until a device has passed real OpenCL verification.
-          </p>
+
+      <div className="mt-4 space-y-1.5">
+        <div className="flex items-center justify-between gap-2">
+          <span className="text-[11px] font-medium text-fg-dim">Wordlist</span>
+          <span className="text-[10px] text-fg-muted">{r.selectedWordlist
+            ? r.selectedWordlist.size_bytes.toLocaleString() + " bytes"
+            : "Required"}</span>
         </div>
-      </details>
-      {!r.validHash && r.hash.length > 0 ? (
-        <p role="status" className="text-[11px] text-warn">
-          This input is not a 64-character SHA-256 digest. Recovery V1 cannot process it.
-        </p>
-      ) : null}
-      {r.disabledReason && !(r.hash.length > 0 && !r.validHash) ? (
-        <p role="status" className="text-[11px] text-warn">{r.disabledReason}</p>
-      ) : null}
-      <div className="space-y-1.5">
-        <span className="text-[11px] text-fg-muted">Wordlist</span>
-        <div className="flex min-w-0 items-center gap-2">
-          <Button size="sm" variant="outline" className="h-8 w-8 shrink-0 p-0"
+        <div className="flex min-w-0 items-stretch gap-2" role="group" aria-label="Wordlist and recovery actions">
+          <Button size="sm" variant="outline"
+            className="h-10 min-w-0 flex-1 justify-start gap-2 rounded-md px-2.5 text-left shadow-none"
             aria-label={r.choosingWordlist ? "Selecting wordlist" : "Choose wordlist"}
-            title="Choose or replace local wordlist (native OS picker)"
-            disabled={!r.desktop || !r.scope || r.choosingWordlist || r.busy || r.jobId !== null}
+            title={r.selectedWordlist ? "Replace wordlist: " + fileLabel : "Choose a local wordlist in the native file picker"}
+            disabled={!r.desktop || !r.scope || r.choosingWordlist || jobInProgress || r.jobId !== null}
             onClick={() => void r.chooseWordlist()}>
-            <FileUp size={15} aria-hidden="true" />
+            {r.selectedWordlist ? <FileText size={15} className="shrink-0" aria-hidden="true" />
+              : <FileUp size={15} className="shrink-0" aria-hidden="true" />}
+            <span className="min-w-0 flex-1 truncate font-mono text-[11px] text-fg-dim"
+              title={fileLabel}>{r.choosingWordlist ? "Selecting…" : fileLabel}</span>
           </Button>
-          <span className="min-w-0 truncate font-mono text-[11px] text-fg-dim"
-            title={r.selectedWordlist?.name ?? "No wordlist selected"}>
-            {r.selectedWordlist?.name ?? "No file selected"}
-          </span>
+          {r.busy || r.jobId === null ? (
+            <Button size="icon" className="h-10 w-10 shrink-0 rounded-md"
+              aria-label={r.busy ? "Starting recovery" : "Start recovery"}
+              title={r.disabledReason ?? "Start SHA-256 wordlist recovery"}
+              disabled={!!r.disabledReason || r.busy || r.choosingWordlist}
+              onClick={() => void r.start()}>
+              <Play size={16} aria-hidden="true" />
+            </Button>
+          ) : r.status === null ? (
+            <Button size="icon" className="h-10 w-10 shrink-0 rounded-md"
+              aria-label="Loading recovery job" title="Loading job" disabled>
+              <Play size={16} aria-hidden="true" />
+            </Button>
+          ) : r.running ? (
+            <Button size="icon" variant="outline" className="h-10 w-10 shrink-0 rounded-md"
+              aria-label={r.pendingCancel || r.status.phase === "cancelling" ? "Stopping recovery" : "Stop recovery"}
+              title="Stop recovery (cooperative cancellation)"
+              disabled={r.pendingCancel || r.status.phase === "cancelling"}
+              onClick={() => void r.cancel()}>
+              <Square size={15} aria-hidden="true" />
+            </Button>
+          ) : (
+            <Button size="icon" variant="outline" className="h-10 w-10 shrink-0 rounded-md"
+              aria-label="Discard recovery result"
+              title="Discard finished or failed results"
+              disabled={r.revealing}
+              onClick={() => void r.discard()}>
+              <Trash2 size={15} aria-hidden="true" />
+            </Button>
+          )}
         </div>
         {r.wordlistError ? <p role="alert" className="text-[11px] text-err">{r.wordlistError}</p> : null}
+        {statusText && !r.wordlistError
+          ? <p role="status" className="pt-1 text-[11px] text-fg-muted">{statusText}</p>
+          : null}
+        {r.desktop && r.scope && !r.selectedWordlist && !r.wordlistError
+          ? <p className="pt-1 text-[11px] text-fg-muted">Choose a wordlist to enable Start.</p>
+          : null}
       </div>
-      <div role="group" aria-label="Recovery action">
-        {r.busy || r.jobId === null ? (
-          <Button size="sm" className="h-8 w-8 p-0"
-            aria-label={r.busy ? "Starting recovery" : "Start recovery"}
-            title={r.disabledReason ?? "Start SHA-256 recovery"}
-            disabled={!!r.disabledReason || r.busy || r.choosingWordlist}
-            onClick={() => void r.start()}>
-            <Play size={15} aria-hidden="true" />
-          </Button>
-        ) : r.status === null ? (
-          <Button size="sm" className="h-8 w-8 p-0" aria-label="Loading recovery job" title="Loading job" disabled><Play size={15} /></Button>
-        ) : r.running ? (
-          <Button size="sm" variant="outline" className="h-8 w-8 p-0"
-            aria-label={r.pendingCancel || r.status.phase === "cancelling" ? "Stopping recovery" : "Stop recovery"}
-            title="Stop recovery (cooperative cancellation)"
-            disabled={r.pendingCancel || r.status.phase === "cancelling"}
-            onClick={() => void r.cancel()}>
-            <Square size={14} aria-hidden="true" />
-          </Button>
-        ) : (
-          <Button size="sm" variant="outline" className="h-8 w-8 p-0"
-            aria-label="Discard recovery result"
-            title="Discard finished or failed results"
-            disabled={r.revealing}
-            onClick={() => void r.discard()}>
-            <Trash2 size={14} aria-hidden="true" />
-          </Button>
-        )}
-      </div>
+
+      <Accordion defaultValue={[]} className="mt-3 border-t border-line/70">
+        <AccordionItem value="advanced" className="border-0">
+          <AccordionTrigger className="group w-full rounded-none px-0 py-2.5 text-[11px] font-medium text-fg-dim hover:text-fg focus-visible:ring-2 focus-visible:ring-orange">
+            <span className="flex min-w-0 items-center gap-2">
+              <SlidersHorizontal size={14} aria-hidden="true" className="text-fg-muted" />
+              Advanced settings
+            </span>
+          </AccordionTrigger>
+          <AccordionPanel className="space-y-3 border-t border-line/50 pt-3 pb-1">
+            <div className="space-y-1.5">
+              <span className="text-[10px] font-semibold uppercase tracking-wider text-fg-muted">Compute</span>
+              <Select ariaLabel="Recovery V1 backend" value={r.backend}
+                onChange={(value) => {
+                  if (r.jobId === null && !r.busy) { r.setBackend(value); r.clearReveal(); }
+                }}
+                options={[
+                  { value: "auto", label: "Auto · verified GPU or CPU" },
+                  { value: "cpu", label: "CPU · Native Rust" },
+                  ...(r.inventory?.devices ?? []).map((device) => ({
+                    value: "open_cl:" + device.device_index,
+                    label: "OpenCL " + device.device_index + " · " + device.name
+                      + (device.hardware_verified ? "" : " (unverified)"),
+                  })),
+                ]} className="w-full" />
+            </div>
+            <div className="space-y-1.5">
+              <span className="text-[10px] font-semibold uppercase tracking-wider text-fg-muted">Processing limits</span>
+              <div className="grid grid-cols-2 gap-2">
+                <label className="min-w-0 space-y-1">
+                  <span className="text-[11px] text-fg-muted">Candidates</span>
+                  <input type="number" aria-label="Recovery candidate budget" min={1} max={1000000}
+                    disabled={r.jobId !== null || r.busy}
+                    value={r.maxCandidates} onChange={(event) => {
+                      const value = Number(event.target.value);
+                      if (Number.isSafeInteger(value)) r.setMaxCandidates(Math.max(1, Math.min(1000000, value)));
+                    }} className="h-8 w-full min-w-0 rounded-md border border-line bg-app px-2 font-mono text-xs text-fg outline-none focus-visible:ring-1 focus-visible:ring-orange disabled:opacity-50" />
+                </label>
+                <label className="min-w-0 space-y-1">
+                  <span className="text-[11px] text-fg-muted">Max matches</span>
+                  <input type="number" aria-label="Maximum matches" min={1} max={4}
+                    disabled={r.jobId !== null || r.busy}
+                    value={r.maxMatches} onChange={(event) => {
+                      const value = Number(event.target.value);
+                      if (Number.isSafeInteger(value)) r.setMaxMatches(Math.max(1, Math.min(4, value)));
+                    }} className="h-8 w-full min-w-0 rounded-md border border-line bg-app px-2 font-mono text-xs text-fg outline-none focus-visible:ring-1 focus-visible:ring-orange disabled:opacity-50" />
+                </label>
+              </div>
+              <p className="text-[10px] text-fg-muted">At most 1,000,000 candidates and 4 masked matches per job.</p>
+            </div>
+            {r.selectedDevice !== null ? (
+              <label className="block space-y-1">
+                <span className="text-[11px] text-fg-muted">OpenCL batch size</span>
+                <input type="number" aria-label="OpenCL batch size" min={1} max={65536}
+                  disabled={r.jobId !== null || r.busy}
+                  value={r.batchSize} onChange={(event) => {
+                    const value = Number(event.target.value);
+                    if (Number.isSafeInteger(value)) r.setBatchSize(Math.max(1, Math.min(65536, value)));
+                  }} className="h-8 w-full rounded-md border border-line bg-app px-2 font-mono text-xs text-fg outline-none focus-visible:ring-1 focus-visible:ring-orange disabled:opacity-50" />
+              </label>
+            ) : null}
+            <p className="border-t border-line/50 pt-2 text-[11px] leading-relaxed text-fg-muted">
+              Wordlist only · Rules, masks and hybrid strategies are not available in Recovery V1.
+              Auto uses CPU until compatible OpenCL hardware passes verification.
+            </p>
+          </AccordionPanel>
+        </AccordionItem>
+      </Accordion>
     </section>
   );
 }
@@ -431,7 +464,16 @@ export function NativeRecoveryResults() {
         </div>
         {r.jobId !== null ? <span className="font-mono text-[11px] text-fg-muted">Job #{r.jobId}</span> : null}
       </div>
-      <p className="text-[11px] leading-relaxed text-fg-muted">{view.detail}</p>
+      {isActive ? (
+        <div className="flex items-center gap-3 rounded-md border border-line/70 bg-app/50 px-2.5 py-2">
+          <Phosphor intensity={1} play theme="dark" label="Recovery activity"
+            className="h-20 w-20 shrink-0" />
+          <div className="min-w-0 space-y-1">
+            <div className="text-[11px] font-semibold text-fg">Processing wordlist</div>
+            <p className="text-[11px] leading-relaxed text-fg-muted">{view.detail}</p>
+          </div>
+        </div>
+      ) : <p className="text-[11px] leading-relaxed text-fg-muted">{view.detail}</p>}
       {r.status?.progress && (
         <div className="space-y-1.5">
           <div className="flex justify-between gap-2 font-mono text-[11px] text-fg-dim">

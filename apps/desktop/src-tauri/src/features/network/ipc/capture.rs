@@ -314,8 +314,15 @@ pub fn capture_follow_stream_v1(
         .completed_for_case(case, session_id)
         .map_err(|error| format!("{:?}: {}", error.code, error.message))?;
     let parsed = cyberdeck_packet::parse_capture(&result.pcap_bytes)?;
-    if parsed.malformed_tail || parsed.packets.len() != result.frame_provenance.len() {
-        return Err("original captured packet index is malformed".into());
+    if parsed.malformed_tail
+        || parsed.packets.len() != result.frame_provenance.len()
+        || parsed
+            .packets
+            .iter()
+            .zip(&result.frame_provenance)
+            .any(|(packet, frame)| packet.offset != frame.pcap_frame_offset)
+    {
+        return Err("original captured packet provenance is malformed".into());
     }
     let transcript = cyberdeck_packet::streams::follow_stream(&parsed.packets, &stream_id)?;
     capture.valid_after(&session, &owner, transcript)
@@ -634,6 +641,21 @@ mod tests {
         // New case revision is never an authorization to resurrect old capture.
         ctx.on_case_changed();
         assert!(save_original_capture(&selected, &ctx, &evidence, &owner).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn save_capture_rejects_another_session_identity_without_side_effects() {
+        let (_tmp, evidence, selected, ctx, owner, _original) = prepare_capture();
+        let false_owner = Owner {
+            scope: owner.scope.clone(),
+            session_id: owner.session_id + 1,
+        };
+        assert!(save_original_capture(&selected, &ctx, &evidence, &false_owner).is_err());
+        let case = owner.scope.case_id.as_deref().unwrap();
+        let store = evidence.store.lock().unwrap();
+        assert!(store.list_artifacts(case).unwrap().is_empty());
+        assert!(store.list_events(case).unwrap().is_empty());
     }
 
     #[cfg(unix)]

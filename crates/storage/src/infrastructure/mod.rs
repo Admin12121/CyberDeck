@@ -8,6 +8,7 @@ pub(crate) mod orphan_recovery;
 mod provenance;
 mod recovery;
 mod schema;
+pub(crate) mod unregistered;
 pub(crate) mod verified_handle;
 #[cfg(all(windows, feature = "experimental-windows-handle"))]
 mod windows_verified_handle;

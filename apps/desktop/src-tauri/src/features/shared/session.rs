@@ -28,7 +28,7 @@ pub struct CaseSessionCtx {
     selection: Mutex<Selection>,
     pub history_policy: Arc<Mutex<ActiveCaseHistoryPolicy>>,
     /// Only eligible nonsecret Quick Tools outputs live here, never SQLite.
-    pub(crate) temp_work: Mutex<crate::features::cases::infrastructure::temp_work::TempWork>,
+    pub(crate) temp_work: Arc<Mutex<crate::features::cases::infrastructure::temp_work::TempWork>>,
 }
 impl Default for CaseSessionCtx {
     fn default() -> Self {
@@ -36,11 +36,27 @@ impl Default for CaseSessionCtx {
             publication: Mutex::new(()),
             selection: Mutex::new(Selection::default()),
             history_policy: Arc::new(Mutex::new(ActiveCaseHistoryPolicy::default())),
-            temp_work: Mutex::new(Default::default()),
+            temp_work: Arc::new(Mutex::new(Default::default())),
         }
     }
 }
 impl CaseSessionCtx {
+    /// Evicts expired temporary outputs even when a user is idle. Weak ref
+    /// ensures cleanup exits when desktop state is dropped; no retained bytes
+    /// survive a case switch.
+    pub fn start_temporary_expiry_cleanup(&self) {
+        let weak = Arc::downgrade(&self.temp_work);
+        tauri::async_runtime::spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                let Some(work) = weak.upgrade() else { break };
+                if let Ok(mut state) = work.lock() {
+                    state.evict_expired();
+                };
+            }
+        });
+    }
+
     pub fn select(&self, store: &ArtifactStore, case_id: &str) -> Result<CaseSessionWire, String> {
         let _gate = self
             .publication
@@ -65,7 +81,10 @@ impl CaseSessionCtx {
             .select_case(store, case_id)?;
         state.case_id = Some(case_id.to_owned());
         state.revision = next;
-        self.temp_work.lock().map_err(|_| "temporary workspace unavailable")?.clear();
+        self.temp_work
+            .lock()
+            .map_err(|_| "temporary workspace unavailable")?
+            .clear();
         Ok(CaseSessionWire {
             case_id: state.case_id.clone(),
             revision: next,
@@ -91,7 +110,10 @@ impl CaseSessionCtx {
             .close_case();
         state.case_id = None;
         state.revision = next;
-        self.temp_work.lock().map_err(|_| "temporary workspace unavailable")?.clear();
+        self.temp_work
+            .lock()
+            .map_err(|_| "temporary workspace unavailable")?
+            .clear();
         Ok(CaseSessionWire {
             case_id: None,
             revision: next,
@@ -241,5 +263,39 @@ mod tests {
         assert!(session.ensure(&first).is_err());
         assert_eq!(session.clear().unwrap().case_id, None);
         assert!(session.selected().is_err());
+    }
+    #[test]
+    fn temporary_staging_is_discarded_on_case_switch_and_clear() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = ArtifactStore::open(&temp.path().join("cases.db")).unwrap();
+        let selected = store.create_case("Saved", "").unwrap();
+        let session = CaseSessionCtx::default();
+        session
+            .temp_work
+            .lock()
+            .unwrap()
+            .stage_digest(0, "volatile-only")
+            .unwrap();
+        assert_eq!(
+            session.temp_work.lock().unwrap().overview(0).outputs.len(),
+            1
+        );
+        let saved = session.select(&store, &selected.id).unwrap();
+        assert!(session
+            .temp_work
+            .lock()
+            .unwrap()
+            .overview(saved.revision)
+            .outputs
+            .is_empty());
+        let cleared = session.clear().unwrap();
+        assert!(session
+            .temp_work
+            .lock()
+            .unwrap()
+            .overview(cleared.revision)
+            .outputs
+            .is_empty());
+        assert!(store.list_artifacts("scratchpad").unwrap().is_empty());
     }
 }

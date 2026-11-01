@@ -7,8 +7,11 @@ mod domain;
 mod infrastructure;
 pub use application::lineage::{ArtifactLineageHop, CaseLineageReport};
 pub use application::network_capture::{NetworkCaptureSource, MAX_ORIGINAL_PCAP_BYTES};
-pub use application::temporary_promotion::{PromotionDestination, PromotionReceipt, TemporaryEvidence, TEMP_MAX_ARTIFACTS, TEMP_MAX_EACH_BYTES, TEMP_MAX_TOTAL_BYTES};
 pub use application::search::{CaseSearchPage, SearchFinding};
+pub use application::temporary_promotion::{
+    PromotionDestination, PromotionReceipt, TemporaryEvidence, TEMP_MAX_ARTIFACTS,
+    TEMP_MAX_EACH_BYTES, TEMP_MAX_TOTAL_BYTES,
+};
 pub use domain::*;
 #[path = "infrastructure/batch.rs"]
 mod batch;
@@ -29,6 +32,7 @@ mod integrity;
 pub use infrastructure::orphan_recovery::{
     CaseReconciliation, ExplicitRecovery, ReconciliationEntry, ReconciliationState,
 };
+pub use infrastructure::unregistered::{UnregisteredCaseFolder, UnregisteredCaseReview};
 pub use infrastructure::verified_handle::{open_verified_case_artifact, VerifiedArtifactHandle};
 pub use integrity::{verify_artifact_file, GENESIS_HASH};
 

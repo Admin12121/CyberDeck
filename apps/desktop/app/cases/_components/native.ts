@@ -56,3 +56,53 @@ export async function copySelectedArtifactToExisting(artifactId: string, targetC
   requireNative();
   return invoke<CopyReceiptV1>("case_copy_artifact_to_existing_v1", { artifactId, targetCaseId });
 }
+
+export interface TemporaryOutputWire {
+  id: number;
+  name: string;
+  kind: "sha256-digest";
+  bytes: number;
+  revision: number;
+}
+export interface TemporaryOverviewWire {
+  revision: number;
+  outputs: TemporaryOutputWire[];
+  retention_seconds: number;
+  max_artifacts: number;
+}
+export interface TemporaryPromotionReceiptWire {
+  case: import("@lib/ipc").CaseRecordWire;
+  artifacts: {id: string; name: string; sha256: string; size: number}[];
+}
+export async function stageTemporarySha256(input: string): Promise<TemporaryOutputWire> {
+  requireNative();
+  if (!input || new TextEncoder().encode(input).length > 65536)
+    throw new Error("SHA-256 input exceeds the bounded native limit");
+  return invoke<TemporaryOutputWire>("case_temp_stage_sha256_v1", { input });
+}
+export async function temporaryOverview(): Promise<TemporaryOverviewWire> {
+  requireNative();
+  return invoke<TemporaryOverviewWire>("case_temp_overview_v1");
+}
+export async function discardTemporary(): Promise<TemporaryOverviewWire> {
+  requireNative();
+  return invoke<TemporaryOverviewWire>("case_temp_discard_v1");
+}
+export async function promoteTemporary(newTitle?: string, existingCaseId?: string, description?: string): Promise<TemporaryPromotionReceiptWire> {
+  requireNative();
+  if (Boolean(newTitle?.trim()) === Boolean(existingCaseId))
+    throw new Error("Select exactly one destination for temporary promotion");
+  return invoke<TemporaryPromotionReceiptWire>("case_temp_promote_v1", {
+    newTitle: newTitle?.trim() || null, description: description || null,
+    existingCaseId: existingCaseId || null,
+  });
+}
+
+export interface UnregisteredCaseReviewWire {
+  folders: {case_id: string; member_count: number; member_scan_truncated: boolean}[];
+  truncated: boolean;
+}
+export async function reviewUnregisteredCaseFolders(): Promise<UnregisteredCaseReviewWire> {
+  requireNative();
+  return invoke<UnregisteredCaseReviewWire>("case_unregistered_folders_review_v1");
+}

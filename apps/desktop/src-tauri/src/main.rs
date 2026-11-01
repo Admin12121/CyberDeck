@@ -41,6 +41,8 @@ fn main() {
         .setup(|app| {
             app.state::<features::crypto::ipc::recovery::RecoveryCtx>()
                 .start_expiry_cleanup();
+            app.state::<features::shared::session::CaseSessionCtx>()
+                .start_temporary_expiry_cleanup();
             // Case store lives under the OS app-data directory; the SQLite
             // index and artifact copies are created on first launch (§8.4).
             let data_dir = features::cases::infrastructure::storage_paths::data_dir(app.handle())
@@ -89,6 +91,7 @@ fn main() {
             features::cases::temporary::case_temp_overview_v1,
             features::cases::temporary::case_temp_discard_v1,
             features::cases::temporary::case_temp_promote_v1,
+            features::cases::temporary::case_unregistered_folders_review_v1,
             features::forensics::ipc::evidence::file_list,
             features::forensics::ipc::evidence::file_hex,
             features::forensics::ipc::evidence::file_signature_scan,

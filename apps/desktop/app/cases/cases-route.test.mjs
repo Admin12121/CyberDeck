@@ -47,3 +47,19 @@ test("uncertain orphan evidence remains visibly read-only and temporary workspac
   assert.match(view, /Temporary Quick Tools/);
   assert.doesNotMatch(view, /localStorage\.setItem|sessionStorage\.setItem/);
 });
+
+test("temporary Quick Tools UI is wired to backend-owned volatile staging and explicitly confirmed atomic promotion", () => {
+  const native = read("_components/native.ts");
+  const rust = read("../../src-tauri/src/features/cases/ipc/temporary.rs");
+  for (const name of ["case_temp_stage_sha256_v1", "case_temp_overview_v1", "case_temp_discard_v1", "case_temp_promote_v1"]) {
+    assert.match(native, new RegExp(name));
+    assert.match(rust, new RegExp("fn " + name));
+  }
+  assert.match(view, /Save Current Work as Case/);
+  assert.match(view, /stageTemporarySha256/);
+  assert.match(view, /promoteTemporary/);
+  assert.match(view, /original input/i);
+  assert.match(rust, /MessageDialogButtons::YesNo/);
+  assert.match(rust, /with_current_publication/);
+  assert.doesNotMatch(native, /localStorage|stored_path|dataB64|privateKey/);
+});
