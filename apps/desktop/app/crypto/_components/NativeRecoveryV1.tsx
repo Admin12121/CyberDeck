@@ -3,6 +3,7 @@ import { createContext, useCallback, useContext, useEffect, useRef, useState, ty
 import { Play, Square, Trash2, Eye, EyeOff, Info, FileUp } from "lucide-react";
 import { Chip } from "@ds/panes";
 import { hasCurrentRecoveryScope, isSha256WordlistTarget, recoveryDisplay } from "./recovery-presentation";
+import { chooseRecoveryBackend, DEFAULT_CANDIDATES, DEFAULT_MATCHES, DEFAULT_OPENCL_BATCH } from "./recovery-auto";
 import { Button } from "@/components/ui/button";
 import { Select } from "@ds/panes";
 import { useWorkbenchCase } from "@state/workbench";
@@ -25,12 +26,12 @@ function useRecoveryController(targetHash: string) {
     ? caseId + ":" + String(caseSession.revision) : null;
   const scopeRef = useRef(scope);
   scopeRef.current = scope;
-  const [backend, setBackend] = useState("cpu");
+  const [backend, setBackend] = useState("auto");
   const [inventory, setInventory] = useState<RecoveryDeviceInventoryV1 | null>(null);
   const [deviceError, setDeviceError] = useState<string | null>(null);
-  const [batchSize, setBatchSize] = useState(4096);
-  const [maxCandidates, setMaxCandidates] = useState(100000);
-  const [maxMatches, setMaxMatches] = useState(1);
+  const [batchSize, setBatchSize] = useState(DEFAULT_OPENCL_BATCH);
+  const [maxCandidates, setMaxCandidates] = useState(DEFAULT_CANDIDATES);
+  const [maxMatches, setMaxMatches] = useState(DEFAULT_MATCHES);
   const [jobId, setJobId] = useState<number | null>(null);
   const [status, setStatus] = useState<RecoveryJobStatusV1 | null>(null);
   const [busy, setBusy] = useState(false);
@@ -46,7 +47,8 @@ function useRecoveryController(targetHash: string) {
   const hash = targetHash.trim();
   const validHash = isSha256WordlistTarget(hash);
   const running = status?.phase === "running" || status?.phase === "cancelling";
-  const selectedDevice = backend.startsWith("open_cl:") ? Number(backend.slice(8)) : null;
+  const selection = chooseRecoveryBackend(backend, inventory, batchSize);
+  const selectedDevice = selection.backend === "open_cl" ? selection.device_index : null;
   const deviceAvailable = selectedDevice === null ||
     !!inventory?.devices.some((item) => item.device_index === selectedDevice);
 
@@ -144,9 +146,7 @@ function useRecoveryController(targetHash: string) {
     clearReveal(); setError(null); setBusy(true); setStatus(null); setJobId(null);
     setDiscarded(false);
     const requestScope = scope;
-    const selected: RecoveryBackendV1 = selectedDevice === null
-      ? { backend: "cpu" }
-      : { backend: "open_cl", device_index: selectedDevice, batch_size: batchSize };
+    const selected: RecoveryBackendV1 = selection;
     const request: RecoveryRequestV1 = {
       algorithm: "sha256", target_hash: hash.toLowerCase(), backend: selected,
       max_candidates: maxCandidates, max_matches: maxMatches,
@@ -223,7 +223,7 @@ function useRecoveryController(targetHash: string) {
     discarded, revealing, pendingCancel, clearReveal, validHash,
     selectedWordlist, choosingWordlist, wordlistError, chooseWordlist,
     running: scopedJob && running, selectedDevice, deviceAvailable, start, cancel, discard, reveal,
-    disabledReason, progress: scopedJob ? progress : null, percent, hash, caseId,
+    disabledReason, progress: scopedJob ? progress : null, percent, hash, caseId, selection,
   };
 }
 
@@ -257,53 +257,67 @@ export function NativeRecoveryControls() {
             <Info size={13} aria-hidden="true" /> Info
           </summary>
           <div className="mt-2 max-w-sm rounded border border-line bg-app p-2 leading-relaxed">
-            Choose a wordlist through the native file picker before Start. Running jobs can be stopped.
+            Choose a local wordlist before starting. Running jobs can be stopped.
             Results are masked; each Reveal requires native OS confirmation.
-            Results expire and are never saved automatically. OpenCL devices
-            are selectable but not hardware-verified.
+            Results expire and are never saved automatically. Auto never assumes
+            that GPU enumeration proves correct kernel execution.
           </div>
         </details>
       </div>
-      <div className="grid grid-cols-2 gap-3">
-        <label className="col-span-2 space-y-1">
-          <span className="text-[11px] text-fg-muted">Backend</span>
-          <Select ariaLabel="Recovery V1 backend" value={r.backend}
-            onChange={(value) => { r.setBackend(value); r.clearReveal(); }}
-            options={[
-              { value: "cpu", label: "CPU · Native Rust" },
-              ...(r.inventory?.devices ?? []).map((d) => ({
-                value: "open_cl:" + d.device_index,
-                label: "OpenCL " + d.device_index + " · " + d.name,
-              })),
-            ]} className="w-full" />
-        </label>
-        <label className="space-y-1">
-          <span className="text-[11px] text-fg-muted">Candidate limit</span>
-          <input type="number" aria-label="Recovery candidate budget" min={1} max={1000000}
-            value={r.maxCandidates} onChange={(e) => {
-              const n = Number(e.target.value);
-              if (Number.isSafeInteger(n)) r.setMaxCandidates(Math.max(1, Math.min(1000000, n)));
-            }} className="h-8 w-full rounded-sm border border-line bg-app px-2 font-mono text-xs text-fg" />
-        </label>
-        <label className="space-y-1">
-          <span className="text-[11px] text-fg-muted">Max matches</span>
-          <input type="number" aria-label="Maximum matches" min={1} max={4}
-            value={r.maxMatches} onChange={(e) => {
-              const n = Number(e.target.value);
-              if (Number.isSafeInteger(n)) r.setMaxMatches(Math.max(1, Math.min(4, n)));
-            }} className="h-8 w-full rounded-sm border border-line bg-app px-2 font-mono text-xs text-fg" />
-        </label>
-        {r.selectedDevice !== null ? (
+      <div className="flex flex-wrap items-center justify-between gap-2 text-[11px] text-fg-dim">
+        <span>Auto · {r.selection.backend === "cpu" ? "CPU" : "verified OpenCL device " + r.selection.device_index}</span>
+        <span>Wordlist · SHA-256</span>
+      </div>
+      <details className="rounded-sm border border-line/70 px-2.5 py-2 text-xs">
+        <summary className="cursor-pointer font-medium text-fg" aria-label="Advanced recovery settings">Advanced</summary>
+        <div className="mt-3 grid grid-cols-2 gap-3">
           <label className="col-span-2 space-y-1">
-            <span className="text-[11px] text-fg-muted">OpenCL batch size</span>
-            <input type="number" aria-label="OpenCL batch size" min={1} max={65536}
-              value={r.batchSize} onChange={(e) => {
-                const n = Number(e.target.value);
-                if (Number.isSafeInteger(n)) r.setBatchSize(Math.max(1, Math.min(65536, n)));
+            <span className="text-[11px] text-fg-muted">Compute device</span>
+            <Select ariaLabel="Recovery V1 backend" value={r.backend}
+              onChange={(value) => { r.setBackend(value); r.clearReveal(); }}
+              options={[
+                { value: "auto", label: "Auto · verified GPU or CPU" },
+                { value: "cpu", label: "CPU · Native Rust" },
+                ...(r.inventory?.devices ?? []).map((device) => ({
+                  value: "open_cl:" + device.device_index,
+                  label: "OpenCL " + device.device_index + " · " + device.name
+                    + (device.hardware_verified ? "" : " (unverified)"),
+                })),
+              ]} className="w-full" />
+          </label>
+          <label className="space-y-1">
+            <span className="text-[11px] text-fg-muted">Candidate limit</span>
+            <input type="number" aria-label="Recovery candidate budget" min={1} max={1000000}
+              value={r.maxCandidates} onChange={(event) => {
+                const value = Number(event.target.value);
+                if (Number.isSafeInteger(value)) r.setMaxCandidates(Math.max(1, Math.min(1000000, value)));
               }} className="h-8 w-full rounded-sm border border-line bg-app px-2 font-mono text-xs text-fg" />
           </label>
-        ) : null}
-      </div>
+          <label className="space-y-1">
+            <span className="text-[11px] text-fg-muted">Max matches</span>
+            <input type="number" aria-label="Maximum matches" min={1} max={4}
+              value={r.maxMatches} onChange={(event) => {
+                const value = Number(event.target.value);
+                if (Number.isSafeInteger(value)) r.setMaxMatches(Math.max(1, Math.min(4, value)));
+              }} className="h-8 w-full rounded-sm border border-line bg-app px-2 font-mono text-xs text-fg" />
+          </label>
+          {r.selectedDevice !== null ? (
+            <label className="col-span-2 space-y-1">
+              <span className="text-[11px] text-fg-muted">OpenCL batch size</span>
+              <input type="number" aria-label="OpenCL batch size" min={1} max={65536}
+                value={r.batchSize} onChange={(event) => {
+                  const value = Number(event.target.value);
+                  if (Number.isSafeInteger(value)) r.setBatchSize(Math.max(1, Math.min(65536, value)));
+                }} className="h-8 w-full rounded-sm border border-line bg-app px-2 font-mono text-xs text-fg" />
+            </label>
+          ) : null}
+          <p className="col-span-2 text-[11px] leading-relaxed text-fg-muted">
+            Strategy: wordlist only. Rules, masks and hybrid combinations are not
+            available in this authorized Recovery V1 workflow.
+            Auto uses CPU until a device has passed real OpenCL verification.
+          </p>
+        </div>
+      </details>
       {!r.validHash && r.hash.length > 0 ? (
         <p role="status" className="text-[11px] text-warn">
           This input is not a 64-character SHA-256 digest. Recovery V1 cannot process it.
@@ -315,12 +329,12 @@ export function NativeRecoveryControls() {
       <div className="space-y-1.5">
         <span className="text-[11px] text-fg-muted">Wordlist</span>
         <div className="flex min-w-0 items-center gap-2">
-          <Button size="sm" variant="outline" className="h-8 shrink-0 gap-1.5"
-            title="Select a local wordlist through the native OS file picker"
+          <Button size="sm" variant="outline" className="h-8 w-8 shrink-0 p-0"
+            aria-label={r.choosingWordlist ? "Selecting wordlist" : "Choose wordlist"}
+            title="Choose or replace local wordlist (native OS picker)"
             disabled={!r.desktop || !r.scope || r.choosingWordlist || r.busy || r.jobId !== null}
             onClick={() => void r.chooseWordlist()}>
-            <FileUp size={13} aria-hidden="true" />
-            {r.choosingWordlist ? "Selecting…" : "Choose Wordlist"}
+            <FileUp size={15} aria-hidden="true" />
           </Button>
           <span className="min-w-0 truncate font-mono text-[11px] text-fg-dim"
             title={r.selectedWordlist?.name ?? "No wordlist selected"}>
@@ -331,28 +345,30 @@ export function NativeRecoveryControls() {
       </div>
       <div role="group" aria-label="Recovery action">
         {r.busy || r.jobId === null ? (
-          <Button size="sm" className="h-8 min-w-28 gap-1.5"
-            title={r.disabledReason ?? "Start the selected native SHA-256 wordlist recovery"}
+          <Button size="sm" className="h-8 w-8 p-0"
+            aria-label={r.busy ? "Starting recovery" : "Start recovery"}
+            title={r.disabledReason ?? "Start SHA-256 recovery"}
             disabled={!!r.disabledReason || r.busy || r.choosingWordlist}
             onClick={() => void r.start()}>
-            <Play size={14} aria-hidden="true" /> {r.busy ? "Starting…" : "Start"}
+            <Play size={15} aria-hidden="true" />
           </Button>
         ) : r.status === null ? (
-          <Button size="sm" className="h-8 min-w-28" disabled>Loading job…</Button>
+          <Button size="sm" className="h-8 w-8 p-0" aria-label="Loading recovery job" title="Loading job" disabled><Play size={15} /></Button>
         ) : r.running ? (
-          <Button size="sm" variant="outline" className="h-8 min-w-28 gap-1.5"
-            title="Request cancellation; the native worker stops cooperatively"
+          <Button size="sm" variant="outline" className="h-8 w-8 p-0"
+            aria-label={r.pendingCancel || r.status.phase === "cancelling" ? "Stopping recovery" : "Stop recovery"}
+            title="Stop recovery (cooperative cancellation)"
             disabled={r.pendingCancel || r.status.phase === "cancelling"}
             onClick={() => void r.cancel()}>
-            <Square size={13} aria-hidden="true" />
-            {r.pendingCancel || r.status.phase === "cancelling" ? "Stopping…" : "Stop"}
+            <Square size={14} aria-hidden="true" />
           </Button>
         ) : (
-          <Button size="sm" variant="outline" className="h-8 min-w-28 gap-1.5"
-            title="Discard finished or failed results and return to Start"
+          <Button size="sm" variant="outline" className="h-8 w-8 p-0"
+            aria-label="Discard recovery result"
+            title="Discard finished or failed results"
             disabled={r.revealing}
             onClick={() => void r.discard()}>
-            <Trash2 size={13} aria-hidden="true" /> Discard
+            <Trash2 size={14} aria-hidden="true" />
           </Button>
         )}
       </div>

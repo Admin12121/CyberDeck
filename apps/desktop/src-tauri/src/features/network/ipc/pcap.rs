@@ -29,6 +29,32 @@ pub struct PcapCtx {
     pub current: Mutex<Option<CachedCapture>>,
 }
 
+/// Decode a bounded native capture frame using the exact offline PCAP parser
+/// and packet wire projection, without replacing the offline PCAP cache.
+pub(crate) fn original_capture_packet(
+    original: &[u8],
+    index: usize,
+    expected_offset: usize,
+) -> Result<PcapPacketWire, String> {
+    let parsed = cyberdeck_packet::parse_capture(original)?;
+    if parsed.malformed_tail {
+        return Err("original native capture has a malformed trailing record".into());
+    }
+    let meta = parsed
+        .packets
+        .get(index)
+        .ok_or("capture frame index out of range")?;
+    if meta.offset != expected_offset {
+        return Err("capture frame offset differs from immutable provenance".into());
+    }
+    Ok(pcap_wire::wire_packet(
+        index,
+        meta,
+        parsed.packets.first(),
+        parsed.nanosecond,
+    ))
+}
+
 #[tauri::command]
 pub fn pcap_open_dialog(app: AppHandle, ctx: State<'_, PcapCtx>) -> Result<PcapOpenWire, String> {
     pcap_commands::open_dialog(app, ctx)
@@ -77,6 +103,10 @@ mod tests {
         file.extend_from_slice(&(frame.len() as u32).to_le_bytes());
         file.extend_from_slice(&(frame.len() as u32).to_le_bytes());
         file.extend_from_slice(&frame);
+        let native = original_capture_packet(&file, 0, 40).unwrap();
+        assert_eq!(native.protocol, "ARP");
+        assert!(!native.layers.is_empty());
+        assert!(original_capture_packet(&file, 0, 41).is_err());
         let parsed = parse_capture(&file).unwrap();
         let wire = wire_packet(
             0,

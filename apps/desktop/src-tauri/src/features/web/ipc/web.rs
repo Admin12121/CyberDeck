@@ -33,6 +33,8 @@ use proxy_rules_domain::replace_bytes_limited;
 pub use proxy_rules_domain::{MatchReplaceRule, MAX_PROXY_BODY};
 
 pub use request_domain::parse_raw_request;
+#[path = "../application/assessment_jobs.rs"]
+pub(crate) mod assessment_jobs;
 #[path = "../infrastructure/client.rs"]
 mod client_infrastructure;
 #[path = "../application/crawl.rs"]
@@ -53,6 +55,8 @@ mod proxy_transport_infrastructure;
 mod repeater_application;
 #[path = "../application/scan.rs"]
 mod scan_application;
+#[path = "../infrastructure/target_scope.rs"]
+mod target_scope;
 #[path = "../infrastructure/websocket.rs"]
 mod websocket_infrastructure;
 use forward_infrastructure::execute_request;
@@ -141,6 +145,11 @@ pub(crate) async fn replay_authorized_case_message(
     };
     authorize()?;
     let request = webhistory::replay_draft_authorized(grant, permit, id, forwarded)?;
+    // Captured traffic may originate from an attacker-controlled browser.
+    // Replay is a NEW active operation, not automatically authorized by capture.
+    // Until pinned DNS transport is available, fail closed for hostnames and
+    // non-private/public/metadata destinations, even with a valid reveal permit.
+    validate_assessment_target(&request.url)?;
     authorize()?;
     // The authorized transport polls the backend authority while waiting for
     // headers and each response chunk; passive consent expiry also cancels.
@@ -150,6 +159,253 @@ pub(crate) async fn replay_authorized_case_message(
         authorize()?;
         Ok(reply)
     })
+}
+
+/// A browser bool or a case_id parameter can never mint this grant.
+fn selected_history_grant(
+    session: &crate::features::shared::session::CaseSessionCtx,
+    selected: &crate::features::shared::session::CaseSessionWire,
+    proxy: &WebCtx,
+) -> Result<cyberdeck_storage::HistoryCaptureGrant, String> {
+    session.ensure(selected)?;
+    if !proxy.shared.running.load(Ordering::Acquire) {
+        return Err("Web proxy is stopped".into());
+    }
+    let case_id = selected
+        .case_id
+        .as_deref()
+        .ok_or("a native-selected case is required")?;
+    let policy = session
+        .history_policy
+        .lock()
+        .map_err(|_| "Web history authority unavailable")?;
+    let grant = policy.authorize_capture(case_id, policy.current_generation())?;
+    // Respect publication -> selection -> policy lock order; never acquire
+    // session.selection while still retaining the policy mutex.
+    drop(policy);
+    session.ensure(selected)?;
+    Ok(grant)
+}
+
+/// Grant and one-time reveal permit minted only under the current case's
+/// publication gate AFTER a trusted native approval event. Never hold policy
+/// while entering Web history (history -> policy is the required mutex order).
+fn mint_history_access(
+    session: &crate::features::shared::session::CaseSessionCtx,
+    selected: &crate::features::shared::session::CaseSessionWire,
+    proxy: &WebCtx,
+    id: u64,
+) -> Result<
+    (
+        cyberdeck_storage::HistoryCaptureGrant,
+        cyberdeck_storage::HistoryRevealPermit,
+    ),
+    String,
+> {
+    session.with_current_publication(selected, || {
+        let grant = selected_history_grant(session, selected, proxy)?;
+        if !webhistory::authorized_entry_ids().contains(&id) {
+            return Err("HTTP history entry is no longer available".into());
+        }
+        let permit = session
+            .history_policy
+            .lock()
+            .map_err(|_| "Web history authority unavailable")?
+            .approve_reveal(&grant)?;
+        Ok((grant, permit))
+    })
+}
+
+#[derive(serde::Serialize)]
+#[serde(tag = "kind", content = "data", rename_all = "snake_case")]
+pub enum WebHistoryAccessWire {
+    Detail(webhistory::Detail),
+    Replay(HttpResponseWire),
+}
+
+/// New narrow sensitive access path; unlike the legacy raw history functions,
+/// it NEVER accepts a client-supplied case, consent boolean or reveal permit.
+/// Keep unregistered until security fixtures and UI/authorization are accepted.
+#[tauri::command]
+pub async fn web_history_access_v1(
+    id: u64,
+    action: String,
+    forwarded: bool,
+    app: tauri::AppHandle,
+    session: State<'_, crate::features::shared::session::CaseSessionCtx>,
+    proxy: State<'_, WebCtx>,
+) -> Result<WebHistoryAccessWire, String> {
+    use tauri_plugin_dialog::{DialogExt, MessageDialogButtons};
+    let selected = session.selected()?;
+    let _grant = selected_history_grant(&session, &selected, &proxy)?;
+    if !webhistory::authorized_entry_ids().contains(&id) {
+        return Err("HTTP history entry is no longer available".into());
+    }
+    if action != "detail" && action != "replay" {
+        return Err("invalid protected history action".into());
+    }
+    let is_replay = action == "replay";
+    let description = if is_replay {
+        let selected_grant = selected_history_grant(&session, &selected, &proxy)?;
+        let origin = webhistory::replay_target_origin(&selected_grant, id, forwarded)?;
+        format!("Replay the {} HTTP request #{} to {}? This sends a NEW network request, potentially with credentials. Only approve an authorized target.",
+            if forwarded { "forwarded" } else { "original" }, id, origin)
+    } else {
+        format!("Reveal captured request/response headers and binary bodies for history #{}? This may include passwords, cookies and tokens. Sensitive content will be shown temporarily.", id)
+    };
+    let approved = tauri::async_runtime::spawn_blocking(move || {
+        app.dialog()
+            .message(description)
+            .title("Authorize sensitive Web history access")
+            .buttons(MessageDialogButtons::YesNo)
+            .blocking_show()
+    })
+    .await
+    .map_err(|_| "native history authorization unavailable")?;
+    if !approved {
+        return Err("history access declined by operator".into());
+    }
+    let (grant, permit) = mint_history_access(&session, &selected, &proxy, id)?;
+    if is_replay {
+        // Browser-captured URLs are untrusted: replay checks target restrictions
+        // before any request is sent and rechecks consent/revision in-flight.
+        let result = replay_authorized_case_message(
+            &session, &selected, &proxy, &grant, permit, id, forwarded,
+        )
+        .await?;
+        Ok(WebHistoryAccessWire::Replay(result))
+    } else {
+        session.with_current_publication(&selected, || {
+            let revealed = case_history_authorized_detail(&grant, permit, id)?
+                .ok_or("HTTP history entry is no longer available")?;
+            selected_history_grant(&session, &selected, &proxy)?;
+            Ok(WebHistoryAccessWire::Detail(revealed))
+        })
+    }
+}
+
+#[cfg(test)]
+mod protected_history_ipc_tests {
+    use super::*;
+
+    fn proxy(running: bool) -> WebCtx {
+        WebCtx {
+            proxy_running: AtomicBool::new(running),
+            proxy_port: AtomicU16::new(8080),
+            proxy_handle: Mutex::new(None),
+            ca: Mutex::new(None),
+            shared: Arc::new(ProxyShared {
+                running: AtomicBool::new(running),
+                intercept: AtomicBool::new(false),
+                port: AtomicU16::new(8080),
+                rules: Mutex::new(vec![]),
+                captured: Mutex::new(vec![]),
+                pending: Mutex::new(HashMap::new()),
+                next_id: AtomicU64::new(1),
+                ca: Mutex::new(None),
+                ws: Mutex::new(vec![]),
+            }),
+        }
+    }
+
+    #[test]
+    fn history_access_requires_selected_case_live_consent_and_proxy() {
+        let session = crate::features::shared::session::CaseSessionCtx::default();
+        let none = session.snapshot().unwrap();
+        assert!(selected_history_grant(&session, &none, &proxy(true)).is_err());
+
+        let tmp = tempfile::tempdir().unwrap();
+        let cases = cyberdeck_storage::ArtifactStore::open(&tmp.path().join("cases.db")).unwrap();
+        let selected = session.select(&cases, "scratchpad").unwrap();
+        assert!(selected_history_grant(&session, &selected, &proxy(true)).is_err());
+
+        let grant = session
+            .history_policy
+            .lock()
+            .unwrap()
+            .enable_volatile_capture(
+                "scratchpad",
+                cyberdeck_storage::HistoryRetentionLimits::default(),
+            )
+            .unwrap();
+        assert_eq!(
+            selected_history_grant(&session, &selected, &proxy(true)).unwrap(),
+            grant
+        );
+        assert!(selected_history_grant(&session, &selected, &proxy(false)).is_err());
+
+        // Re-selecting the SAME case invalidates both revision and consent.
+        session.select(&cases, "scratchpad").unwrap();
+        assert!(selected_history_grant(&session, &selected, &proxy(true)).is_err());
+        assert!(session
+            .history_policy
+            .lock()
+            .unwrap()
+            .authorize_grant(&grant)
+            .is_err());
+    }
+
+    #[test]
+    fn native_history_permit_cannot_be_issued_for_missing_entry() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cases = cyberdeck_storage::ArtifactStore::open(&tmp.path().join("cases.db")).unwrap();
+        let session = crate::features::shared::session::CaseSessionCtx::default();
+        let selected = session.select(&cases, "scratchpad").unwrap();
+        let _grant = session
+            .history_policy
+            .lock()
+            .unwrap()
+            .enable_volatile_capture(
+                "scratchpad",
+                cyberdeck_storage::HistoryRetentionLimits::default(),
+            )
+            .unwrap();
+        // No bound captured record exists; a client ID cannot fabricate one.
+        assert!(mint_history_access(&session, &selected, &proxy(true), u64::MAX).is_err());
+        session.clear().unwrap();
+        assert!(mint_history_access(&session, &selected, &proxy(true), u64::MAX).is_err());
+    }
+}
+
+/// One bounded HTTP operation prepared for trusted, native per-target approval.
+/// Raw HTTP and credentials are never written to a case or backend job registry.
+pub(crate) struct PreparedHttpRequest {
+    pub origin: String,
+    pub sockets: Vec<std::net::SocketAddr>,
+    client: reqwest::Client,
+    request: repeater_application::BinaryReplayRequest,
+}
+
+/// Cheap limits are also enforced in the registered shared controller. This
+/// function is not an independent client authorization surface.
+pub(crate) async fn prepare_scoped_http_request(raw: &str) -> Result<PreparedHttpRequest, String> {
+    if raw.len() > 576 * 1024 {
+        return Err("HTTP request exceeds 576 KiB limit".into());
+    }
+    let (method, url, headers, body) = parse_raw_request(raw, "http")?;
+    if body.len() > 512 * 1024 {
+        return Err("HTTP body exceeds 512 KiB limit".into());
+    }
+    let pinned = target_scope::prepare_private_target(&url).await?;
+    Ok(PreparedHttpRequest {
+        origin: pinned.url.origin().ascii_serialization(),
+        sockets: pinned.sockets,
+        client: pinned.client,
+        request: repeater_application::BinaryReplayRequest {
+            method,
+            url,
+            headers,
+            body: body.into_bytes(),
+        },
+    })
+}
+
+/// Call only after the native case/target consent dialog has approved these
+/// exact pinned addresses. No new DNS resolution or redirect can occur.
+pub(crate) async fn send_scoped_http_request(
+    prepared: PreparedHttpRequest,
+) -> Result<HttpResponseWire, String> {
+    repeater_application::send_binary_with_client(&prepared.client, prepared.request).await
 }
 
 /// Send an editable raw request using the native Repeater service.
@@ -223,6 +479,39 @@ async fn authorize_assessment(
     session.ensure(selected)
 }
 
+/// The operator approves both the origin and the concrete pinned IPs.
+/// No backend HTTP request is made until this separate native confirmation.
+async fn authorize_pinned_assessment(
+    app: tauri::AppHandle,
+    session: &crate::features::shared::session::CaseSessionCtx,
+    selected: &crate::features::shared::session::CaseSessionWire,
+    pinned: &target_scope::PinnedTarget,
+) -> Result<(), String> {
+    use tauri_plugin_dialog::{DialogExt, MessageDialogButtons};
+    let origin = pinned.url.origin().ascii_serialization();
+    let destinations = pinned
+        .sockets
+        .iter()
+        .map(|socket| socket.ip().to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let accepted = tauri::async_runtime::spawn_blocking(move || {
+        app.dialog()
+            .message(format!(
+                "Authorize this Web security assessment of {origin} through pinned address(es) {destinations}?                  Only approve hosts you own or are explicitly permitted to test."
+            ))
+            .title("Authorize pinned Web target")
+            .buttons(MessageDialogButtons::YesNo)
+            .blocking_show()
+    })
+    .await
+    .map_err(|_| "Web assessment confirmation unavailable")?;
+    if !accepted {
+        return Err("Web assessment rejected by operator".into());
+    }
+    session.ensure(selected)
+}
+
 async fn execute_case_scoped_assessment<T>(
     session: &crate::features::shared::session::CaseSessionCtx,
     selected: &crate::features::shared::session::CaseSessionWire,
@@ -258,14 +547,14 @@ pub async fn web_scan(
     session: State<'_, crate::features::shared::session::CaseSessionCtx>,
 ) -> Result<Vec<Finding>, String> {
     scan_domain::require_authorization(authorized)?;
-    let url = validate_assessment_target(&target_url)?;
     let selected = session.selected()?;
-    authorize_assessment(app, &session, &selected, &url).await?;
-    let client = http_client();
+    let pinned = target_scope::prepare_private_target(&target_url).await?;
+    session.ensure(&selected)?;
+    authorize_pinned_assessment(app, &session, &selected, &pinned).await?;
     execute_case_scoped_assessment(
         &session,
         &selected,
-        scan_application::run_scan(&client, url.to_string(), true),
+        scan_application::run_scan(&pinned.client, pinned.url.to_string(), true),
     )
     .await
 }
@@ -279,14 +568,14 @@ pub async fn spider_scan(
     session: State<'_, crate::features::shared::session::CaseSessionCtx>,
 ) -> Result<Vec<String>, String> {
     scan_domain::require_authorization(authorized)?;
-    let url = validate_assessment_target(&target_url)?;
     let selected = session.selected()?;
-    authorize_assessment(app, &session, &selected, &url).await?;
-    let client = http_client();
+    let pinned = target_scope::prepare_private_target(&target_url).await?;
+    session.ensure(&selected)?;
+    authorize_pinned_assessment(app, &session, &selected, &pinned).await?;
     execute_case_scoped_assessment(
         &session,
         &selected,
-        crawl_application::run_spider(&client, url.to_string(), max_depth, true),
+        crawl_application::run_spider(&pinned.client, pinned.url.to_string(), max_depth, true),
     )
     .await
 }

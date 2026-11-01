@@ -23,11 +23,13 @@ pub fn validate_mode(engine: &str, mode: &str, mask: Option<&str>) -> Result<(),
         return Err("engine attacks support wordlist and mask modes this arc".into());
     }
     match engine {
-        "hashcat" if mode == "mask" && mask.is_none_or(str::is_empty) =>
-            Err("mask attack needs a mask pattern".into()),
+        "hashcat" if mode == "mask" && mask.is_none_or(str::is_empty) => {
+            Err("mask attack needs a mask pattern".into())
+        }
         "hashcat" => Ok(()),
-        "john" if mode == "mask" =>
-            Err("john mask mode arrives with the mask engine arc; use wordlist or native".into()),
+        "john" if mode == "mask" => {
+            Err("john mask mode arrives with the mask engine arc; use wordlist or native".into())
+        }
         "john" => Ok(()),
         other => Err(format!("unknown engine: {other}")),
     }

@@ -33,7 +33,7 @@ function binaryResponseBytes(reply: HttpResponseWire): Uint8Array {
 export function RepeaterView() {
   const desktop = isDesktop();
   const { repeaterHandoff } = useWebWorkflow();
-  const { caseId } = useWorkbenchCase();
+  const { caseId, caseSession } = useWorkbenchCase();
   const caseRef = useRef(caseId);
   caseRef.current = caseId;
   const inFlightRevision = useRef(0);
@@ -50,7 +50,7 @@ export function RepeaterView() {
     inFlightRevision.current += 1;
     setTabs((previous) => previous.map((tab) => ({ ...tab, response: null, error: null })));
     setBusy(false);
-  }, [caseId]);
+  }, [caseId, caseSession.revision]);
 
   useEffect(() => {
     if (!repeaterHandoff || repeaterHandoff.id === lastHandoff.current) return;

@@ -1,6 +1,6 @@
 //! Native CPU attack use cases. No Tauri commands or external processes.
-use super::masks::{mask_slots, plan_mask, Slot, MAX_CANDIDATES};
 use super::attack_domain::AttackMatch;
+use super::masks::{mask_slots, plan_mask, Slot, MAX_CANDIDATES};
 use super::rules::rule_variants;
 
 const MAX_REPORTED_MATCHES: usize = 100;
@@ -49,8 +49,6 @@ impl AttackSession {
         true
     }
 }
-
-
 
 /// Stream built-in rule candidates through a bounded multi-worker queue.
 /// A single atomic quota covers every worker, not an allocation per partition.
@@ -105,7 +103,9 @@ pub(super) fn run_rules(
                             stop.store(true, Ordering::Relaxed);
                             break 'work;
                         }
-                        let id = word_index.saturating_mul(1000).saturating_add(variant_index as u64);
+                        let id = word_index
+                            .saturating_mul(1000)
+                            .saturating_add(variant_index as u64);
                         let before = session.matches.len();
                         if !session.test(algo, &candidate, id) {
                             stop.store(true, Ordering::Relaxed);
@@ -162,7 +162,8 @@ pub(super) fn run_rules(
             }
         }
         drop(sender);
-        let partials = handles.into_iter()
+        let partials = handles
+            .into_iter()
             .map(|handle| handle.join().unwrap_or_else(|_| AttackSession::new(target)))
             .collect::<Vec<_>>();
         (partials, read_error)
@@ -332,9 +333,9 @@ fn run_mask_odometer(
     }
 }
 
-use std::time::Instant;
 use super::attack_domain::AttackResultWire;
 use super::masks::mask_expansions;
+use std::time::Instant;
 
 const SUPPORTED: &[&str] = &["md5", "sha1", "sha256", "sha512"];
 
@@ -404,7 +405,11 @@ pub fn rules_over_lines(
     ))
 }
 
-pub(super) fn mask_attack(algo: &str, target_hash: &str, mask: &str) -> Result<AttackResultWire, String> {
+pub(super) fn mask_attack(
+    algo: &str,
+    target_hash: &str,
+    mask: &str,
+) -> Result<AttackResultWire, String> {
     let target = guard(algo, target_hash)?;
     let started = Instant::now();
     let session = run_mask(algo, &target, mask)?;
@@ -520,8 +525,6 @@ pub fn combinator_over_bytes(
     ))
 }
 
-
-
 #[cfg(test)]
 mod streaming_tests {
     use super::*;
@@ -529,7 +532,9 @@ mod streaming_tests {
     #[test]
     fn rule_stream_preserves_legacy_candidate_generation() {
         let target = hex::encode(cyberdeck_crypto::apply_op("sha256", b"Hello123", None).unwrap());
-        let words = ["hello", "world"].into_iter().map(|word| Ok(word.to_owned()));
+        let words = ["hello", "world"]
+            .into_iter()
+            .map(|word| Ok(word.to_owned()));
         let result = rules_over_lines("sha256", &target, words).unwrap();
         assert_eq!(result.matches.len(), 1);
         assert_eq!(result.matches[0].password, "Hello123");
@@ -542,7 +547,8 @@ mod streaming_tests {
         let words = vec![
             Ok("hello".to_owned()),
             Err("injected wordlist read error".to_owned()),
-        ].into_iter();
+        ]
+        .into_iter();
         let failure = rules_over_lines("md5", &target, words).unwrap_err();
         assert!(failure.contains("injected wordlist read error"));
     }

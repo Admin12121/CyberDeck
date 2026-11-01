@@ -1,5 +1,7 @@
 "use client";
 import { useEffect, useRef, useState } from "react";
+// Web-native crawler job UI pending integration.
+
 import { Globe, Play, PlayCircle, Square } from "lucide-react";
 import { Chip, EmptyState, Pane, Select, TextInput, ToolButton } from "@ds/panes";
 import {
@@ -23,13 +25,15 @@ import {
 import { buildSitesTree, filterCaptured, useTarget } from "./controller";
 import { makeGetDraft, useWebWorkflow } from "./WebWorkflow";
 import { useWorkbench, useWorkbenchCase } from "@state/workbench";
+import { useWorkspaceDraft } from "@state/workspace-sessions";
+import { cancelWebAssessment, startWebAssessment, webAssessmentStatus, waitForWebAssessment, type WebAssessmentJob } from "./controller/assessment-jobs";
 
 // ----------------------------------------------------------------- spider ---
 
 export function SpiderView() {
   const desktop = isDesktop();
   const wb = useWorkbench();
-  const { caseId } = useWorkbenchCase();
+  const { caseId, caseSession } = useWorkbenchCase();
   const caseRef = useRef(caseId);
   caseRef.current = caseId;
   const crawlRevision = useRef(0);
@@ -38,33 +42,73 @@ export function SpiderView() {
     setLinks([]);
     setBusy(false);
     setError(null);
-  }, [caseId]);
+  }, [caseId, caseSession.revision]);
   const { target, setTarget, normalized, scanTarget, draftInRepeater } = useWebWorkflow();
   const [depth, setDepth] = useState("2");
+  const [jobId, setJobId] = useWorkspaceDraft<number | null>(caseId, "web", "spider-job", null);
+  const [job, setJob] = useState<WebAssessmentJob | null>(null);
   const [links, setLinks] = useState<string[]>([]);
   const [busy, setBusy] = useState(false);
   const [authorized, setAuthorized] = useState(false);
   useEffect(() => { setAuthorized(false); }, [normalized]);
   const [error, setError] = useState<string | null>(null);
 
+  useEffect(() => {
+    if (!desktop || jobId === null) return;
+    let disposed = false;
+    let inFlight = false;
+    const poll = async () => {
+      if (disposed || inFlight) return;
+      inFlight = true;
+      try {
+        const current = await webAssessmentStatus(jobId);
+        if (!disposed) {
+          setJob(current);
+          if (current.state === "completed") setLinks(current.urls);
+          if (current.state === "cancelled") setLinks([]);
+        }
+      } catch (cause) {
+        if (!disposed) setError(String(cause));
+      } finally { inFlight = false; }
+    };
+    void poll();
+    const timer = setInterval(() => void poll(), 650);
+    return () => { disposed = true; clearInterval(timer); };
+  }, [desktop, jobId, caseId, caseSession.revision]);
+
   const crawl = async () => {
-    if (busy || !normalized || !authorized) return;
+    if (busy || job?.state === "running" || !normalized || !authorized) return;
     const revision = ++crawlRevision.current;
-    const startingCase = caseId;
-    const target = normalized;
-    setBusy(true);
-    setError(null);
-    setLinks([]);
+    const selectedCase = caseId;
+    const requestedTarget = normalized;
+    const requestedDepth = Math.max(1, Math.min(4, Number.parseInt(depth, 10) || 2));
+    setBusy(true); setError(null); setLinks([]); setJob(null);
     try {
-      const found = await wb.trackOperation("Web spider", () => spiderScan(target, Math.max(1, Math.min(4, Number.parseInt(depth, 10) || 2)), authorized));
-      if (revision === crawlRevision.current && caseRef.current === startingCase) setLinks(found);
-    } catch (err) {
-      if (revision === crawlRevision.current && caseRef.current === startingCase) {
-        setError(err instanceof Error ? err.message : String(err));
+      const result = await wb.trackOperation("Web spider", async () => {
+        const id = await startWebAssessment("spider", requestedTarget, true, requestedDepth);
+        if (crawlRevision.current === revision) setJobId(id);
+        return waitForWebAssessment(id, (current) => {
+          if (crawlRevision.current === revision && caseRef.current === selectedCase) {
+            setJob(current);
+            if (current.state === "completed") setLinks(current.urls);
+          }
+        });
+      });
+      if (crawlRevision.current === revision && caseRef.current === selectedCase) {
+        setJob(result);
+        if (result.state === "completed") setLinks(result.urls);
+        if (result.state === "failed") setError(result.error ?? "Spider failed");
+        if (result.state === "cancelled") setError("Spider cancelled");
       }
-    } finally {
-      if (revision === crawlRevision.current) setBusy(false);
-    }
+    } catch (cause) {
+      if (crawlRevision.current === revision) setError(String(cause));
+    } finally { if (crawlRevision.current === revision) setBusy(false); }
+  };
+
+  const stop = async () => {
+    if (jobId === null) return;
+    try { setJob(await cancelWebAssessment(jobId)); setLinks([]); }
+    catch (cause) { setError(String(cause)); }
   };
 
   return (
@@ -84,15 +128,18 @@ export function SpiderView() {
           ]}
           ariaLabel="Spider depth"
         />
-        <ToolButton tone="primary" onClick={() => void crawl()} disabled={busy || !desktop || !normalized || !authorized} title={desktop ? "Native scope-checked same-host crawl, private/loopback literal IP only" : "Spidering requires the desktop runtime"}>
-          <Play size={11} /> {busy ? "crawling…" : "Start spider"}
-        </ToolButton>
-        <span className="ml-auto font-mono text-[10px] text-fg-muted">{links.length} urls</span>
+        {job?.state === "running" && jobId !== null
+          ? <ToolButton tone="danger" onClick={() => void stop()}><Square size={11} /> Stop</ToolButton>
+          : <ToolButton tone="primary" disabled={busy || !desktop || !normalized || !authorized}
+              onClick={() => void crawl()}><Play size={11} /> {busy ? "Authorizing…" : "Start"}</ToolButton>}
+        <span className="ml-auto font-mono text-[10px] text-fg-muted">
+          {job ? `${job.state} · ${job.processed} pages · ${job.discovered} URLs` : `${links.length} URLs`}
+        </span>
       </div>
       {error ? <div className="border-b border-err/50 bg-err/10 px-2 py-1 font-mono text-[10px] text-err">{error}</div> : null}
       <label className="flex items-center gap-2 border-b border-line bg-panel px-3 py-2 text-xs text-fg-dim">
         <input type="checkbox" checked={authorized} onChange={(e) => setAuthorized(e.target.checked)} className="accent-[var(--color-orange)]" />
-        I confirm I own this target or have written permission. The native backend also requires a selected case, literal private/loopback IP target, and one-request OS confirmation. DNS hostnames are not enabled until address pinning is verified.
+        Authorized target · native approval required
       </label>
       <Pane title="Discovered URLs" className="min-h-0 flex-1">
         {links.length === 0 ? (

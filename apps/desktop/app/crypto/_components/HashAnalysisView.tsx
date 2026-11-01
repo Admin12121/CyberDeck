@@ -1,8 +1,11 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { Accordion, AccordionItem, AccordionTrigger, AccordionPanel } from "@/components/ui/accordion";
+import { VerifyAlgorithmCombobox, VERIFY_ALGORITHMS, type VerifyAlgorithmId } from "./VerifyAlgorithmCombobox";
+import { verifyDigestOutput } from "./verify-output";
 import { FileUp, Info, Link2, Play } from "lucide-react";
-import { Chip, Pane, Resizer, Select, TextInput, ToolButton } from "@ds/panes";
+import { Chip, Pane, Resizer, TextInput, ToolButton } from "@ds/panes";
 import { useWorkbenchCase } from "@state/workbench";
 import { cryptoOp, kdfVerify } from "@lib/ipc";
 import { detectHashFormats } from "./model/hash";
@@ -14,25 +17,27 @@ import {
 const MAX_HASH_INPUT_CHARS = 2048;
 const CANDIDATE_PAGE_SIZE = 12;
 
-const VERIFY_OPTIONS = [
-  { value: "md5", label: "MD5" },
-  { value: "sha1", label: "SHA-1" },
-  { value: "sha256", label: "SHA-256" },
-  { value: "sha512", label: "SHA-512" },
-  { value: "ntlm", label: "NTLM" },
-  { value: "sha3_256", label: "SHA3-256" },
-];
-const VERIFY_HEX_LENGTH: Record<string, number> = {
-  md5: 32, sha1: 40, sha256: 64, sha512: 128, ntlm: 32, sha3_256: 64,
-};
+// Hash drafts are transient, case-isolated and never written to disk.
+// Cache only operator-pasted digests, NEVER verification candidates or passwords.
+const hashDrafts = new Map<string, string>();
+function rememberedHash(caseId: string): string {
+  return typeof window === "undefined" ? "" : hashDrafts.get(caseId) ?? "";
+}
+function keepHash(caseId: string, value: string) {
+  if (typeof window === "undefined") return;
+  if (!hashDrafts.has(caseId) && hashDrafts.size >= 12) hashDrafts.delete(hashDrafts.keys().next().value!);
+  hashDrafts.set(caseId, value);
+}
 
 export function HashAnalysisView() {
   const { caseId } = useWorkbenchCase();
   const [operationsWidth, setOperationsWidth] = useState(408);
   const [input, setInput] = useState("");
+  const hashFileRef = useRef<HTMLInputElement>(null);
+  const [hashImportError, setHashImportError] = useState<string | null>(null);
   const [visibleCandidates, setVisibleCandidates] = useState(CANDIDATE_PAGE_SIZE);
   const [candidate, setCandidate] = useState("");
-  const [algorithm, setAlgorithm] = useState("sha256");
+  const [algorithm, setAlgorithm] = useState<VerifyAlgorithmId>("sha256");
   const [verdict, setVerdict] = useState<"match" | "mismatch" | null>(null);
   const [verifying, setVerifying] = useState(false);
   const [verifyError, setVerifyError] = useState<string | null>(null);
@@ -45,13 +50,36 @@ export function HashAnalysisView() {
   };
   const hash = input.trim();
   const compatibleShape = isSha256WordlistTarget(hash);
-  const kdfFormat = /^\$(?:2[abxy]\$|argon2(?:id|i|d)\$|y\$|7\$)/.test(hash);
+  const kdfFormat = /^\$(?:2[abxy]\$|argon2(?:id|i|d)\$|y\$|7\$|scrypt\$|pbkdf2(?:-sha256|-sha512)?\$)/.test(hash);
 
   useEffect(() => {
+    setInput(rememberedHash(caseId));
     setCandidate("");
+    setHashImportError(null);
     setVerdict(null);
     setVerifyError(null);
   }, [caseId]);
+
+  const importHashFile = async (file: File | undefined) => {
+    if (!file) return;
+    setHashImportError(null);
+    try {
+      if (file.size > 8192) throw new Error("Choose a small text file (8 KiB maximum).");
+      const text = (await file.text()).replace(/^\uFEFF/, "").trim();
+      const lines = text.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+      if (lines.length !== 1) throw new Error("The file must contain exactly one hash.");
+      const line = lines[0];
+      const shaSum = /^([0-9a-fA-F]{32,40}|[0-9a-fA-F]{56,64}|[0-9a-fA-F]{96,128})\s+\*?\S.+$/.exec(line);
+      const value = shaSum ? shaSum[1] : line;
+      if (value.length > MAX_HASH_INPUT_CHARS) throw new Error("Hash exceeds the 2,048-character input limit.");
+      setInput(value);
+      keepHash(caseId, value);
+      setVerdict(null);
+      setVerifyError(null);
+    } catch (reason) {
+      setHashImportError(reason instanceof Error ? reason.message : String(reason));
+    }
+  };
 
   const verify = async () => {
     if (verifying) return;
@@ -65,11 +93,11 @@ export function HashAnalysisView() {
         setVerdict(matched ? "match" : "mismatch");
       } else {
         if (!/^[0-9a-f]+$/i.test(hash)) throw new Error("Expected a hexadecimal digest.");
-        if (hash.length !== VERIFY_HEX_LENGTH[algorithm]) {
+        if (hash.length !== VERIFY_ALGORITHMS.find((op) => op.id === algorithm)!.hexLength) {
           throw new Error("Digest length does not match the selected algorithm.");
         }
         const output = await cryptoOp(algorithm, new TextEncoder().encode(candidate));
-        setVerdict(output.output_hex.toLowerCase() === hash.toLowerCase() ? "match" : "mismatch");
+        setVerdict(verifyDigestOutput(algorithm, hash, output) ? "match" : "mismatch");
       }
     } catch (reason) {
       setVerifyError(reason instanceof Error ? reason.message : String(reason));
@@ -86,7 +114,10 @@ export function HashAnalysisView() {
             <textarea
               value={input}
               onChange={(event) => {
-                setInput(event.target.value.slice(0, MAX_HASH_INPUT_CHARS));
+                const value = event.target.value.slice(0, MAX_HASH_INPUT_CHARS);
+                setInput(value);
+                keepHash(caseId, value);
+                setHashImportError(null);
                 setVerdict(null);
                 setVerifyError(null);
               }}
@@ -97,7 +128,15 @@ export function HashAnalysisView() {
               className="h-28 max-h-28 min-h-28 w-full resize-none overflow-y-auto rounded-sm border border-line bg-app p-3 font-mono text-xs leading-relaxed text-fg outline-none ring-0 focus:border-line focus:outline-none focus:ring-0 focus-visible:border-line focus-visible:outline-none focus-visible:ring-0"
             />
             <div className="mt-2 flex flex-wrap items-center gap-2">
-              <ToolButton disabled title="Hash file import is not available in this screen">
+              <input ref={hashFileRef} type="file" accept=".txt,.hash,.md5,.sha1,.sha256,.sha512,text/plain"
+                aria-label="Choose a hash text file" className="sr-only"
+                onChange={(event) => {
+                  const file = event.currentTarget.files?.[0];
+                  if (file) void importHashFile(file);
+                  event.currentTarget.value = "";
+                }} />
+              <ToolButton title="Import a single hash from a local text file (8 KiB maximum)"
+                onClick={() => hashFileRef.current?.click()}>
                 <FileUp size={13} aria-hidden="true" /> Import
               </ToolButton>
               <ToolButton disabled title="Forensic handoff will be enabled after case integration">
@@ -105,6 +144,7 @@ export function HashAnalysisView() {
               </ToolButton>
               <span className="ml-auto font-mono text-[11px] text-fg-muted">{hash.length}/{MAX_HASH_INPUT_CHARS} characters</span>
             </div>
+            {hashImportError ? <p role="alert" className="mt-2 text-[11px] text-err">{hashImportError}</p> : null}
           </Pane>
           <Pane title="Detected Candidates" className={hash ? "h-[40%] min-h-44 max-h-[50%] shrink-0" : "h-44 shrink-0"} bodyClassName="overflow-hidden"
             actions={
@@ -173,33 +213,36 @@ export function HashAnalysisView() {
         />
         <Pane title="Operations" className="shrink-0" style={{ width: operationsWidth }}
           bodyClassName="overflow-y-auto">
-          <section aria-label="Verify candidate" className="space-y-3 border-b border-line px-3 py-3">
-            <div className="text-xs font-semibold text-fg">Verify</div>
-            <div className="space-y-2">
-              <label className="block space-y-1">
-                <span className="text-[11px] text-fg-muted">Algorithm</span>
-                <Select value={algorithm} ariaLabel="Verification algorithm"
-                  onChange={(value) => {
-                    setAlgorithm(value);
-                    setVerdict(null);
-                  }} options={VERIFY_OPTIONS} className="w-full" />
-              </label>
-              <label className="block space-y-1">
-                <span className="text-[11px] text-fg-muted">Candidate</span>
-                <TextInput value={candidate} ariaLabel="Candidate password" placeholder="Enter candidate"
-                  onChange={(value) => { setCandidate(value); setVerdict(null); }}
-                  className="w-full" />
-              </label>
-              <ToolButton tone="primary" onClick={() => void verify()}
-                disabled={verifying || !hash || !candidate.length}
-                title="Verify the entered candidate against the selected digest or native KDF format">
-                <Play size={13} aria-hidden="true" /> {verifying ? "Checking…" : "Verify"}
-              </ToolButton>
-              {verdict === "match" ? <Chip tone="ok">Match</Chip> : null}
-              {verdict === "mismatch" ? <Chip tone="err">No match</Chip> : null}
-              {verifyError ? <p role="alert" className="text-[11px] text-err">{verifyError}</p> : null}
-            </div>
-          </section>
+          <Accordion defaultValue={[]} className="border-b border-line">
+            <AccordionItem value="verify" className="border-none">
+              <AccordionTrigger className="w-full rounded-none px-3 py-2.5 text-xs font-semibold text-fg hover:bg-app/40">
+                Verify
+              </AccordionTrigger>
+              <AccordionPanel className="space-y-3 px-3 pb-3">
+                <label className="block space-y-1">
+                  <span className="text-[11px] text-fg-muted">Algorithm · searchable</span>
+                  <VerifyAlgorithmCombobox value={algorithm}
+                    onChange={(value) => { setAlgorithm(value); setVerdict(null); }} />
+                </label>
+                <label className="block space-y-1">
+                  <span className="text-[11px] text-fg-muted">Candidate</span>
+                  <TextInput value={candidate} ariaLabel="Candidate password" placeholder="Enter candidate"
+                    onChange={(value) => { setCandidate(value); setVerdict(null); }} className="w-full" />
+                </label>
+                <ToolButton tone="primary" onClick={() => void verify()}
+                  disabled={verifying || !hash || !candidate.length}
+                  title="Verify one candidate against the selected digest or recognized native KDF">
+                  <Play size={13} aria-hidden="true" /> {verifying ? "Checking…" : "Verify"}
+                </ToolButton>
+                {verdict === "match" ? <Chip tone="ok">Match</Chip> : null}
+                {verdict === "mismatch" ? <Chip tone="err">No match</Chip> : null}
+                {verifyError ? <p role="alert" className="text-[11px] text-err">{verifyError}</p> : null}
+                <p className="text-[11px] text-fg-muted">
+                  Structured bcrypt, Argon2, scrypt, yescrypt and PBKDF2 formats use native KDF verification.
+                </p>
+              </AccordionPanel>
+            </AccordionItem>
+          </Accordion>
           <NativeRecoveryControls />
           <NativeRecoveryDevices />
         </Pane>

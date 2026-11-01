@@ -1,190 +1,144 @@
 "use client";
 import { useEffect, useRef, useState } from "react";
-import { Globe, Play, PlayCircle, Square } from "lucide-react";
-import { Chip, EmptyState, Pane, Resizer, Select, TextInput, ToolButton } from "@ds/panes";
-import {
-  caseFindingsAdd,
-  engineScan,
-  httpSend,
-  isDesktop,
-  proxyHistory,
-  proxyStart,
-  proxyStatus,
-  proxyStop,
-  spiderScan,
-  webEnginesDetect,
-  webScan,
-  type CapturedRequestWire,
-  type EngineScanResultWire,
-  type HttpResponseWire,
-  type ProxyStatusWire,
-  type WebEngineStatusWire,
-  type WebFindingWire,
-} from "@lib/ipc";
-import { buildSitesTree, filterCaptured, useTarget } from "./controller";
-import { useWorkbench, useWorkbenchCase } from "@state/workbench";
+import { Play, Square } from "lucide-react";
+import { Chip, EmptyState, Pane, TextInput, ToolButton } from "@ds/panes";
+import { caseFindingsAdd, isDesktop } from "@lib/ipc";
 import { useWebWorkflow } from "./WebWorkflow";
-
-// ---------------------------------------------------------------- scanner ---
+import { useWorkbench, useWorkbenchCase } from "@state/workbench";
+import { useWorkspaceDraft } from "@state/workspace-sessions";
+import {
+  cancelWebAssessment, startWebAssessment, webAssessmentStatus, waitForWebAssessment,
+  type WebAssessmentJob,
+} from "./controller/assessment-jobs";
 
 export function ScannerView() {
   const desktop = isDesktop();
   const wb = useWorkbench();
-  const { caseId } = useWorkbenchCase();
-  const activeContext = useRef({ caseId, target: "" });
-  const scanRevision = useRef(0);
-  const engineRevision = useRef(0);
+  const { caseId, caseSession } = useWorkbenchCase();
   const { target, setTarget, normalized } = useWebWorkflow();
-  const [findings, setFindings] = useState<WebFindingWire[]>([]);
-  const [busy, setBusy] = useState(false);
-  const [savedCount, setSavedCount] = useState(0);
+  const [jobId, setJobId] = useWorkspaceDraft<number | null>(caseId, "web", "scanner-job", null);
+  const [job, setJob] = useState<WebAssessmentJob | null>(null);
   const [authorized, setAuthorized] = useState(false);
-  useEffect(() => { setAuthorized(false); }, [normalized]);
+  const [busy, setBusy] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [savedCount, setSavedCount] = useState(0);
   const [error, setError] = useState<string | null>(null);
-  const [engines, setEngines] = useState<WebEngineStatusWire[]>([]);
-  const [engineOut, setEngineOut] = useState<EngineScanResultWire | null>(null);
-  const [engineBusy, setEngineBusy] = useState<string | null>(null);
-  const [engineWidth, setEngineWidth] = useState(384);
-  activeContext.current = { caseId, target: normalized };
-  useEffect(() => {
-    scanRevision.current += 1;
-    engineRevision.current += 1;
-    setFindings([]);
-    setEngineOut(null);
-    setSavedCount(0);
-    setBusy(false);
-    setEngineBusy(null);
-    setError(null);
-  }, [caseId, normalized]);
+  const context = useRef({ caseId, target: normalized, revision: 0 });
+  context.current.caseId = caseId;
+  context.current.target = normalized;
+  const running = busy || job?.state === "running";
+  const findings = job?.state === "completed" ? job.findings : [];
 
   useEffect(() => {
-    if (!desktop) return;
-    webEnginesDetect().then(setEngines).catch(() => setEngines([]));
-  }, [desktop]);
+    context.current.revision++;
+    setJob(null); setAuthorized(false); setSavedCount(0);
+    setBusy(false); setError(null);
+  }, [caseId, caseSession.revision, normalized]);
 
-  const scan = async () => {
-    if (busy || !normalized || !authorized) return;
-    const revision = ++scanRevision.current;
-    const selectedCase = caseId;
-    const selectedTarget = normalized;
-    const current = () => revision === scanRevision.current &&
-      activeContext.current.caseId === selectedCase && activeContext.current.target === selectedTarget;
-    setBusy(true);
-    setError(null);
-    setFindings([]);
-    setSavedCount(0);
+  useEffect(() => {
+    if (!desktop || jobId === null) return;
+    let disposed = false;
+    let inFlight = false;
+    const read = async () => {
+      if (disposed || inFlight) return;
+      inFlight = true;
+      try {
+        const status = await webAssessmentStatus(jobId);
+        if (!disposed) setJob(status);
+      } catch (cause) {
+        if (!disposed) { setJob(null); setError(String(cause)); }
+      } finally { inFlight = false; }
+    };
+    void read();
+    const timer = setInterval(() => void read(), 650);
+    return () => { disposed = true; clearInterval(timer); };
+  }, [desktop, jobId, caseId, caseSession.revision]);
+
+  const start = async () => {
+    if (!desktop || running || !normalized || !authorized) return;
+    const stamp = { ...context.current };
+    setBusy(true); setSavedCount(0); setError(null); setJob(null);
     try {
-      const found = await wb.trackOperation("Web scan", () => webScan(selectedTarget, authorized));
-      if (!current()) return;
-      setFindings(found);
-      if (found.length > 0) {
-        try {
-          const saved = await caseFindingsAdd(selectedCase, "web.native", found.slice(0, 128).map((f) => ({
-            title: f.title.slice(0, 200),
-            severity: ["info", "low", "medium", "high", "critical"].includes(f.severity)
-              ? f.severity as "info" | "low" | "medium" | "high" | "critical" : "info",
-            details: `Target: ${selectedTarget}\n${f.detail}\nEvidence: ${f.evidence}`.slice(0, 8192),
-          })));
-          if (current()) setSavedCount(saved);
-        } catch (error) { if (current()) setError(`Scan completed, but findings were not saved: ${String(error)}`); }
+      // The Jobs dock monitors the actual backend operation until it reaches
+      // a terminal state. Navigation does not stop the native worker.
+      const completed = await wb.trackOperation("Web scanner", async () => {
+        const id = await startWebAssessment("scanner", stamp.target, true);
+        if (context.current.revision === stamp.revision) setJobId(id);
+        return waitForWebAssessment(id, (current) => {
+          if (context.current.revision === stamp.revision &&
+              context.current.caseId === stamp.caseId) setJob(current);
+        });
+      });
+      if (context.current.revision === stamp.revision &&
+          context.current.caseId === stamp.caseId) {
+        setJob(completed);
+        if (completed.state === "failed") setError(completed.error ?? "Web scan failed");
+        if (completed.state === "cancelled") setError("Scan cancelled");
       }
-    } catch (err) {
-      if (current()) setError(err instanceof Error ? err.message : String(err));
-    } finally {
-      if (revision === scanRevision.current) setBusy(false);
-    }
+    } catch (cause) {
+      if (context.current.revision === stamp.revision) setError(String(cause));
+    } finally { if (context.current.revision === stamp.revision) setBusy(false); }
   };
-
-  const runEngine = async (tool: string) => {
-    if (engineBusy || !authorized || !normalized) return;
-    const revision = ++engineRevision.current;
+  const stop = async () => {
+    if (jobId === null) return;
+    try { setJob(await cancelWebAssessment(jobId)); }
+    catch (cause) { setError(String(cause)); }
+  };
+  const save = async () => {
+    if (saving || !job || job.state !== "completed" || !findings.length ||
+        caseId === "scratchpad") return;
     const selectedCase = caseId;
-    const selectedTarget = normalized;
-    const current = () => revision === engineRevision.current &&
-      activeContext.current.caseId === selectedCase && activeContext.current.target === selectedTarget;
-    setEngineBusy(tool);
-    setEngineOut(null);
+    const selectedJob = job.job_id;
+    setSaving(true);
     try {
-      const output = await wb.trackOperation(`Engine: ${tool}`, () => engineScan(tool, selectedTarget, authorized));
-      if (current()) setEngineOut(output);
-    } catch (err) {
-      if (current()) setError(err instanceof Error ? err.message : String(err));
-    } finally {
-      if (revision === engineRevision.current) setEngineBusy(null);
-    }
+      const current = await webAssessmentStatus(selectedJob);
+      if (current.state !== "completed") throw new Error("Scan result is no longer available");
+      if (context.current.caseId !== selectedCase) return;
+      const saved = await caseFindingsAdd(selectedCase, "web.native", current.findings.slice(0, 128).map((item) => ({
+        title: item.title.slice(0, 200),
+        severity: (["info", "low", "medium", "high", "critical"].includes(item.severity)
+          ? item.severity : "info") as "info" | "low" | "medium" | "high" | "critical",
+        details: `Target: ${normalized}\n${item.detail}\nEvidence: ${item.evidence}`.slice(0, 8192),
+      })));
+      if (context.current.caseId === selectedCase) setSavedCount(saved);
+    } catch (cause) { setError(String(cause)); }
+    finally { setSaving(false); }
   };
-
-  const severityTone = (s: string) => (s === "high" ? "err" : s === "medium" ? "orange" : "muted");
-
-  return (
-    <div className="flex h-full min-h-0 flex-col">
-      <div className="cd-workspace-toolbar shrink-0 items-center gap-2  px-2">
-        <span className="font-mono text-[10px] uppercase text-fg-muted">target</span>
-        <TextInput value={target} onChange={setTarget} placeholder="http://127.0.0.1:3000" ariaLabel="Scan target" className="w-72" />
-        <ToolButton tone="primary" onClick={() => void scan()} disabled={busy || !desktop || !normalized || !authorized} title={desktop ? "Native scope-checked review of private/loopback IP targets; OS approval is required" : "Scanning requires the desktop runtime"}>
-          <Play size={11} /> {busy ? "scanning…" : "Native scan"}
-        </ToolButton>
-        <span className="ml-auto font-mono text-[10px] text-fg-muted">{findings.length} findings · {savedCount} saved to case</span>
-      </div>
-      {error ? <div className="border-b border-err/50 bg-err/10 px-2 py-1 font-mono text-[10px] text-err">{error}</div> : null}
-      <label className="flex items-center gap-2 border-b border-line bg-panel px-3 py-2 text-xs text-fg-dim">
-        <input type="checkbox" checked={authorized} onChange={(e) => setAuthorized(e.target.checked)} className="accent-[var(--color-orange)]" />
-        I confirm I own this target or have written permission. The native backend also requires a selected case, literal private/loopback IP target, and one-request OS confirmation. DNS hostnames are not enabled until address pinning is verified.
-      </label>
-      <div className="flex min-h-0 flex-1 gap-px bg-line">
-        <Pane title="Findings" className="min-w-0 flex-1">
-          {findings.length === 0 ? (
-            <EmptyState title={busy ? "Scanning…" : "No findings yet"} detail="Set a target and run the native scan: reachable paths, security headers, banner disclosure." badge="scanner" />
-          ) : (
-            <table className="data-table">
-              <thead>
-                <tr>
-                  <th className="w-20">Severity</th>
-                  <th>Finding</th>
-                  <th>Detail</th>
-                  <th className="w-40">Evidence</th>
-                </tr>
-              </thead>
-              <tbody>
-                {findings.map((f, i) => (
-                  <tr key={i}>
-                    <td><Chip tone={severityTone(f.severity)}>{f.severity}</Chip></td>
-                    <td className="text-fg">{f.title}</td>
-                    <td className="text-fg-dim">{f.detail}</td>
-                    <td className="truncate text-fg-muted">{f.evidence}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          )}
-        </Pane>
-        <Resizer direction="horizontal" flip ariaLabel="Resize engine bay" value={engineWidth} onChange={setEngineWidth} min={280} max={560} />
-        <div className="flex shrink-0 flex-col gap-px bg-line" style={{ width: engineWidth }}>
-          <Pane title="Engine bay (GPL sidecars, user-approved)">
-            <div className="space-y-1 p-2">
-              {engines.map((engine) => (
-                <div key={engine.id} className="flex items-center gap-2 border border-line bg-app px-2 py-1">
-                  <span className="flex-1 truncate font-mono text-[11px]">
-                    {engine.label} <span className="text-fg-muted">{engine.available ? engine.version : "not detected"}</span>
-                  </span>
-                  <Chip tone={engine.available ? "ok" : "muted"}>{engine.license.split("-")[0]}</Chip>
-                  <ToolButton onClick={() => void runEngine(engine.id)} disabled={!engine.available || !normalized || !authorized || engineBusy !== null} title={engine.available ? `Run ${engine.label} against the target` : "Optional external sidecar not installed; native scanner operates independently"}>
-                    {engineBusy === engine.id ? "…" : <Play size={11} />}
-                  </ToolButton>
-                </div>
-              ))}
-              {!desktop ? <div className="font-mono text-[10px] text-fg-muted">engine detection runs in the desktop runtime</div> : null}
-              {engineOut ? (
-                <div className="border border-line bg-app p-2">
-                  <div className="font-mono text-[10px] text-fg-muted">{engineOut.tool} · {engineOut.duration_ms} ms</div>
-                  <pre className="mt-1 max-h-40 overflow-auto whitespace-pre-wrap break-all font-mono text-[10px] text-fg-dim">{engineOut.raw}</pre>
-                </div>
-              ) : null}
-            </div>
-          </Pane>
-        </div>
-      </div>
+  const tone = (s: string) => s === "critical" || s === "high" ? "err" :
+    s === "medium" ? "orange" : "muted";
+  return <div className="flex h-full min-h-0 flex-col">
+    <div className="cd-workspace-toolbar shrink-0 items-center gap-2 px-2">
+      <TextInput value={target} onChange={setTarget} placeholder="http://127.0.0.1:3000"
+        ariaLabel="Scanner target" className="w-72" />
+      {running && jobId !== null
+        ? <ToolButton tone="danger" onClick={() => void stop()}><Square size={12} /> Stop</ToolButton>
+        : <ToolButton tone="primary" disabled={!desktop || !normalized || !authorized || running}
+            onClick={() => void start()}><Play size={12} /> Start</ToolButton>}
+      <span className="ml-auto font-mono text-[10px] text-fg-muted">
+        {job ? `${job.state} · ${job.processed} requests · ${job.discovered} findings` : "Native review"}
+      </span>
     </div>
-  );
+    <label className="flex items-center gap-2 border-b border-line px-2 py-1.5 text-[11px] text-fg-dim">
+      <input type="checkbox" checked={authorized} onChange={(e) => setAuthorized(e.target.checked)} />
+      Authorized target · native approval required
+    </label>
+    {error ? <div role="alert" className="border-b border-line px-2 py-1 text-xs text-err">{error}</div> : null}
+    <Pane title="Findings" className="min-h-0 flex-1"
+      actions={job?.state === "completed" && findings.length > 0 && caseId !== "scratchpad"
+        ? <ToolButton disabled={saving || savedCount > 0} onClick={() => void save()}>
+            {savedCount ? `${savedCount} saved` : saving ? "Saving…" : "Save to case"}
+          </ToolButton> : undefined}>
+      {findings.length ? <div className="h-full overflow-auto"><table className="data-table">
+        <thead><tr><th>Severity</th><th>Finding</th><th>Detail</th><th>Evidence</th></tr></thead>
+        <tbody>{findings.map((f, i) => <tr key={i}>
+          <td><Chip tone={tone(f.severity)}>{f.severity}</Chip></td>
+          <td className="text-fg">{f.title}</td>
+          <td className="text-fg-dim">{f.detail}</td>
+          <td className="break-all text-fg-muted">{f.evidence}</td>
+        </tr>)}</tbody>
+      </table></div> : <EmptyState title={running ? "Scanning" : job?.state === "completed" ? "No findings" : "Ready"}
+        detail={running ? `Checked ${job?.processed ?? 0} HTTP requests` :
+          "Enter an authorized IP target and start the native review."} />}
+    </Pane>
+  </div>;
 }
-

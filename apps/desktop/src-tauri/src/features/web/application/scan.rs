@@ -34,7 +34,19 @@ pub(super) async fn run_scan(
     target_url: String,
     authorized: bool,
 ) -> Result<Vec<Finding>, String> {
+    run_scan_with_progress(client, target_url, authorized, &|_, _| {}).await
+}
+
+/// Reports real HTTP attempts completed, not a synthetic elapsed percentage.
+pub(super) async fn run_scan_with_progress(
+    client: &reqwest::Client,
+    target_url: String,
+    authorized: bool,
+    on_progress: &impl Fn(usize, usize),
+) -> Result<Vec<Finding>, String> {
     require_authorization(authorized)?;
+    let total = INTERESTING_PATHS.len() + 1;
+    on_progress(0, total);
     let mut origin = reqwest::Url::parse(target_url.trim())
         .map_err(|e| format!("invalid scan target URL: {e}"))?;
     if !matches!(origin.scheme(), "http" | "https")
@@ -64,6 +76,7 @@ pub(super) async fn run_scan(
         None
     };
 
+    on_progress(1, total);
     if let Some(headers) = &root_headers {
         for (header, title) in SECURITY_HEADERS {
             if *header == "strict-transport-security" && origin.scheme() != "https" {
@@ -101,7 +114,8 @@ pub(super) async fn run_scan(
         }
     }
 
-    for (path, note) in INTERESTING_PATHS {
+    for (index, (path, note)) in INTERESTING_PATHS.iter().enumerate() {
+        on_progress(index + 1, total);
         let url = format!("{base}{path}");
         if let Ok(resp) = client.get(&url).send().await {
             let status = resp.status().as_u16();
@@ -130,5 +144,6 @@ pub(super) async fn run_scan(
             }
         }
     }
+    on_progress(total, total);
     Ok(findings)
 }

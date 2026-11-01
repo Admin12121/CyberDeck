@@ -725,6 +725,50 @@ impl BoundHistory {
         Ok(self.store.detail(&grant.case_id, id, true))
     }
 
+    /// Read only the request origin for a native confirmation prompt.
+    /// Does NOT reveal the request's body, URL query, or credential headers.
+    /// No permit is consumed here; mint one only AFTER the operator approves.
+    fn replay_target_origin(
+        &mut self,
+        grant: &HistoryCaptureGrant,
+        id: u64,
+        forwarded: bool,
+    ) -> Result<String, String> {
+        self.authorized()
+            .ok_or("backend history consent unavailable")?;
+        let binding = self
+            .binding
+            .as_ref()
+            .ok_or("backend history consent unavailable")?;
+        if binding.grant != *grant {
+            return Err("backend history grant mismatch".into());
+        }
+        let entry = self
+            .store
+            .entries
+            .iter()
+            .find(|entry| entry.id == id)
+            .ok_or("HTTP history entry is no longer available")?;
+        let raw = if forwarded {
+            &entry
+                .forwarded
+                .as_ref()
+                .ok_or("forwarded request is not available")?
+                .url
+        } else {
+            &entry.url
+        };
+        let url = reqwest::Url::parse(raw).map_err(|_| "invalid saved HTTP target")?;
+        if !matches!(url.scheme(), "http" | "https")
+            || !url.username().is_empty()
+            || url.password().is_some()
+            || url.port_or_known_default().is_none()
+        {
+            return Err("unsafe saved HTTP target".into());
+        }
+        Ok(url.origin().ascii_serialization())
+    }
+
     fn replay_authorized(
         &mut self,
         grant: &HistoryCaptureGrant,
@@ -849,6 +893,18 @@ pub fn capture_forwarded(
         .lock()
         .expect("web history poisoned")
         .capture(stamp, id, original, head, status, headers, resp, forwarded);
+}
+
+/// Internal origin-only preview for the native replay confirmation dialog.
+pub(crate) fn replay_target_origin(
+    grant: &HistoryCaptureGrant,
+    id: u64,
+    forwarded: bool,
+) -> Result<String, String> {
+    global()
+        .lock()
+        .expect("web history poisoned")
+        .replay_target_origin(grant, id, forwarded)
 }
 
 /// Backend-only original/forwarded message draft. The grant is reverified
@@ -1110,6 +1166,53 @@ mod tests {
         assert_eq!(store.len(), MAX_ENTRIES);
         assert!(store.detail("a", 0, true).is_none());
         assert!(store.detail("a", 89, true).is_some());
+    }
+
+    #[test]
+    fn native_replay_confirmation_shows_only_origin_and_honors_revocation() {
+        let temp = tempfile::tempdir().unwrap();
+        let db = cyberdeck_storage::ArtifactStore::open(&temp.path().join("cases.db")).unwrap();
+        let policy = Arc::new(Mutex::new(ActiveCaseHistoryPolicy::default()));
+        let grant = {
+            let mut guard = policy.lock().unwrap();
+            guard.select_case(&db, "scratchpad").unwrap();
+            guard
+                .enable_volatile_capture("scratchpad", HistoryRetentionLimits::default())
+                .unwrap()
+        };
+        let mut bound = BoundHistory::default();
+        let stamp = bound.arm(Arc::clone(&policy), grant.clone()).unwrap();
+        bound.capture(
+            Some(stamp),
+            77,
+            OriginalSnapshot {
+                url: "http://127.0.0.1:8999/a?access_token=SECRET".into(),
+                body_prefix: b"SECRET".to_vec(),
+                body_original_len: 6,
+            },
+            "POST /a HTTP/1.1\r\nAuthorization: SECRET\r\n\r\n",
+            201,
+            &[("Set-Cookie".into(), "SECRET".into())],
+            b"SECRET",
+            snapshot_forwarded(
+                Some(stamp),
+                "PUT",
+                "http://10.3.2.1:8080/b?secret=SECRET",
+                &[],
+                b"EDITED",
+            ),
+        );
+        assert_eq!(
+            bound.replay_target_origin(&grant, 77, false).unwrap(),
+            "http://127.0.0.1:8999"
+        );
+        assert_eq!(
+            bound.replay_target_origin(&grant, 77, true).unwrap(),
+            "http://10.3.2.1:8080"
+        );
+        assert!(bound.replay_target_origin(&grant, 0, false).is_err());
+        policy.lock().unwrap().revoke();
+        assert!(bound.replay_target_origin(&grant, 77, false).is_err());
     }
 
     #[test]

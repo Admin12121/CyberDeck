@@ -7,13 +7,16 @@ import { Button } from "@/components/ui/button";
 import { Chip, EmptyState, Select, TextInput, ToolButton, WorkspaceTabs } from "@ds/panes";
 import { PacketTable } from "./PacketTable";
 import { PacketPaneSplit } from "./PacketPaneSplit";
+import { CaptureActivity, type CaptureActivityPoint } from "./CaptureActivity";
 import { nativeCapturePacketRow } from "./packet-row-model";
 import {
-  isDesktop, captureInterfacesV1, captureStartV1, captureStatusV1, captureStopV1,
+  isDesktop, captureInterfacesV1, captureStartV1, captureStatusV1, captureStopV1, captureSaveV1,
+  type CaptureSaveReceiptV1,
   captureProvenanceV1, captureHostsV1, captureFlowsV1, captureFramePageV1,
+  capturePacketDetailsV1, captureFollowStreamV1,
   type CaptureInterfaceV1, type CaptureStatusV1, type CapturePageV1,
   type CaptureFrameProvenanceV1, type CaptureHostV1, type CaptureFlowV1,
-  type CaptureFramePageV1,
+  type CaptureFramePageV1, type PcapPacketWire, type StreamTranscriptWire,
 } from "@lib/ipc";
 import { useWorkbenchCase } from "@state/workbench";
 import { useWorkspaceDraft } from "@state/workspace-sessions";
@@ -76,7 +79,13 @@ export function LiveCaptureView({ presentation = "full", onCaptureStarted, onRet
   const [working, setWorking] = useState(false);
   const [loadingPages, setLoadingPages] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [saved, setSaved] = useState<CaptureSaveReceiptV1 | null>(null);
+  const [decoded, setDecoded] = useState<PcapPacketWire | null>(null);
+  const [stream, setStream] = useState<StreamTranscriptWire | null>(null);
+  const [streamBusy, setStreamBusy] = useState(false);
   const [showLimits, setShowLimits] = useState(false);
+  const [activity, setActivity] = useState<CaptureActivityPoint[]>([]);
 
   const valid = useCallback((key: string, version: number) =>
     currentIdentity.current === key && token.current === version, []);
@@ -91,7 +100,8 @@ export function LiveCaptureView({ presentation = "full", onCaptureStarted, onRet
     frameRequest.current++;
     pageRequest.current++;
     setStatus(null); setPages(emptyPages()); setSelectedIndex(null); setFrame(null);
-    setError(null); setDevices([]); setWorking(false);
+    setError(null); setDevices([]); setWorking(false); setActivity([]);
+    setSaving(false); setSaved(null); setDecoded(null); setStream(null);
   }, [identity]);
 
   const discover = useCallback(async () => {
@@ -122,6 +132,7 @@ export function LiveCaptureView({ presentation = "full", onCaptureStarted, onRet
       if (!valid(key, version) || order !== pollRequest.current) return;
       if (!matchesCaptureIdentity(next, id, caseId)) throw new Error("backend capture identity changed");
       setStatus(next);
+      setActivity((history) => [...history, { at: Date.now(), packets: next.progress.packets }].slice(-36));
       if (next.phase === "failed") setError((next.error?.code ?? "failed") + ": " + (next.error?.message ?? "capture failed"));
     } catch (cause) {
       if (!valid(key, version) || order !== pollRequest.current) return;
@@ -164,13 +175,14 @@ export function LiveCaptureView({ presentation = "full", onCaptureStarted, onRet
   }, [readable, sessionId, identity, loadPages]);
 
   async function start(selectedDevice = device) {
-    if (!desktop || revision === null || running || working || !eligible.some((entry) => entry.name === selectedDevice)) return;
+    if (!desktop || running || working || !eligible.some((entry) => entry.name === selectedDevice)) return;
+    if (revision === null) { setError("Select an authorized saved case to start live capture."); return; }
     const limits = captureLimits(maxPackets, memoryMiB, seconds);
     if (!limits) {
       setError("Use whole-number limits: 1–20000 packets, 1–16 MiB and 1–600 seconds."); return;
     }
     const key = identity, version = ++token.current;
-    setWorking(true); setStatus(null); setPages(emptyPages()); setFrame(null); setError(null);
+    setWorking(true); setStatus(null); setPages(emptyPages()); setFrame(null); setError(null); setActivity([]); setSaved(null); setDecoded(null); setStream(null);
     try {
       const next = await captureStartV1(selectedDevice, limits);
       if (next.case_id !== caseId || !Number.isSafeInteger(next.session_id) || next.session_id <= 0) throw new Error("invalid backend capture identity");
@@ -203,16 +215,62 @@ export function LiveCaptureView({ presentation = "full", onCaptureStarted, onRet
     }
   }
 
+  async function save() {
+    if (!readable || sessionId === null || saving) return;
+    const key = identity;
+    const version = token.current;
+    setSaving(true);
+    setError(null);
+    try {
+      // Backend independently confirms operator approval and case generation
+      // before committing the original bytes. No raw PCAP crosses frontend IPC.
+      const receipt = await captureSaveV1(sessionId);
+      if (!valid(key, version)) return;
+      if (receipt.case_id !== caseId || receipt.session_id !== sessionId
+        || !/^[0-9a-f]{64}$/.test(receipt.sha256)) {
+        throw new Error("backend returned a mismatched artifact receipt");
+      }
+      setSaved(receipt);
+    } catch (cause) {
+      if (valid(key, version)) {
+        const reason = message(cause);
+        if (!reason.includes("cancelled by operator")) setError("Save capture: " + reason);
+      }
+    } finally {
+      if (valid(key, version)) setSaving(false);
+    }
+  }
+
   async function inspect(index: number, offset = 0) {
     if (!readable || sessionId === null) return;
     const key = identity, version = token.current;
     const order = ++frameRequest.current;
     setSelectedIndex(index); setFrame(null);
+    if (offset === 0) { setDecoded(null); setStream(null); }
     try {
-      const next = await captureFramePageV1(sessionId, index, offset, 4096);
-      if (valid(key, version) && order === frameRequest.current && next.index === index) setFrame(next);
+      const [raw, packet] = await Promise.all([
+        captureFramePageV1(sessionId, index, offset, 4096),
+        offset === 0 ? capturePacketDetailsV1(sessionId, index) : Promise.resolve(null),
+      ]);
+      if (!valid(key, version) || order !== frameRequest.current || raw.index !== index) return;
+      setFrame(raw);
+      if (packet) setDecoded(packet);
     } catch (cause) {
-      if (valid(key, version) && order === frameRequest.current) setError("Original frame read: " + message(cause));
+      if (valid(key, version) && order === frameRequest.current) setError("Original frame inspection: " + message(cause));
+    }
+  }
+
+  async function followSelectedStream() {
+    if (!readable || sessionId === null || !decoded?.stream_id || streamBusy) return;
+    const key = identity, version = token.current, order = frameRequest.current;
+    setStreamBusy(true);
+    try {
+      const transcript = await captureFollowStreamV1(sessionId, decoded.stream_id);
+      if (valid(key, version) && order === frameRequest.current) setStream(transcript);
+    } catch (cause) {
+      if (valid(key, version) && order === frameRequest.current) setError("Stream follow: " + message(cause));
+    } finally {
+      if (valid(key, version)) setStreamBusy(false);
     }
   }
 
@@ -249,7 +307,7 @@ export function LiveCaptureView({ presentation = "full", onCaptureStarted, onRet
         </div>
         {!desktop ? (
           <div className="flex flex-col items-start gap-2 py-2">
-            <Router label="Network interfaces unavailable" theme="dark" className="w-28 max-w-full opacity-50" />
+            <Router label="Network interfaces unavailable" theme="auto" className="w-80 max-w-full opacity-50" />
             <p className="text-xs text-fg-muted">Live capture requires the desktop application.</p>
           </div>
         ) : (
@@ -311,9 +369,9 @@ export function LiveCaptureView({ presentation = "full", onCaptureStarted, onRet
             <span className="text-xs text-fg-muted">Saved case required</span>
           )}
           {status && (
-            <span className="ml-auto text-xs text-fg-muted">
+            <div className="ml-auto flex items-center gap-2"><CaptureActivity samples={activity}/><span className="text-xs text-fg-muted">
               {status.phase} · {status.progress.packets} frames
-            </span>
+            </span></div>
           )}
         </div>
         {showLimits && desktop && (
@@ -362,7 +420,8 @@ export function LiveCaptureView({ presentation = "full", onCaptureStarted, onRet
         <Chip tone={running ? "orange" : status?.phase === "failed" ? "err" : readable ? "ok" : "muted"}>
           {status?.phase ?? "idle"}
         </Chip>
-        <span className="ml-auto truncate text-[10px] text-fg-muted">
+        <span className="ml-auto flex items-center gap-2 truncate text-[10px] text-fg-muted">
+          <CaptureActivity samples={activity}/>
           {status ? status.progress.packets + " frames · " + status.progress.stored_pcap_bytes + " PCAP bytes" : "Native Linux Ethernet"}
         </span>
       </div>
@@ -371,9 +430,13 @@ export function LiveCaptureView({ presentation = "full", onCaptureStarted, onRet
         <label>Memory MiB <TextInput value={memoryMiB} onChange={setMemoryMiB} ariaLabel="Memory budget MiB" className="ml-1 inline-flex w-16" /></label>
         <label>Duration s <TextInput value={seconds} onChange={setSeconds} ariaLabel="Capture duration in seconds" className="ml-1 inline-flex w-16" /></label>
         <span>{revision === null ? "Saved case required for live capture." : "Case " + caseId + " · rev " + revision}</span>
-        <ToolButton disabled title="Immutable Save-to-Case requires the approved storage transaction and digest readback">
-          Save to Case unavailable
+        <ToolButton disabled={!readable || saving} onClick={() => void save()}
+          title={readable ? "Save the byte-exact original PCAP as immutable case evidence, after native confirmation" : "Complete a capture with original frames first"}>
+          {saving ? "Saving…" : saved ? "Saved to Case" : "Save Capture to Case"}
         </ToolButton>
+        {saved && <span className="font-mono text-[10px] text-fg-muted" title={saved.artifact_id}>
+          SHA-256 {saved.sha256.slice(0, 16)}… · {saved.frame_count} frames verified
+        </span>}
       </div>
       {(error || caseSession.error) && (
         <p role="alert" className="border-b border-err/50 bg-err/10 px-3 py-1 text-xs text-err">{error || caseSession.error}</p>
@@ -458,9 +521,31 @@ export function LiveCaptureView({ presentation = "full", onCaptureStarted, onRet
                   <div><dt className="inline text-fg-muted">Captured / wire length: </dt><dd className="inline">{selectedPacket.captured_length} / {selectedPacket.wire_length} bytes</dd></div>
                   <div><dt className="inline text-fg-muted">PCAP frame offset: </dt><dd className="inline">{selectedPacket.pcap_frame_offset}</dd></div>
                   {selectedPacket.stream_id && <div><dt className="inline text-fg-muted">Stream: </dt><dd className="inline break-all">{selectedPacket.stream_id}</dd></div>}
-                  <p className="pt-2 text-[11px] leading-relaxed text-fg-muted">
-                    Native Capture V1 provides frame provenance. Timestamp and full protocol hierarchy need Agent 1's shared Rust dissection API.
-                  </p>
+                  {decoded && (
+                    <div className="mt-2 space-y-1 border-t border-line pt-2">
+                      <div className="text-fg">{decoded.protocol} · {decoded.info}</div>
+                      <div>Relative time: {(decoded.time_ms / 1000).toFixed(6)} s</div>
+                      {decoded.layers.map((layer, index) => (
+                        <div key={index} className="break-words"><span className="text-fg-muted">{layer.label}: </span>{layer.value}</div>
+                      ))}
+                      {decoded.stream_id && (
+                        <ToolButton onClick={() => void followSelectedStream()} disabled={streamBusy}>
+                          {streamBusy ? "Following…" : "Follow native stream"}
+                        </ToolButton>
+                      )}
+                    </div>
+                  )}
+                  {stream && (
+                    <div className="mt-2 border-t border-line pt-2">
+                      <div className="mb-1 flex items-center justify-between">
+                        <span>{stream.protocol} stream · {stream.chunks.length} chunks · {stream.gaps} gaps</span>
+                        <ToolButton onClick={() => setStream(null)}>Hide stream</ToolButton>
+                      </div>
+                      <pre className="max-h-56 overflow-auto whitespace-pre-wrap break-all text-[10px]">{stream.chunks.map((chunk) => "[" + chunk.dir + " / " + chunk.kind + "] " + chunk.text).join("\n")}</pre>
+                      {stream.truncated && <p className="text-warn">Stream reconstruction was truncated at native safety limits.</p>}
+                    </div>
+                  )}
+                  {!decoded && <p className="pt-2 text-[11px] text-fg-muted">Decoded protocol layers are retrieved from the original capture using the shared native Rust parser.</p>}
                 </dl>
               ) : (
                 <EmptyState title="Select a captured packet" detail={running

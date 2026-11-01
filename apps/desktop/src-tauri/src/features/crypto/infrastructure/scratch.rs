@@ -42,7 +42,9 @@ impl ScratchDir {
             match builder.create(&path) {
                 Ok(()) => return Ok(Self(path)),
                 Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
-                Err(error) => return Err(format!("cannot create engine scratch directory: {error}")),
+                Err(error) => {
+                    return Err(format!("cannot create engine scratch directory: {error}"))
+                }
             }
         }
         Err("could not allocate unique engine scratch directory".into())
@@ -59,9 +61,11 @@ impl ScratchDir {
             use std::os::unix::fs::OpenOptionsExt;
             opts.mode(0o600);
         }
-        let mut handle = opts.open(&file)
+        let mut handle = opts
+            .open(&file)
             .map_err(|e| format!("cannot create hash file: {e}"))?;
-        handle.write_all(format!("{hash}\n").as_bytes())
+        handle
+            .write_all(format!("{hash}\n").as_bytes())
             .map_err(|e| format!("cannot write hash file: {e}"))?;
         Ok(file)
     }
@@ -78,8 +82,14 @@ mod tests {
         let base = tempfile::tempdir().unwrap();
         let dir = ScratchDir::create(base.path()).unwrap();
         let file = dir.write_hash_file("ABC").unwrap();
-        assert_eq!(std::fs::metadata(&*dir).unwrap().permissions().mode() & 0o077, 0);
-        assert_eq!(std::fs::metadata(&file).unwrap().permissions().mode() & 0o077, 0);
+        assert_eq!(
+            std::fs::metadata(&*dir).unwrap().permissions().mode() & 0o077,
+            0
+        );
+        assert_eq!(
+            std::fs::metadata(&file).unwrap().permissions().mode() & 0o077,
+            0
+        );
     }
 
     #[test]
@@ -91,8 +101,13 @@ mod tests {
             let b = ScratchDir::create(dir.path()).unwrap();
             assert_ne!(a.to_path_buf(), b.to_path_buf());
             first = a.to_path_buf();
-            let file = a.write_hash_file("$2b$12$CaseSensitiveEncodedSalt").unwrap();
-            assert_eq!(std::fs::read_to_string(&file).unwrap(), "$2b$12$CaseSensitiveEncodedSalt\n");
+            let file = a
+                .write_hash_file("$2b$12$CaseSensitiveEncodedSalt")
+                .unwrap();
+            assert_eq!(
+                std::fs::read_to_string(&file).unwrap(),
+                "$2b$12$CaseSensitiveEncodedSalt\n"
+            );
             assert_eq!(file.file_name().unwrap(), "target.hash");
             assert!(file.exists());
         }

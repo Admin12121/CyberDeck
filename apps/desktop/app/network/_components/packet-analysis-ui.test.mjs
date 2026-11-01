@@ -14,7 +14,7 @@ test("Packet Analysis starts with one welcome workflow, not two mode buttons", (
   assert.match(studio, /<PacketStartView/);
   assert.match(start, /Capture file/);
   assert.match(start, /Recent/);
-  assert.match(start, /Sample/);
+  assert.doesNotMatch(start, /Sample/);
   assert.match(start, /No recent captures/);
   assert.doesNotMatch(start, /mock recent|mock file/i);
 });
@@ -46,7 +46,7 @@ test("real capture status and original provenance remain visible, demo is labele
   assert.match(live, /Original captured frame/);
   assert.match(live, /Save to Case unavailable/);
   assert.match(live, /caseSession\.phase === "ready"/);
-  assert.match(start, /Demonstration packets, not case evidence/);
+  assert.doesNotMatch(start, /Demonstration packets/);
   assert.match(studio, /DEMO: sample packets/);
   assert.match(studio, /Send to Recipes/);
 });
@@ -80,7 +80,7 @@ test("opened files and native capture share one packet list presentation", () =>
 test("welcome keeps live capture setup below file opening without duplicated mode buttons", () => {
   const studio = read("PacketStudioView.tsx");
   const start = read("PacketStartView.tsx");
-  assert.match(studio, /mt-auto shrink-0 border-t border-line/);
+  assert.match(studio, /mt-auto shrink-0 pt-2/);
   assert.match(start, /Packet Analysis/);
   assert.match(start, /Capture file/);
   assert.doesNotMatch(studio, /Opened PCAP \/ Sample|Native Live Capture/);
@@ -110,4 +110,43 @@ test("packet table remains one shared readable style for real and native packets
   assert.match(table, /h-\[26px\]/);
   assert.match(style, /\.cd-packet-table th/);
   assert.match(style, /\.cd-packet-table td/);
+});
+
+test("Capture starts from clicking a real eligible interface, with native authorization unchanged", () => {
+  const live = read("LiveCaptureView.tsx");
+  const welcome = read("PacketStartView.tsx");
+  assert.match(live, /onClick=\{\(\) => \{ setDevice\(entry.name\); void start\(entry.name\); \}\}/);
+  assert.match(live, /async function start\(selectedDevice = device\)/);
+  assert.match(live, /eligible\.some\(\(entry\) => entry\.name === selectedDevice\)/);
+  assert.match(live, /captureStartV1\(selectedDevice, limits\)/);
+  assert.match(live, /Select an authorized saved case/);
+  assert.match(live, /<Router\b/);
+  assert.doesNotMatch(live, /rounded-md border border-line bg-panel px-4 py-5 text-sm/);
+  assert.doesNotMatch(welcome, /onSample|Load Sample/);
+});
+
+test("shared packet inspectors support vertical and unconstrained responsive horizontal dragging", () => {
+  const split = read("PacketPaneSplit.tsx");
+  const offline = read("PacketStudioView.tsx");
+  const live = read("LiveCaptureView.tsx");
+  for (const source of [offline, live]) assert.match(source, /<PacketPaneSplit/);
+  assert.match(split, /<Resizer direction="vertical"/);
+  assert.match(split, /<Resizer direction="horizontal"/);
+  assert.match(split, /new ResizeObserver/);
+  assert.match(split, /bounds\.width - 180/);
+  assert.match(split, /bounds\.height - 132/);
+  assert.match(split, /Show Inspectors/);
+  assert.match(split, /Hide packet details/);
+  assert.match(split, /Hide packet bytes/);
+  assert.doesNotMatch(split, /max=\{720\}/);
+});
+
+test("capture sparkline is based only on real native packet counter updates", () => {
+  const live = read("LiveCaptureView.tsx");
+  const graph = read("CaptureActivity.tsx");
+  assert.match(live, /captureStatusV1\(id\)/);
+  assert.match(live, /setActivity\(\(history\) => \[\.\.\.history, \{ at: Date\.now\(\), packets: next\.progress\.packets \}\]/);
+  assert.match(live, /<CaptureActivity samples=\{activity\}/);
+  assert.match(graph, /item\.packets - previous\.packets/);
+  assert.match(graph, /samples\.length < 2/);
 });

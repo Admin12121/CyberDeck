@@ -5,10 +5,10 @@ use std::path::Path;
 use std::process::{Command, ExitStatus};
 use std::time::Duration;
 
-use crate::features::crypto::ipc::attack::AttackMatch;
 use super::engine_formats::{parse_hashcat_outfile, parse_john_show};
 use super::process::run_with_timeout;
 use super::scratch::ScratchDir;
+use crate::features::crypto::ipc::attack::AttackMatch;
 
 const PROCESS_TIMEOUT: Duration = Duration::from_secs(300);
 const MAX_REPORTED_MATCHES: usize = 100;
@@ -40,7 +40,8 @@ pub fn hashcat(
         .arg(&outfile);
     match mode {
         "mask" => {
-            let mask = mask.filter(|value| !value.is_empty())
+            let mask = mask
+                .filter(|value| !value.is_empty())
                 .ok_or("mask attack needs a mask pattern")?;
             command.arg("-a").arg("3").arg(&hash_file).arg(mask);
         }
@@ -63,7 +64,12 @@ pub fn hashcat(
     };
     let mut matches = parse_hashcat_outfile(&output_text);
     matches.truncate(MAX_REPORTED_MATCHES);
-    Ok(EngineRun { status, stdout, stderr, matches })
+    Ok(EngineRun {
+        status,
+        stdout,
+        stderr,
+        matches,
+    })
 }
 
 pub fn john(
@@ -98,7 +104,12 @@ pub fn john(
     }
     let mut matches = parse_john_show(&String::from_utf8_lossy(&show_out));
     matches.truncate(MAX_REPORTED_MATCHES);
-    Ok(EngineRun { status, stdout, stderr, matches })
+    Ok(EngineRun {
+        status,
+        stdout,
+        stderr,
+        matches,
+    })
 }
 
 pub fn capture_tail(stdout: &[u8], stderr: &[u8], max_bytes: usize) -> String {

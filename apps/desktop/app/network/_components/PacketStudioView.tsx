@@ -154,14 +154,13 @@ function ImportedCaptureView() {
         {screen === "welcome" && (
           <PacketStartView opening={opening} desktop={desktop}
             onOpen={() => void openCapture()}
-            onSample={() => { setCapture(null); setShowSample(true); setSelected(0); setPacketBytes(null); setOpenError(null); setScreen("offline"); }}
             lastOpened={capture?.file_name ?? null}
             onResumeOpened={() => { if (capture) setScreen("offline"); }} />
         )}
         {screen === "welcome" && openError && (
           <p role="alert" className="mx-auto mb-3 w-full max-w-6xl px-6 text-xs text-err">{openError}</p>
         )}
-        <div className={screen === "welcome" ? "mt-auto shrink-0 border-t border-line pt-4" : "min-h-0 flex-1"}>
+        <div className={screen === "welcome" ? "mt-auto shrink-0 pt-2" : "min-h-0 flex-1"}>
           <LiveCaptureView presentation={screen === "welcome" ? "setup" : "full"}
             onCaptureStarted={() => setScreen("native")}
             onReturnToStart={() => setScreen("welcome")} />
@@ -179,7 +178,6 @@ function ImportedCaptureView() {
         >
           <FolderOpen size={11} /> {opening ? "opening…" : "Open…"}
         </ToolButton>
-        {!capture && <ToolButton onClick={() => { setShowSample(true); setSelected(0); setScreen("offline"); }} title="Open explicitly labeled demonstration data, not case evidence">Sample</ToolButton>}
 
         <TextInput
           value={filter}

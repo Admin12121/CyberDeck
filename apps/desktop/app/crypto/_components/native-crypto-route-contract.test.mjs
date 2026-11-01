@@ -54,7 +54,8 @@ test("Recovery V1 real route uses existing typed native calls and authorized rev
   assert.ok(ui.includes("onClick={() => void r.discard()}"));
   assert.ok(ui.includes('r.status === null ? ('));
   assert.ok(ui.includes('r.running ? ('));
-  assert.ok(ui.includes('Choose Wordlist'));
+  assert.ok(ui.includes('aria-label={r.choosingWordlist ? "Selecting wordlist" : "Choose wordlist"}'));
+  assert.ok(ui.includes('aria-label={r.busy ? "Starting recovery" : "Start recovery"}'));
   assert.ok(ui.includes('onClick={() => void r.chooseWordlist()}'));
   assert.ok(ui.includes('disabled={!r.desktop || !r.scope'));
   for (const [name, command] of [
@@ -71,5 +72,27 @@ test("Recovery V1 real route uses existing typed native calls and authorized rev
   assert.ok(view.includes("resize-none"));
   assert.ok(view.includes("showNextCandidates(event.currentTarget)"));
   assert.ok(ui.includes("Scroll to view more masked matches"));
+  assert.ok(ui.includes('aria-label="Advanced recovery settings"'));
+  assert.ok(ui.includes('value: "auto"'));
+  assert.ok(ui.includes('r.selection.backend === "cpu"'));
+  const combo = read("apps/desktop/app/crypto/_components/VerifyAlgorithmCombobox.tsx");
+  assert.ok(combo.includes('from "@/components/ui/combobox"'));
+  assert.ok(combo.includes("<ComboboxCollection>"));
+  assert.ok(combo.includes("Search verification algorithms"));
+  const catalog = read("crates/crypto/src/lib.rs");
+  const verifiedAlgorithms = ["md4", "md5", "ntlm", "sha1", "sha224", "sha256",
+    "sha384", "sha512", "sha3_256", "sha3_512", "crc32"];
+  for (const id of verifiedAlgorithms) {
+    assert.ok(combo.includes('id: "' + id + '"'), "Verify must offer native " + id);
+    assert.ok(catalog.includes('op("' + id + '"'), "Verify should not offer unimplemented " + id);
+  }
+  assert.ok(view.includes('<Accordion defaultValue={[]}'));
+  assert.ok(view.includes('value="verify"'));
+  assert.ok(view.includes('VerifyAlgorithmCombobox'));
+  assert.ok(view.includes('hashDrafts = new Map'));
+  assert.ok(view.includes('keepHash(caseId, value)'));
+  assert.ok(view.includes('file.size > 8192'));
+  assert.ok(view.includes('setHashImportError'));
+  assert.ok(!view.includes("hashDrafts.set(caseId, candidate)"));
 
 });

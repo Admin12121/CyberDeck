@@ -142,6 +142,17 @@ pub(super) async fn run_spider(
     max_depth: u8,
     authorized: bool,
 ) -> Result<Vec<String>, String> {
+    run_spider_with_progress(client, target_url, max_depth, authorized, &|_, _| {}).await
+}
+
+/// Reports real pages attempted and URLs discovered to the native job.
+pub(super) async fn run_spider_with_progress(
+    client: &reqwest::Client,
+    target_url: String,
+    max_depth: u8,
+    authorized: bool,
+    on_progress: &impl Fn(usize, usize),
+) -> Result<Vec<String>, String> {
     require_authorization(authorized)?;
     let base =
         reqwest::Url::parse(target_url.trim()).map_err(|e| format!("invalid target URL: {e}"))?;
@@ -156,7 +167,11 @@ pub(super) async fn run_spider(
     seen.insert(base.to_string());
     let mut queue = VecDeque::from([(base.clone(), 0_u8)]);
     let mut links = vec![base.to_string()];
+    let mut processed = 0usize;
+    on_progress(0, links.len());
     while let Some((url, depth)) = queue.pop_front() {
+        processed += 1;
+        on_progress(processed, links.len());
         if depth >= max_depth.min(4) || links.len() >= 60 {
             continue;
         }
@@ -181,5 +196,6 @@ pub(super) async fn run_spider(
         }
     }
     links.sort();
+    on_progress(processed, links.len());
     Ok(links)
 }

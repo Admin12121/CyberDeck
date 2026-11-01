@@ -1,7 +1,7 @@
 //! Fail-closed active HTTP Repeater boundary. Agent3 owns the Web transport.
 //! This controller preserves the existing `http_send(request_raw)` IPC wire.
-//! Until verified DNS/address-pinning exists, only explicitly confirmed literal
-//! private/loopback IP targets are allowed (never hostnames or metadata IPs).
+//! Pinned DNS hostnames are permitted only when ALL approved socket addresses
+//! are private/loopback and the actual connector uses those exact addresses.
 use std::net::IpAddr;
 use std::time::Duration;
 
@@ -18,8 +18,8 @@ const MAX_URL: usize = 4096;
 const MAX_BODY: usize = 512 * 1024;
 
 /// Validate cheap source bounds before Agent3's domain parser makes copies.
-/// Domain names are rejected in the integration boundary until Agent3 ships
-/// pinned DNS resolution and address-class checks with deterministic tests.
+/// Domain names are syntactically accepted here only. Network and approval
+/// require the separately validated, actual pinned-address transport.
 fn inspect_request(raw: &str) -> Result<reqwest::Url, String> {
     if raw.len() > MAX_RAW {
         return Err("HTTP request exceeds 576 KiB limit".into());
@@ -42,21 +42,25 @@ fn inspect_request(raw: &str) -> Result<reqwest::Url, String> {
     let text_host = url.host_str().ok_or("HTTP target hostname missing")?;
     // URL authorities containing IPv6 addresses can be bracketed.
     let host = text_host.trim_start_matches('[').trim_end_matches(']');
-    let address: IpAddr = host
-        .parse()
-        .map_err(|_| "DNS hostname targets require verified address-pinned transport")?;
-    let trusted = match address {
-        IpAddr::V4(ip) => ip.is_loopback() || ip.is_private(),
-        IpAddr::V6(ip) => {
-            ip.is_loopback()
-                || ip.is_unique_local()
-                || ip
-                    .to_ipv4_mapped()
-                    .is_some_and(|v4| v4.is_private() || v4.is_loopback())
+    // Literal IPs are checked before any async work; hostnames receive the
+    // exact same check on EVERY resolved IP and pinned sockets before approval.
+    if let Ok(address) = host.parse::<IpAddr>() {
+        let trusted = match address {
+            IpAddr::V4(ip) => ip.is_loopback() || ip.is_private(),
+            IpAddr::V6(ip) => {
+                ip.is_loopback()
+                    || ip.is_unique_local()
+                    || ip
+                        .to_ipv4_mapped()
+                        .is_some_and(|v4| v4.is_private() || v4.is_loopback())
+            }
+        };
+        if !trusted {
+            return Err("target is outside allowed loopback/private IP scope".into());
         }
-    };
-    if !trusted || url.port_or_known_default().is_none() {
-        return Err("target is outside allowed loopback/private IP scope".into());
+    }
+    if url.port_or_known_default().is_none() {
+        return Err("target has no usable HTTP port".into());
     }
     if url.username() != "" || url.password().is_some() || !matches!(url.scheme(), "http" | "https")
     {
@@ -75,12 +79,24 @@ pub async fn http_send_scoped(
 ) -> Result<HttpResponseWire, String> {
     let url = inspect_request(&request_raw)?;
     let selected = session.selected()?;
-    // Exact origin shown. This is not an unbounded blanket HTTP permission.
-    let origin = url.origin().ascii_serialization();
+    // Resolve once, validate ALL addresses and build an isolated connector
+    // before the operator confirms the exact IPs. No implicit second lookup.
+    let prepared = web::prepare_scoped_http_request(&request_raw).await?;
+    session.ensure(&selected)?;
+    if prepared.origin != url.origin().ascii_serialization() {
+        return Err("HTTP target changed while preparing pinned transport".into());
+    }
+    let origin = prepared.origin.clone();
+    let pinned_ips = prepared
+        .sockets
+        .iter()
+        .map(|socket| socket.ip().to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
     let confirmed = tauri::async_runtime::spawn_blocking(move || {
         app.dialog()
             .message(format!(
-                "Authorize one HTTP request to {origin} in the currently selected case? Only explicitly owned/test systems may be targeted. This request may disclose credentials and request data."
+                "Authorize one HTTP request to {origin}, using pinned address(es) {pinned_ips}, in the selected case? Only explicitly owned/test systems may be targeted. This may disclose credentials."
             ))
             .title("Authorize HTTP security test")
             .buttons(MessageDialogButtons::YesNo)
@@ -104,7 +120,7 @@ pub async fn http_send_scoped(
     let result = tokio::select! {
         biased;
         error = cancelled => return Err(error),
-        reply = web::http_send(request_raw) => reply?,
+        reply = web::send_scoped_http_request(prepared) => reply?,
     };
     // Serializes publication against case selection/reselection. A caller/UI
     // must still discard a reply received after it changes its local context.
@@ -136,13 +152,21 @@ mod tests {
             "0.0.0.0",
             "224.0.0.1",
             "8.8.8.8",
-            "example.com",
-            "localhost",
             "[fe80::1]",
         ] {
             let raw = format!("GET / HTTP/1.1\r\nHost: {authority}\r\n\r\n");
             assert!(inspect_request(&raw).is_err(), "{authority}");
         }
+    }
+
+    #[test]
+    fn hostname_only_passes_cheap_syntax_gate_pending_pinned_validation() {
+        for authority in ["localhost", "example.com"] {
+            let raw = format!("GET / HTTP/1.1\r\nHost: {authority}\r\n\r\n");
+            assert!(inspect_request(&raw).is_ok(), "{authority}");
+        }
+        // This helper never sends a network request; final scope is enforced
+        // by Web's pinned resolver, concrete-IP checks and OS approval.
     }
 
     #[test]

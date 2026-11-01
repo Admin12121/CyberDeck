@@ -27,6 +27,8 @@ pub struct CaseSessionCtx {
     publication: Mutex<()>,
     selection: Mutex<Selection>,
     pub history_policy: Arc<Mutex<ActiveCaseHistoryPolicy>>,
+    /// Only eligible nonsecret Quick Tools outputs live here, never SQLite.
+    pub(crate) temp_work: Mutex<crate::features::cases::infrastructure::temp_work::TempWork>,
 }
 impl Default for CaseSessionCtx {
     fn default() -> Self {
@@ -34,6 +36,7 @@ impl Default for CaseSessionCtx {
             publication: Mutex::new(()),
             selection: Mutex::new(Selection::default()),
             history_policy: Arc::new(Mutex::new(ActiveCaseHistoryPolicy::default())),
+            temp_work: Mutex::new(Default::default()),
         }
     }
 }
@@ -62,6 +65,7 @@ impl CaseSessionCtx {
             .select_case(store, case_id)?;
         state.case_id = Some(case_id.to_owned());
         state.revision = next;
+        self.temp_work.lock().map_err(|_| "temporary workspace unavailable")?.clear();
         Ok(CaseSessionWire {
             case_id: state.case_id.clone(),
             revision: next,
@@ -87,6 +91,7 @@ impl CaseSessionCtx {
             .close_case();
         state.case_id = None;
         state.revision = next;
+        self.temp_work.lock().map_err(|_| "temporary workspace unavailable")?.clear();
         Ok(CaseSessionWire {
             case_id: None,
             revision: next,

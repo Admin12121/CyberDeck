@@ -758,6 +758,35 @@ export async function captureFramePageV1(sessionId: number, index: number, offse
   return invoke<CaptureFramePageV1>("capture_frame_page_v1", { sessionId, index, offset, len });
 }
 
+
+/** Verified original PCAP evidence receipt. No evidence filesystem path or PCAP bytes are exposed. */
+export interface CaptureSaveReceiptV1 {
+  artifact_id: string;
+  case_id: string;
+  session_id: number;
+  interface: string;
+  frame_count: number;
+  size: number;
+  sha256: string;
+}
+export async function captureSaveV1(sessionId: number): Promise<CaptureSaveReceiptV1> {
+  if (!inTauri) throw new Error("Saving native capture requires the desktop runtime");
+  return invoke<CaptureSaveReceiptV1>("capture_save_v1", { sessionId });
+}
+
+
+/** Decoded metadata from the *same* native original PCAP parser as opened files. */
+export async function capturePacketDetailsV1(sessionId: number, index: number): Promise<PcapPacketWire> {
+  if (!inTauri) throw new Error("Native packet inspection requires the desktop runtime");
+  return invoke<PcapPacketWire>("capture_packet_details_v1", { sessionId, index });
+}
+
+/** Bounded native stream reconstruction, never unrestricted raw PCAP bytes. */
+export async function captureFollowStreamV1(sessionId: number, streamId: string): Promise<StreamTranscriptWire> {
+  if (!inTauri) throw new Error("Following a capture stream requires the desktop runtime");
+  return invoke<StreamTranscriptWire>("capture_follow_stream_v1", { sessionId, streamId });
+}
+
 // --- captures ----------------------------------------------------------------
 
 export interface PcapLayerWire {
