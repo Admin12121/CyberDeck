@@ -21,9 +21,9 @@ export function StatusBar() {
   }, []);
   useEffect(() => {
     if (!casesLoaded) return;
-    if (cases.length === 0) { if (wb.caseId !== "scratchpad") wb.setCaseId("scratchpad"); return; }
-    // Never silently display case A while writes still target a stale case ID.
-    if (!cases.some((item) => item.id === wb.caseId)) wb.setCaseId(cases[0].id);
+    if (wb.caseId === "scratchpad") return; // temporary workspace is always an explicit choice
+    // Unknown/deleted cases cannot be silently replaced by another real case.
+    if (!cases.some((item) => item.id === wb.caseId)) wb.setCaseId("scratchpad");
   }, [cases, casesLoaded, wb.caseId, wb.setCaseId]);
 
   const createCase = async () => {
@@ -46,11 +46,11 @@ export function StatusBar() {
         <select aria-label="Active case" disabled={!casesLoaded || !!caseError}
           value={wb.caseId} onChange={(event) => wb.setCaseId(event.target.value)}
           className="h-7 max-w-52 min-w-28 rounded-md border border-line bg-panel px-2 text-xs text-fg">
-          {cases.map((item) => <option key={item.id} value={item.id}>{item.title}</option>)}
-          {!cases.some((item) => item.id === wb.caseId) ? (
+          <option value="scratchpad">Temporary workspace</option>
+          {cases.filter((item) => item.id !== "scratchpad").map((item) => <option key={item.id} value={item.id}>{item.title}</option>)}
+          {!cases.some((item) => item.id === wb.caseId) && wb.caseId !== "scratchpad" ? (
             <option value={wb.caseId}>{!casesLoaded ? "Loading…" : wb.caseId === "scratchpad" ? "Scratchpad" : "Resolving…"}</option>
           ) : null}
-          {cases.length === 0 && wb.caseId !== "scratchpad" ? <option value="scratchpad">Scratchpad</option> : null}
         </select>
       </label>
       {creating ? (

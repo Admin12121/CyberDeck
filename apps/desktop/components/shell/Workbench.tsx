@@ -5,11 +5,11 @@
  */
 import { WorkbenchProvider, useWorkbenchLocation, useWorkbenchLayout } from "@state/workbench";
 import { PANEL_LIMITS } from "@state/workbench";
-import { CryptoWorkspace } from "@features/crypto";
-import { NetworkWorkspace } from "@features/network";
-import { WebWorkspace } from "@features/web";
-import { ReverseWorkspace } from "@features/reverse";
-import { ForensicsWorkspace } from "@features/forensics";
+import { CryptoWorkspace } from "@/app/crypto/_components/CryptoWorkspace";
+import { NetworkWorkspace } from "@/app/network/_components/NetworkWorkspace";
+import { WebWorkspace } from "@/app/web/_components/WebWorkspace";
+import { ReverseWorkspace } from "@/app/reverse/_components/ReverseWorkspace";
+import { ForensicsWorkspace } from "@/app/forensics/_components/ForensicsWorkspace";
 import { Rail } from "./Rail";
 import { ContextNavigator } from "./ContextNavigator";
 import { BottomDock } from "./BottomDock";

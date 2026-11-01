@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { ArrowDown, ArrowUp, CornerDownLeft, Search, X } from "lucide-react";
-import { CATEGORIES } from "@features/registry";
+import { CATEGORIES } from "@state/tool-registry";
 import { useWorkbench } from "@state/workbench";
 
 type PaletteAction = { id: string; label: string; hint: string; shortcut?: string; run: () => void };

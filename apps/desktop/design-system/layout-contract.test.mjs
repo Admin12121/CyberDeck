@@ -8,7 +8,7 @@ const source = (relative) => fs.readFileSync(path.join(desktop, relative), "utf8
 const features = ["crypto", "network", "forensics", "web"];
 const views = [];
 for (const feature of features) {
-  const directory = path.join(desktop, "features", feature, "view");
+  const directory = path.join(desktop, "app", feature, "_components");
   for (const file of fs.readdirSync(directory)) {
     if (file.endsWith(".tsx")) views.push(path.join(directory, file));
   }
@@ -26,7 +26,7 @@ test("all feature toolbar geometry is sourced from the common design contract", 
 
 test("workspace navigation lives in the sidebar, not duplicated tool tabs", () => {
   for (const category of ["crypto", "network", "forensics"]) {
-    const directory = path.join(desktop, "features", category, "view");
+    const directory = path.join(desktop, "app", category, "_components");
     for (const file of fs.readdirSync(directory).filter((name) => name.endsWith(".tsx"))) {
       assert.doesNotMatch(fs.readFileSync(path.join(directory, file), "utf8"), /<ToolTabs\b|@shell\/ToolTabs/, file);
     }
@@ -36,15 +36,15 @@ test("workspace navigation lives in the sidebar, not duplicated tool tabs", () =
 
 test("Web and Packet views use the same local tab primitive", () => {
   assert.match(source("design-system/panes.tsx"), /export function WorkspaceTabs/);
-  assert.match(source("features/web/view/WebWorkspace.tsx"), /<WorkspaceTabs\b/);
-  assert.match(source("features/network/view/PacketStudioView.tsx"), /<WorkspaceTabs\b/);
+  assert.match(source("app/web/_components/WebWorkspace.tsx"), /<WorkspaceTabs\b/);
+  assert.match(source("app/network/_components/PacketStudioView.tsx"), /<WorkspaceTabs\b/);
 });
 
 test("all browser exports use one checked helper rather than local anchor implementations", () => {
   for (const view of [
-    "features/crypto/view/RecipesView.tsx",
-    "features/forensics/view/CaseFindingsView.tsx",
-    "features/web/view/ProxyView.tsx",
+    "app/crypto/_components/RecipesView.tsx",
+    "app/forensics/_components/CaseFindingsView.tsx",
+    "app/web/_components/ProxyView.tsx",
   ]) {
     assert.match(source(view), /downloadContent\(/);
     assert.doesNotMatch(source(view), /URL\.createObjectURL\(/);

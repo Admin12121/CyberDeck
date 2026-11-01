@@ -1,12 +1,15 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import Link from "next/link";
+import { usePathname } from "next/navigation";
 import { Command, ListTodo, Moon, PanelLeftOpen, PanelLeftClose, SquareTerminal, Sun } from "lucide-react";
-import { CATEGORIES } from "@features/registry";
+import { CATEGORIES } from "@state/tool-registry";
 import { useWorkbench } from "@state/workbench";
 
 export function Rail() {
   const wb = useWorkbench();
+  const pathname = usePathname();
   const [dark, setDark] = useState(true);
   const running = Object.values(wb.jobs).filter((job) => job.status === "running").length;
 
@@ -30,10 +33,12 @@ export function Rail() {
   return (
     <nav className="flex w-12 shrink-0 flex-col items-center border-r border-line bg-sidebar" aria-label="Workspace categories and controls">
       <div className="flex h-[var(--cd-toolbar-height)] w-full shrink-0 items-center justify-center">
-        <img src="/logo.webp" alt="CyberDeck" className="size-6 grayscale" />
+        <Link href="/" aria-label="CyberDeck Home" title="Home" className="flex size-9 items-center justify-center rounded hover:bg-raised">
+          <img src="/logo.webp" alt="" className="size-6 grayscale" />
+        </Link>
       </div>
       <button type="button" onClick={wb.toggleNavigator}
-        disabled={!CATEGORIES.some((item) => item.id === wb.category && item.tools.filter((tool) => !tool.disabled).length > 1)}
+        disabled={pathname === "/" || !CATEGORIES.some((item) => item.id === wb.category && item.tools.filter((tool) => !tool.disabled).length > 1)}
         title={wb.navigatorOpen ? "Collapse sidebar (Ctrl+B)" : "Expand sidebar (Ctrl+B)"}
         aria-label={wb.navigatorOpen ? "Collapse sidebar" : "Expand sidebar"}
         aria-expanded={wb.navigatorOpen} aria-controls="cyberdeck-context-navigator"
@@ -43,7 +48,7 @@ export function Rail() {
       <div className="flex w-full flex-1 flex-col items-center gap-1 py-2">
         {CATEGORIES.map((category) => {
           const Icon = category.icon;
-          const active = wb.category === category.id;
+          const active = pathname === `/${category.id}`;
           const disabled = category.tools.every((tool) => tool.disabled);
           return (
             <button key={category.id} type="button"

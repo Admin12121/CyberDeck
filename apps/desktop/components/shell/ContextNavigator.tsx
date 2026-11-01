@@ -1,6 +1,6 @@
 "use client";
 
-import { CATEGORIES } from "@features/registry";
+import { CATEGORIES } from "@state/tool-registry";
 import { useWorkbenchLocation, useWorkbenchLayout } from "@state/workbench";
 
 export function ContextNavigator() {

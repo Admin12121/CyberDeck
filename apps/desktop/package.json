@@ -10,11 +10,15 @@
     "tauri": "tauri"
   },
   "dependencies": {
+    "@base-ui/react": "^1.9.0",
+    "@daypicker/react": "^10.0.2",
     "@tauri-apps/api": "^2.12.4",
+    "clsx": "^2.1.1",
     "lucide-react": "^1.65.0",
     "next": "^16.4.3",
     "react": "^19.3.1",
-    "react-dom": "^19.3.1"
+    "react-dom": "^19.3.1",
+    "tailwind-merge": "^3.7.0"
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4.3.3",

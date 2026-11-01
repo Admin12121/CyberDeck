@@ -14,8 +14,9 @@ import {
   useRef,
   useState,
 } from "react";
-import { CATEGORIES, toolById, type CategoryId, type ToolId } from "@features/registry";
-import type { RecipeStep } from "@features/crypto/model";
+import { CATEGORIES, toolById, type CategoryId, type ToolId } from "@state/tool-registry";
+import { usePathname, useRouter } from "next/navigation";
+import type { RecipeStep } from "@/app/crypto/_components/model";
 import { jobCancel, jobStart } from "@lib/ipc";
 import { useNativeCaseSession, type CaseSessionState } from "@state/case-session";
 import { usePanelPreferences } from "@state/panel-preferences";
@@ -123,6 +124,8 @@ function firstToolOf(category: CategoryId): ToolId {
 }
 
 export function WorkbenchProvider({ children }: { children: React.ReactNode }) {
+  const router = useRouter();
+  const pathname = usePathname();
   const [caseId, setCaseId] = useState("scratchpad");
   const [category, setCategory] = useState<CategoryId>("crypto");
   const [tool, setTool] = useState<ToolId>("crypto.recipes");
@@ -212,12 +215,24 @@ export function WorkbenchProvider({ children }: { children: React.ReactNode }) {
     try { window.localStorage.setItem("cyberdeck.navigator-open", JSON.stringify(navigatorByCategory)); } catch { /* optional */ }
   }, [navigatorByCategory, locationLoaded]);
 
+  // Back/forward and deep links are the source of truth for the active feature.
+  useEffect(() => {
+    const segment = pathname.split("/")[1];
+    const routed = CATEGORIES.find((item) => item.id === segment);
+    if (!routed) return;
+    const id = routed.id;
+    setCategory(id);
+    setTool((current) => toolById(current)?.category === id
+      ? current : recentTools.current[id] ?? firstToolOf(id));
+  }, [pathname]);
+
   const selectCategory = useCallback((id: CategoryId) => {
     const category = CATEGORIES.find((item) => item.id === id);
     if (!category?.tools.some((item) => !item.disabled)) return;
     setCategory(id);
     setTool(recentTools.current[id] ?? firstToolOf(id));
-  }, []);
+    if (pathname !== `/${id}`) router.push(`/${id}`);
+  }, [pathname, router]);
 
   const selectTool = useCallback((id: ToolId) => {
     const descriptor = toolById(id);
@@ -225,7 +240,8 @@ export function WorkbenchProvider({ children }: { children: React.ReactNode }) {
     recentTools.current[descriptor.category] = id;
     setTool(id);
     setCategory(descriptor.category);
-  }, []);
+    if (pathname !== `/${descriptor.category}`) router.push(`/${descriptor.category}`);
+  }, [pathname, router]);
 
   const runDemoJob = useCallback(() => {
     const generation = operationGeneration.current;

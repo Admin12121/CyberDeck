@@ -1,5 +1,5 @@
-import { Workbench } from "@shell/Workbench";
+import { StartProject } from "./_components";
 
-export default function Page() {
-  return <Workbench />;
+export default function HomePage() {
+  return <StartProject />;
 }
