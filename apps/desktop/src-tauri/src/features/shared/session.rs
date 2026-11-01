@@ -23,12 +23,15 @@ struct Selection {
 /// One process-local case authority. Initially unselected. A future frontend
 /// case-switch must await case_session_select before using scoped native APIs.
 pub struct CaseSessionCtx {
+    /// Serializes case revocation against durable publication/consent minting.
+    publication: Mutex<()>,
     selection: Mutex<Selection>,
     pub history_policy: Arc<Mutex<ActiveCaseHistoryPolicy>>,
 }
 impl Default for CaseSessionCtx {
     fn default() -> Self {
         Self {
+            publication: Mutex::new(()),
             selection: Mutex::new(Selection::default()),
             history_policy: Arc::new(Mutex::new(ActiveCaseHistoryPolicy::default())),
         }
@@ -36,6 +39,10 @@ impl Default for CaseSessionCtx {
 }
 impl CaseSessionCtx {
     pub fn select(&self, store: &ArtifactStore, case_id: &str) -> Result<CaseSessionWire, String> {
+        let _gate = self
+            .publication
+            .lock()
+            .map_err(|_| "case publication gate unavailable")?;
         validate_case_id(case_id)?;
         if !store.case_exists(case_id)? {
             return Err("selected case does not exist".into());
@@ -62,6 +69,10 @@ impl CaseSessionCtx {
     }
 
     pub fn clear(&self) -> Result<CaseSessionWire, String> {
+        let _gate = self
+            .publication
+            .lock()
+            .map_err(|_| "case publication gate unavailable")?;
         let mut state = self
             .selection
             .lock()
@@ -99,6 +110,25 @@ impl CaseSessionCtx {
             return Err("select a case in the native desktop session first".into());
         }
         Ok(scope)
+    }
+
+    /// Synchronize short backend-only publication and consent operations with
+    /// every case switch/reselection. The callback must NOT await, call select/
+    /// clear, or hold a network operation. Use this at the real commit boundary.
+    /// Lock order: publication -> selection -> policy, never the reverse.
+    pub fn with_current_publication<T>(
+        &self,
+        expected: &CaseSessionWire,
+        publish: impl FnOnce() -> Result<T, String>,
+    ) -> Result<T, String> {
+        let _gate = self
+            .publication
+            .lock()
+            .map_err(|_| "case publication gate unavailable")?;
+        self.ensure(expected)?;
+        let result = publish()?;
+        self.ensure(expected)?;
+        Ok(result)
     }
 
     pub fn ensure(&self, prior: &CaseSessionWire) -> Result<(), String> {
@@ -151,6 +181,45 @@ pub fn case_session_status_v1(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn publication_guard_serializes_reselection_and_rejects_stale_generation() {
+        use std::sync::{mpsc, Arc};
+        use std::thread;
+        use std::time::Duration;
+        let temp = tempfile::tempdir().unwrap();
+        let store = ArtifactStore::open(&temp.path().join("cases.db")).unwrap();
+        let session = Arc::new(CaseSessionCtx::default());
+        let old = session.select(&store, "scratchpad").unwrap();
+        let (entered, observed) = mpsc::channel::<()>();
+        let (release, continue_gate) = mpsc::channel::<()>();
+        let held = session.clone();
+        let prior = old.clone();
+        let publisher = thread::spawn(move || {
+            held.with_current_publication(&prior, || {
+                entered.send(()).unwrap();
+                continue_gate.recv_timeout(Duration::from_secs(2)).unwrap();
+                Ok(42)
+            })
+        });
+        observed.recv_timeout(Duration::from_secs(2)).unwrap();
+        let (attempted, attempting) = mpsc::channel::<()>();
+        let (selected, completed) = mpsc::channel::<()>();
+        let changing = session.clone();
+        let switch = thread::spawn(move || {
+            attempted.send(()).unwrap();
+            let later = changing.select(&store, "scratchpad").unwrap();
+            selected.send(()).unwrap();
+            later
+        });
+        attempting.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert!(completed.recv_timeout(Duration::from_millis(25)).is_err());
+        release.send(()).unwrap();
+        assert_eq!(publisher.join().unwrap().unwrap(), 42);
+        let newer = switch.join().unwrap();
+        assert_ne!(newer.revision, old.revision);
+        assert!(session.with_current_publication(&old, || Ok(())).is_err());
+    }
+
     #[test]
     fn native_selection_validates_store_and_invalidates_reselected_scope() {
         let tmp = tempfile::tempdir().unwrap();

@@ -26,6 +26,7 @@ import {
 } from "../controller";
 import { b64, fileImportDerived, isDesktop, recipeRun, type RecipeRunWire } from "@lib/ipc";
 import { useWorkbench } from "@state/workbench";
+import { outputCapabilities } from "./recipe-output-policy";
 
 /** Recipes: four-column pipeline with drag-and-drop, params, image preview. */
 
@@ -63,6 +64,7 @@ export function RecipesView() {
   const wb = useWorkbench();
   const [savingCase, setSavingCase] = useState(false);
   const [caseSaveError, setCaseSaveError] = useState<string | null>(null);
+  const [outputActionError, setOutputActionError] = useState<string | null>(null);
   const [sourceDescription, setSourceDescription] = useState<string | null>(null);
   const [state, setState] = useState<RecipeState>(initialRecipeState);
   const [search, setSearch] = useState("");
@@ -152,15 +154,26 @@ export function RecipesView() {
     }
   }, [result, imageMime]);
   const [outMode, setOutMode] = useState<"text" | "hex" | "image">("text");
+  const textOutput = useMemo(
+    () => outputCapabilities(result, "text", decodedImage?.mime ?? null),
+    [result, decodedImage],
+  );
   useEffect(() => {
-    // auto-switch: an image result shows as an image, anything else as text
-    setOutMode(decodedImage ? "image" : "text");
-  }, [decodedImage]);
+    setOutMode(decodedImage ? "image" : textOutput.canText || !textOutput.hasBytes ? "text" : "hex");
+  }, [decodedImage, textOutput]);
+  useEffect(() => setOutputActionError(null), [result, outMode]);
+  const supportsTextClipboard = mounted && typeof navigator !== "undefined" && typeof navigator.clipboard?.writeText === "function";
+  const supportsImageClipboard = mounted && typeof navigator !== "undefined"
+    && typeof navigator.clipboard?.write === "function" && typeof ClipboardItem !== "undefined";
+  const output = outputCapabilities(result, outMode, decodedImage?.mime ?? null, supportsImageClipboard);
+  const copyEnabled = output.canCopy && (outMode === "image" ? supportsImageClipboard : supportsTextClipboard);
+  const caseLinked = wb.caseId !== "scratchpad"
+    && wb.caseSession.phase === "ready" && wb.caseSession.caseId === wb.caseId;
   const imageSrc = decodedImage
     ? `data:${decodedImage.mime};base64,${b64.encode(decodedImage.bytes)}`
     : null;
   const saveToCase = async () => {
-    if (!result || result.error) return;
+    if (!output.hasBytes || !caseLinked || !result) return;
     setSavingCase(true);
     setCaseSaveError(null);
     try {
@@ -177,16 +190,35 @@ export function RecipesView() {
   };
 
   const downloadOutput = () => {
-    if (!result) return;
-    const bytes = outMode === "image" && decodedImage ? decodedImage.bytes : result.outputBytes;
-    const ext = outMode === "image" && decodedImage ? decodedImage.mime.split("/")[1].replace("jpeg", "jpg") : "bin";
-    const blob = new Blob([bytes as BlobPart], { type: "application/octet-stream" });
+    if (!output.canDownload || !result) return;
+    const image = outMode === "image" ? decodedImage : null;
+    const bytes = image?.bytes ?? result.outputBytes;
+    const ext = image?.mime === "image/jpeg" ? "jpg"
+      : image?.mime?.split("/")[1] ?? (outMode === "text" && output.canText ? "txt" : "bin");
+    const blob = new Blob([Uint8Array.from(bytes)], { type: image?.mime ?? "application/octet-stream" });
     const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `output.${ext}`;
-    a.click();
-    URL.revokeObjectURL(url);
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = `output.${ext}`;
+    anchor.click();
+    setTimeout(() => URL.revokeObjectURL(url), 0);
+  };
+
+  const copyOutput = async () => {
+    if (!copyEnabled || !result) return;
+    try {
+      if (outMode === "image" && decodedImage) {
+        const png = new Blob([Uint8Array.from(decodedImage.bytes)], { type: "image/png" });
+        await navigator.clipboard.write([new ClipboardItem({ "image/png": png })]);
+      } else {
+        const text = outMode === "hex"
+          ? Array.from(result.outputBytes, (byte) => byte.toString(16).padStart(2, "0")).join(" ")
+          : new TextDecoder("utf-8", { fatal: true }).decode(result.outputBytes);
+        await navigator.clipboard.writeText(text);
+      }
+    } catch {
+      setOutputActionError("Could not copy output. Check clipboard permissions.");
+    }
   };
 
   const filtered = useMemo(() => {
@@ -221,7 +253,7 @@ export function RecipesView() {
   };
 
   return (
-    <div className="flex h-full min-h-0 bg-line">
+    <div className="flex h-full min-h-0 bg-panel">
       <Pane title="Operations" className="shrink-0" bodyClassName="p-1" style={{ width: opsWidth }}>
         <div className="p-1">
           <TextInput value={search} onChange={setSearch} placeholder="search operations…" ariaLabel="Search operations" className="w-full" />
@@ -388,21 +420,21 @@ export function RecipesView() {
                 <button
                   key={mode}
                   type="button"
-                  disabled={mode === "image" && !decodedImage}
+                  disabled={mode === "text" ? !output.canText : mode === "hex" ? !output.canHex : !output.canImage}
                   onClick={() => setOutMode(mode)}
-                  className={`flex h-6 items-center border px-1.5 font-mono text-[10px] uppercase disabled:opacity-30 ${outMode === mode ? "border-orange/50 text-orange" : "border-line text-fg-muted"}`}
+                  className={`flex h-6 items-center border px-1.5 font-mono text-[10px] uppercase disabled:opacity-30 ${outMode === mode ? "border-line bg-selected text-fg" : "border-line text-fg-muted"}`}
                 >
                   {mode}
                 </button>
               ))}
-              <ToolButton onClick={() => void saveToCase()} disabled={!isDesktop() || !result || !!result.error || savingCase}
-                title="Save derived bytes with provenance to the selected case">
+              <ToolButton onClick={() => void saveToCase()} disabled={!isDesktop() || !output.hasBytes || !caseLinked || savingCase}
+                title={!caseLinked ? "Select and link a native case to save evidence" : !output.hasBytes ? "No output bytes to save" : "Save derived bytes with provenance to the selected case"}>
                 <Save size={11} /> {savingCase ? "Saving" : "To Case"}
               </ToolButton>
-              <ToolButton onClick={downloadOutput} disabled={!result} title="Save output as file">
+              <ToolButton onClick={downloadOutput} disabled={!output.canDownload} title={output.canDownload ? "Download output bytes" : "No output bytes to download"}>
                 <FileDown size={11} />
               </ToolButton>
-              <ToolButton onClick={() => void navigator.clipboard?.writeText(result?.output ?? "")} title="Copy output">
+              <ToolButton onClick={() => void copyOutput()} disabled={!copyEnabled} title={copyEnabled ? "Copy the selected output format" : "No copyable output in this format or clipboard unavailable"}>
                 <Copy size={11} />
               </ToolButton>
             </div>
@@ -446,7 +478,8 @@ export function RecipesView() {
               <EmptyState title={state.autoBake && eligibleForNative ? "Processing in Rust…" : "No result yet"} detail={state.autoBake && eligibleForNative ? "Evaluating the recipe in the native engine." : "Enable auto-bake or press Bake to evaluate the recipe."} badge="recipes" />
             </div>
           )}
-          {caseSaveError ? <div className="border-t border-err/50 px-2 py-1 text-xs text-err">{caseSaveError}</div> : null}
+          {caseSaveError ? <div role="alert" className="border-t border-line px-2 py-1 text-xs text-err">{caseSaveError}</div> : null}
+          {outputActionError ? <div role="alert" className="border-t border-line px-2 py-1 text-xs text-err">{outputActionError}</div> : null}
           <div className="shrink-0 border-t border-line px-2 py-0.5 font-mono text-[10px] text-fg-muted">
             {result ? `${result.byteLength} bytes out${mounted ? ` · ${result.elapsedMs.toFixed(1)} ms` : ""} · ${nativeResult ? "Rust engine" : "TypeScript engine"}` : "n/a"}
           </div>
@@ -499,7 +532,7 @@ export function StepRow({ step, index, onToggle, onMoveUp, onMoveDown, onRemove,
           title={`${op.paramLabel ?? "parameter"} for ${op.label}`}
           aria-label={`${op.label} parameter`}
           draggable={false}
-          className="h-5 w-16 shrink-0 border border-line bg-app px-1 font-mono text-[10px] text-fg focus:border-orange focus:outline-none"
+          className="h-5 w-16 shrink-0 border border-line bg-app px-1 font-mono text-[10px] text-fg"
         />
       ) : null}
       <button type="button" title="Move up" onClick={onMoveUp} className="text-fg-muted opacity-0 transition-opacity group-hover:opacity-100 hover:text-fg">

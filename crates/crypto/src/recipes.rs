@@ -44,6 +44,10 @@ pub fn native_operation(id: &str) -> bool {
             | "to_base64url"
             | "from_base64url"
             | "to_base32"
+            | "url_encode"
+            | "url_decode"
+            | "defang"
+            | "refang"
             | "from_base32"
             | "to_hex"
             | "from_hex"
@@ -175,6 +179,153 @@ fn add_line_numbers(input: &[u8]) -> Result<Vec<u8>, String> {
     Ok(output)
 }
 
+fn url_encode(input: &[u8]) -> Result<Vec<u8>, String> {
+    let source = text(input);
+    let is_safe = |b: u8| {
+        b.is_ascii_alphanumeric()
+            || matches!(
+                b,
+                b'-' | b'_' | b'.' | b'!' | b'~' | b'*' | b'\'' | b'(' | b')'
+            )
+    };
+    let mut required = 0usize;
+    for &byte in source.as_bytes() {
+        required = required
+            .checked_add(if is_safe(byte) { 1 } else { 3 })
+            .ok_or("recipe output size limit exceeded")?;
+        if required > MAX_RECIPE_BYTES {
+            return Err("recipe output size limit exceeded".into());
+        }
+    }
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    let mut encoded = Vec::with_capacity(required);
+    for &byte in source.as_bytes() {
+        if is_safe(byte) {
+            encoded.push(byte);
+        } else {
+            encoded.extend_from_slice(&[
+                b'%',
+                HEX[(byte >> 4) as usize],
+                HEX[(byte & 15) as usize],
+            ]);
+        }
+    }
+    Ok(encoded)
+}
+
+fn url_decode(input: &[u8]) -> Result<Vec<u8>, String> {
+    let source = text(input);
+    if source.len() > MAX_RECIPE_BYTES {
+        return Err("recipe output size limit exceeded".into());
+    }
+    let mut decoded = Vec::with_capacity(source.len());
+    let bytes = source.as_bytes();
+    let mut at = 0;
+    while at < bytes.len() {
+        match bytes[at] {
+            b'+' => decoded.push(b' '),
+            b'%' => {
+                if at + 2 >= bytes.len() {
+                    return Err("URI malformed".into());
+                }
+                let nibble = |b: u8| match b {
+                    b'0'..=b'9' => Some(b - b'0'),
+                    b'a'..=b'f' => Some(b - b'a' + 10),
+                    b'A'..=b'F' => Some(b - b'A' + 10),
+                    _ => None,
+                };
+                let hi = nibble(bytes[at + 1]).ok_or("URI malformed")?;
+                let lo = nibble(bytes[at + 2]).ok_or("URI malformed")?;
+                decoded.push((hi << 4) | lo);
+                at += 2;
+            }
+            byte => decoded.push(byte),
+        }
+        at += 1;
+    }
+    std::str::from_utf8(&decoded).map_err(|_| "URI malformed")?;
+    Ok(decoded)
+}
+
+fn defang(input: &[u8]) -> Result<Vec<u8>, String> {
+    let source = text(input);
+    let replacements = source.bytes().filter(|c| *c == b'.' || *c == b'@').count();
+    let upper_bound = source
+        .len()
+        .checked_add(
+            replacements
+                .checked_mul(2)
+                .ok_or("recipe output size limit exceeded")?,
+        )
+        .ok_or("recipe output size limit exceeded")?;
+    if upper_bound > MAX_RECIPE_BYTES {
+        return Err("recipe output size limit exceeded".into());
+    }
+    let substituted = source.replace('.', "[.]").replace('@', "[@]");
+    let mut output = String::with_capacity(substituted.len());
+    let mut at = 0;
+    while at < substituted.len() {
+        let rest = &substituted[at..];
+        if rest
+            .get(..8)
+            .is_some_and(|v| v.eq_ignore_ascii_case("https://"))
+        {
+            output.push_str(if rest.starts_with("https") {
+                "hXXps://"
+            } else {
+                "hXXp://"
+            });
+            at += 8;
+        } else if rest
+            .get(..7)
+            .is_some_and(|v| v.eq_ignore_ascii_case("http://"))
+        {
+            output.push_str("hXXp://");
+            at += 7;
+        } else {
+            let ch = rest.chars().next().expect("valid text boundary");
+            output.push(ch);
+            at += ch.len_utf8();
+        }
+    }
+    Ok(output.into_bytes())
+}
+
+fn refang(input: &[u8]) -> Result<Vec<u8>, String> {
+    let source = text(input);
+    if source.len() > MAX_RECIPE_BYTES {
+        return Err("recipe output size limit exceeded".into());
+    }
+    let substituted = source
+        .replace("[.]", ".")
+        .replace("[@]", "@")
+        .replace("(.)", ".");
+    let mut output = String::with_capacity(substituted.len());
+    let mut at = 0;
+    while at < substituted.len() {
+        let rest = &substituted[at..];
+        let b = rest.as_bytes();
+        if b.len() >= 7
+            && b[0].eq_ignore_ascii_case(&b'h')
+            && (b[1].eq_ignore_ascii_case(&b'x') || b[1] == b'*')
+            && (b[2].eq_ignore_ascii_case(&b'x') || b[2] == b'*')
+            && b[3].eq_ignore_ascii_case(&b'p')
+        {
+            let has_s = b.get(4).is_some_and(|v| v.eq_ignore_ascii_case(&b's'));
+            let suffix = if has_s { 5 } else { 4 };
+            if b.get(suffix..suffix + 3) == Some(b"://") {
+                output.push_str(if has_s { "https://" } else { "http://" });
+                at += suffix + 3;
+                continue;
+            }
+        }
+        let ch = rest.chars().next().expect("valid text boundary");
+        output.push(ch);
+        at += ch.len_utf8();
+    }
+    Ok(output.into_bytes())
+}
+
 fn text(bytes: &[u8]) -> String {
     String::from_utf8_lossy(bytes).into_owned()
 }
@@ -202,6 +353,10 @@ fn transform(op: &str, bytes: &[u8], param: Option<&str>) -> Result<Vec<u8>, Str
                     .trim_end_matches('='),
             )
             .map_err(|_| "input is not valid Base64URL".to_string()),
+        "url_encode" => url_encode(bytes),
+        "url_decode" => url_decode(bytes),
+        "defang" => defang(bytes),
+        "refang" => refang(bytes),
         "to_base32" => base32_encode(bytes),
         "from_base32" => base32_decode(bytes),
         "to_hex" => Ok(hex::encode(bytes).into_bytes()),
@@ -645,5 +800,156 @@ mod added_recipe_parity {
                 && native_operation("from_base32")
                 && native_operation("add_line_numbers")
         );
+    }
+}
+
+#[cfg(test)]
+mod p4_web_recipe_parity {
+    use super::*;
+
+    fn result(op: &str, input: &str) -> Result<Vec<u8>, String> {
+        let output = execute_recipe(
+            input,
+            &[RecipeStep {
+                op_id: op.to_owned(),
+                enabled: true,
+                param: None,
+            }],
+        );
+        match output.error {
+            Some(error) => Err(error.message),
+            None => base64::engine::general_purpose::STANDARD
+                .decode(output.output_b64)
+                .map_err(|e| e.to_string()),
+        }
+    }
+
+    #[test]
+    fn url_encoding_matches_typescript_encode_uri_component() {
+        for (source, expected) in [
+            ("", ""),
+            (
+                "hello world! /?a=1&b=雪+%",
+                "hello%20world!%20%2F%3Fa%3D1%26b%3D%E9%9B%AA%2B%25",
+            ),
+            ("!*'()~_-.,é😃", "!*'()~_-.%2C%C3%A9%F0%9F%98%83"),
+            ("a+b%=", "a%2Bb%25%3D"),
+        ] {
+            assert_eq!(result("url_encode", source).unwrap(), expected.as_bytes());
+        }
+        assert_eq!(url_encode(b"\xff").unwrap(), b"%EF%BF%BD");
+    }
+
+    #[test]
+    fn url_decoding_matches_typescript_and_rejects_invalid_utf8() {
+        for (source, expected) in [
+            (
+                "hello+world%21%20%2F%3Fa%3D1%26b%3D%E9%9B%AA%2B%25",
+                "hello world! /?a=1&b=雪+%",
+            ),
+            ("%C3%A9%F0%9F%98%83", "é😃"),
+            ("%2b+%41%7a", "+ Az"),
+            ("hello%00world", "hello\0world"),
+        ] {
+            assert_eq!(result("url_decode", source).unwrap(), expected.as_bytes());
+        }
+        for invalid in ["%ZZ", "%FF", "%E2%82", "trailing%", "%0", "%C0%AF"] {
+            assert_eq!(result("url_decode", invalid), Err("URI malformed".into()));
+        }
+        let pipeline = execute_recipe(
+            "hello + 雪",
+            &[
+                RecipeStep {
+                    op_id: "url_encode".into(),
+                    enabled: true,
+                    param: None,
+                },
+                RecipeStep {
+                    op_id: "url_decode".into(),
+                    enabled: true,
+                    param: None,
+                },
+            ],
+        );
+        assert!(pipeline.error.is_none());
+        assert_eq!(
+            base64::engine::general_purpose::STANDARD
+                .decode(pipeline.output_b64)
+                .unwrap(),
+            "hello + 雪".as_bytes()
+        );
+    }
+
+    #[test]
+    fn defang_matches_typescript_with_case_sensitive_prefix_quirk() {
+        for (source, expected) in [
+            (
+                "https://example.com/a.b?u=x@y.org HTTP://Foo.Bar http://a.b",
+                "hXXps://example[.]com/a[.]b?u=x[@]y[.]org hXXp://Foo[.]Bar hXXp://a[.]b",
+            ),
+            (
+                "HttPS://a.b http://one.two",
+                "hXXp://a[.]b hXXp://one[.]two",
+            ),
+            ("a@b.com [.] and 🛡️", "a[@]b[.]com [[.]] and 🛡️"),
+        ] {
+            assert_eq!(result("defang", source).unwrap(), expected.as_bytes());
+        }
+    }
+
+    #[test]
+    fn refang_matches_typescript_and_does_not_fetch_urls() {
+        for (source, expected) in [
+            (
+                "hXXps://example[.]com h**p://x[.]y bob[@]site(.)org",
+                "https://example.com http://x.y bob@site.org",
+            ),
+            (
+                "HXXPS://A[.]B hXXp://test[.]com",
+                "https://A.B http://test.com",
+            ),
+            ("https://unmodified.example", "https://unmodified.example"),
+        ] {
+            assert_eq!(result("refang", source).unwrap(), expected.as_bytes());
+        }
+    }
+
+    #[test]
+    fn output_boundaries_are_checked_before_expansion() {
+        assert_eq!(
+            url_encode(&vec![b'!'; MAX_RECIPE_BYTES]).unwrap().len(),
+            MAX_RECIPE_BYTES
+        );
+        assert_eq!(
+            url_encode(&vec![b' '; MAX_RECIPE_BYTES / 3 + 1]).unwrap_err(),
+            "recipe output size limit exceeded"
+        );
+        assert_eq!(
+            defang(&vec![b'.'; MAX_RECIPE_BYTES / 3 + 1]).unwrap_err(),
+            "recipe output size limit exceeded"
+        );
+        assert_eq!(
+            url_decode(&vec![b'%'; MAX_RECIPE_BYTES + 1]).unwrap_err(),
+            "recipe output size limit exceeded"
+        );
+        assert_eq!(
+            refang(&vec![b'a'; MAX_RECIPE_BYTES + 1]).unwrap_err(),
+            "recipe output size limit exceeded"
+        );
+        for op in ["url_encode", "url_decode", "defang", "refang"] {
+            assert!(native_operation(op));
+        }
+        let fail = execute_recipe(
+            "%ZZ",
+            &[RecipeStep {
+                op_id: "url_decode".into(),
+                enabled: true,
+                param: None,
+            }],
+        );
+        let err = fail.error.unwrap();
+        assert_eq!(err.step_index, 0);
+        assert_eq!(err.op_id, "url_decode");
+        assert_eq!(err.message, "URI malformed");
     }
 }

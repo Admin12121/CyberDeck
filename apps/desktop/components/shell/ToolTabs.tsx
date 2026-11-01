@@ -6,9 +6,10 @@ import { useWorkbench } from "@state/workbench";
 export function ToolTabs({ category, active }: { category: CategoryId; active: ToolId }) {
   const wb = useWorkbench();
   const cat = CATEGORIES.find((c) => c.id === category);
-  if (!cat || cat.tools.length <= 1) return null;
+  if (!cat || cat.tools.filter((tool) => !tool.disabled).length <= 1) return null;
+  const sidebarIsPrimary = wb.category === category && wb.navigatorOpen;
   return (
-    <nav aria-label={`${cat.label} tools`} className="flex h-10 shrink-0 items-center gap-1 overflow-x-auto border-b border-line bg-sidebar px-2">
+    <nav aria-label={`${cat.label} tools`} className={`${sidebarIsPrimary ? "min-[1080px]:hidden " : ""}flex h-9 shrink-0 items-center gap-1 overflow-x-auto border-b border-line bg-sidebar px-2`}>
       {cat.tools.map((tool) => (
         <button
           key={tool.id}

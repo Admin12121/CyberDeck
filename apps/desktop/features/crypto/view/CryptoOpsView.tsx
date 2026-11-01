@@ -150,7 +150,7 @@ export function CryptoOpsView() {
             onChange={(e) => setInput(e.target.value)}
             spellCheck={false}
             aria-label="Digest input"
-            className="h-24 w-full resize-none border border-line bg-app p-2 font-mono text-xs text-fg focus:border-orange focus:outline-none"
+            className="h-24 w-full resize-none border border-line bg-app p-2 font-mono text-xs text-fg"
           />
           {current.needsKey ? (
             <>

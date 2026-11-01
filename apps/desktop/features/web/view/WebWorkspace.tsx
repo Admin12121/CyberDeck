@@ -19,7 +19,7 @@ function WebWorkspaceContent() {
             type="button"
             onClick={() => setTab(t)}
             className={`h-6 border px-3 font-mono text-[10px] uppercase tracking-wide ${
-              tab === t ? "border-orange/50 text-orange" : "border-transparent text-fg-muted hover:text-fg"
+              tab === t ? "border-line bg-selected text-fg" : "border-line text-fg-muted hover:text-fg"
             }`}
           >
             {t}

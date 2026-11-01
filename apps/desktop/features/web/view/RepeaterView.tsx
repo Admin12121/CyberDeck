@@ -59,7 +59,7 @@ export function RepeaterView() {
     <div className="flex h-full min-h-0 flex-col">
       <div className="flex h-8 shrink-0 items-center gap-1 border-b border-line bg-sidebar px-2">
         {tabs.map((t, i) => (
-          <div key={t.name} className={`flex h-6 items-center gap-1 border px-1 font-mono text-[11px] uppercase ${i === active ? "border-orange/50 text-orange" : "border-transparent text-fg-muted"}`}>
+          <div key={t.name} className={`flex h-6 items-center gap-1 border px-1 font-mono text-[11px] uppercase ${i === active ? "border-line bg-selected text-fg" : "border-line text-fg-muted"}`}>
             <button type="button" aria-selected={i === active} onClick={() => setActive(i)}
               className="h-full px-1 hover:text-fg" title={`Open ${t.name}`}>{t.name}</button>
             {tabs.length > 1 ? (
@@ -110,7 +110,7 @@ export function RepeaterView() {
                     key={mode}
                     type="button"
                     onClick={() => setBodyMode(mode)}
-                    className={`flex h-6 items-center border px-1.5 font-mono text-[10px] uppercase ${bodyMode === mode ? "border-orange/50 text-orange" : "border-line text-fg-muted"}`}
+                    className={`flex h-6 items-center border px-1.5 font-mono text-[10px] uppercase ${bodyMode === mode ? "border-line bg-selected text-fg" : "border-line text-fg-muted"}`}
                   >
                     {mode === "hex" ? "Text hex" : mode}
                   </button>

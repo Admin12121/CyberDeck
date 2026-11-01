@@ -11,10 +11,10 @@ export function ContextNavigator() {
     <aside
       id="cyberdeck-context-navigator"
       aria-label={`${category?.label ?? "Workspace"} tools`}
-      className="hidden min-h-0 shrink-0 flex-col bg-sidebar min-[1080px]:flex"
+      className="flex min-h-0 shrink-0 flex-col border-r border-line bg-sidebar min-[1080px]:border-r-0"
       style={{ width: wb.navigatorWidth }}
     >
-      <div className="flex h-11 shrink-0 items-center border-b border-line px-3">
+      <div className="flex h-9 shrink-0 items-center border-b border-line px-3">
         <h2 className="truncate text-sm font-semibold text-fg">{category?.label}</h2>
       </div>
       <nav aria-label={`${category?.label ?? "Workspace"} navigation`}

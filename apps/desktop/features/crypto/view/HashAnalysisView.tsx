@@ -303,7 +303,7 @@ export function HashAnalysisView() {
             }}
             spellCheck={false}
             aria-label="Hash input"
-            className="h-24 w-full resize-none border border-line bg-app p-2 font-mono text-xs text-fg focus:border-orange focus:outline-none"
+            className="h-24 w-full resize-none border border-line bg-app p-2 font-mono text-xs text-fg"
           />
           <div className="mt-2 flex items-center gap-1">
             <ToolButton disabled title="Import from file, planned arc 4">Import file</ToolButton>

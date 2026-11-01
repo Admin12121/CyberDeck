@@ -107,7 +107,7 @@ export function ToolButton({
   tone?: "default" | "primary" | "danger";
 }) {
   const tones: Record<string, string> = {
-    default: "border-line text-fg-dim hover:border-line-strong hover:text-fg",
+    default: "border-line text-fg-dim hover:text-fg",
     primary: "border-orange/50 text-orange hover:bg-orange-dim",
     danger: "border-err/40 text-err hover:bg-err/10",
   };
@@ -148,7 +148,7 @@ export function TextInput({
       onKeyDown={onKeyDown}
       placeholder={placeholder}
       aria-label={ariaLabel}
-      className={`h-8 border border-line bg-app px-2 text-[13px] text-fg placeholder:text-fg-muted focus:border-orange focus:outline-none ${mono ? "font-mono" : ""} ${className}`}
+      className={`h-8 border border-line bg-app px-2 text-[13px] text-fg placeholder:text-fg-muted ${mono ? "font-mono" : ""} ${className}`}
     />
   );
 }
@@ -171,7 +171,7 @@ export function Select({
       value={value}
       onChange={(e) => onChange(e.target.value)}
       aria-label={ariaLabel}
-      className={`h-8 border border-line bg-app px-2 font-mono text-xs text-fg-dim focus:border-orange focus:outline-none ${className}`}
+      className={`h-8 border border-line bg-app px-2 font-mono text-xs text-fg-dim ${className}`}
     >
       {options.map((opt) => (
         <option key={opt.value} value={opt.value}>

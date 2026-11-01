@@ -340,6 +340,35 @@ export async function caseSessionStatusV1(): Promise<CaseSessionWire> {
   return invoke<CaseSessionWire>("case_session_status_v1", {});
 }
 
+/** Backend-selected volatile Web history consent. Does not reveal raw data. */
+export interface WebCaptureConsentV1 {
+  enabled: boolean;
+  case_id: string | null;
+  generation: number | null;
+  max_entries: number;
+  max_total_bytes: number;
+  max_body_bytes: number;
+  duration_seconds: number;
+}
+
+/** Opens an independent native OS Yes/No confirmation after active-case and
+ * proxy checks. No caller-provided case ID or consent boolean can grant access.
+ */
+export async function webCaptureConsentStartV1(): Promise<WebCaptureConsentV1> {
+  if (!inTauri) throw new Error("Web capture consent requires native CyberDeck");
+  return invoke<WebCaptureConsentV1>("web_capture_consent_start_v1", {});
+}
+
+export async function webCaptureConsentRevokeV1(): Promise<WebCaptureConsentV1> {
+  if (!inTauri) throw new Error("Web capture revocation requires native CyberDeck");
+  return invoke<WebCaptureConsentV1>("web_capture_consent_revoke_v1", {});
+}
+
+export async function webCaptureConsentStatusV1(): Promise<WebCaptureConsentV1> {
+  if (!inTauri) throw new Error("Web capture status requires native CyberDeck");
+  return invoke<WebCaptureConsentV1>("web_capture_consent_status_v1", {});
+}
+
 export interface CaseSearchFindingWire {
   id: number;
   source: string;

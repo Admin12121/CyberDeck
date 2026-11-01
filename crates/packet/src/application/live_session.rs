@@ -119,6 +119,8 @@ pub struct CaptureSessionManager {
     /// ordinary status, stop, or paginated result reads during a disk commit.
     publication_gate: Mutex<()>,
     next_id: AtomicU64,
+    /// A stopped desktop session manager must not spawn or publish again.
+    closed: AtomicBool,
 }
 
 impl Default for CaptureSessionManager {
@@ -128,6 +130,7 @@ impl Default for CaptureSessionManager {
             worker: Mutex::new(None),
             publication_gate: Mutex::new(()),
             next_id: AtomicU64::new(1),
+            closed: AtomicBool::new(false),
         }
     }
 }
@@ -182,6 +185,12 @@ impl CaptureSessionManager {
                 "capture publication gate unavailable",
             )
         })?;
+        if self.closed.load(Ordering::Acquire) {
+            return Err(SessionError::new(
+                SessionErrorCode::NotReady,
+                "capture manager is shut down",
+            ));
+        }
         let case_id = case_id.trim();
         if case_id.is_empty() || case_id.len() > 128 || interface.is_empty() || interface.len() > 64
         {
@@ -389,6 +398,12 @@ impl CaptureSessionManager {
                 "capture publication gate unavailable",
             )
         })?;
+        if self.closed.load(Ordering::Acquire) {
+            return Err(SessionError::new(
+                SessionErrorCode::NotReady,
+                "capture manager is shut down",
+            ));
+        }
         let result = {
             let guard = self.shared.lock().map_err(|_| {
                 SessionError::new(SessionErrorCode::Internal, "capture state unavailable")
@@ -479,11 +494,21 @@ impl CaptureSessionManager {
     /// Join only after signaling cancellation. Used for deterministic lifecycle
     /// acceptance and graceful desktop shutdown, not from a UI render thread.
     pub fn shutdown(&self) {
-        if let Ok(guard) = self.shared.lock() {
-            if let Some(s) = guard.session.as_ref() {
+        // Linearize terminal shutdown with active capture publication and new
+        // sessions, then cancel/finish the worker without holding this gate.
+        // A caller must not invoke shutdown from inside a publisher callback.
+        let Ok(_publication) = self.publication_gate.lock() else {
+            return;
+        };
+        self.closed.store(true, Ordering::Release);
+        if let Ok(mut guard) = self.shared.lock() {
+            if let Some(s) = guard.session.as_mut() {
+                s.revoked = true;
                 s.cancel.store(true, Ordering::Release);
+                s.result = None;
             }
         }
+        drop(_publication);
         if let Ok(mut worker) = self.worker.lock() {
             if let Some(handle) = worker.take() {
                 let _ = handle.join();
@@ -1106,6 +1131,91 @@ mod tests {
             manager.status("case-A", run.session_id).unwrap_err().code,
             SessionErrorCode::UnauthorizedSession
         );
+    }
+
+    #[test]
+    fn shutdown_waits_for_inflight_publication_then_denies_new_commit() {
+        let manager = Arc::new(CaptureSessionManager::new());
+        let started = manager
+            .start_with("case-A", "fixture0", |stop, _| Ok(result(&stop)))
+            .unwrap();
+        until(&manager, "case-A", started.session_id, Phase::Completed);
+
+        let (publishing_tx, publishing_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel::<()>();
+        let owned = Arc::clone(&manager);
+        let publisher = std::thread::spawn(move || {
+            owned.publish_completed("case-A", started.session_id, |result| {
+                publishing_tx.send(result.pcap_bytes.len()).unwrap();
+                release_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+                Ok::<_, String>(result.pcap_bytes.len())
+            })
+        });
+        publishing_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+
+        let (shutting_down_tx, shutting_down_rx) = mpsc::channel();
+        let (shutdown_done_tx, shutdown_done_rx) = mpsc::channel();
+        let shutting_down = Arc::clone(&manager);
+        let joiner = std::thread::spawn(move || {
+            shutting_down_tx.send(()).unwrap();
+            shutting_down.shutdown();
+            shutdown_done_tx.send(()).unwrap();
+        });
+        shutting_down_rx
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap();
+        // A running publisher holds the publication gate, so shutdown must
+        // not finish before that already-authorized publication returns.
+        assert!(matches!(
+            shutdown_done_rx.try_recv(),
+            Err(mpsc::TryRecvError::Empty)
+        ));
+        release_tx.send(()).unwrap();
+        assert!(publisher.join().unwrap().unwrap() > 24);
+        shutdown_done_rx
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap();
+        joiner.join().unwrap();
+        assert_eq!(
+            manager
+                .publish_completed("case-A", started.session_id, |_| {
+                    panic!("commit after shutdown");
+                    #[allow(unreachable_code)]
+                    Ok::<(), String>(())
+                })
+                .unwrap_err()
+                .code,
+            SessionErrorCode::NotReady,
+        );
+    }
+
+    #[test]
+    fn shutdown_rejects_new_workers_and_publications_after_return() {
+        let manager = CaptureSessionManager::new();
+        let first = manager
+            .start_with("case-A", "fixture0", |stop, _| Ok(result(&stop)))
+            .unwrap();
+        until(&manager, "case-A", first.session_id, Phase::Completed);
+        manager.shutdown();
+        assert_eq!(
+            manager
+                .completed_for_case("case-A", first.session_id)
+                .unwrap_err()
+                .code,
+            SessionErrorCode::UnauthorizedSession,
+            "shutdown must revoke completed confidential capture bytes",
+        );
+        let published = manager.publish_completed("case-A", first.session_id, |_original| {
+            panic!("shutdown must prevent evidence publication");
+            #[allow(unreachable_code)]
+            Ok::<(), String>(())
+        });
+        assert_eq!(published.unwrap_err().code, SessionErrorCode::NotReady);
+        let attempted = manager.start_with("case-A", "fixture0", |_, _| {
+            panic!("shutdown must prevent spawning a capture worker");
+        });
+        assert_eq!(attempted.unwrap_err().code, SessionErrorCode::NotReady);
+        manager.shutdown();
     }
 
     #[test]

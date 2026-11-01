@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { Command, ListTodo, Moon, PanelLeftOpen, PanelLeftClose, Sun } from "lucide-react";
+import { Command, ListTodo, Moon, PanelLeftOpen, PanelLeftClose, SquareTerminal, Sun } from "lucide-react";
 import { CATEGORIES } from "@features/registry";
 import { useWorkbench } from "@state/workbench";
 
@@ -29,7 +29,7 @@ export function Rail() {
 
   return (
     <nav className="flex w-12 shrink-0 flex-col items-center border-r border-line bg-sidebar" aria-label="Workspace categories and controls">
-      <div className="flex h-11 w-full shrink-0 items-center justify-center">
+      <div className="flex h-9 w-full shrink-0 items-center justify-center">
         <img src="/logo.webp" alt="CyberDeck" className="size-6 grayscale" />
       </div>
       <button type="button" onClick={wb.toggleNavigator}
@@ -59,10 +59,14 @@ export function Rail() {
       </div>
       <div className="flex w-full shrink-0 flex-col items-center gap-0.5 pb-2">
         <button type="button" onClick={() => { wb.setDockTab("jobs"); wb.setDockOpen(true); }}
-          aria-label={running ? `Jobs: ${running} running` : "Open jobs and console"}
-          title="Jobs and console (Ctrl+J)" className={control}>
+          aria-label={running ? `Jobs: ${running} running` : "Open jobs"}
+          title="Jobs (Ctrl+J)" className={control}>
           <ListTodo size={18} aria-hidden="true" />
           {running > 0 ? <span className="absolute mb-6 ml-6 size-1.5 rounded-full bg-fg" aria-hidden="true" /> : null}
+        </button>
+        <button type="button" onClick={() => { wb.setDockTab("console"); wb.setDockOpen(true); }}
+          aria-label="Open CyberDeck console" title="Console (Ctrl+`)" className={control}>
+          <SquareTerminal size={18} aria-hidden="true" />
         </button>
         <button type="button" onClick={toggleTheme}
           aria-label={dark ? "Use light theme" : "Use dark theme"}
