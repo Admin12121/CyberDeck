@@ -43,6 +43,8 @@ pub fn native_operation(id: &str) -> bool {
             | "from_base64"
             | "to_base64url"
             | "from_base64url"
+            | "to_base32"
+            | "from_base32"
             | "to_hex"
             | "from_hex"
             | "to_binary"
@@ -62,6 +64,7 @@ pub fn native_operation(id: &str) -> bool {
             | "to_uppercase"
             | "to_lowercase"
             | "trim_lines"
+            | "add_line_numbers"
             | "unique_lines"
             | "reverse_lines"
             | "filter_lines"
@@ -74,6 +77,102 @@ pub fn native_operation(id: &str) -> bool {
             | "slice_bytes"
             | "to_utf8"
     )
+}
+
+const BASE32_ALPHABET: &[u8; 32] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+
+/// RFC 4648 padded Base32, with a checked output size before allocation.
+fn base32_encode(input: &[u8]) -> Result<Vec<u8>, String> {
+    let required = input
+        .len()
+        .checked_add(4)
+        .and_then(|n| n.checked_div(5))
+        .and_then(|n| n.checked_mul(8))
+        .ok_or("recipe output size limit exceeded")?;
+    if required > MAX_RECIPE_BYTES {
+        return Err("recipe output size limit exceeded".into());
+    }
+    let mut output = Vec::with_capacity(required);
+    let mut value = 0u32;
+    let mut bits = 0u32;
+    for &byte in input {
+        value = (value << 8) | u32::from(byte);
+        bits += 8;
+        while bits >= 5 {
+            output.push(BASE32_ALPHABET[((value >> (bits - 5)) & 31) as usize]);
+            bits -= 5;
+        }
+    }
+    if bits > 0 {
+        output.push(BASE32_ALPHABET[((value << (5 - bits)) & 31) as usize]);
+    }
+    while output.len() % 8 != 0 {
+        output.push(b'=');
+    }
+    Ok(output)
+}
+
+/// Mirror the TS decoder: uppercase input, ignore whitespace and '=' anywhere,
+/// reject other characters and ignore incomplete trailing 5-bit groups.
+fn base32_decode(input: &[u8]) -> Result<Vec<u8>, String> {
+    let decoded = text(input);
+    let mut output = Vec::with_capacity(input.len().saturating_mul(5) / 8);
+    let mut value = 0u32;
+    let mut bits = 0u32;
+    for ch in decoded.chars().flat_map(char::to_uppercase) {
+        if ch.is_whitespace() || ch == '\u{feff}' || ch == '=' {
+            continue;
+        }
+        let digit = match ch {
+            'A'..='Z' => u32::from(ch as u8 - b'A'),
+            '2'..='7' => u32::from(ch as u8 - b'2') + 26,
+            _ => return Err("input is not valid Base32".into()),
+        };
+        value = (value << 5) | digit;
+        bits += 5;
+        if bits >= 8 {
+            output.push((value >> (bits - 8)) as u8);
+            bits -= 8;
+        }
+    }
+    Ok(output)
+}
+
+/// Match TS split(/\r?\n/) followed by right-aligned, 1-based line numbers.
+fn add_line_numbers(input: &[u8]) -> Result<Vec<u8>, String> {
+    let value = text(input);
+    let line_count = value.split('\n').count();
+    let width = line_count.to_string().len();
+    let mut output = Vec::with_capacity(value.len().min(MAX_RECIPE_BYTES));
+    for (i, raw) in value.split('\n').enumerate() {
+        // The JS /\r?\n/ splitter consumes a CR only when adjacent to LF.
+        let line = if i + 1 < line_count {
+            raw.strip_suffix('\r').unwrap_or(raw)
+        } else {
+            raw
+        };
+        let number = (i + 1).to_string();
+        let growth = usize::from(i > 0)
+            .checked_add(width)
+            .and_then(|n| n.checked_add(1))
+            .and_then(|n| n.checked_add(line.len()))
+            .ok_or("recipe output size limit exceeded")?;
+        if output
+            .len()
+            .checked_add(growth)
+            .is_none_or(|n| n > MAX_RECIPE_BYTES)
+        {
+            return Err("recipe output size limit exceeded".into());
+        }
+        if i > 0 {
+            output.push(b'\n');
+        }
+        output.extend(std::iter::repeat_n(b' ', width - number.len()));
+        output.extend_from_slice(number.as_bytes());
+        output.push(b' ');
+        output.extend_from_slice(line.as_bytes());
+    }
+    Ok(output)
 }
 
 fn text(bytes: &[u8]) -> String {
@@ -103,6 +202,8 @@ fn transform(op: &str, bytes: &[u8], param: Option<&str>) -> Result<Vec<u8>, Str
                     .trim_end_matches('='),
             )
             .map_err(|_| "input is not valid Base64URL".to_string()),
+        "to_base32" => base32_encode(bytes),
+        "from_base32" => base32_decode(bytes),
         "to_hex" => Ok(hex::encode(bytes).into_bytes()),
         "from_hex" => {
             let clean: String = text(bytes)
@@ -212,6 +313,7 @@ fn transform(op: &str, bytes: &[u8], param: Option<&str>) -> Result<Vec<u8>, Str
         }
         "to_uppercase" => Ok(text(bytes).to_uppercase().into_bytes()),
         "to_lowercase" => Ok(text(bytes).to_lowercase().into_bytes()),
+        "add_line_numbers" => add_line_numbers(bytes),
         "trim_lines" => Ok(text(bytes)
             .split('\n')
             .map(str::trim)
@@ -438,5 +540,110 @@ mod tests {
     fn rejects_excessive_step_count() {
         let result = execute_recipe("abc", &vec![step("reverse", None); 65]);
         assert!(result.error.is_some());
+    }
+}
+
+#[cfg(test)]
+mod added_recipe_parity {
+    use super::*;
+
+    fn step(op_id: &str) -> RecipeStep {
+        RecipeStep {
+            op_id: op_id.into(),
+            enabled: true,
+            param: None,
+        }
+    }
+
+    #[test]
+    fn base32_matches_rfc4648_and_ts_byte_roundtrip() {
+        for (plain, expected) in [
+            ("", ""),
+            ("f", "MY======"),
+            ("fo", "MZXQ===="),
+            ("foo", "MZXW6==="),
+            ("foob", "MZXW6YQ="),
+            ("fooba", "MZXW6YTB"),
+            ("foobar", "MZXW6YTBOI======"),
+        ] {
+            assert_eq!(
+                base32_encode(plain.as_bytes()).unwrap(),
+                expected.as_bytes()
+            );
+            assert_eq!(
+                base32_decode(expected.as_bytes()).unwrap(),
+                plain.as_bytes()
+            );
+        }
+        let original = [0, 255, 128, 0, 254, 42];
+        let encoded = base32_encode(&original).unwrap();
+        assert_eq!(base32_decode(&encoded).unwrap(), original);
+        // The TS implementation deliberately strips whitespace and '=' anywhere.
+        assert_eq!(base32_decode(b"m=z x w 6===").unwrap(), b"foo");
+        assert_eq!(
+            base32_decode(" \u{feff}MZXW6===\t".as_bytes()).unwrap(),
+            b"foo"
+        );
+        assert_eq!(base32_decode(b"MZXW6").unwrap(), b"foo");
+        let result = execute_recipe("foobar", &[step("to_base32"), step("from_base32")]);
+        assert!(result.error.is_none());
+        assert_eq!(
+            base64::engine::general_purpose::STANDARD
+                .decode(result.output_b64)
+                .unwrap(),
+            b"foobar"
+        );
+    }
+
+    #[test]
+    fn base32_malformed_failure_coordinates_and_bounds() {
+        for invalid in [b"not@base32".as_slice(), b"ABC1", b"MZXW6!", b"invalid_"] {
+            assert_eq!(
+                base32_decode(invalid).unwrap_err(),
+                "input is not valid Base32"
+            );
+        }
+        let result = execute_recipe("!a", &[step("reverse"), step("from_base32")]);
+        let error = result.error.unwrap();
+        assert_eq!(error.step_index, 1);
+        assert_eq!(error.op_id, "from_base32");
+        assert_eq!(error.message, "input is not valid Base32");
+        let excessive = vec![b'a'; MAX_RECIPE_BYTES];
+        assert!(base32_encode(&excessive).unwrap_err().contains("limit"));
+        let result = execute_recipe(&"a".repeat(5_242_881), &[step("to_base32")]);
+        let error = result.error.unwrap();
+        assert_eq!(error.op_id, "to_base32");
+        assert_eq!(error.step_index, 0);
+        assert!(error.message.contains("limit"));
+    }
+
+    #[test]
+    fn line_numbering_matches_ts_line_splitting_and_output_limit() {
+        assert_eq!(
+            add_line_numbers(b"a\r\nb\nc\r").unwrap(),
+            b"1 a\n2 b\n3 c\r"
+        );
+        assert_eq!(add_line_numbers(b"").unwrap(), b"1 ");
+        assert_eq!(add_line_numbers(b"one\n").unwrap(), b"1 one\n2 ");
+        let many = "x\n".repeat(11);
+        let result = add_line_numbers(many.as_bytes()).unwrap();
+        assert!(result.starts_with(b" 1 x\n 2 x"));
+        assert!(result.ends_with(b"12 "));
+        let pipeline = execute_recipe("A\r\nB", &[step("add_line_numbers")]);
+        assert!(pipeline.error.is_none());
+        assert_eq!(
+            base64::engine::general_purpose::STANDARD
+                .decode(pipeline.output_b64)
+                .unwrap(),
+            b"1 A\n2 B"
+        );
+        assert!(add_line_numbers(&vec![b'\n'; 1_100_000])
+            .unwrap_err()
+            .contains("limit"));
+        assert!(
+            native_operation("to_base32")
+                && native_operation("from_base32")
+                && native_operation("add_line_numbers")
+        );
     }
 }

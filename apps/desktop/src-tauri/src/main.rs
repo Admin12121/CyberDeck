@@ -14,6 +14,9 @@ fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .manage(features::shared::jobs::ipc::JobManager::new())
+        .manage(features::shared::session::CaseSessionCtx::default())
+        .manage(features::crypto::ipc::recovery::RecoveryCtx::default())
+        .manage(features::network::ipc::capture::CaptureCtx::default())
         .manage(features::network::ipc::netscan::ScanCtx::default())
         .manage(features::network::ipc::pcap::PcapCtx {
             current: std::sync::Mutex::new(None),
@@ -67,6 +70,11 @@ fn main() {
             features::cases::case_integrity_verify,
             features::cases::case_provenance_verify_against,
             features::cases::case_findings_add,
+            features::shared::session::case_session_select_v1,
+            features::shared::session::case_session_clear_v1,
+            features::shared::session::case_session_status_v1,
+            features::cases::scoped::case_search_scoped_v1,
+            features::cases::scoped::case_lineage_scoped_v1,
             features::forensics::ipc::evidence::file_list,
             features::forensics::ipc::evidence::file_hex,
             features::forensics::ipc::evidence::file_signature_scan,
@@ -83,6 +91,14 @@ fn main() {
             features::network::ipc::pcap::pcap_open_dialog,
             features::network::ipc::pcap::pcap_packet_bytes,
             features::network::ipc::pcap::pcap_follow_stream,
+            features::network::ipc::capture::capture_interfaces_v1,
+            features::network::ipc::capture::capture_start_v1,
+            features::network::ipc::capture::capture_stop_v1,
+            features::network::ipc::capture::capture_status_v1,
+            features::network::ipc::capture::capture_hosts_v1,
+            features::network::ipc::capture::capture_flows_v1,
+            features::network::ipc::capture::capture_provenance_v1,
+            features::network::ipc::capture::capture_frame_page_v1,
             features::crypto::ipc::crack::crack_wordlist_dialog,
             features::crypto::ipc::crack::pick_wordlist,
             features::crypto::ipc::history::crack_history_list,
@@ -95,6 +111,12 @@ fn main() {
             features::crypto::ipc::attack::crack_combinator_dialog,
             features::crypto::ipc::attack::benchmark,
             features::crypto::ipc::attack::device_info,
+            features::crypto::ipc::recovery::recovery_devices_v1,
+            features::crypto::ipc::recovery::recovery_start_v1,
+            features::crypto::ipc::recovery::recovery_cancel_v1,
+            features::crypto::ipc::recovery::recovery_status_v1,
+            features::crypto::ipc::recovery::recovery_discard_v1,
+            features::crypto::ipc::recovery::recovery_reveal_v1,
             features::crypto::ipc::engines::engines_detect,
             features::crypto::ipc::engines::engine_attack,
             features::web::ipc::web::http_send,

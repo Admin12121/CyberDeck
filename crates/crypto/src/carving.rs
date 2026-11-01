@@ -3,7 +3,7 @@
 //! Never emits reconstructed bytes or writes recovered files. Reuse the
 //! existing signature scanner and native PNG chunk/CRC metadata validator.
 //! A signature hit alone is not a valid carved object.
-use super::{forensic_native, riff_wave, scan_signatures, MAX_SIGNATURE_HITS};
+use super::{forensic_native, jpeg_boundary, riff_wave, scan_signatures, MAX_SIGNATURE_HITS};
 use serde::Serialize;
 
 pub const MAX_CARVE_SCAN_BYTES: usize = 4 * 1024 * 1024;
@@ -31,8 +31,8 @@ pub fn preview_png_carving(data: &[u8], base: u64) -> Result<CarvePreview, Strin
     preview_carving_impl(data, base, false)
 }
 
-/// Extended preview for PNG and RIFF/WAVE framing-validated members. It does
-/// not attempt to decode zlib image data or audio samples. AVI is rejected.
+/// Extended preview for PNG, RIFF/WAVE and JPEG structurally validated members.
+/// Does not decode pixels or audio. AVI is rejected.
 pub fn preview_validated_carving(data: &[u8], base: u64) -> Result<CarvePreview, String> {
     preview_carving_impl(data, base, true)
 }
@@ -50,7 +50,7 @@ fn preview_carving_impl(data: &[u8], base: u64, include_wav: bool) -> Result<Car
     let mut rejected_or_incomplete = 0usize;
     let mut candidate_limit_reached = scanner_cap_reached;
     for hit in signatures {
-        if hit.format != "png" && !(include_wav && hit.format == "riff") {
+        if hit.format != "png" && !(include_wav && matches!(hit.format, "riff" | "jpeg")) {
             continue;
         }
         if candidates.len() + rejected_or_incomplete >= MAX_CARVE_CANDIDATES {
@@ -65,10 +65,14 @@ fn preview_carving_impl(data: &[u8], base: u64, include_wav: bool) -> Result<Car
                 .ok()
                 .filter(|parsed| parsed.complete && parsed.format == "png")
                 .map(|parsed| ("png", parsed.parsed_bytes))
-        } else {
+        } else if hit.format == "riff" {
             riff_wave::validated_wave_length(&data[rel..])
                 .ok()
                 .map(|length| ("wav", length))
+        } else {
+            jpeg_boundary::validated_jpeg_length(&data[rel..], base + hit.offset)
+                .ok()
+                .map(|length| ("jpeg", length))
         };
         if let Some((format, length)) = validated {
             candidates.push(CarveCandidate {
@@ -245,5 +249,69 @@ mod tests {
             .unwrap()
             .candidates
             .is_empty());
+    }
+    #[test]
+    fn deterministic_malformed_corpus_png_wav_jpeg_stays_bounded() {
+        fn segment(tag: u8, body: &[u8]) -> Vec<u8> {
+            let mut part = vec![0xff, tag];
+            part.extend_from_slice(&((body.len() + 2) as u16).to_be_bytes());
+            part.extend_from_slice(body);
+            part
+        }
+        let mut jpeg = vec![0xff, 0xd8];
+        jpeg.extend(segment(0xdb, &[0, 1, 1, 1]));
+        jpeg.extend(segment(0xc0, &[8, 0, 1, 0, 1, 1, 1, 0x11, 0]));
+        jpeg.extend(segment(0xc4, &[0, 0, 1]));
+        jpeg.extend(segment(0xda, &[1, 1, 0, 0, 63, 0]));
+        jpeg.extend_from_slice(&[0x11, 0xff, 0x00, 0x22, 0xff, 0xd9]);
+        let mut wave_body = b"WAVEfmt ".to_vec();
+        wave_body.extend_from_slice(&16_u32.to_le_bytes());
+        wave_body.extend_from_slice(&[1, 0, 1, 0]);
+        wave_body.extend_from_slice(&8_000_u32.to_le_bytes());
+        wave_body.extend_from_slice(&8_000_u32.to_le_bytes());
+        wave_body.extend_from_slice(&[1, 0, 8, 0]);
+        wave_body.extend_from_slice(b"data");
+        wave_body.extend_from_slice(&2_u32.to_le_bytes());
+        wave_body.extend_from_slice(&[0, 1]);
+        let mut wave = b"RIFF".to_vec();
+        wave.extend_from_slice(&(wave_body.len() as u32).to_le_bytes());
+        wave.extend(wave_body);
+        let fixtures = [png(1, 1), wave, jpeg];
+
+        // Reproducible xorshift32 fuzz-style corpus: fixed seed and iteration
+        // count; no files, thread spawning or unbounded allocations.
+        let mut state = 0x51d3_cafe_u32;
+        let mut next = || {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            state as usize
+        };
+        for fixture in &fixtures {
+            assert!(fixture.len() < 4096);
+            for i in 0..192 {
+                let mut mutated = fixture.clone();
+                let index = next() % mutated.len();
+                mutated[index] ^= (1 << (next() % 8)) as u8;
+                if i % 3 == 0 {
+                    let end = next() % (mutated.len() + 1);
+                    mutated.truncate(end);
+                }
+                if mutated.is_empty() {
+                    assert!(preview_validated_carving(&mutated, 4096).is_err());
+                    continue;
+                }
+                let first = preview_validated_carving(&mutated, 4096).unwrap();
+                let second = preview_validated_carving(&mutated, 4096).unwrap();
+                assert_eq!(first, second);
+                assert!(first.candidates.len() <= MAX_CARVE_CANDIDATES);
+                assert!(first.candidates.iter().all(|candidate| {
+                    candidate.offset >= 4096
+                        && candidate.offset - 4096 < mutated.len() as u64
+                        && candidate.length <= mutated.len()
+                        && candidate.offset - 4096 + candidate.length as u64 <= mutated.len() as u64
+                }));
+            }
+        }
     }
 }

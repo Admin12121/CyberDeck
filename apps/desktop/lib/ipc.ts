@@ -48,6 +48,97 @@ export const b64 = {
   },
 };
 
+// --- native selected-backend SHA-256 recovery v1 ----------------------------
+
+export type RecoveryBackendV1 =
+  | { backend: "cpu" }
+  | { backend: "open_cl"; device_index: number; batch_size: number };
+
+export interface RecoveryRequestV1 {
+  algorithm: "sha256";
+  target_hash: string;
+  backend: RecoveryBackendV1;
+  max_candidates: number;
+  max_matches: number;
+}
+export interface RecoveryDeviceWireV1 {
+  device_index: number;
+  name: string;
+  vendor: string;
+  driver: string;
+  hardware_verified: boolean;
+}
+export interface RecoveryDeviceInventoryV1 {
+  opencl_detected: boolean;
+  detail: string;
+  devices: RecoveryDeviceWireV1[];
+}
+export interface RecoveryProgressV1 {
+  tried: number;
+  budget: number;
+  matches: number;
+}
+export interface RecoverySummaryV1 {
+  algorithm: string;
+  backend: RecoveryBackendV1;
+  engine: string;
+  tried: number;
+  cancelled: boolean;
+  limit_reached: boolean;
+  duration_ms: number;
+  matches: { candidate_index: number; masked: boolean }[];
+}
+export type RecoveryPhaseV1 = "running" | "cancelling" | "completed" | "cancelled" | "failed";
+export interface RecoveryJobStatusV1 {
+  job_id: number;
+  phase: RecoveryPhaseV1;
+  progress: RecoveryProgressV1 | null;
+  summary: RecoverySummaryV1 | null;
+  error: string | null;
+  reveal_available: boolean;
+}
+export type RecoveryEventV1 =
+  | { type: "started"; job_id: number }
+  | ({ type: "progress"; job_id: number } & RecoveryProgressV1)
+  | { type: "completed"; job_id: number; summary: RecoverySummaryV1 }
+  | { type: "cancelled"; job_id: number }
+  | { type: "failed"; job_id: number; error: string };
+
+export async function recoveryDevicesV1(): Promise<RecoveryDeviceInventoryV1> {
+  if (!inTauri) throw new Error("Native recovery devices require the desktop runtime");
+  return invoke<RecoveryDeviceInventoryV1>("recovery_devices_v1", {});
+}
+
+/** Opens a native wordlist picker; streams only masked progress and results. */
+export async function recoveryStartV1(
+  request: RecoveryRequestV1, onEvent: (event: RecoveryEventV1) => void,
+): Promise<number> {
+  if (!inTauri) throw new Error("Native SHA-256 recovery requires the desktop runtime");
+  const channel = new Channel<RecoveryEventV1>();
+  channel.onmessage = onEvent;
+  return invoke<number>("recovery_start_v1", { request, onEvent: channel });
+}
+export async function recoveryCancelV1(jobId: number): Promise<boolean> {
+  if (!inTauri) throw new Error("Recovery cancellation requires the desktop runtime");
+  return invoke<boolean>("recovery_cancel_v1", { jobId });
+}
+export async function recoveryStatusV1(jobId: number): Promise<RecoveryJobStatusV1> {
+  if (!inTauri) throw new Error("Recovery status requires the desktop runtime");
+  return invoke<RecoveryJobStatusV1>("recovery_status_v1", { jobId });
+}
+export async function recoveryDiscardV1(jobId: number): Promise<boolean> {
+  if (!inTauri) throw new Error("Recovery cleanup requires the desktop runtime");
+  return invoke<boolean>("recovery_discard_v1", { jobId });
+}
+/** Sensitive: an independent native OS confirmation is required for EACH
+ * reveal; this returns transient candidate bytes as hexadecimal. Do not log,
+ * persist, cache, or retain them after the user dismisses the view.
+ */
+export async function recoveryRevealV1(jobId: number, ordinal: number): Promise<string> {
+  if (!inTauri) throw new Error("Recovered secret reveal requires the desktop runtime");
+  return invoke<string>("recovery_reveal_v1", { jobId, ordinal });
+}
+
 // --- native crypto -----------------------------------------------------------
 
 export interface OpResult {
@@ -222,6 +313,78 @@ export async function caseIntegrityVerify(caseId: string): Promise<CaseIntegrity
 export async function caseArtifactVerify(caseId: string, artifactId: string): Promise<boolean> {
   if (!inTauri) throw new Error("Artifact integrity verification requires the desktop runtime");
   return invoke<boolean>("case_artifact_verify", { caseId, artifactId });
+}
+
+// --- backend-selected case investigation (native-only) ------------------------
+
+/** Backend-held case selection generation. A client case ID never authorizes
+ * scoped reads by itself. Re-selecting even the same case invalidates old work.
+ */
+export interface CaseSessionWire {
+  case_id: string | null;
+  revision: number;
+}
+
+export async function caseSessionSelectV1(caseId: string): Promise<CaseSessionWire> {
+  if (!inTauri) throw new Error("Case session selection requires the native desktop runtime");
+  return invoke<CaseSessionWire>("case_session_select_v1", { caseId });
+}
+
+export async function caseSessionClearV1(): Promise<CaseSessionWire> {
+  if (!inTauri) throw new Error("Case session clearing requires the native desktop runtime");
+  return invoke<CaseSessionWire>("case_session_clear_v1", {});
+}
+
+export async function caseSessionStatusV1(): Promise<CaseSessionWire> {
+  if (!inTauri) throw new Error("Case session status requires the native desktop runtime");
+  return invoke<CaseSessionWire>("case_session_status_v1", {});
+}
+
+export interface CaseSearchFindingWire {
+  id: number;
+  source: string;
+  title: string;
+  severity: string;
+  artifact_id: string | null;
+  created_ms: number;
+}
+
+export interface CaseSearchPageWire {
+  case_id: string;
+  artifacts: Pick<ArtifactRecord, "id" | "name" | "size" | "sha256" | "signature" | "imported_at">[];
+  findings: CaseSearchFindingWire[];
+  truncated_artifacts: boolean;
+  truncated_findings: boolean;
+}
+
+export async function caseSearchScopedV1(
+  query: string, limit = 30, offset = 0,
+): Promise<CaseSearchPageWire> {
+  if (!inTauri) throw new Error("Case search requires a selected native desktop case");
+  if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100 ||
+      !Number.isSafeInteger(offset) || offset < 0 || offset > 100_000) {
+    throw new Error("Case search paging limits exceeded");
+  }
+  return invoke<CaseSearchPageWire>("case_search_scoped_v1", { query, limit, offset });
+}
+
+export interface ArtifactLineageHopWire {
+  version: number;
+  source_artifact_id: string;
+  derived_artifact_id: string;
+  offset: number;
+  format: string;
+  item_name: string;
+}
+export interface CaseLineageReportWire {
+  case_id: string;
+  hops: ArtifactLineageHopWire[];
+  truncated: boolean;
+}
+
+export async function caseLineageScopedV1(): Promise<CaseLineageReportWire> {
+  if (!inTauri) throw new Error("Case lineage requires a selected native desktop case");
+  return invoke<CaseLineageReportWire>("case_lineage_scoped_v1", {});
 }
 
 // --- evidence ----------------------------------------------------------------
@@ -444,6 +607,108 @@ export async function fileExtractNestedArchive(
 ): Promise<ArtifactRecord[]> {
   if (!inTauri) throw new Error("Nested extraction requires the desktop runtime");
   return invoke<ArtifactRecord[]>("file_extract_nested_archive", { caseId, id, format, offset, maxDepth });
+}
+
+// --- native bounded Linux capture sessions (host verification pending) -------
+
+export interface CaptureInterfaceV1 {
+  name: string;
+  index: number;
+  ethernet: boolean;
+  up: boolean;
+  loopback: boolean;
+}
+export interface CaptureLimitsV1 {
+  max_packets: number;
+  max_bytes: number;
+  duration_ms: number;
+}
+export interface CaptureProgressV1 {
+  packets: number;
+  stored_pcap_bytes: number;
+  oversized_frames_discarded: number;
+}
+export type CapturePhaseV1 = "running" | "stopping" | "completed" | "failed";
+export interface CaptureStatusV1 {
+  session_id: number;
+  case_id: string;
+  interface: string;
+  phase: CapturePhaseV1;
+  progress: CaptureProgressV1;
+  stop_reason: "cancelled" | "packet_limit" | "byte_limit" | "duration_limit" | null;
+  error: { code: string; message: string } | null;
+  results_available: boolean;
+}
+export interface CapturePageV1<T> {
+  total: number;
+  offset: number;
+  entries: T[];
+}
+export interface CaptureHostV1 {
+  address: string;
+  first_packet_index: number;
+  last_packet_index: number;
+  packets_sent: number;
+  packets_received: number;
+  captured_bytes_sent: number;
+  captured_bytes_received: number;
+}
+export interface CaptureFlowV1 {
+  stream_id: string;
+  first_packet_index: number;
+  last_packet_index: number;
+  packet_count: number;
+  captured_bytes: number;
+}
+export interface CaptureFrameProvenanceV1 {
+  packet_index: number;
+  pcap_frame_offset: number;
+  captured_length: number;
+  wire_length: number;
+  source: string | null;
+  destination: string | null;
+  stream_id: string | null;
+}
+export interface CaptureFramePageV1 {
+  index: number;
+  frame_length: number;
+  offset: number;
+  bytes: number[];
+}
+export async function captureInterfacesV1(): Promise<CaptureInterfaceV1[]> {
+  if (!inTauri) throw new Error("Native capture requires the desktop runtime");
+  return invoke<CaptureInterfaceV1[]>("capture_interfaces_v1", {});
+}
+/** Starts only after backend case selection and a native OS confirmation;
+ * permission failures are returned by the native capture status. No privilege elevation.
+ */
+export async function captureStartV1(interfaceName: string, limits: CaptureLimitsV1): Promise<CaptureStatusV1> {
+  if (!inTauri) throw new Error("Native capture requires the desktop runtime");
+  return invoke<CaptureStatusV1>("capture_start_v1", { interfaceName, limits });
+}
+export async function captureStatusV1(sessionId: number): Promise<CaptureStatusV1> {
+  if (!inTauri) throw new Error("Native capture requires the desktop runtime");
+  return invoke<CaptureStatusV1>("capture_status_v1", { sessionId });
+}
+export async function captureStopV1(sessionId: number): Promise<CaptureStatusV1> {
+  if (!inTauri) throw new Error("Native capture requires the desktop runtime");
+  return invoke<CaptureStatusV1>("capture_stop_v1", { sessionId });
+}
+export async function captureHostsV1(sessionId: number, offset = 0, len = 50): Promise<CapturePageV1<CaptureHostV1>> {
+  if (!inTauri) throw new Error("Native capture requires the desktop runtime");
+  return invoke<CapturePageV1<CaptureHostV1>>("capture_hosts_v1", { sessionId, offset, len });
+}
+export async function captureFlowsV1(sessionId: number, offset = 0, len = 50): Promise<CapturePageV1<CaptureFlowV1>> {
+  if (!inTauri) throw new Error("Native capture requires the desktop runtime");
+  return invoke<CapturePageV1<CaptureFlowV1>>("capture_flows_v1", { sessionId, offset, len });
+}
+export async function captureProvenanceV1(sessionId: number, offset = 0, len = 50): Promise<CapturePageV1<CaptureFrameProvenanceV1>> {
+  if (!inTauri) throw new Error("Native capture requires the desktop runtime");
+  return invoke<CapturePageV1<CaptureFrameProvenanceV1>>("capture_provenance_v1", { sessionId, offset, len });
+}
+export async function captureFramePageV1(sessionId: number, index: number, offset: number, len: number): Promise<CaptureFramePageV1> {
+  if (!inTauri) throw new Error("Native capture requires the desktop runtime");
+  return invoke<CaptureFramePageV1>("capture_frame_page_v1", { sessionId, index, offset, len });
 }
 
 // --- captures ----------------------------------------------------------------

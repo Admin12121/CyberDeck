@@ -632,6 +632,15 @@ fn metadata_impl(data: &[u8], base: u64, require_png_idat: bool) -> Result<Metad
             }
             let p = &data[i + 2..i + n];
             let payload_start = i + 2;
+            if tag == 0xdd && n == 4 {
+                let interval = u16::from_be_bytes([p[0], p[1]]);
+                fields.push(MetadataField {
+                    namespace: "jpeg",
+                    key: "restart_interval",
+                    value: interval.to_string(),
+                    offset: base + payload_start as u64,
+                });
+            }
             if tag == 0xe1 && p.starts_with(b"Exif\0\0") {
                 fields.extend(exif(&p[6..], base + (payload_start + 6) as u64)?);
             }

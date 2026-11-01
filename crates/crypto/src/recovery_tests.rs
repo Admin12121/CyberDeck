@@ -393,3 +393,238 @@ fn sha256_backend_rejects_modular_kdf_targets() {
     );
     assert!(outcome.unwrap_err().contains("raw SHA-256 digest"));
 }
+
+/// SHA3-256 is a distinct Keccak/SHA-3 digest, not an alias for SHA-256.
+/// Golden value is SHA3-256("abc") from the standard FIPS 202 test vector.
+#[test]
+fn sha3_256_recovery_fips202_vector_with_binary_safe_wordlist() {
+    use std::io::Cursor;
+    const ABC_SHA3: &str = "3a985da74fe225b2045c172d6bd390bd855f086e3e9d525b46bfe24511431532";
+    let target = RecoveryTarget::parse("sha3_256", ABC_SHA3).unwrap();
+    assert!(matches!(
+        target,
+        RecoveryTarget::Digest {
+            algorithm: FastHash::Sha3_256,
+            ..
+        }
+    ));
+    assert!(!target.is_match(b"abd").unwrap());
+    assert!(target.is_match(b"abc").unwrap());
+    assert_eq!(
+        hex::encode(apply_op("sha3_256", b"abc", None).unwrap()),
+        ABC_SHA3
+    );
+    let mut progress = Vec::new();
+    let report = recover_wordlist_with_progress(
+        &target,
+        Cursor::new(b"\xff\nwrong\r\nabc\nunused\n".as_slice()),
+        RecoveryLimits {
+            max_candidates: 4,
+            max_matches: 1,
+        },
+        || false,
+        |p| progress.push(p),
+    )
+    .unwrap();
+    assert_eq!(report.tried, 3);
+    assert!(!report.cancelled);
+    assert_eq!(report.hits.len(), 1);
+    assert_eq!(report.hits[0].index, 2);
+    assert_eq!(report.hits[0].candidate, b"abc");
+    assert_eq!(progress.last().unwrap().tried, 3);
+    assert_eq!(progress.last().unwrap().budget, 4);
+    assert_eq!(progress.last().unwrap().matches, 1);
+    assert!(!serde_json::to_string(&progress).unwrap().contains("abc"));
+}
+
+#[test]
+fn sha3_256_aliases_accept_uppercase_hex_but_reject_invalid_length_and_format() {
+    const ABC_SHA3: &str = "3a985da74fe225b2045c172d6bd390bd855f086e3e9d525b46bfe24511431532";
+    let aliases = ["sha3_256", "sha3-256", "SHA3_256"];
+    for alias in aliases {
+        let target = RecoveryTarget::parse(alias, &ABC_SHA3.to_ascii_uppercase()).unwrap();
+        assert!(target.is_match(b"abc").unwrap());
+    }
+    for bad in ["", "zz", "ab"] {
+        assert!(RecoveryTarget::parse("sha3_256", bad).is_err());
+    }
+    assert!(RecoveryTarget::parse("sha3_256", &"00".repeat(33)).is_err());
+    assert!(RecoveryTarget::parse("sha3_256", "$6$salt$hash").is_err());
+    assert!(!RecoveryTarget::parse("sha256", &"00".repeat(32))
+        .unwrap()
+        .is_match(b"abc")
+        .unwrap());
+}
+
+#[test]
+fn sha3_256_global_limit_and_cancel_stay_lazy() {
+    let target = RecoveryTarget::parse("sha3_256", &"00".repeat(32)).unwrap();
+    let pulls = std::cell::Cell::new(0usize);
+    let stream = std::iter::from_fn(|| {
+        pulls.set(pulls.get() + 1);
+        Some(b"bad".to_vec())
+    });
+    let capped = recover(
+        &target,
+        stream,
+        RecoveryLimits {
+            max_candidates: 2,
+            max_matches: 1,
+        },
+        || false,
+    )
+    .unwrap();
+    assert_eq!(capped.tried, 2);
+    assert_eq!(pulls.get(), 2);
+    assert!(capped.limit_reached);
+    let mut checks = 0u32;
+    let stopped = recover(
+        &target,
+        [b"a", b"b", b"c"],
+        RecoveryLimits::default(),
+        || {
+            checks += 1;
+            checks > 1
+        },
+    )
+    .unwrap();
+    assert!(stopped.cancelled);
+    assert_eq!(stopped.tried, 1);
+}
+
+#[test]
+fn yescrypt_bounded_known_password_and_streaming() {
+    use yescrypt::password_hash::CustomizedPasswordHasher as _;
+    let encoded = yescrypt::Yescrypt::default()
+        .hash_password_customized(
+            b"hello",
+            b"0123456789abcdef",
+            None,
+            None,
+            yescrypt::Params::default(),
+        )
+        .unwrap()
+        .to_string();
+    assert!(encoded.starts_with("$y$j9T$"));
+    let target = RecoveryTarget::parse("", &encoded).unwrap();
+    assert!(target.is_kdf());
+    assert!(target.is_match(b"hello").unwrap());
+    assert!(!target.is_match(b"wrong").unwrap());
+    let mut progress = Vec::new();
+    let result = recover_wordlist_with_progress(
+        &target,
+        std::io::Cursor::new(b"wrong\nhello\nunused\n".as_slice()),
+        RecoveryLimits {
+            max_candidates: 3,
+            max_matches: 1,
+        },
+        || false,
+        |update| progress.push(update),
+    )
+    .unwrap();
+    assert_eq!(result.tried, 2);
+    assert_eq!(result.hits[0].index, 1);
+    assert_eq!(result.hits[0].candidate, b"hello");
+    assert_eq!(progress.last().unwrap().tried, 2);
+    assert_eq!(progress.last().unwrap().budget, 3);
+    assert!(!serde_json::to_string(progress.last().unwrap())
+        .unwrap()
+        .contains("hello"));
+}
+
+#[test]
+fn yescrypt_strict_encoding_and_cost_boundaries() {
+    use yescrypt::{Mode, Params};
+    let sample = |params: &str| ["$y$", params, "$0123456789abcdef1234$", &"x".repeat(43)].concat();
+    let canonical = |n, r, p| Params::new(Mode::Rw, n, r, p).unwrap().to_string();
+    for (n, r) in [(4096, 32), (8192, 32), (4096, 8)] {
+        assert!(RecoveryTarget::parse("", &sample(&canonical(n, r, 1))).is_ok());
+    }
+    for (n, r) in [(16384, 32), (32768, 8), (4096, 64)] {
+        assert!(RecoveryTarget::parse("", &sample(&canonical(n, r, 1))).is_err());
+    }
+    for params in [
+        canonical(4096, 32, 2),
+        Params::new_with_all_params(Mode::Rw, 4096, 32, 1, 1, 0)
+            .unwrap()
+            .to_string(),
+        Params::new(Mode::Classic, 4096, 32, 1).unwrap().to_string(),
+        "j9Tjunk".into(),
+        "j9!".into(),
+        "jzz".into(),
+        "j9".into(),
+    ] {
+        assert!(
+            RecoveryTarget::parse("", &sample(&params)).is_err(),
+            "{params}"
+        );
+    }
+    for malformed in [
+        "$7$test$hash".to_string(),
+        "$y$j9T$0123456789abcdef1234".into(),
+        "$y$j9T$short$short".into(),
+        "$y$j9T$0123456789abcdef1234$".into(),
+        "$y$j9T$0123456789abcdef1234$abc!def".into(),
+        ["$y$j9T$0123456789abcdef1234$", &"x".repeat(43), "$extra"].concat(),
+        ["$y$j9T$", &"A".repeat(200), "$hash"].concat(),
+    ] {
+        assert!(
+            RecoveryTarget::parse("", &malformed).is_err(),
+            "{malformed}"
+        );
+    }
+    for params in ["j..", "jzz", "j~~", "j9zzzzzz", "j9T."] {
+        let input = sample(params);
+        assert!(std::panic::catch_unwind(|| RecoveryTarget::parse("", &input)).is_ok());
+        assert!(RecoveryTarget::parse("", &input).is_err());
+    }
+}
+
+#[test]
+fn yescrypt_cancel_and_global_candidate_cap_without_prefetch() {
+    use yescrypt::password_hash::CustomizedPasswordHasher as _;
+    let encoded = yescrypt::Yescrypt::default()
+        .hash_password_customized(
+            b"hello",
+            b"0123456789abcdef",
+            None,
+            None,
+            yescrypt::Params::default(),
+        )
+        .unwrap()
+        .to_string();
+    let target = RecoveryTarget::parse("", &encoded).unwrap();
+    let stopped = recover_wordlist(
+        &target,
+        std::io::Cursor::new(b"hello\n".as_slice()),
+        RecoveryLimits::default(),
+        || true,
+    )
+    .unwrap();
+    assert!(stopped.cancelled);
+    assert_eq!(stopped.tried, 0);
+    let input = [b"wrong\n".to_vec(), vec![b'X'; MAX_CANDIDATE_BYTES + 128]].concat();
+    let limited = recover_wordlist(
+        &target,
+        std::io::Cursor::new(input),
+        RecoveryLimits {
+            max_candidates: 1,
+            max_matches: 1,
+        },
+        || false,
+    )
+    .unwrap();
+    assert_eq!(limited.tried, 1);
+    assert!(limited.limit_reached);
+    assert!(limited.hits.is_empty());
+    assert!(recover_wordlist(
+        &target,
+        std::io::Cursor::new(b"hello\n".as_slice()),
+        RecoveryLimits {
+            max_candidates: 0,
+            max_matches: 1
+        },
+        || false,
+    )
+    .is_err());
+}

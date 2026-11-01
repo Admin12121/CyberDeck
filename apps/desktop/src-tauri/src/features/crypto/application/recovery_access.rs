@@ -85,6 +85,16 @@ impl RecoveryResultAccess {
         self.active.as_ref() == Some(verified)
     }
 
+    /// Remove every expired result and release its confidential buffers now.
+    /// Call from the desktop job lifecycle even when no new requests arrive.
+    /// Returns the number of expired entries removed.
+    pub fn prune_expired(&mut self) -> usize {
+        let now = Instant::now();
+        let before = self.results.len();
+        self.results.retain(|_, item| now < item.expires);
+        before - self.results.len()
+    }
+
     pub fn retain(
         &mut self,
         job_id: u64,
@@ -95,6 +105,7 @@ impl RecoveryResultAccess {
         if !self.is_active(verified) {
             return Err("recovery result session/case is no longer active".into());
         }
+        self.prune_expired();
         if job_id == 0 || self.results.contains_key(&job_id) {
             return Err("invalid or duplicate recovery job identifier".into());
         }
@@ -132,6 +143,7 @@ impl RecoveryResultAccess {
         if !self.is_active(verified) {
             return Err("active recovery session changed".into());
         }
+        self.prune_expired();
         let result = self
             .results
             .get_mut(&job_id)
@@ -153,15 +165,7 @@ impl RecoveryResultAccess {
         if !self.is_active(verified) {
             return None;
         }
-        let expired = self
-            .results
-            .get(&job_id)
-            .map(|x| Instant::now() >= x.expires)
-            .unwrap_or(false);
-        if expired {
-            self.results.remove(&job_id);
-            return None;
-        }
+        self.prune_expired();
         let item = self.results.get(&job_id)?;
         if &item.owner != verified || !item.consent {
             return None;
@@ -176,6 +180,7 @@ impl RecoveryResultAccess {
         if !self.is_active(verified) {
             return false;
         }
+        self.prune_expired();
         if self
             .results
             .get(&job_id)
@@ -280,6 +285,63 @@ mod tests {
         std::thread::sleep(Duration::from_millis(5));
         assert!(gate.reveal(1, 0, &owner).is_none());
         assert!(gate.authorize_reveal(1, &owner).is_err());
+    }
+
+    #[test]
+    fn expired_four_job_capacity_is_recovered_on_next_retention() {
+        let mut gate = RecoveryResultAccess::new();
+        let owner = scope("owner", "case", 1);
+        gate.set_active(owner.clone());
+        for id in 1..=MAX_RETAINED_RECOVERY_JOBS {
+            gate.retain(id as u64, &owner, completed(), Duration::from_millis(1))
+                .unwrap();
+        }
+        std::thread::sleep(Duration::from_millis(10));
+        gate.retain(5, &owner, completed(), Duration::from_secs(30))
+            .unwrap();
+        assert_eq!(gate.results.len(), 1);
+        assert!(!gate.results.contains_key(&1));
+        assert!(gate.reveal(1, 0, &owner).is_none());
+        assert!(gate.authorize_reveal(1, &owner).is_err());
+        gate.authorize_reveal(5, &owner).unwrap();
+        assert_eq!(gate.reveal(5, 0, &owner).unwrap().as_bytes(), b"abc");
+    }
+
+    #[test]
+    fn explicit_prune_releases_expired_results_even_without_reveal() {
+        let mut gate = RecoveryResultAccess::new();
+        let owner = scope("owner", "case", 1);
+        gate.set_active(owner.clone());
+        gate.retain(12, &owner, completed(), Duration::from_millis(1))
+            .unwrap();
+        gate.authorize_reveal(12, &owner).unwrap();
+        std::thread::sleep(Duration::from_millis(10));
+        assert_eq!(gate.prune_expired(), 1);
+        assert!(gate.results.is_empty());
+        assert_eq!(gate.prune_expired(), 0);
+        assert!(gate.reveal(12, 0, &owner).is_none());
+        let other = scope("owner", "other-case", 2);
+        gate.set_active(other.clone());
+        assert!(gate.reveal(12, 0, &other).is_none());
+    }
+
+    #[test]
+    fn expired_entries_cannot_block_concurrent_session_replacement() {
+        let mut gate = RecoveryResultAccess::new();
+        let owner = scope("owner", "case-a", 1);
+        gate.set_active(owner.clone());
+        gate.retain(33, &owner, completed(), Duration::from_millis(1))
+            .unwrap();
+        std::thread::sleep(Duration::from_millis(10));
+        assert_eq!(gate.prune_expired(), 1);
+        let replacement = scope("other-session", "case-b", 2);
+        gate.set_active(replacement.clone());
+        gate.retain(33, &replacement, completed(), Duration::from_secs(30))
+            .unwrap();
+        assert!(gate.authorize_reveal(33, &owner).is_err());
+        assert!(gate.reveal(33, 0, &replacement).is_none());
+        gate.revoke_all();
+        assert!(gate.reveal(33, 0, &replacement).is_none());
     }
 
     #[test]

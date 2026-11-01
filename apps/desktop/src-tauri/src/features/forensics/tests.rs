@@ -667,3 +667,48 @@ fn case_backed_yara_subset_is_bounded_reproducible_and_immutable() {
     std::fs::write(&record.stored_path, &altered).unwrap();
     assert!(yara_subset_scan(&ctx, DEFAULT_CASE, &record.id, 0, source.len(), rule).is_err());
 }
+
+#[test]
+fn case_backed_jpeg_carving_handles_scans_integrity_and_isolation() {
+    fn marker(tag: u8, body: &[u8]) -> Vec<u8> {
+        let mut segment = vec![0xff, tag];
+        segment.extend_from_slice(&((body.len() + 2) as u16).to_be_bytes());
+        segment.extend_from_slice(body);
+        segment
+    }
+    let mut jpeg = vec![0xff, 0xd8];
+    jpeg.extend(marker(0xdb, &[0, 1, 1, 1]));
+    jpeg.extend(marker(0xc0, &[8, 0, 1, 0, 1, 1, 1, 0x11, 0]));
+    jpeg.extend(marker(0xc4, &[0, 0, 1]));
+    jpeg.extend(marker(0xda, &[1, 1, 0, 0, 63, 0]));
+    jpeg.extend_from_slice(&[0x11, 0xff, 0x00, 0x22, 0xff, 0xd0, 0x33]);
+    jpeg.extend(marker(0xc4, &[0, 0, 1]));
+    jpeg.extend(marker(0xda, &[1, 1, 0, 0, 63, 0]));
+    jpeg.extend_from_slice(&[0x44, 0x55, 0xff, 0xd9]);
+
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = test_ctx(dir.path());
+    let mut source = b"unrelated-firmware-prefix".to_vec();
+    let start = source.len() as u64;
+    source.extend_from_slice(&jpeg);
+    source.extend_from_slice(b"unrelated trailing bytes");
+    let imported =
+        import_bytes(&ctx, Path::new("firmware.raw"), &source, DEFAULT_CASE, true).unwrap();
+    let before = list_artifacts(&ctx, DEFAULT_CASE).unwrap().len();
+    let preview = carve_preview(&ctx, DEFAULT_CASE, &imported.id, 0, source.len()).unwrap();
+    assert!(preview.integrity_checked);
+    assert!(!preview.coverage_truncated);
+    assert_eq!(preview.candidates.len(), 1);
+    assert_eq!(preview.candidates[0].format, "jpeg");
+    assert_eq!(preview.candidates[0].offset, start);
+    assert_eq!(preview.candidates[0].length, jpeg.len());
+    assert_eq!(list_artifacts(&ctx, DEFAULT_CASE).unwrap().len(), before);
+    assert!(carve_preview(&ctx, "not-this-case", &imported.id, 0, source.len()).is_err());
+    assert!(carve_preview(&ctx, DEFAULT_CASE, &imported.id, 0, 4 * 1024 * 1024 + 1).is_err());
+
+    // Same-length tamper must be detected even if the preview window skips it.
+    let mut altered = source.clone();
+    altered[0] ^= 1;
+    std::fs::write(&imported.stored_path, altered).unwrap();
+    assert!(carve_preview(&ctx, DEFAULT_CASE, &imported.id, start, jpeg.len()).is_err());
+}

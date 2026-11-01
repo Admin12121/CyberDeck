@@ -30,6 +30,7 @@ pub enum SessionErrorCode {
     UnauthorizedSession,
     NotReady,
     InvalidPage,
+    ImportFailed,
     Internal,
 }
 
@@ -347,6 +348,35 @@ impl CaptureSessionManager {
                 "capture is not completed successfully",
             )
         })
+    }
+
+    /// Backend-only evidence publication boundary. A caller must validate the
+    /// currently authoritative case and consent *inside* its publisher before
+    /// committing the exact bytes. Publication and manager revocation are
+    /// serialized: an already-revoked/stale session cannot begin publication,
+    /// and a case switch cannot revoke the session halfway through a commit.
+    ///
+    /// The publisher MUST NOT call this manager recursively; it receives a
+    /// borrowed result and must not expose it over IPC. Failed publication
+    /// preserves the original result for an explicitly authorized retry.
+    /// Agent5's case store owns the actual immutable import and SHA-256 check.
+    pub fn publish_completed<T>(
+        &self,
+        case_id: &str,
+        id: u64,
+        publish: impl FnOnce(&CaptureResult) -> Result<T, String>,
+    ) -> Result<T, SessionError> {
+        let guard = self.shared.lock().map_err(|_| {
+            SessionError::new(SessionErrorCode::Internal, "capture state unavailable")
+        })?;
+        let session = checked(&guard, case_id, id)?;
+        let result = session.result.as_deref().ok_or_else(|| {
+            SessionError::new(
+                SessionErrorCode::NotReady,
+                "capture is not completed successfully",
+            )
+        })?;
+        publish(result).map_err(|error| SessionError::new(SessionErrorCode::ImportFailed, error))
     }
 
     pub fn hosts(
@@ -853,6 +883,131 @@ mod tests {
             .start_with("case", "eth0", |flag, _| Ok(result(&flag)))
             .unwrap();
         until(&manager, "case", next.session_id, Phase::Completed);
+    }
+
+    #[test]
+    fn case_import_handoff_preserves_identical_pcap_bytes_and_retries_failure() {
+        let manager = CaptureSessionManager::new();
+        let run = manager
+            .start_with("case-A", "fixture0", |cancel, _| Ok(result(&cancel)))
+            .unwrap();
+        until(&manager, "case-A", run.session_id, Phase::Completed);
+        let expected = manager
+            .completed_for_case("case-A", run.session_id)
+            .unwrap();
+        let mut original = Vec::<u8>::new();
+        let imported = manager
+            .publish_completed("case-A", run.session_id, |result| {
+                assert_eq!(result.pcap_bytes, expected.pcap_bytes);
+                assert_eq!(result.original_frame(0).unwrap(), sample_frame());
+                original.extend_from_slice(&result.pcap_bytes);
+                Err::<(), _>("storage transaction rejected; no commit".to_string())
+            })
+            .unwrap_err();
+        assert_eq!(imported.code, SessionErrorCode::ImportFailed);
+        assert!(imported.message.contains("transaction rejected"));
+        assert_eq!(
+            manager
+                .status("case-A", run.session_id)
+                .unwrap()
+                .results_available,
+            true
+        );
+        let expected_bytes = expected.pcap_bytes.clone();
+        let stored = manager
+            .publish_completed("case-A", run.session_id, |result| {
+                assert_eq!(result.pcap_bytes, original);
+                Ok(result.pcap_bytes.clone())
+            })
+            .unwrap();
+        assert_eq!(stored, expected_bytes);
+        assert_eq!(stored[40..], sample_frame());
+        assert_eq!(
+            manager
+                .provenance("case-A", run.session_id, 0, 1)
+                .unwrap()
+                .entries[0]
+                .pcap_frame_offset,
+            40
+        );
+    }
+
+    #[test]
+    fn cross_case_or_revoked_publish_is_denied_before_callback() {
+        let manager = CaptureSessionManager::new();
+        let run = manager
+            .start_with("case-A", "fixture0", |cancel, _| Ok(result(&cancel)))
+            .unwrap();
+        until(&manager, "case-A", run.session_id, Phase::Completed);
+        assert_eq!(
+            manager
+                .publish_completed("case-B", run.session_id, |_| {
+                    panic!("wrong case must never receive bytes");
+                    #[allow(unreachable_code)]
+                    Ok::<(), String>(())
+                })
+                .unwrap_err()
+                .code,
+            SessionErrorCode::UnauthorizedSession,
+        );
+        manager.revoke("case-A", run.session_id).unwrap();
+        assert_eq!(
+            manager
+                .publish_completed("case-A", run.session_id, |_| {
+                    panic!("revoked case must never receive bytes");
+                    #[allow(unreachable_code)]
+                    Ok::<(), String>(())
+                })
+                .unwrap_err()
+                .code,
+            SessionErrorCode::UnauthorizedSession,
+        );
+    }
+
+    #[test]
+    fn case_revocation_serializes_with_authorized_import_publication() {
+        let manager = Arc::new(CaptureSessionManager::new());
+        let run = manager
+            .start_with("case-A", "fixture0", |cancel, _| Ok(result(&cancel)))
+            .unwrap();
+        until(&manager, "case-A", run.session_id, Phase::Completed);
+        let (inside_tx, inside_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel::<()>();
+        let publisher_manager = Arc::clone(&manager);
+        let publisher = std::thread::spawn(move || {
+            publisher_manager.publish_completed("case-A", run.session_id, |result| {
+                inside_tx.send(result.pcap_bytes.len()).unwrap();
+                release_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+                Ok::<_, String>(result.pcap_bytes.len())
+            })
+        });
+        assert!(inside_rx.recv_timeout(Duration::from_secs(2)).unwrap() > 24);
+        let (attempt_tx, attempt_rx) = mpsc::channel();
+        let (revoked_tx, revoked_rx) = mpsc::channel();
+        let revoke_manager = Arc::clone(&manager);
+        let revoker = std::thread::spawn(move || {
+            attempt_tx.send(()).unwrap();
+            let outcome = revoke_manager.revoke("case-A", run.session_id);
+            revoked_tx.send(outcome).unwrap();
+        });
+        attempt_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        // The callback currently holds the session's publication/revocation
+        // gate, so a revocation cannot complete until the callback returns.
+        assert!(matches!(
+            revoked_rx.try_recv(),
+            Err(mpsc::TryRecvError::Empty)
+        ));
+        release_tx.send(()).unwrap();
+        assert!(publisher.join().unwrap().unwrap() > 24);
+        revoked_rx
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap()
+            .unwrap();
+        revoker.join().unwrap();
+        assert_eq!(
+            manager.status("case-A", run.session_id).unwrap_err().code,
+            SessionErrorCode::UnauthorizedSession
+        );
     }
 
     #[test]

@@ -97,3 +97,6 @@ pub fn case_provenance_verify_against(
         application::verify_against_trusted_head(store, &case_id, &trusted_head_sha256)
     })
 }
+
+#[path = "scoped.rs"]
+pub mod scoped;

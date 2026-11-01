@@ -170,7 +170,7 @@ pub fn open_verified_case_artifact(
 /// Never silently fall back to an unconfined pathname open on Windows.
 /// The existing verification API stays available until a native reparse-aware
 /// open-by-handle adapter receives its Windows security tests.
-#[cfg(windows)]
+#[cfg(all(windows, feature = "experimental-windows-handle"))]
 pub fn open_verified_case_artifact(
     record: &ArtifactRecord,
     root: &Path,
@@ -178,7 +178,7 @@ pub fn open_verified_case_artifact(
     super::windows_verified_handle::open_windows_verified_case_artifact(record, root)
 }
 
-#[cfg(not(any(unix, windows)))]
+#[cfg(not(any(unix, all(windows, feature = "experimental-windows-handle"))))]
 pub fn open_verified_case_artifact(
     _record: &ArtifactRecord,
     _root: &Path,

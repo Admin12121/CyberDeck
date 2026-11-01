@@ -14,6 +14,7 @@ pub enum FastHash {
     Md5,
     Sha1,
     Sha256,
+    Sha3_256,
     Sha512,
     Ntlm,
 }
@@ -23,6 +24,7 @@ impl FastHash {
             Self::Md5 => "md5",
             Self::Sha1 => "sha1",
             Self::Sha256 => "sha256",
+            Self::Sha3_256 => "sha3_256",
             Self::Sha512 => "sha512",
             Self::Ntlm => "ntlm",
         }
@@ -31,7 +33,7 @@ impl FastHash {
         match self {
             Self::Md5 | Self::Ntlm => 16,
             Self::Sha1 => 20,
-            Self::Sha256 => 32,
+            Self::Sha256 | Self::Sha3_256 => 32,
             Self::Sha512 => 64,
         }
     }
@@ -76,6 +78,65 @@ fn check_scrypt_memory(log_n: u32, r: u32) -> Result<(), String> {
     Ok(())
 }
 
+/// Only permit canonical yescrypt RW parameters whose cost is bounded
+/// before invoking the existing yescrypt verifier (which supports $y$).
+/// The three-character form excludes optional p/t/g/NROM fields.
+fn check_yescrypt_recovery_hash(hash: &str) -> Result<(), String> {
+    const MAX_MEMORY: u64 = 32 * 1024 * 1024;
+    const MAX_N: u64 = 8192;
+    const MAX_R: u32 = 32;
+    fn crypt64(text: &str) -> bool {
+        text.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'/')
+    }
+    if hash.len() > 160 || !hash.starts_with("$y$") {
+        return Err("unsupported yescrypt recovery encoding (requires $y$)".into());
+    }
+    let mut parts = hash.split('$');
+    if parts.next() != Some("") || parts.next() != Some("y") {
+        return Err("invalid yescrypt hash fields".into());
+    }
+    let encoded = parts.next().ok_or("missing yescrypt cost parameters")?;
+    let salt = parts.next().ok_or("missing yescrypt salt")?;
+    let digest = parts.next().ok_or("missing yescrypt digest")?;
+    if parts.next().is_some() || encoded.len() != 3 || !encoded.starts_with('j') {
+        return Err("unsupported yescrypt parameters or hash fields".into());
+    }
+    // Reject variable-width cost extensions BEFORE upstream param decoding.
+    let alphabet = b"./0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+    if !encoded.as_bytes()[1..].iter().all(|c| {
+        alphabet
+            .iter()
+            .position(|a| a == c)
+            .is_some_and(|i| i <= 47)
+    }) {
+        return Err("noncanonical yescrypt cost encoding".into());
+    }
+    if !(8..=64).contains(&salt.len()) || !crypt64(salt) || digest.len() != 43 || !crypt64(digest) {
+        return Err("invalid yescrypt salt or digest encoding".into());
+    }
+    let params: yescrypt::Params = encoded
+        .parse()
+        .map_err(|_| "invalid yescrypt cost parameters")?;
+    let n = params.n();
+    let r = params.r();
+    let memory = n
+        .checked_mul(u64::from(r))
+        .and_then(|cost| cost.checked_mul(128))
+        .ok_or("yescrypt memory calculation overflow")?;
+    if n < 16 || n > MAX_N || r < 8 || r > MAX_R || memory > MAX_MEMORY {
+        return Err("yescrypt recovery cost exceeds CPU/memory policy".into());
+    }
+    // Round-trip proves mode=RW, p=1, t=0, g=0, NROM=0: no optional work.
+    let canonical = yescrypt::Params::new(yescrypt::Mode::Rw, n, r, 1)
+        .map_err(|_| "unsupported yescrypt recovery parameters")?;
+    if canonical.to_string() != encoded {
+        return Err("noncanonical or unsupported yescrypt recovery parameters".into());
+    }
+    yescrypt::PasswordHashRef::new(hash).map_err(|_| "invalid yescrypt modular hash encoding")?;
+    Ok(())
+}
+
 impl RecoveryTarget {
     pub fn parse(algo: &str, text: &str) -> Result<Self, String> {
         let text = text.trim();
@@ -109,8 +170,7 @@ impl RecoveryTarget {
                 f if f.starts_with("pbkdf2") => {
                     check_param(text, "i=", 500_000)?;
                 }
-                // Compact yescrypt cost fields need a dedicated bounded parser.
-                "yescrypt" => return Err("yescrypt cost bounds not implemented".into()),
+                "yescrypt" => check_yescrypt_recovery_hash(text)?,
                 _ => return Err("unsupported KDF".into()),
             }
             return Ok(Self::Kdf {
@@ -125,6 +185,7 @@ impl RecoveryTarget {
             "md5" => FastHash::Md5,
             "sha1" => FastHash::Sha1,
             "sha256" => FastHash::Sha256,
+            "sha3_256" | "sha3-256" => FastHash::Sha3_256,
             "sha512" => FastHash::Sha512,
             "ntlm" => FastHash::Ntlm,
             _ => return Err("unsupported raw digest algorithm".into()),

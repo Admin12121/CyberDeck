@@ -261,6 +261,53 @@ mod tests {
             .contains("integrity"));
     }
     #[test]
+    fn ntfs_reparse_member_and_case_directory_rejected() {
+        use std::os::windows::fs::{symlink_dir, symlink_file};
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("artifacts");
+        let record = fixture(&root, b"secret");
+        let outside = temp.path().join("outside.bin");
+        std::fs::write(&outside, b"secret").unwrap();
+        std::fs::remove_file(&record.stored_path).unwrap();
+        match symlink_file(&outside, &record.stored_path) {
+            Ok(()) => assert!(open_windows_verified_case_artifact(&record, &root).is_err()),
+            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+                eprintln!("NTFS symlink test needs Developer Mode or symlink privilege: {e}");
+                return;
+            }
+            Err(e) => panic!("NTFS symlink setup failed: {e}"),
+        }
+        std::fs::remove_file(&record.stored_path).unwrap();
+        let case = root.join(crate::DEFAULT_CASE);
+        std::fs::remove_dir(&case).unwrap();
+        // Make the outside reparse target contain valid matching evidence,
+        // so accidental junction following would otherwise return data.
+        std::fs::write(temp.path().join("evidence-証拠.bin"), b"secret").unwrap();
+        match symlink_dir(temp.path(), &case) {
+            Ok(()) => assert!(open_windows_verified_case_artifact(&record, &root).is_err()),
+            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+                eprintln!("NTFS case symlink test needs symlink privilege: {e}");
+            }
+            Err(e) => panic!("NTFS case symlink setup failed: {e}"),
+        }
+    }
+    #[test]
+    fn ntfs_open_descriptor_rejects_path_replacement_until_closed() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("artifacts");
+        let record = fixture(&root, b"unchanged");
+        let mut handle = open_windows_verified_case_artifact(&record, &root).unwrap();
+        let old = Path::new(&record.stored_path);
+        let moved = old.with_extension("previous");
+        assert!(std::fs::rename(old, &moved).is_err());
+        assert_eq!(handle.read_window(0, 9, 9).unwrap(), b"unchanged");
+        drop(handle);
+        std::fs::rename(old, &moved).unwrap();
+        std::fs::write(old, b"otherdata").unwrap();
+        assert!(open_windows_verified_case_artifact(&record, &root).is_err());
+    }
+
+    #[test]
     fn ntfs_hardlink_outside_case_rejected() {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().join("artifacts");
