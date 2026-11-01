@@ -4,7 +4,7 @@ use std::net::IpAddr;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 
-use super::tcp_probe::{probe, well_known_service};
+use super::tcp_probe::{observed_service, probe, well_known_service};
 use super::{ScanEntry, ScanProgress};
 
 const MAX_RESULTS: usize = 20_000;
@@ -50,6 +50,19 @@ pub(super) fn run_scan_into(
     on_progress: &(impl Fn(ScanProgress) + Sync),
     results: &Arc<StdMutex<Vec<ScanEntry>>>,
 ) -> Vec<ScanEntry> {
+    run_scan_into_scoped(hosts, ports, stop, on_progress, results, &|| true)
+}
+
+/// Each native probe independently checks the backend selected case generation.
+/// Revocation causes Stop and suppresses results, even between progress events.
+pub(super) fn run_scan_into_scoped(
+    hosts: Vec<IpAddr>,
+    ports: Vec<u16>,
+    stop: &AtomicBool,
+    on_progress: &(impl Fn(ScanProgress) + Sync),
+    results: &Arc<StdMutex<Vec<ScanEntry>>>,
+    scope_is_active: &(impl Fn() -> bool + Sync),
+) -> Vec<ScanEntry> {
     let total = (hosts.len() as u64).saturating_mul(ports.len() as u64);
     if total == 0 || total > MAX_SCAN_PROBES {
         return Vec::new();
@@ -73,7 +86,8 @@ pub(super) fn run_scan_into(
             let hosts = &hosts;
             let ports = &ports;
             scope.spawn(move || loop {
-                if stop.load(Ordering::Relaxed) {
+                if stop.load(Ordering::Acquire) || !scope_is_active() {
+                    stop.store(true, Ordering::Release);
                     break;
                 }
                 let index = next.fetch_add(1, Ordering::Relaxed);
@@ -83,13 +97,21 @@ pub(super) fn run_scan_into(
                 let offset = index as usize;
                 let host = hosts[offset / ports.len()];
                 let port = ports[offset % ports.len()];
+                if stop.load(Ordering::Acquire) || !scope_is_active() {
+                    stop.store(true, Ordering::Release);
+                    break;
+                }
                 let (state, banner) = probe(host, port);
+                if !scope_is_active() {
+                    stop.store(true, Ordering::Release);
+                    break; // Never publish an observation after case revocation.
+                }
                 if state == "open" {
                     let mut output = results.lock().expect("scan results poisoned");
                     if output.len() >= MAX_RESULTS {
                         stop.store(true, Ordering::Relaxed);
                     } else {
-                        let service = well_known_service(port);
+                        let service = observed_service(&banner).unwrap_or_else(|| well_known_service(port));
                         output.push(ScanEntry {
                             host: host.to_string(),
                             port,
@@ -143,6 +165,28 @@ mod tests {
         assert!(scanned.is_empty());
         assert!(results.lock().unwrap().is_empty());
         assert!(progress.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn scope_revocation_prevents_any_probe_or_persisted_result() {
+        let stop = AtomicBool::new(false);
+        let results = Arc::new(StdMutex::new(Vec::new()));
+        let seen = AtomicU64::new(0);
+        let output = run_scan_into_scoped(
+            vec!["127.0.0.1".parse().unwrap()],
+            vec![22, 80, 443],
+            &stop,
+            &|_| {},
+            &results,
+            &|| {
+                seen.fetch_add(1, Ordering::Relaxed);
+                false
+            },
+        );
+        assert!(output.is_empty());
+        assert!(results.lock().unwrap().is_empty());
+        assert_eq!(seen.load(Ordering::Relaxed), 1);
+        assert!(stop.load(Ordering::Acquire));
     }
 
     #[test]

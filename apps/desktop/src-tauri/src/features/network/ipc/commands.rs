@@ -88,6 +88,8 @@ pub(super) fn start(
     selected.ensure(&scope)?;
     let worker_app = app.clone();
     let worker_scope = scope.clone();
+    let probe_app = app.clone();
+    let probe_scope = scope.clone();
     let stop_on_revoke = Arc::clone(&ctx.stop);
     let save_scope = scope.clone();
     let id = session::start(
@@ -107,6 +109,12 @@ pub(super) fn start(
             } else {
                 let _ = on_progress.send(progress);
             }
+        },
+        move || {
+            probe_app
+                .state::<CaseSessionCtx>()
+                .ensure(&probe_scope)
+                .is_ok()
         },
         move |scan_id, entries| {
             case_findings::save_scan(&app, &case_id, &save_scope, scan_id, entries)

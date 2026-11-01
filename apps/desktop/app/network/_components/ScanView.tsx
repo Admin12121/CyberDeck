@@ -14,7 +14,8 @@ import {
   type ScanProgressWire,
   type NetscanStatusWire,
 } from "@lib/ipc";
-import { useWorkbench } from "@state/workbench";
+import { useWorkbench, useWorkbenchCase } from "@state/workbench";
+import { useWorkspaceDraft } from "@state/workspace-sessions";
 
 const PORT_PRESETS = [
   { value: "top25", label: "Top 25 ports" },
@@ -25,19 +26,29 @@ const PORT_PRESETS = [
 export function ScanView() {
   const desktop = isDesktop();
   const wb = useWorkbench();
-  const [target, setTarget] = useState("127.0.0.1");
+  const { caseSession } = useWorkbenchCase();
+  const revision = caseSession.phase === "ready" && caseSession.caseId === wb.caseId
+    ? caseSession.revision : null;
+  const identity = wb.caseId + ":" + String(revision);
+  const [retainedRevision, setRetainedRevision] = useWorkspaceDraft<number | null>(
+    wb.caseId, "network", "scan-session-revision", null,
+  );
+  const [target, setTarget] = useWorkspaceDraft(wb.caseId, "network", "scan-target", "127.0.0.1");
   const [notesWidth, setNotesWidth] = useState(320);
-  const [ports, setPorts] = useState("top25");
+  const [ports, setPorts] = useWorkspaceDraft(wb.caseId, "network", "scan-ports", "top25");
   const [authorized, setAuthorized] = useState(false);
   const [running, setRunning] = useState(false);
   const [progress, setProgress] = useState<ScanProgressWire | null>(null);
   const [results, setResults] = useState<ScanEntryWire[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [status, setStatus] = useState<NetscanStatusWire>({ running: false, results: 0, saved_findings: 0, save_error: null });
-  // Scanner state is global today; never show its results as another case's evidence.
-  const activeCase = useRef(wb.caseId);
-  activeCase.current = wb.caseId;
-  const scanCase = useRef<string | null>(null);
+  // Native status/results now enforce the selected case generation on every read.
+  const activeCase = useRef(identity);
+  activeCase.current = identity;
+  const scanCase = useRef<string | null>(
+    revision !== null && retainedRevision === revision ? wb.caseId : null,
+  );
+  scanCase.current = revision !== null && retainedRevision === revision ? wb.caseId : null;
   const scanTicket = useRef(0);
   const pollTicket = useRef(0);
 
@@ -47,24 +58,25 @@ export function ScanView() {
     setResults([]);
     setProgress(null);
     setError(null);
-    if (scanCase.current !== wb.caseId) setRunning(false);
-  }, [wb.caseId]);
+    setRunning(false);
+  }, [identity]);
 
   const poll = useCallback(async () => {
     const caseId = wb.caseId;
+    const key = identity;
     const ticket = ++pollTicket.current;
-    const isCurrent = () => activeCase.current === caseId && ticket === pollTicket.current;
+    const isCurrent = () => activeCase.current === key && ticket === pollTicket.current;
     try {
       const currentStatus = await netscanStatus();
       if (!isCurrent()) return;
       setStatus(currentStatus);
-      if (scanCase.current !== caseId) return;
+      // The backend independently gates these results by selected case revision.
       const currentResults = await netscanResults();
-      if (isCurrent() && scanCase.current === caseId) setResults(currentResults);
+      if (isCurrent()) setResults(currentResults);
     } catch (cause) {
       if (isCurrent()) setError("Scanner status unavailable: " + String(cause));
     }
-  }, [wb.caseId]);
+  }, [identity]);
 
   useEffect(() => {
     if (!desktop) return;
@@ -74,12 +86,13 @@ export function ScanView() {
   }, [poll, desktop]);
 
   const start = async () => {
-    if (running || status.running) return;
+    if (running || status.running || revision === null) return;
     const caseId = wb.caseId;
+    const key = identity;
     const ticket = ++scanTicket.current;
     pollTicket.current += 1;
     scanCase.current = caseId;
-    const isCurrent = () => activeCase.current === caseId && scanTicket.current === ticket;
+    const isCurrent = () => activeCase.current === key && scanTicket.current === ticket;
     setRunning(true);
     setError(null);
     setResults([]);
@@ -88,6 +101,7 @@ export function ScanView() {
       await netscanStart(target, ports, caseId, authorized, (p) => {
         if (isCurrent()) setProgress(p);
       });
+      if (isCurrent()) setRetainedRevision(revision);
     } catch (err) {
       if (isCurrent()) setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -100,7 +114,7 @@ export function ScanView() {
   };
 
   const stop = async () => {
-    if (scanCase.current !== wb.caseId) return;
+    if (scanCase.current !== wb.caseId && !status.running) return;
     try {
       await netscanStop();
       void poll();
@@ -112,15 +126,15 @@ export function ScanView() {
   const openCount = results.filter((r) => r.state === "open").length;
 
   const exportResults = async (format: "json" | "csv") => {
-    if (scanCase.current !== wb.caseId) return;
+    if (results.length === 0) return;
     const caseId = wb.caseId;
     setError(null);
     try {
       const path = await netscanExport(format);
-      if (activeCase.current === caseId) wb.logConsole(`scan exported for case ${caseId}: ${path}`);
+      if (activeCase.current === identity) wb.logConsole(`scan exported for case ${caseId}: ${path}`);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      if (message !== "cancelled" && activeCase.current === caseId) setError(message);
+      if (message !== "cancelled" && activeCase.current === identity) setError(message);
     }
   };
   const isPreset = PORT_PRESETS.some((p) => p.value === ports);
@@ -144,7 +158,7 @@ export function ScanView() {
         {!isPreset ? (
           <TextInput value={ports} onChange={setPorts} placeholder="80,443,8000-8100" ariaLabel="Custom ports" className="w-40" />
         ) : null}
-        {running && scanCase.current === wb.caseId ? (
+        {status.running || (running && scanCase.current === wb.caseId) ? (
           <ToolButton tone="danger" onClick={() => void stop()}>
             <Square size={11} /> Stop
           </ToolButton>
@@ -152,8 +166,8 @@ export function ScanView() {
           <ToolButton
             tone="primary"
             onClick={() => void start()}
-            disabled={!desktop || !authorized || !target.trim() || status.running || running}
-            title={desktop ? "TCP connect scan across all cores" : "Scanning requires the desktop runtime"}
+            disabled={!desktop || revision === null || !authorized || !target.trim() || status.running || running}
+            title={revision === null ? "Select a saved native investigation case before scanning" : "Backend-selected case and native confirmation are required before TCP probes"}
           >
             <Play size={11} /> {running ? "scanning…" : "Run scan"}
           </ToolButton>
@@ -161,7 +175,7 @@ export function ScanView() {
         <Chip tone={status.running || running ? "orange" : "muted"}>
           {running ? "running" : status.running ? "other session running" : "idle"}
         </Chip>
-        {results.length > 0 && scanCase.current === wb.caseId ? (
+        {results.length > 0 ? (
           <>
             <ToolButton onClick={() => void exportResults("json")} title="Save results as JSON">JSON</ToolButton>
             <ToolButton onClick={() => void exportResults("csv")} title="Save results as CSV">CSV</ToolButton>
@@ -181,8 +195,7 @@ export function ScanView() {
                 className="mt-0.5 accent-[var(--color-orange)]"
               />
               <span>
-                I confirm the target is mine or I have written authorization to scan it. Active
-                scanning without authorization is illegal in most jurisdictions.
+                I confirm the target is mine or I have explicit authorization to assess it. The backend verifies the selected saved case and asks for native confirmation before starting.
               </span>
             </label>
           </Pane>
@@ -201,7 +214,7 @@ export function ScanView() {
             {results.length === 0 ? (
               <EmptyState
                 title={running ? "Scanning…" : "No results"}
-                detail="TCP connect scan with service banners. Acknowledge the authorization, set target and ports, run."
+                detail="TCP connect scan with observed banners. Select a saved case, acknowledge scope, confirm in the native dialog and run."
                 badge="netscan"
               />
             ) : (
@@ -247,8 +260,7 @@ export function ScanView() {
             <span className="text-fg-muted">Live scan status appears above; completed scans are listed below.</span>
           </div>
           <div className="border-t border-line p-2 text-[10px] text-fg-muted">
-            Global scan history is withheld from case-specific views until the native API
-            exposes a verified case identifier for each record.
+            Scan results, findings and Stop are bound to the backend-selected case generation; switching cases revokes stale read access.
           </div>
         </Pane>
       </div>

@@ -17,7 +17,7 @@ pub(super) fn now_ms() -> u64 {
 
 /// Start a bounded worker and update observable state. All persistence uses a
 /// callback port: only the infrastructure adapter knows about the case store.
-pub(super) fn start<P, F>(
+pub(super) fn start<P, G, F>(
     ctx: &ScanCtx,
     scope: CaseSessionWire,
     hosts: Vec<IpAddr>,
@@ -25,10 +25,12 @@ pub(super) fn start<P, F>(
     targets: String,
     ports: String,
     on_progress: P,
+    scope_is_active: G,
     save_findings: F,
 ) -> Result<u64, String>
 where
     P: Fn(ScanProgress) + Sync + Send + 'static,
+    G: Fn() -> bool + Sync + Send + 'static,
     F: FnOnce(u64, &[ScanEntry]) -> Result<usize, String> + Send + 'static,
 {
     let host_count = hosts.len();
@@ -68,11 +70,17 @@ where
     let saved_out = Arc::clone(&ctx.saved_findings);
 
     std::thread::spawn(move || {
-        let entries =
-            scan_service::run_scan_into(hosts, port_list, &stop_out, &on_progress, &results_out);
+        let entries = scan_service::run_scan_into_scoped(
+            hosts,
+            port_list,
+            &stop_out,
+            &on_progress,
+            &results_out,
+            &scope_is_active,
+        );
         let open = entries.len();
         let duration = started.elapsed().as_millis() as u64;
-        if !entries.is_empty() {
+        if !entries.is_empty() && !stop_out.load(Ordering::Acquire) && scope_is_active() {
             match save_findings(id, &entries) {
                 Ok(count) => saved_out.store(count as u64, Ordering::Relaxed),
                 Err(error) => {
@@ -107,6 +115,43 @@ mod tests {
     use std::time::Duration;
 
     #[test]
+    fn revoked_case_scan_never_invokes_durable_findings_callback() {
+        let ctx = ScanCtx::default();
+        let (tx, rx) = channel();
+        let _id = start(
+            &ctx,
+            CaseSessionWire {
+                case_id: Some("case-a".into()),
+                revision: 1,
+            },
+            vec!["127.0.0.1".parse().unwrap()],
+            vec![65000],
+            "127.0.0.1".into(),
+            "65000".into(),
+            |_| {},
+            || false,
+            move |_, _| {
+                tx.send(()).unwrap();
+                Ok(1)
+            },
+        )
+        .unwrap();
+        for _ in 0..100 {
+            if !ctx.running.load(Ordering::Acquire) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert!(!ctx.running.load(Ordering::Acquire));
+        assert!(ctx.stop.load(Ordering::Acquire));
+        assert!(ctx.results.lock().unwrap().is_empty());
+        assert!(
+            rx.try_recv().is_err(),
+            "revoked scan must not save findings"
+        );
+    }
+
+    #[test]
     fn empty_scan_closes_session_and_records_history() {
         let ctx = ScanCtx::default();
         let (tx, rx) = channel();
@@ -121,6 +166,7 @@ mod tests {
             "127.0.0.1".into(),
             "80".into(),
             |_| {},
+            || true,
             move |_, _| {
                 tx.send(()).unwrap();
                 Ok(0)

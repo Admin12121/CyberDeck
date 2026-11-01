@@ -31,6 +31,30 @@ pub(super) fn well_known_service(port: u16) -> &'static str {
     }
 }
 
+/// Return a protocol only when actual response bytes provide recognizable
+/// evidence, including services listening on unexpected TCP ports. Unlike the
+/// fallback port table, this is not a claim about the remote software version.
+/// Independently authored from common protocol greeting formats.
+pub(super) fn observed_service(banner: &str) -> Option<&'static str> {
+    let first = banner.lines().next()?.trim();
+    if first.starts_with("SSH-2.0-") || first.starts_with("SSH-1.99-") || first.starts_with("SSH-1.5-") {
+        return Some("ssh");
+    }
+    if first.starts_with("HTTP/1.0 ") || first.starts_with("HTTP/1.1 ") || first.starts_with("HTTP/2 ") {
+        return Some("http");
+    }
+    if first.starts_with("220 ") || first.starts_with("220-") {
+        let lower = first.to_ascii_lowercase();
+        if lower.contains("esmtp") || lower.contains("smtp") {
+            return Some("smtp");
+        }
+        if lower.contains("ftp") {
+            return Some("ftp");
+        }
+    }
+    None
+}
+
 /// Condense a raw service banner to the informative first line / header.
 pub(super) fn summarize_banner(raw: &str) -> String {
     let first_line = raw.lines().next().unwrap_or("").trim().to_string();
@@ -86,5 +110,32 @@ pub(super) fn probe(host: IpAddr, port: u16) -> (String, String) {
             }
             ("open".to_string(), banner)
         }
+    }
+}
+
+#[cfg(test)]
+mod evidence_tests {
+    use super::*;
+
+    #[test]
+    fn observed_protocol_recognizes_responses_on_unexpected_ports() {
+        assert_eq!(observed_service("SSH-2.0-OpenSSH_9.6\r\n"), Some("ssh"));
+        assert_eq!(observed_service("HTTP/1.1 200 OK\r\nServer: test\r\n"), Some("http"));
+        assert_eq!(observed_service("220 smtp.example ESMTP ready\r\n"), Some("smtp"));
+        assert_eq!(observed_service("220 ftp.example FTP server ready\r\n"), Some("ftp"));
+    }
+
+    #[test]
+    fn observed_protocol_refuses_unsupported_or_ambiguous_banners() {
+        assert_eq!(observed_service("220 ready\r\n"), None);
+        assert_eq!(observed_service("error: SSH-2.0 spoofed\r\n"), None);
+        assert_eq!(observed_service("HTTP/1.1x not-a-status\r\n"), None);
+        assert_eq!(observed_service(""), None);
+    }
+
+    #[test]
+    fn observed_protocol_does_not_invent_a_product_version() {
+        assert_eq!(observed_service("SSH-2.0-vendor_1.2\r\n"), Some("ssh"));
+        assert_eq!(observed_service("some unknown service\r\n"), None);
     }
 }
