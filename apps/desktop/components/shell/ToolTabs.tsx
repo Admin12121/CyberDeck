@@ -8,22 +8,24 @@ export function ToolTabs({ category, active }: { category: CategoryId; active: T
   const cat = CATEGORIES.find((c) => c.id === category);
   if (!cat || cat.tools.length <= 1) return null;
   return (
-    <div className="flex h-8 shrink-0 items-center gap-1 border-b border-line bg-sidebar px-2">
+    <nav aria-label={`${cat.label} tools`} className="flex h-10 shrink-0 items-center gap-1 overflow-x-auto border-b border-line bg-sidebar px-2">
       {cat.tools.map((tool) => (
         <button
           key={tool.id}
           type="button"
-          title={tool.hint}
+          title={tool.disabled ? tool.disabledReason : tool.hint}
+          aria-current={active === tool.id ? "page" : undefined}
+          disabled={tool.disabled}
           onClick={() => wb.selectTool(tool.id)}
-          className={`h-6 border px-3 font-mono text-[10px] uppercase tracking-wide ${
+          className={`h-8 shrink-0 border-b px-3 text-xs font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-40 ${
             active === tool.id
-              ? "border-orange/50 text-orange"
-              : "border-transparent text-fg-muted hover:text-fg"
+              ? "border-fg bg-selected/60 text-fg"
+              : "border-transparent text-fg-muted hover:bg-raised hover:text-fg"
           }`}
         >
           {tool.label}
         </button>
       ))}
-    </div>
+    </nav>
   );
 }

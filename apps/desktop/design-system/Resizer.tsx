@@ -18,6 +18,7 @@ interface ResizerProps {
   /** Which side the panel sits on relative to the drag direction. */
   flip?: boolean;
   ariaLabel: string;
+  resetValue?: number;
   /**
    * Called on drag start; may return the synced starting size. Use when the
    * panel is in a flexible (unset) state and must be measured before the
@@ -26,12 +27,13 @@ interface ResizerProps {
   onDragStart?: () => number | void;
 }
 
-export function Resizer({ direction, value, onChange, min, max, flip = false, ariaLabel, onDragStart }: ResizerProps) {
+export function Resizer({ direction, value, onChange, min, max, flip = false, ariaLabel, resetValue, onDragStart }: ResizerProps) {
   const [dragging, setDragging] = useState(false);
   const startRef = useRef<{ pointer: number; value: number } | null>(null);
 
   const onPointerDown = useCallback(
     (e: React.PointerEvent<HTMLDivElement>) => {
+      if (e.button !== 0) return;
       e.preventDefault();
       const synced = onDragStart ? onDragStart() : undefined;
       startRef.current = {
@@ -74,7 +76,13 @@ export function Resizer({ direction, value, onChange, min, max, flip = false, ar
       aria-valuemax={max}
       tabIndex={0}
       onPointerDown={onPointerDown}
+      onDoubleClick={() => { if (resetValue !== undefined) onChange(resetValue); }}
       onKeyDown={(e) => {
+        if (e.key === "Home" || e.key === "End") {
+          e.preventDefault();
+          onChange(e.key === "Home" ? min : max);
+          return;
+        }
         const step = e.shiftKey ? 32 : 8;
         if (direction === "horizontal" && (e.key === "ArrowLeft" || e.key === "ArrowRight")) {
           e.preventDefault();
@@ -89,7 +97,7 @@ export function Resizer({ direction, value, onChange, min, max, flip = false, ar
       }}
       className={`group relative z-10 shrink-0 transition-colors ${
         direction === "horizontal" ? "w-px cursor-col-resize" : "h-px cursor-row-resize"
-      } ${dragging ? "bg-orange" : "bg-line hover:bg-line-strong"}`}
+      } ${dragging ? "bg-line" : "bg-line hover:bg-line focus-visible:bg-line"}`}
       style={{ touchAction: "none" }}
       data-dragging={dragging || undefined}
     >

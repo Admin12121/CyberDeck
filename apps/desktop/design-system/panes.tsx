@@ -26,8 +26,8 @@ export function Pane({
 }) {
   return (
     <section style={style} className={`flex min-h-0 min-w-0 flex-col bg-panel ${className}`}>
-      <header className="flex h-8 shrink-0 items-center justify-between gap-2 border-b border-line bg-sidebar px-2">
-        <span className="truncate text-[11px] font-medium uppercase tracking-wider text-fg-muted">
+      <header className="flex h-9 shrink-0 items-center justify-between gap-2 border-b border-line bg-sidebar px-3">
+        <span className="truncate text-xs font-semibold uppercase tracking-wider text-fg-muted">
           {title}
         </span>
         {actions ? <div className="flex shrink-0 items-center gap-1">{actions}</div> : null}
@@ -51,10 +51,10 @@ export function EmptyState({
   return (
     <div className="flex h-full flex-col items-center justify-center gap-2 p-6 text-center">
       {Icon ? <Icon size={22} strokeWidth={1.5} className="text-fg-muted" /> : null}
-      <div className="text-xs text-fg-dim">{title}</div>
-      {detail ? <div className="max-w-md font-mono text-[11px] leading-relaxed text-fg-muted">{detail}</div> : null}
+      <div className="text-sm font-medium text-fg">{title}</div>
+      {detail ? <div className="max-w-md text-xs leading-relaxed text-fg-muted">{detail}</div> : null}
       {badge ? (
-        <span className="border border-line px-1.5 py-0.5 font-mono text-[10px] uppercase tracking-wide text-fg-muted">
+        <span className="border border-line px-1.5 py-0.5 font-mono text-[11px] uppercase tracking-wide text-fg-muted">
           {badge}
         </span>
       ) : null}
@@ -67,11 +67,10 @@ export function Chip({
   tone = "muted",
 }: {
   children: ReactNode;
-  tone?: "muted" | "blue" | "orange" | "ok" | "err";
+  tone?: "muted" | "orange" | "ok" | "err";
 }) {
   const tones: Record<string, string> = {
     muted: "border-line text-fg-muted",
-    blue: "border-blue/40 text-blue",
     orange: "border-orange/40 text-orange",
     ok: "border-ok/40 text-ok",
     err: "border-err/40 text-err",
@@ -89,7 +88,7 @@ export function Field({ label, value }: { label: string; value: ReactNode }) {
   return (
     <div className="border-b border-line/50 px-3 py-1.5">
       <div className="text-[10px] uppercase tracking-wider text-fg-muted">{label}</div>
-      <div className="truncate font-mono text-xs text-fg-dim">{value}</div>
+      <div className="truncate font-mono text-[13px] text-fg-dim">{value}</div>
     </div>
   );
 }
@@ -118,7 +117,7 @@ export function ToolButton({
       onClick={onClick}
       disabled={disabled}
       title={title}
-      className={`inline-flex h-7 items-center gap-1 border px-2 font-mono text-[11px] transition-colors disabled:cursor-not-allowed disabled:opacity-40 ${tones[tone]}`}
+      className={`inline-flex h-8 items-center gap-1 border px-3 font-mono text-xs transition-colors disabled:cursor-not-allowed disabled:opacity-40 ${tones[tone]}`}
     >
       {children}
     </button>
@@ -149,7 +148,7 @@ export function TextInput({
       onKeyDown={onKeyDown}
       placeholder={placeholder}
       aria-label={ariaLabel}
-      className={`h-7 border border-line bg-app px-2 text-xs text-fg placeholder:text-fg-muted focus:border-orange focus:outline-none ${mono ? "font-mono" : ""} ${className}`}
+      className={`h-8 border border-line bg-app px-2 text-[13px] text-fg placeholder:text-fg-muted focus:border-orange focus:outline-none ${mono ? "font-mono" : ""} ${className}`}
     />
   );
 }
@@ -172,7 +171,7 @@ export function Select({
       value={value}
       onChange={(e) => onChange(e.target.value)}
       aria-label={ariaLabel}
-      className={`h-6 border border-line bg-app px-1 font-mono text-[11px] text-fg-dim focus:border-orange focus:outline-none ${className}`}
+      className={`h-8 border border-line bg-app px-2 font-mono text-xs text-fg-dim focus:border-orange focus:outline-none ${className}`}
     >
       {options.map((opt) => (
         <option key={opt.value} value={opt.value}>

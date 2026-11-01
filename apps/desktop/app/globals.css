@@ -1,114 +1,167 @@
 @import "tailwindcss";
 
-/*
- * Dark Matter theme — near-black cool neutrals, blue = selection/analysis,
- * orange = active operations, green only for verified success, red only for
- * real errors (Master Plan §3). Values calibrated against a Zed dark reference
- * capture; do not introduce decorative color.
- */
-@theme {
-  --color-app: #0d0d0e;          /* main background */
-  --color-sidebar: #131316;      /* rail + navigator */
-  --color-panel: #1b1b1f;        /* workspace panels */
-  --color-raised: #232329;       /* hover / elevated surface */
-  --color-selected: #2a2a30;     /* active tab / selected row */
-  --color-line: #3b3b44;         /* subtle 1px separators */
-  --color-line-strong: #55555e;  /* strong separators / drag handles */
-  --color-fg: #d6d6e0;           /* primary text */
-  --color-fg-dim: #a5a5b5;       /* secondary text / icons */
-  --color-fg-muted: #9191a2;     /* muted text */
-  --color-blue: #3fc1ff;         /* selection + analysis accent */
-  --color-blue-selection: #2d9bff;
-  --color-blue-dim: #14344a;
-  --color-orange: #ff7b00;       /* active operations / running jobs */
-  --color-orange-dim: #432a1f;
-  --color-ok: #5dc8a0;           /* verified success only */
-  --color-warn: #e7b66c;
-  --color-err: #e87578;          /* actual errors only */
-
-  --font-sans: Inter, "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
-  --font-mono: "Geist Mono", "JetBrains Mono", "Cascadia Mono", Consolas, monospace;
-
-  --default-font-family: var(--font-sans);
+:root {
+  --background: oklch(1 0 0);
+  --foreground: oklch(0.145 0 0);
+  --card: oklch(1 0 0);
+  --card-foreground: oklch(0.145 0 0);
+  --popover: oklch(1 0 0);
+  --popover-foreground: oklch(0.145 0 0);
+  --primary: oklch(0.205 0 0);
+  --primary-foreground: oklch(0.985 0 0);
+  --secondary: oklch(0.97 0 0);
+  --secondary-foreground: oklch(0.205 0 0);
+  --muted: oklch(0.97 0 0);
+  --muted-foreground: oklch(0.556 0 0);
+  --accent: oklch(0.97 0 0);
+  --accent-foreground: oklch(0.205 0 0);
+  --destructive: oklch(0.577 0.245 27.325);
+  --border: oklch(0.922 0 0);
+  --input: oklch(0.922 0 0);
+  --ring: oklch(0.708 0 0);
+  --chart-1: oklch(0.87 0 0);
+  --chart-2: oklch(0.556 0 0);
+  --chart-3: oklch(0.439 0 0);
+  --chart-4: oklch(0.371 0 0);
+  --chart-5: oklch(0.269 0 0);
+  --radius: 0.625rem;
+  --sidebar: oklch(0.985 0 0);
+  --sidebar-foreground: oklch(0.145 0 0);
+  --sidebar-primary: oklch(0.205 0 0);
+  --sidebar-primary-foreground: oklch(0.985 0 0);
+  --sidebar-accent: oklch(0.97 0 0);
+  --sidebar-accent-foreground: oklch(0.205 0 0);
+  --sidebar-border: oklch(0.922 0 0);
+  --sidebar-ring: oklch(0.708 0 0);
+  color-scheme: light;
+  --cd-control-height: 32px;
+  --cd-motion-fast: 120ms;
+  --cd-motion-medium: 180ms;
 }
 
-:root {
+.dark {
+  --background: oklch(0.145 0 0);
+  --foreground: oklch(0.985 0 0);
+  --card: oklch(0.205 0 0);
+  --card-foreground: oklch(0.985 0 0);
+  --popover: oklch(0.205 0 0);
+  --popover-foreground: oklch(0.985 0 0);
+  --primary: oklch(0.922 0 0);
+  --primary-foreground: oklch(0.205 0 0);
+  --secondary: oklch(0.269 0 0);
+  --secondary-foreground: oklch(0.985 0 0);
+  --muted: oklch(0.269 0 0);
+  --muted-foreground: oklch(0.708 0 0);
+  --accent: oklch(0.269 0 0);
+  --accent-foreground: oklch(0.985 0 0);
+  --destructive: oklch(0.704 0.191 22.216);
+  --border: oklch(1 0 0 / 10%);
+  --input: oklch(1 0 0 / 15%);
+  --ring: oklch(0.556 0 0);
+  --chart-1: oklch(0.87 0 0);
+  --chart-2: oklch(0.556 0 0);
+  --chart-3: oklch(0.439 0 0);
+  --chart-4: oklch(0.371 0 0);
+  --chart-5: oklch(0.269 0 0);
+  --sidebar: oklch(0.205 0 0);
+  --sidebar-foreground: oklch(0.985 0 0);
+  --sidebar-primary: oklch(0.922 0 0);
+  --sidebar-primary-foreground: oklch(0.205 0 0);
+  --sidebar-accent: oklch(0.269 0 0);
+  --sidebar-accent-foreground: oklch(0.985 0 0);
+  --sidebar-border: oklch(1 0 0 / 10%);
+  --sidebar-ring: oklch(0.556 0 0);
   color-scheme: dark;
 }
 
-html,
-body {
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-sidebar: var(--sidebar);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-ring: var(--sidebar-ring);
+  --color-chart-1: var(--chart-1);
+  --color-chart-2: var(--chart-2);
+  --color-chart-3: var(--chart-3);
+  --color-chart-4: var(--chart-4);
+  --color-chart-5: var(--chart-5);
+
+  /* Existing workspace classes remain compatible during incremental migration. */
+  --color-app: var(--background);
+  --color-panel: var(--card);
+  --color-raised: var(--accent);
+  --color-selected: var(--secondary);
+  --color-line: var(--border);
+  --color-line-strong: var(--border);
+  --color-fg: var(--foreground);
+  --color-fg-dim: var(--foreground);
+  --color-fg-muted: var(--muted-foreground);
+  --color-orange: var(--muted-foreground);
+  --color-orange-dim: var(--accent);
+  --color-ok: var(--foreground);
+  --color-warn: var(--muted-foreground);
+  --color-err: var(--destructive);
+
+  --font-sans: Inter, "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
+  --font-mono: "Geist Mono", "JetBrains Mono", "Cascadia Mono", Consolas, monospace;
+  --default-font-family: var(--font-sans);
+}
+
+html, body {
   height: 100%;
   overflow: hidden;
 }
-
 body {
-  background-color: var(--color-app);
-  color: var(--color-fg);
-  font-size: 13px;
+  background: var(--background);
+  color: var(--foreground);
+  font-size: 14px;
   line-height: 1.45;
   -webkit-font-smoothing: antialiased;
 }
-
-/* Zed-style thin dark scrollbars */
-::-webkit-scrollbar {
-  width: 10px;
-  height: 10px;
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-thumb { background: var(--secondary); border: 2px solid transparent; background-clip: content-box; }
+::-webkit-scrollbar-thumb:hover { background: var(--ring); }
+::-webkit-scrollbar-track, ::-webkit-scrollbar-corner { background: transparent; }
+::selection { background: var(--accent); color: var(--accent-foreground); }
+:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    scroll-behavior: auto !important;
+    transition-duration: 0.01ms !important;
+  }
 }
-::-webkit-scrollbar-thumb {
-  background: var(--color-selected);
-  border: 2px solid transparent;
-  background-clip: content-box;
-}
-::-webkit-scrollbar-thumb:hover {
-  background: var(--color-line);
-  border: 2px solid transparent;
-  background-clip: content-box;
-}
-::-webkit-scrollbar-track {
-  background: transparent;
-}
-::-webkit-scrollbar-corner {
-  background: transparent;
-}
-
-::selection {
-  background: color-mix(in srgb, var(--color-orange) 25%, transparent);
-}
-
-:focus-visible {
-  outline: 1px solid var(--color-orange);
-  outline-offset: -1px;
-}
-
-/* dense data tables shared across studios */
-.data-table {
-  font-family: var(--font-mono);
-  font-size: 12px;
-  width: 100%;
-  border-collapse: collapse;
-}
+.data-table { font-family: var(--font-mono); font-size: 12px; width: 100%; border-collapse: collapse; }
 .data-table th {
-  color: var(--color-fg-dim);
-  font-weight: 500;
-  text-align: left;
-  padding: 3px 8px;
-  border-bottom: 1px solid var(--color-line);
-  position: sticky;
-  top: 0;
-  background: var(--color-panel);
-  user-select: none;
+  color: var(--muted-foreground); font-weight: 500; text-align: left; padding: 3px 8px;
+  border-bottom: 1px solid var(--border); position: sticky; top: 0;
+  background: var(--card); user-select: none;
 }
 .data-table td {
-  padding: 2px 8px;
-  border-bottom: 1px solid color-mix(in srgb, var(--color-line) 40%, transparent);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  padding: 2px 8px; border-bottom: 1px solid var(--border);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
-.data-table tbody tr:hover {
-  background: var(--color-raised);
-}
-.data-table tbody tr.selected {
-  background: var(--color-orange-dim);
-}
+.data-table tbody tr:hover { background: var(--accent); }
+.data-table tbody tr.selected { background: var(--secondary); }

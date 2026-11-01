@@ -1,6 +1,8 @@
 //! Native crypto operations with reference test vectors.
 
 pub mod recipes;
+pub mod key_derivation;
+pub mod hkdf;
 pub mod recovery;
 pub mod candidates;
 pub mod gpu;

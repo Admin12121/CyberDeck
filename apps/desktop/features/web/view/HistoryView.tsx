@@ -68,7 +68,7 @@ export function HistoryView() {
             {filtered.map((r) => (
               <tr key={r.id}>
                 <td className="text-fg-muted">{r.id}</td>
-                <td className="text-blue">{r.method}</td>
+                <td className="text-fg-dim">{r.method}</td>
                 <td>{r.host}</td>
                 <td className="text-fg-dim">{r.path}</td>
                 <td className={r.status >= 400 ? "text-err" : "text-ok"}>{r.status}</td>
@@ -107,7 +107,7 @@ function SitesTree({ rows }: { rows: CapturedRequestWire[] }) {
       {[...hosts.entries()].map(([host, paths]) => (
         <div key={host} className="mb-1">
           <div className="flex items-center gap-1 px-1 py-0.5 font-mono text-[11px] text-fg">
-            <Globe size={11} className="text-blue" /> {host}
+            <Globe size={11} className="text-fg-dim" /> {host}
           </div>
           {[...paths].sort().map((path) => (
             <div key={path} className="truncate pl-5 font-mono text-[10px] text-fg-dim">{path}</div>

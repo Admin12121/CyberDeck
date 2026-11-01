@@ -3,17 +3,25 @@
  * Console dock: operation log plus a small command router
  * (help, clear, scan, spider, get, crack, status).
  */
-import { useState } from "react";
+import { useRef } from "react";
 import { b64,crackWordlistDialog,cryptoOp,httpSend,isDesktop,kdfVerify,spiderScan,webScan } from "@lib/ipc";import { useWorkbench } from "@state/workbench";
 
-export function ConsoleDock() {
+export function ConsoleDock({ terminalId }: { terminalId: string }) {
   const wb = useWorkbench();
-  const [input, setInput] = useState("");
-  const [busy, setBusy] = useState(false);
+  const currentCase = useRef(wb.caseId);
+  currentCase.current = wb.caseId;
+  const input = wb.terminalInputs[terminalId] ?? "";
+  const setInput = (value: string) => wb.setTerminalInput(terminalId, value);
+  const lines = terminalId === "terminal-1" ? wb.consoleLines : wb.terminalLines[terminalId] ?? [];
+  const busy = wb.terminalBusy[terminalId] ?? false;
+  const setBusy = (next: boolean) => wb.setTerminalBusy(terminalId, next);
 
-  const log = (line: string) => wb.logConsole(line);
+  const log = (line: string) => {
+    if (currentCase.current === wb.caseId) wb.logTerminal(terminalId, line);
+  };
 
   const runCommand = async (raw: string) => {
+    const caseAtInvocation = wb.caseId;
     const line = raw.trim();
     if (!line) return;
     const [cmd, ...args] = line.split(/\s+/);
@@ -22,7 +30,7 @@ export function ConsoleDock() {
     log(sensitive.has(cmd.toLowerCase()) ? `> ${cmd.toLowerCase()} [arguments hidden]` : `> ${line}`);
     switch (cmd.toLowerCase()) {
       case "clear":
-        wb.setConsoleLines([]);
+        wb.clearTerminal(terminalId);
         return;
       case "help":
         log("commands: hash <algo> <text> · verify <kdf-hash> <password> · b64 <text> · unb64 <b64> · scan --authorized <url> · spider --authorized <url> [depth] · get <url> · crack <algo> <hash> <wordlist> · status · clear");
@@ -93,7 +101,7 @@ export function ConsoleDock() {
       case "crack": {
         if (args.length < 3) return log("usage: crack <algo> <hash> <wordlist-path>");
         setBusy(true);
-        log(`crack ${args[0]}: running over ${args[2]}…`);
+        log(`crack ${args[0]}: running authorized recovery…`);
         try {
           const result = await crackWordlistDialog(args[0], args[1], args[2]);
           log(`crack: ${result.tried} tried in ${result.duration_ms} ms · ${result.matches.length} match(es) · ${result.threads} threads`);
@@ -101,7 +109,7 @@ export function ConsoleDock() {
         } catch (err) {
           log(`crack failed: ${err instanceof Error ? err.message : String(err)}`);
         } finally {
-          setBusy(false);
+          if (currentCase.current === caseAtInvocation) setBusy(false);
         }
         return;
       }
@@ -111,37 +119,14 @@ export function ConsoleDock() {
   };
 
   return (
-    <div className="flex h-full min-h-0 flex-col border-t border-line bg-panel" role="region" aria-label="Console dock">
-      <div className="flex h-8 shrink-0 items-center gap-2 border-b border-line bg-sidebar px-2">
-        <div className="flex items-center gap-1">
-          {(["jobs", "console"] as const).map((t) => (
-            <button
-              key={t}
-              type="button"
-              onClick={() => wb.setDockTab(t)}
-              className={`border px-2 font-mono text-[10px] uppercase ${wb.dockTab === t ? "border-orange/50 text-orange" : "border-transparent text-fg-muted hover:text-fg"}`}
-            >
-              {t}
-            </button>
-          ))}
-        </div>
-        <span className="inline-flex items-center border border-line px-1.5 py-px font-mono text-[10px] uppercase tracking-wide text-fg-muted">
-          {isDesktop() ? "tauri" : "browser fallback"}
-        </span>
-        <div className="ml-auto flex items-center gap-2">
-          <span className="font-mono text-[10px] text-fg-muted">Ctrl+` toggles</span>
-          <button type="button" onClick={() => wb.setDockOpen(false)} aria-label="Close console dock" className="text-fg-muted hover:text-fg">
-            ×
-          </button>
-        </div>
-      </div>
+    <div className="flex h-full min-h-0 flex-col bg-panel" role="region" aria-label={`CyberDeck command console ${terminalId.slice(9)}`}>
       <div className="min-h-0 flex-1 overflow-auto p-2 font-mono text-[11px] leading-relaxed">
-        {wb.consoleLines.length === 0 ? (
+        {lines.length === 0 ? (
           <div className="text-fg-muted">
-            operation log and command line. type help for commands.
+            Type help for commands.
           </div>
         ) : (
-          wb.consoleLines.map((line, i) => (
+          lines.map((line, i) => (
             <div key={i} className={line.startsWith(">") ? "text-fg" : "text-fg-dim"} style={{ whiteSpace: "pre-wrap" }}>
               {line}
             </div>
@@ -157,10 +142,10 @@ export function ConsoleDock() {
             if (e.key === "Enter" && !busy) {
               const value = input;
               setInput("");
-              void runCommand(value);
+              void runCommand(value).catch((error: unknown) => log(`Command failed: ${error instanceof Error ? error.message : String(error)}`));
             }
           }}
-          aria-label="Console command input"
+          aria-label={`Console ${terminalId.slice(9)} command input`}
           spellCheck={false}
           className="h-full flex-1 bg-transparent font-mono text-[11px] text-fg focus:outline-none"
           placeholder={busy ? "running…" : "type a command (help)"}

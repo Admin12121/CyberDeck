@@ -342,6 +342,8 @@ fn gps_ifd(data: &[u8], base: u64, at: usize, le: bool) -> Result<Vec<MetadataFi
     let mut lon_ref = None;
     let mut lat = None;
     let mut lon = None;
+    let mut altitude_ref = None;
+    let mut altitude = None;
     for i in 0..count {
         let entry = start + i * 12;
         let tag = tiff_u16(data, entry, le)?;
@@ -395,9 +397,37 @@ fn gps_ifd(data: &[u8], base: u64, at: usize, le: bool) -> Result<Vec<MetadataFi
             } else {
                 lon = Some((degrees, offset));
             }
+        } else if tag == 5 {
+            if kind != 1 || num != 1 || altitude_ref.is_some() {
+                return Err("invalid GPS altitude reference".into());
+            }
+            let reference = *data
+                .get(entry + 8)
+                .ok_or("missing GPS altitude reference")?;
+            if reference > 1 {
+                return Err("invalid GPS altitude hemisphere reference".into());
+            }
+            altitude_ref = Some(reference);
+        } else if tag == 6 {
+            if kind != 5 || num != 1 || altitude.is_some() {
+                return Err("invalid GPS altitude rational".into());
+            }
+            let value_at = tiff_u32(data, entry + 8, le)? as usize;
+            if value_at.checked_add(8).ok_or("GPS altitude overflow")? > data.len() {
+                return Err("truncated GPS altitude".into());
+            }
+            let numerator = tiff_u32(data, value_at, le)?;
+            let denominator = tiff_u32(data, value_at + 4, le)?;
+            if denominator == 0 {
+                return Err("zero GPS altitude rational denominator".into());
+            }
+            let offset = base
+                .checked_add(value_at as u64)
+                .ok_or("GPS altitude source offset overflow")?;
+            altitude = Some((numerator as f64 / denominator as f64, offset));
         }
     }
-    let mut fields = Vec::with_capacity(2);
+    let mut fields = Vec::with_capacity(3);
     for (key, coordinate, reference, negative) in [
         ("latitude", lat, lat_ref, 'S'),
         ("longitude", lon, lon_ref, 'W'),
@@ -412,7 +442,190 @@ fn gps_ifd(data: &[u8], base: u64, at: usize, le: bool) -> Result<Vec<MetadataFi
             });
         }
     }
+    if let Some((height, offset)) = altitude {
+        let reference = altitude_ref.ok_or("GPS altitude lacks reference")?;
+        fields.push(MetadataField {
+            namespace: "exif.gps",
+            key: "altitude_meters",
+            value: format!("{:.3}", if reference == 1 { -height } else { height }),
+            offset,
+        });
+    }
     Ok(fields)
+}
+
+fn tiff_ifd_bounds(
+    data: &[u8],
+    at: usize,
+    le: bool,
+    max_entries: usize,
+) -> Result<(usize, usize, usize), String> {
+    let count = tiff_u16(data, at, le)? as usize;
+    if count > max_entries {
+        return Err("too many EXIF directory fields".into());
+    }
+    let start = at.checked_add(2).ok_or("EXIF directory overflow")?;
+    let end = start
+        .checked_add(count.checked_mul(12).ok_or("EXIF directory overflow")?)
+        .and_then(|end| end.checked_add(4))
+        .ok_or("EXIF directory overflow")?;
+    if end > data.len() {
+        return Err("truncated EXIF directory".into());
+    }
+    Ok((count, start, end))
+}
+
+fn exif_text(
+    data: &[u8],
+    entry: usize,
+    le: bool,
+    count: usize,
+    max_len: usize,
+    require_nul: bool,
+) -> Result<(String, usize), String> {
+    if count == 0 || count > max_len {
+        return Err("invalid EXIF ASCII size".into());
+    }
+    let at = if count <= 4 {
+        entry.checked_add(8).ok_or("EXIF ASCII overflow")?
+    } else {
+        tiff_u32(data, entry + 8, le)? as usize
+    };
+    let bytes = data
+        .get(at..at.checked_add(count).ok_or("EXIF ASCII overflow")?)
+        .ok_or("truncated EXIF ASCII value")?;
+    if require_nul && bytes.last() != Some(&0) {
+        return Err("unterminated EXIF ASCII value".into());
+    }
+    let value = bytes.split(|b| *b == 0).next().unwrap_or(bytes);
+    if require_nul
+        && (value.len() + 1 != bytes.len()
+            || !value.iter().all(|byte| (0x20..=0x7e).contains(byte)))
+    {
+        return Err("invalid EXIF ASCII characters".into());
+    }
+    Ok((value.iter().map(|byte| char::from(*byte)).collect(), at))
+}
+
+fn valid_exif_datetime(text: &str) -> bool {
+    let b = text.as_bytes();
+    if b.len() != 19
+        || b[4] != b':'
+        || b[7] != b':'
+        || b[10] != b' '
+        || b[13] != b':'
+        || b[16] != b':'
+        || !b
+            .iter()
+            .enumerate()
+            .all(|(i, x)| matches!(i, 4 | 7 | 10 | 13 | 16) || x.is_ascii_digit())
+    {
+        return false;
+    }
+    let num = |start: usize, end: usize| {
+        b[start..end]
+            .iter()
+            .fold(0u32, |n, c| n * 10 + (c - b'0') as u32)
+    };
+    let (year, month, day) = (num(0, 4), num(5, 7), num(8, 10));
+    let leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
+    let days = match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if leap => 29,
+        2 => 28,
+        _ => 0,
+    };
+    year > 0 && day > 0 && day <= days && num(11, 13) < 24 && num(14, 16) < 60 && num(17, 19) < 60
+}
+
+fn exif_rational(data: &[u8], entry: usize, le: bool) -> Result<(u32, u32, usize), String> {
+    let at = tiff_u32(data, entry + 8, le)? as usize;
+    let numerator = tiff_u32(data, at, le)?;
+    let denominator = tiff_u32(data, at.checked_add(4).ok_or("EXIF rational overflow")?, le)?;
+    if numerator == 0 || denominator == 0 {
+        return Err("invalid EXIF rational".into());
+    }
+    Ok((numerator, denominator, at))
+}
+
+fn exif_subifd(
+    data: &[u8],
+    base: u64,
+    pos: usize,
+    le: bool,
+) -> Result<(Vec<MetadataField>, usize), String> {
+    let (count, start, end) = tiff_ifd_bounds(data, pos, le, 64)?;
+    if tiff_u32(data, end - 4, le)? != 0 {
+        return Err("unsupported EXIF SubIFD linked directory".into());
+    }
+    let mut fields = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for index in 0..count {
+        let entry = start + index * 12;
+        let tag = tiff_u16(data, entry, le)?;
+        let key = match tag {
+            0x9003 => "datetime_original",
+            0x9004 => "datetime_digitized",
+            0x829a => "exposure_time",
+            0x8827 => "iso",
+            0x920a => "focal_length_mm",
+            _ => continue,
+        };
+        if !seen.insert(tag) {
+            return Err("duplicate EXIF SubIFD tag".into());
+        }
+        let kind = tiff_u16(data, entry + 2, le)?;
+        let num = tiff_u32(data, entry + 4, le)? as usize;
+        let (value, offset) = match tag {
+            0x9003 | 0x9004 => {
+                if kind != 2 || num != 20 {
+                    return Err("invalid EXIF date/time type or size".into());
+                }
+                let (value, offset) = exif_text(data, entry, le, num, 20, true)?;
+                if !valid_exif_datetime(&value) {
+                    return Err("invalid EXIF date/time".into());
+                }
+                (value, offset)
+            }
+            0x8827 => {
+                if num != 1 || !matches!(kind, 3 | 4) {
+                    return Err("invalid EXIF ISO type or count".into());
+                }
+                let iso = if kind == 3 {
+                    tiff_u16(data, entry + 8, le)? as u32
+                } else {
+                    tiff_u32(data, entry + 8, le)?
+                };
+                if iso == 0 {
+                    return Err("invalid EXIF ISO value".into());
+                }
+                (iso.to_string(), entry + 8)
+            }
+            0x829a | 0x920a => {
+                if kind != 5 || num != 1 {
+                    return Err("invalid EXIF rational type or count".into());
+                }
+                let (numerator, denominator, offset) = exif_rational(data, entry, le)?;
+                let value = if tag == 0x829a {
+                    format!("{numerator}/{denominator} s")
+                } else {
+                    format!("{:.3}", numerator as f64 / denominator as f64)
+                };
+                (value, offset)
+            }
+            _ => unreachable!(),
+        };
+        fields.push(MetadataField {
+            namespace: "exif.subifd",
+            key,
+            value,
+            offset: base
+                .checked_add(offset as u64)
+                .ok_or("EXIF source offset overflow")?,
+        });
+    }
+    Ok((fields, end))
 }
 
 fn exif(data: &[u8], base: u64) -> Result<Vec<MetadataField>, String> {
@@ -428,29 +641,38 @@ fn exif(data: &[u8], base: u64) -> Result<Vec<MetadataField>, String> {
         return Err("invalid TIFF magic".into());
     }
     let pos = tiff_u32(data, 4, le)? as usize;
-    let count = tiff_u16(data, pos, le)? as usize;
-    if count > 256 {
-        return Err("too many EXIF fields".into());
-    }
-    let start = pos.checked_add(2).ok_or("EXIF overflow")?;
-    let end = start
-        .checked_add(count.checked_mul(12).ok_or("EXIF overflow")?)
-        .ok_or("EXIF overflow")?;
-    if end.checked_add(4).ok_or("EXIF overflow")? > data.len() {
-        return Err("truncated EXIF IFD".into());
-    }
+    let (count, start, end) = tiff_ifd_bounds(data, pos, le, 256)?;
     let mut fields = Vec::new();
     let mut gps_pointer = None;
+    let mut subifd_pointer = None;
+    let mut seen = std::collections::HashSet::new();
     for i in 0..count {
         let at = start + i * 12;
         let tag = tiff_u16(data, at, le)?;
+        if !matches!(
+            tag,
+            0x8825 | 0x8769 | 0x010f | 0x0110 | 0x0131 | 0x0132 | 0x0112
+        ) {
+            continue;
+        }
+        if !seen.insert(tag) {
+            return Err("duplicate EXIF IFD0 tag".into());
+        }
         let typ = tiff_u16(data, at + 2, le)?;
         let n = tiff_u32(data, at + 4, le)? as usize;
-        if tag == 0x8825 {
-            if typ != 4 || n != 1 || gps_pointer.is_some() {
-                return Err("invalid EXIF GPS IFD pointer".into());
+        if matches!(tag, 0x8825 | 0x8769) {
+            if typ != 4 || n != 1 {
+                return Err("invalid EXIF directory pointer".into());
             }
-            gps_pointer = Some(tiff_u32(data, at + 8, le)? as usize);
+            let pointer = tiff_u32(data, at + 8, le)? as usize;
+            if pointer < end || pointer >= data.len() {
+                return Err("invalid/cyclic EXIF directory pointer".into());
+            }
+            if tag == 0x8825 {
+                gps_pointer = Some(pointer);
+            } else {
+                subifd_pointer = Some(pointer);
+            }
             continue;
         }
         let key = match tag {
@@ -459,40 +681,54 @@ fn exif(data: &[u8], base: u64) -> Result<Vec<MetadataField>, String> {
             0x0131 => "software",
             0x0132 => "datetime",
             0x0112 => "orientation",
-            _ => continue,
+            _ => unreachable!(),
         };
-        let value = if tag == 0x0112 && typ == 3 && n == 1 {
+        let value = if tag == 0x0112 {
+            if typ != 3 || n != 1 {
+                return Err("invalid EXIF orientation".into());
+            }
             tiff_u16(data, at + 8, le)?.to_string()
         } else if typ == 2 && (1..=2048).contains(&n) {
-            let loc = if n <= 4 {
-                at + 8
-            } else {
-                tiff_u32(data, at + 8, le)? as usize
-            };
-            let x = data
-                .get(loc..loc.checked_add(n).ok_or("EXIF size overflow")?)
-                .ok_or("truncated EXIF value")?;
-            x.split(|b| *b == 0)
-                .next()
-                .unwrap_or(x)
-                .iter()
-                .map(|b| char::from(*b))
-                .collect()
+            exif_text(data, at, le, n, 2048, false)?.0
         } else {
-            continue;
+            return Err("invalid EXIF IFD0 field type or size".into());
         };
         fields.push(MetadataField {
             namespace: "exif.ifd0",
             key,
             value,
-            offset: base + at as u64,
+            offset: base.checked_add(at as u64).ok_or("EXIF offset overflow")?,
         });
     }
+    let ifd1 = tiff_u32(data, end - 4, le)? as usize;
+    if ifd1 == pos
+        || ifd1 == gps_pointer.unwrap_or(0) && ifd1 != 0
+        || ifd1 == subifd_pointer.unwrap_or(0) && ifd1 != 0
+    {
+        return Err("cyclic EXIF directory pointer".into());
+    }
+    if let (Some(gps), Some(subifd)) = (gps_pointer, subifd_pointer) {
+        if gps == subifd {
+            return Err("overlapping EXIF directory pointers".into());
+        }
+    }
+    let sub_end = if let Some(pointer) = subifd_pointer {
+        let (parsed, sub_end) = exif_subifd(data, base, pointer, le)?;
+        fields.extend(parsed);
+        Some((pointer, sub_end))
+    } else {
+        None
+    };
     if let Some(pointer) = gps_pointer {
+        let (_, _, gps_end) = tiff_ifd_bounds(data, pointer, le, 64)?;
+        if sub_end.is_some_and(|(sub_start, sub_end)| pointer < sub_end && sub_start < gps_end) {
+            return Err("overlapping EXIF/GPS directories".into());
+        }
         fields.extend(gps_ifd(data, base, pointer, le)?);
     }
     Ok(fields)
 }
+
 /// Metadata mode preserves partial/metadata-only PNG compatibility.
 pub fn metadata(data: &[u8], base: u64) -> Result<MetadataReport, String> {
     metadata_impl(data, base, false)
@@ -632,7 +868,10 @@ fn metadata_impl(data: &[u8], base: u64, require_png_idat: bool) -> Result<Metad
             }
             let p = &data[i + 2..i + n];
             let payload_start = i + 2;
-            if tag == 0xdd && n == 4 {
+            if tag == 0xdd {
+                if n != 4 {
+                    return Err("invalid JPEG DRI length".into());
+                }
                 let interval = u16::from_be_bytes([p[0], p[1]]);
                 fields.push(MetadataField {
                     namespace: "jpeg",
@@ -762,6 +1001,219 @@ mod tests {
             .iter()
             .any(|f| f.key == "make" && f.value == "ACME"));
         assert!(m.complete);
+    }
+
+    #[test]
+    fn exif_subifd_camera_capture_and_exposure_both_endians() {
+        fn p16(b: &mut [u8], at: usize, v: u16, le: bool) {
+            b[at..at + 2].copy_from_slice(&if le { v.to_le_bytes() } else { v.to_be_bytes() });
+        }
+        fn p32(b: &mut [u8], at: usize, v: u32, le: bool) {
+            b[at..at + 4].copy_from_slice(&if le { v.to_le_bytes() } else { v.to_be_bytes() });
+        }
+        fn fixture(le: bool) -> Vec<u8> {
+            let mut t = vec![0u8; 288];
+            t[..2].copy_from_slice(if le { b"II" } else { b"MM" });
+            p16(&mut t, 2, 42, le);
+            p32(&mut t, 4, 8, le);
+            p16(&mut t, 8, 3, le);
+            for (entry, tag, typ, count, value) in [
+                (10, 0x010f, 2, 7, 160),
+                (22, 0x0110, 2, 7, 170),
+                (34, 0x8769, 4, 1, 64),
+            ] {
+                p16(&mut t, entry, tag, le);
+                p16(&mut t, entry + 2, typ, le);
+                p32(&mut t, entry + 4, count, le);
+                p32(&mut t, entry + 8, value, le);
+            }
+            p16(&mut t, 64, 5, le);
+            for (entry, tag, typ, count, value) in [
+                (66, 0x9003, 2, 20, 180),
+                (78, 0x9004, 2, 20, 205),
+                (90, 0x829a, 5, 1, 240),
+                (102, 0x8827, 3, 1, 0),
+                (114, 0x920a, 5, 1, 260),
+            ] {
+                p16(&mut t, entry, tag, le);
+                p16(&mut t, entry + 2, typ, le);
+                p32(&mut t, entry + 4, count, le);
+                p32(&mut t, entry + 8, value, le);
+            }
+            p16(&mut t, 110, 400, le); // ISO SHORT inline payload
+            t[160..167].copy_from_slice(b"Camera\0");
+            t[170..177].copy_from_slice(b"Unit-X\0");
+            t[180..200].copy_from_slice(b"2024:02:29 13:47:59\0");
+            t[205..225].copy_from_slice(b"2024:03:01 01:02:03\0");
+            p32(&mut t, 240, 1, le);
+            p32(&mut t, 244, 125, le);
+            p32(&mut t, 260, 100, le);
+            p32(&mut t, 264, 2, le);
+            t
+        }
+        fn jpeg(tiff: &[u8]) -> Vec<u8> {
+            let mut v = b"\xff\xd8\xff\xe1".to_vec();
+            v.extend_from_slice(&((tiff.len() + 8) as u16).to_be_bytes());
+            v.extend_from_slice(b"Exif\0\0");
+            v.extend_from_slice(tiff);
+            v.extend_from_slice(b"\xff\xd9");
+            v
+        }
+        for le in [true, false] {
+            let original = fixture(le);
+            let data = jpeg(&original);
+            let fields = metadata(&data, 4096).unwrap().fields;
+            for (namespace, key, value, offset) in [
+                ("exif.ifd0", "make", "Camera", 4096 + 12 + 10),
+                ("exif.ifd0", "model", "Unit-X", 4096 + 12 + 22),
+                (
+                    "exif.subifd",
+                    "datetime_original",
+                    "2024:02:29 13:47:59",
+                    4096 + 12 + 180,
+                ),
+                (
+                    "exif.subifd",
+                    "datetime_digitized",
+                    "2024:03:01 01:02:03",
+                    4096 + 12 + 205,
+                ),
+                ("exif.subifd", "exposure_time", "1/125 s", 4096 + 12 + 240),
+                ("exif.subifd", "iso", "400", 4096 + 12 + 110),
+                ("exif.subifd", "focal_length_mm", "50.000", 4096 + 12 + 260),
+            ] {
+                assert!(
+                    fields.iter().any(|f| f.namespace == namespace
+                        && f.key == key
+                        && f.value == value
+                        && f.offset == offset),
+                    "missing {key} {le}"
+                );
+            }
+            let mut bad = original.clone();
+            p32(&mut bad, 42, 8, le); // SubIFD cycles into IFD0
+            assert!(metadata(&jpeg(&bad), 0).is_err());
+            let mut bad = original.clone();
+            p32(&mut bad, 42, 9999, le); // SubIFD out of bounds
+            assert!(metadata(&jpeg(&bad), 0).is_err());
+            let mut bad = original.clone();
+            p16(&mut bad, 78, 0x9003, le); // duplicate date tag
+            assert!(metadata(&jpeg(&bad), 0).is_err());
+            let mut bad = original.clone();
+            p16(&mut bad, 22, 0x010f, le); // duplicate camera maker
+            assert!(metadata(&jpeg(&bad), 0).is_err());
+            let mut bad = original.clone();
+            p32(&mut bad, 126, 64, le); // SubIFD next points to itself
+            assert!(metadata(&jpeg(&bad), 0).is_err());
+            let mut bad = original.clone();
+            p32(&mut bad, 244, 0, le); // zero exposure denominator
+            assert!(metadata(&jpeg(&bad), 0).is_err());
+            let mut bad = original.clone();
+            p32(&mut bad, 264, 0, le); // zero focal length denominator
+            assert!(metadata(&jpeg(&bad), 0).is_err());
+            let mut bad = original.clone();
+            p16(&mut bad, 92, 3, le); // exposure incorrectly SHORT
+            assert!(metadata(&jpeg(&bad), 0).is_err());
+            let mut bad = original.clone();
+            p32(&mut bad, 74, 2000, le); // out-of-range capture date pointer
+            assert!(metadata(&jpeg(&bad), 0).is_err());
+            let mut bad = original.clone();
+            bad[199] = b'!'; // date must terminate with NUL
+            assert!(metadata(&jpeg(&bad), 0).is_err());
+            let mut bad = original.clone();
+            bad[188] = b'3'; // invalid February 39
+            assert!(metadata(&jpeg(&bad), 0).is_err());
+            let mut bad = original.clone();
+            p16(&mut bad, 102, 0xffff, le); // optional unknown ISO tag
+            let f = metadata(&jpeg(&bad), 0).unwrap().fields;
+            assert!(!f.iter().any(|f| f.key == "iso"));
+            assert!(f.iter().any(|f| f.key == "datetime_original"));
+            let mut bad = original.clone();
+            p16(&mut bad, 34, 0xffff, le); // absent SubIFD pointer
+            let f = metadata(&jpeg(&bad), 0).unwrap().fields;
+            assert!(f.iter().any(|f| f.key == "make"));
+            assert!(!f.iter().any(|f| f.namespace == "exif.subifd"));
+            assert!(metadata(&jpeg(&original)[..45], 0).is_err());
+            assert!(metadata(&data, u64::MAX).is_err());
+        }
+    }
+
+    #[test]
+    fn exif_gps_altitude_is_endian_safe_bounded_and_signed() {
+        fn put16(data: &mut [u8], at: usize, value: u16, le: bool) {
+            data[at..at + 2].copy_from_slice(&if le {
+                value.to_le_bytes()
+            } else {
+                value.to_be_bytes()
+            });
+        }
+        fn put32(data: &mut [u8], at: usize, value: u32, le: bool) {
+            data[at..at + 4].copy_from_slice(&if le {
+                value.to_le_bytes()
+            } else {
+                value.to_be_bytes()
+            });
+        }
+        fn fixture(le: bool, below: bool) -> Vec<u8> {
+            let mut tiff = vec![0u8; 72];
+            tiff[..2].copy_from_slice(if le { b"II" } else { b"MM" });
+            put16(&mut tiff, 2, 42, le);
+            put32(&mut tiff, 4, 8, le);
+            put16(&mut tiff, 8, 1, le);
+            put16(&mut tiff, 10, 0x8825, le);
+            put16(&mut tiff, 12, 4, le);
+            put32(&mut tiff, 14, 1, le);
+            put32(&mut tiff, 18, 26, le);
+            put16(&mut tiff, 26, 2, le);
+            put16(&mut tiff, 28, 5, le);
+            put16(&mut tiff, 30, 1, le);
+            put32(&mut tiff, 32, 1, le);
+            tiff[36] = u8::from(below);
+            put16(&mut tiff, 40, 6, le);
+            put16(&mut tiff, 42, 5, le);
+            put32(&mut tiff, 44, 1, le);
+            put32(&mut tiff, 48, 64, le);
+            put32(&mut tiff, 64, 247, le);
+            put32(&mut tiff, 68, 2, le);
+            tiff
+        }
+        fn jpeg(tiff: &[u8]) -> Vec<u8> {
+            let mut out = b"\xff\xd8\xff\xe1".to_vec();
+            out.extend_from_slice(&((tiff.len() + 8) as u16).to_be_bytes());
+            out.extend_from_slice(b"Exif\0\0");
+            out.extend_from_slice(tiff);
+            out.extend_from_slice(b"\xff\xd9");
+            out
+        }
+        for le in [true, false] {
+            for below in [false, true] {
+                let tiff = fixture(le, below);
+                let fields = &metadata(&jpeg(&tiff), 100).unwrap().fields;
+                let altitude = fields
+                    .iter()
+                    .find(|f| f.namespace == "exif.gps" && f.key == "altitude_meters")
+                    .unwrap();
+                assert_eq!(altitude.value, if below { "-123.500" } else { "123.500" });
+                assert_eq!(altitude.offset, 176);
+
+                let mut zero_den = tiff.clone();
+                put32(&mut zero_den, 68, 0, le);
+                assert!(metadata(&jpeg(&zero_den), 0).is_err());
+                let mut bad_pointer = tiff.clone();
+                put32(&mut bad_pointer, 48, 200, le);
+                assert!(metadata(&jpeg(&bad_pointer), 0).is_err());
+                let mut bad_reference = tiff.clone();
+                bad_reference[36] = 2;
+                assert!(metadata(&jpeg(&bad_reference), 0).is_err());
+                let mut wrong_type = tiff.clone();
+                put16(&mut wrong_type, 42, 3, le);
+                assert!(metadata(&jpeg(&wrong_type), 0).is_err());
+                let mut missing_reference = tiff.clone();
+                put16(&mut missing_reference, 28, 7, le);
+                assert!(metadata(&jpeg(&missing_reference), 0).is_err());
+                assert!(metadata(&jpeg(&tiff), u64::MAX).is_err());
+            }
+        }
     }
 
     #[test]

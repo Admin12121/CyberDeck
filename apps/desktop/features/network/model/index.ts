@@ -52,7 +52,7 @@ export const PROTOCOL_COLORS: Record<string, string> = {
   dns: "text-warn",
   tcp: "text-fg-dim",
   tls: "text-orange",
-  http: "text-blue",
+  http: "text-fg-dim",
   udp: "text-fg-muted",
   icmp: "text-warn",
   ipv6: "text-orange",

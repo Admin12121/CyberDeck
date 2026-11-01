@@ -39,6 +39,8 @@ fn main() {
             }),
         })
         .setup(|app| {
+            app.state::<features::crypto::ipc::recovery::RecoveryCtx>()
+                .start_expiry_cleanup();
             // Case store lives under the OS app-data directory; the SQLite
             // index and artifact copies are created on first launch (§8.4).
             let data_dir = features::cases::infrastructure::storage_paths::data_dir(app.handle())

@@ -257,7 +257,7 @@ export function ProxyView() {
               ) : (
                 pending.map((p) => (
                   <div key={p.id} className="flex items-center gap-2 border border-line bg-app px-2 py-1">
-                    <span className={`w-12 shrink-0 font-mono text-[10px] ${p.method === "GET" ? "text-blue" : "text-orange"}`}>{p.method}</span>
+                    <span className={`w-12 shrink-0 font-mono text-[10px] ${p.method === "GET" ? "text-fg-dim" : "text-orange"}`}>{p.method}</span>
                     <span className="min-w-0 flex-1 truncate font-mono text-[10px] text-fg-dim" title={p.url}>
                       {p.host}{p.path}
                     </span>

@@ -108,7 +108,7 @@ export function CaseFindingsView() {
   const current = filtered.find((f) => f.id === selected) ?? filtered[0] ?? null;
   const severityTone = (value: string) =>
     value === "high" || value === "critical" ? "err" :
-    value === "medium" ? "orange" : value === "low" ? "blue" : "muted";
+    value === "medium" ? "orange" : "muted";
 
   return (
     <div className="flex h-full min-h-0 flex-col">

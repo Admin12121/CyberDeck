@@ -115,6 +115,9 @@ struct Shared {
 pub struct CaptureSessionManager {
     shared: Arc<Mutex<Shared>>,
     worker: Mutex<Option<JoinHandle<()>>>,
+    /// Serializes publication with replacement and revocation without blocking
+    /// ordinary status, stop, or paginated result reads during a disk commit.
+    publication_gate: Mutex<()>,
     next_id: AtomicU64,
 }
 
@@ -123,6 +126,7 @@ impl Default for CaptureSessionManager {
         Self {
             shared: Arc::new(Mutex::new(Shared::default())),
             worker: Mutex::new(None),
+            publication_gate: Mutex::new(()),
             next_id: AtomicU64::new(1),
         }
     }
@@ -172,6 +176,12 @@ impl CaptureSessionManager {
             + Send
             + 'static,
     {
+        let _publication = self.publication_gate.lock().map_err(|_| {
+            SessionError::new(
+                SessionErrorCode::Internal,
+                "capture publication gate unavailable",
+            )
+        })?;
         let case_id = case_id.trim();
         if case_id.is_empty() || case_id.len() > 128 || interface.is_empty() || interface.len() > 64
         {
@@ -311,6 +321,12 @@ impl CaptureSessionManager {
     /// Revoke results immediately on case-switch. No new session may start
     /// before the old worker has actually published its terminal state.
     pub fn revoke(&self, case_id: &str, id: u64) -> Result<(), SessionError> {
+        let _publication = self.publication_gate.lock().map_err(|_| {
+            SessionError::new(
+                SessionErrorCode::Internal,
+                "capture publication gate unavailable",
+            )
+        })?;
         let mut guard = self.shared.lock().map_err(|_| {
             SessionError::new(SessionErrorCode::Internal, "capture state unavailable")
         })?;
@@ -350,33 +366,49 @@ impl CaptureSessionManager {
         })
     }
 
-    /// Backend-only evidence publication boundary. A caller must validate the
-    /// currently authoritative case and consent *inside* its publisher before
-    /// committing the exact bytes. Publication and manager revocation are
-    /// serialized: an already-revoked/stale session cannot begin publication,
-    /// and a case switch cannot revoke the session halfway through a commit.
+    /// Trusted backend evidence publication boundary. A separate gate
+    /// serializes this callback with session revocation and replacement; the
+    /// ordinary session-state mutex is released before any storage I/O.
     ///
-    /// The publisher MUST NOT call this manager recursively; it receives a
-    /// borrowed result and must not expose it over IPC. Failed publication
-    /// preserves the original result for an explicitly authorized retry.
-    /// Agent5's case store owns the actual immutable import and SHA-256 check.
+    /// The publisher must independently revalidate authoritative selected-case
+    /// revision/consent in Agent5's storage transaction immediately before
+    /// committing. Neither a caller-supplied case ID nor this gate authorizes
+    /// persistent evidence. The callback must not reenter start, revoke or
+    /// publish on this manager (those operations acquire the same gate).
+    /// Status, stop and paginated reads remain responsive during publication.
+    /// A failed publisher leaves the original PCAP result intact for retry.
     pub fn publish_completed<T>(
         &self,
         case_id: &str,
         id: u64,
         publish: impl FnOnce(&CaptureResult) -> Result<T, String>,
     ) -> Result<T, SessionError> {
-        let guard = self.shared.lock().map_err(|_| {
-            SessionError::new(SessionErrorCode::Internal, "capture state unavailable")
-        })?;
-        let session = checked(&guard, case_id, id)?;
-        let result = session.result.as_deref().ok_or_else(|| {
+        let _publication = self.publication_gate.lock().map_err(|_| {
             SessionError::new(
-                SessionErrorCode::NotReady,
-                "capture is not completed successfully",
+                SessionErrorCode::Internal,
+                "capture publication gate unavailable",
             )
         })?;
-        publish(result).map_err(|error| SessionError::new(SessionErrorCode::ImportFailed, error))
+        let result = {
+            let guard = self.shared.lock().map_err(|_| {
+                SessionError::new(SessionErrorCode::Internal, "capture state unavailable")
+            })?;
+            let session = checked(&guard, case_id, id)?;
+            session.result.clone().ok_or_else(|| {
+                SessionError::new(
+                    SessionErrorCode::NotReady,
+                    "capture is not completed successfully",
+                )
+            })?
+        };
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| publish(&result))) {
+            Ok(Ok(value)) => Ok(value),
+            Ok(Err(error)) => Err(SessionError::new(SessionErrorCode::ImportFailed, error)),
+            Err(_) => Err(SessionError::new(
+                SessionErrorCode::ImportFailed,
+                "capture evidence publisher failed unexpectedly",
+            )),
+        }
     }
 
     pub fn hosts(
@@ -930,6 +962,72 @@ mod tests {
                 .pcap_frame_offset,
             40
         );
+    }
+
+    #[test]
+    fn panicking_importer_does_not_poison_publication_or_destroy_original_capture() {
+        let manager = CaptureSessionManager::new();
+        let started = manager
+            .start_with("case-A", "fixture0", |stop, _| Ok(result(&stop)))
+            .unwrap();
+        until(&manager, "case-A", started.session_id, Phase::Completed);
+        let attempted = manager.publish_completed("case-A", started.session_id, |_result| {
+            panic!("injected storage callback panic");
+            #[allow(unreachable_code)]
+            Ok::<(), String>(())
+        });
+        let error = attempted.unwrap_err();
+        assert_eq!(error.code, SessionErrorCode::ImportFailed);
+        assert!(error.message.contains("unexpectedly"));
+        let bytes = manager
+            .publish_completed("case-A", started.session_id, |capture| {
+                Ok::<_, String>(capture.pcap_bytes.clone())
+            })
+            .unwrap();
+        assert_eq!(&bytes[40..], sample_frame());
+        assert_eq!(
+            manager.status("case-A", started.session_id).unwrap().phase,
+            Phase::Completed
+        );
+        manager.revoke("case-A", started.session_id).unwrap();
+    }
+
+    #[test]
+    fn status_and_stop_remain_responsive_while_evidence_publisher_is_blocked() {
+        let manager = Arc::new(CaptureSessionManager::new());
+        let run = manager
+            .start_with("case-A", "fixture0", |cancel, _| Ok(result(&cancel)))
+            .unwrap();
+        until(&manager, "case-A", run.session_id, Phase::Completed);
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel::<()>();
+        let publishing = Arc::clone(&manager);
+        let publisher = std::thread::spawn(move || {
+            publishing.publish_completed("case-A", run.session_id, |capture| {
+                entered_tx.send(capture.pcap_bytes.len()).unwrap();
+                release_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+                Ok::<_, String>(capture.pcap_bytes.len())
+            })
+        });
+        entered_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        let (status_tx, status_rx) = mpsc::channel();
+        let checking = Arc::clone(&manager);
+        let reader = std::thread::spawn(move || {
+            status_tx
+                .send((
+                    checking.status("case-A", run.session_id),
+                    checking.stop("case-A", run.session_id),
+                ))
+                .unwrap();
+        });
+        let responsiveness = status_rx.recv_timeout(Duration::from_millis(400));
+        release_tx.send(()).unwrap();
+        let completed = publisher.join().unwrap().unwrap();
+        reader.join().unwrap();
+        let (status, stop) = responsiveness.expect("status and stop blocked by storage callback");
+        assert_eq!(status.unwrap().phase, Phase::Completed);
+        assert_eq!(stop.unwrap().phase, Phase::Completed);
+        assert!(completed > 24);
     }
 
     #[test]

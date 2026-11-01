@@ -11,6 +11,7 @@ import { WebWorkspace } from "@features/web";
 import { ReverseWorkspace } from "@features/reverse";
 import { ForensicsWorkspace } from "@features/forensics";
 import { Rail } from "./Rail";
+import { ContextNavigator } from "./ContextNavigator";
 import { BottomDock } from "./BottomDock";
 import { StatusBar } from "./StatusBar";
 import { CommandPalette } from "./CommandPalette";
@@ -40,24 +41,24 @@ function Shell() {
     <div className="flex h-screen w-screen flex-col overflow-hidden">
       <div className="flex min-h-0 flex-1">
         <Rail />
+        {wb.navigatorOpen ? (
+          <div className="hidden min-[1080px]:contents">
+            <ContextNavigator />
+            <Resizer direction="horizontal" ariaLabel="Resize contextual navigator" value={wb.navigatorWidth}
+              onChange={wb.setNavigatorWidth} resetValue={PANEL_LIMITS.navigator.fallback}
+              min={PANEL_LIMITS.navigator.min} max={PANEL_LIMITS.navigator.max} />
+          </div>
+        ) : null}
         <div className="flex min-w-0 flex-1 flex-col">
           <main className="min-h-0 flex-1 overflow-hidden bg-app" aria-label="Active workspace">
             <ActiveWorkspace />
           </main>
-          {wb.dockOpen ? (
-            <>
-              <Resizer
-                direction="vertical"
-                flip
-                ariaLabel="Resize jobs dock"
-                value={wb.dockHeight}
-                onChange={wb.setDockHeight}
-                min={PANEL_LIMITS.dock.min}
-                max={PANEL_LIMITS.dock.max}
-              />
-              <BottomDock />
-            </>
-          ) : null}
+          <div className={wb.dockOpen ? "contents" : "hidden"}>
+            <Resizer direction="vertical" flip ariaLabel="Resize dock"
+              value={wb.dockHeight} resetValue={PANEL_LIMITS.dock.fallback}
+              onChange={wb.setDockHeight} min={PANEL_LIMITS.dock.min} max={PANEL_LIMITS.dock.max} />
+            <BottomDock />
+          </div>
         </div>
       </div>
       <StatusBar />

@@ -326,7 +326,7 @@ export function HashAnalysisView() {
                 <tr key={candidate.format}>
                   <td className="text-fg">{candidate.format}</td>
                   <td>
-                    <Chip tone={candidate.confidence === "high" ? "ok" : candidate.confidence === "medium" ? "blue" : "muted"}>
+                    <Chip tone={candidate.confidence === "high" ? "ok" : "muted"}>
                       {candidate.confidence}
                     </Chip>
                   </td>
@@ -547,7 +547,7 @@ export function HashAnalysisView() {
             >
               {crackBusy ? "cracking…" : "Run attack"}
             </ToolButton>
-            {engineOnly ? <Chip tone="blue">engine format</Chip> : null}
+            {engineOnly ? <Chip tone="muted">engine format</Chip> : null}
             {isKdfAlgo && engineChoice === "native" ? <Chip tone="orange">KDF slow by design</Chip> : null}
           </div>
           {crackError ? <div className="mt-1 font-mono text-[10px] text-err">{crackError}</div> : null}

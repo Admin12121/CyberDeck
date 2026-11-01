@@ -499,7 +499,7 @@ function FollowStreamView({ packets }: { packets: DisplayPacket[] }) {
               <div className="text-fg-muted">no payload bytes in this stream</div>
             ) : transcript.chunks.map((chunk, i) => (
               <div key={i} className={`whitespace-pre-wrap break-all ${chunk.kind === "gap" || chunk.kind === "notice" ? "my-1 text-warn" : ""}`}>
-                <span className={chunk.dir === "A" ? "text-blue" : "text-orange"}>[{chunk.dir}] </span>
+                <span className={chunk.dir === "A" ? "text-fg-dim" : "text-orange"}>[{chunk.dir}] </span>
                 <span className={chunk.kind === "data" || chunk.kind === "datagram" ? "text-fg" : "text-warn"}>
                   {chunk.kind === "gap" ? "⚠ " : ""}{chunk.text}
                 </span>

@@ -86,7 +86,7 @@ export function ScannerView() {
     }
   };
 
-  const severityTone = (s: string) => (s === "high" ? "err" : s === "medium" ? "orange" : s === "low" ? "blue" : "muted");
+  const severityTone = (s: string) => (s === "high" ? "err" : s === "medium" ? "orange" : "muted");
 
   return (
     <div className="flex h-full min-h-0 flex-col">

@@ -41,10 +41,16 @@ pub fn validated_jpeg_length(input: &[u8], base: u64) -> Result<usize, String> {
     if pos < 2 || input.get(pos - 2..pos) != Some(&b"\xff\xda"[..]) {
         return Err("JPEG scan marker missing".into());
     }
+    let mut restart_interval = header
+        .fields
+        .iter()
+        .filter(|field| field.namespace == "jpeg" && field.key == "restart_interval")
+        .filter_map(|field| field.value.parse::<u16>().ok())
+        .last()
+        .unwrap_or(0);
     let mut scans = 0usize;
     let mut markers = 0usize;
     let mut pending_sos = true;
-    let mut restart_seen = false;
     loop {
         markers += 1;
         if markers > MAX_MARKERS {
@@ -82,6 +88,8 @@ pub fn validated_jpeg_length(input: &[u8], base: u64) -> Result<usize, String> {
             pos = end;
             pending_sos = false;
             let mut data_seen = false;
+            let mut data_since_restart = false;
+            let mut expected_restart = 0u8;
             // Scan compressed bytes while interpreting FF00 as stuffed byte,
             // FF D0..D7 as restart, FF FF as fill and unescaped FF as markers.
             loop {
@@ -90,6 +98,7 @@ pub fn validated_jpeg_length(input: &[u8], base: u64) -> Result<usize, String> {
                 }
                 if input[pos] != 0xff {
                     data_seen = true;
+                    data_since_restart = true;
                     pos += 1;
                     continue;
                 }
@@ -99,13 +108,29 @@ pub fn validated_jpeg_length(input: &[u8], base: u64) -> Result<usize, String> {
                 }
                 let tag = *input.get(pos).ok_or("truncated JPEG scan marker")?;
                 pos += 1;
+                if tag != 0x00 {
+                    markers += 1;
+                    if markers > MAX_MARKERS {
+                        return Err("JPEG marker budget exceeded".into());
+                    }
+                }
                 match tag {
-                    0x00 => data_seen = true, // byte stuffing (FF 00)
+                    0x00 => {
+                        data_seen = true;
+                        data_since_restart = true;
+                    }
                     0xd0..=0xd7 => {
-                        if !data_seen {
-                            return Err("JPEG restart without scan data".into());
+                        if restart_interval == 0 {
+                            return Err("JPEG restart requires a nonzero DRI interval".into());
                         }
-                        restart_seen = true;
+                        if !data_since_restart {
+                            return Err("JPEG restart without intervening scan data".into());
+                        }
+                        if tag != 0xd0 + expected_restart {
+                            return Err("out-of-order JPEG restart marker".into());
+                        }
+                        expected_restart = (expected_restart + 1) & 7;
+                        data_since_restart = false;
                     }
                     0xd9 => {
                         if !data_seen {
@@ -147,9 +172,7 @@ pub fn validated_jpeg_length(input: &[u8], base: u64) -> Result<usize, String> {
             }
             // Only APP/COM, DHT/DQT/DAC/DRI and JPEG extension markers can
             // legally separate scans. Conservative fail-closed on others.
-            if !((0xe0..=0xef).contains(&tag)
-                || matches!(tag, 0xfe | 0xc4 | 0xcc | 0xdb | 0xdd | 0xdc | 0xdf))
-            {
+            if !((0xe0..=0xef).contains(&tag) || matches!(tag, 0xfe | 0xc4 | 0xcc | 0xdb | 0xdd)) {
                 return Err("unsupported JPEG inter-scan marker".into());
             }
             let n = u16::from_be_bytes(
@@ -166,10 +189,13 @@ pub fn validated_jpeg_length(input: &[u8], base: u64) -> Result<usize, String> {
             if end > input.len() {
                 return Err("truncated JPEG inter-scan segment".into());
             }
-            pos = end;
-            if restart_seen && scans > MAX_SCANS {
-                return Err("JPEG restart/scan limits exceeded".into());
+            if tag == 0xdd {
+                if n != 4 {
+                    return Err("invalid JPEG DRI length".into());
+                }
+                restart_interval = u16::from_be_bytes([input[pos + 2], input[pos + 3]]);
             }
+            pos = end;
         }
     }
 }
@@ -188,6 +214,7 @@ mod tests {
         out.extend(segment(0xdb, &[0, 1, 1, 1]));
         out.extend(segment(0xc0, &[8, 0, 1, 0, 1, 1, 1, 0x11, 0]));
         out.extend(segment(0xc4, &[0, 0, 1]));
+        out.extend(segment(0xdd, &[0, 1]));
         out.extend(segment(0xda, &[1, 1, 0, 0, 63, 0]));
         out.extend_from_slice(&[0x11, 0xff, 0x00, 0x22, 0xff, 0xd0, 0x33]);
         if multiscan {
@@ -198,6 +225,140 @@ mod tests {
         out.extend_from_slice(&[0xff, 0xd9]);
         out
     }
+    fn scan_with_restarts(tags: &[u8]) -> Vec<u8> {
+        let mut out = jpeg(false);
+        let sos = out.windows(2).position(|w| w == [0xff, 0xda]).unwrap();
+        let data_start = sos + 2 + 8;
+        out.truncate(data_start);
+        for (i, tag) in tags.iter().enumerate() {
+            out.extend_from_slice(&[0x20 + i as u8, 0xff, *tag]);
+        }
+        out.extend_from_slice(&[0x30, 0xff, 0xd9]);
+        out
+    }
+    #[test]
+    fn restart_declaration_sequence_wraparound_and_data_separation() {
+        let valid = scan_with_restarts(&[0xd0, 0xd1, 0xd2, 0xd3, 0xd4, 0xd5, 0xd6, 0xd7, 0xd0]);
+        assert_eq!(validated_jpeg_length(&valid, 512).unwrap(), valid.len());
+
+        let mut undeclared = jpeg(false);
+        let dri = undeclared
+            .windows(2)
+            .position(|w| w == [0xff, 0xdd])
+            .unwrap();
+        undeclared.drain(dri..dri + 6);
+        assert!(validated_jpeg_length(&undeclared, 0).is_err());
+
+        for tags in [&[0xd1][..], &[0xd0, 0xd2][..], &[0xd0, 0xd0][..]] {
+            assert!(validated_jpeg_length(&scan_with_restarts(tags), 0).is_err());
+        }
+        let mut no_intervening_data = scan_with_restarts(&[0xd0, 0xd1]);
+        let second = no_intervening_data
+            .windows(2)
+            .position(|w| w == [0xff, 0xd1])
+            .unwrap();
+        no_intervening_data.remove(second - 1);
+        assert!(validated_jpeg_length(&no_intervening_data, 0).is_err());
+    }
+    #[test]
+    fn restart_declaration_changes_between_scans_and_malformed_lengths() {
+        let mut multiple = jpeg(true);
+        let second_sos = multiple
+            .windows(2)
+            .enumerate()
+            .filter(|(_, w)| *w == [0xff, 0xda])
+            .nth(1)
+            .unwrap()
+            .0;
+        multiple.splice(second_sos..second_sos, segment(0xdd, &[0, 2]));
+        assert_eq!(validated_jpeg_length(&multiple, 0).unwrap(), multiple.len());
+        let interval_tag = multiple.windows(2).position(|w| w == [0xff, 0xdd]).unwrap();
+        let mut disabled = multiple.clone();
+        disabled[interval_tag + 4] = 0;
+        disabled[interval_tag + 5] = 0;
+        assert!(validated_jpeg_length(&disabled, 0).is_err());
+
+        let mut malformed = jpeg(false);
+        let dri = malformed
+            .windows(2)
+            .position(|w| w == [0xff, 0xdd])
+            .unwrap();
+        malformed[dri + 3] = 3;
+        assert!(validated_jpeg_length(&malformed, 0).is_err());
+
+        let mut between = jpeg(true);
+        let second_sos = between
+            .windows(2)
+            .enumerate()
+            .filter(|(_, w)| *w == [0xff, 0xda])
+            .nth(1)
+            .unwrap()
+            .0;
+        between.splice(second_sos..second_sos, segment(0xdd, &[1]));
+        assert!(validated_jpeg_length(&between, 0).is_err());
+
+        assert!(validated_jpeg_length(&multiple[..multiple.len() - 1], 0).is_err());
+    }
+    #[test]
+    fn independently_decodable_baseline_progressive_and_exif_corpus() {
+        use sha2::{Digest, Sha256};
+        for (source, expected_digest, scan_count) in [
+            (
+                include_str!("jpeg_fixtures/baseline.hex"),
+                "3af719d223841c8b90e5bc5997164e329af05eb3d8e65cdd965ad729fbacf58d",
+                1,
+            ),
+            (
+                include_str!("jpeg_fixtures/progressive.hex"),
+                "ad3176575beced65619bc6154d4e22fbf402c15eed099758fbc656f524e702a1",
+                10,
+            ),
+        ] {
+            let image = hex::decode(source.trim()).unwrap();
+            assert_eq!(hex::encode(Sha256::digest(&image)), expected_digest);
+            assert_eq!(
+                image.windows(2).filter(|w| *w == [0xff, 0xda]).count(),
+                scan_count
+            );
+            assert_eq!(validated_jpeg_length(&image, 4000).unwrap(), image.len());
+
+            let mut embedded = b"original-prefix-nonzero-offset".to_vec();
+            let member_start = embedded.len() as u64;
+            embedded.extend_from_slice(&image);
+            embedded.extend_from_slice(b"unrelated suffix");
+            let preview =
+                super::super::carving::preview_validated_carving(&embedded, 4000).unwrap();
+            assert_eq!(preview.candidates.len(), 1);
+            assert_eq!(preview.candidates[0].format, "jpeg");
+            assert_eq!(preview.candidates[0].offset, 4000 + member_start);
+            assert_eq!(preview.candidates[0].length, image.len());
+
+            assert!(validated_jpeg_length(&image[..image.len() - 1], 0).is_err());
+            let mut invalid = image.clone();
+            let scan = invalid.windows(2).position(|w| w == [0xff, 0xda]).unwrap();
+            invalid[scan + 1] = 0xd8;
+            assert!(validated_jpeg_length(&invalid, 0).is_err());
+        }
+
+        let mut exif = hex::decode(include_str!("jpeg_fixtures/baseline.hex").trim()).unwrap();
+        let app1 = hex::decode(concat!(
+            "ffe100484578696600004d4d002a000000080002010f00020000000a00000026",
+            "011000020000000f000000300000000043796265724465636b004e6174697665",
+            "20466978747572650000"
+        ))
+        .unwrap();
+        let dqt = exif.windows(2).position(|w| w == [0xff, 0xdb]).unwrap();
+        exif.splice(dqt..dqt, app1);
+        assert_eq!(validated_jpeg_length(&exif, 0).unwrap(), exif.len());
+        let report = metadata(&exif, 0).unwrap();
+        assert!(report
+            .fields
+            .iter()
+            .any(|field| field.namespace == "exif.ifd0"
+                && field.key == "make"
+                && field.value == "CyberDeck"));
+    }
+
     #[test]
     fn complete_stuffed_restart_and_multiple_scans_have_exact_boundary() {
         for multiple in [false, true] {

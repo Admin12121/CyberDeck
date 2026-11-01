@@ -3,11 +3,12 @@
 import { caseCreate, caseList, isDesktop, type CaseRecordWire } from "@lib/ipc";
 import { useEffect, useState } from "react";
 import { useWorkbench } from "@state/workbench";
-import { toolById } from "@features/registry";
 
 export function StatusBar() {
   const wb = useWorkbench();
   const [cases, setCases] = useState<CaseRecordWire[]>([]);
+  const [runtime, setRuntime] = useState<"checking" | "native" | "browser">("checking");
+  useEffect(() => { setRuntime(isDesktop() ? "native" : "browser"); }, []);
   const [creating, setCreating] = useState(false);
   const [caseTitle, setCaseTitle] = useState("");
   const [caseError, setCaseError] = useState<string | null>(null);
@@ -36,52 +37,40 @@ export function StatusBar() {
       setCaseError(null);
     } catch (error) { setCaseError(String(error)); }
   };
-  const tool = toolById(wb.tool);
-  const running = Object.values(wb.jobs).filter((j) => j.status === "running").length;
 
+  const linked = wb.caseSession.phase === "ready" && wb.caseSession.caseId === wb.caseId;
   return (
-    <footer className="flex h-6 shrink-0 items-center gap-3 border-t border-line bg-sidebar px-2 font-mono text-[10px] text-fg-muted">
-      <span className={isDesktop() ? "text-ok" : "text-warn"}>{isDesktop() ? "ipc: tauri" : "ipc: browser fallback"}</span>
-      <span>workspace: {tool ? `${tool.category} / ${tool.label}` : wb.tool}</span>
-      <label className="flex items-center gap-1" title="Active evidence case">
-        active case
-        <select
-          aria-label="Active case"
-          disabled={!casesLoaded || !!caseError}
-          value={wb.caseId}
-          onChange={(event) => wb.setCaseId(event.target.value)}
-          className="max-w-52 border border-orange/50 bg-panel px-1 text-[11px] text-fg"
-        >
+    <footer className="flex min-h-9 shrink-0 items-center gap-2 overflow-x-auto whitespace-nowrap border-t border-line bg-sidebar px-3 text-xs text-fg-muted" aria-label="Case and runtime status">
+      <label className="flex shrink-0 items-center gap-2">
+        <span>Case</span>
+        <select aria-label="Active case" disabled={!casesLoaded || !!caseError}
+          value={wb.caseId} onChange={(event) => wb.setCaseId(event.target.value)}
+          className="h-7 max-w-52 min-w-28 rounded-md border border-line bg-panel px-2 text-xs text-fg">
           {cases.map((item) => <option key={item.id} value={item.id}>{item.title}</option>)}
-          {!cases.some((item) => item.id === wb.caseId) ? <option value={wb.caseId}>{!casesLoaded ? "Loading cases…" : cases.length === 0 && wb.caseId === "scratchpad" ? "Scratchpad (create a case to save evidence)" : "Resolving case…"}</option> : null}
-          {cases.length === 0 && wb.caseId !== "scratchpad" ? <option value="scratchpad">Scratchpad (no saved case)</option> : null}
+          {!cases.some((item) => item.id === wb.caseId) ? (
+            <option value={wb.caseId}>{!casesLoaded ? "Loading…" : wb.caseId === "scratchpad" ? "Scratchpad" : "Resolving…"}</option>
+          ) : null}
+          {cases.length === 0 && wb.caseId !== "scratchpad" ? <option value="scratchpad">Scratchpad</option> : null}
         </select>
       </label>
       {creating ? (
-        <form onSubmit={(e) => { e.preventDefault(); void createCase(); }} className="flex items-center gap-1">
-          <input value={caseTitle} onChange={(e) => setCaseTitle(e.target.value)} maxLength={120}
-            aria-label="New case title" placeholder="Case title" className="w-28 border border-line bg-app px-1 text-[10px]" />
-          <button type="submit" disabled={!caseTitle.trim() || !isDesktop()} className="text-orange disabled:opacity-40">save</button>
-          <button type="button" onClick={() => setCreating(false)}>cancel</button>
+        <form onSubmit={(event) => { event.preventDefault(); void createCase(); }} className="flex items-center gap-1">
+          <input value={caseTitle} onChange={(event) => setCaseTitle(event.target.value)} maxLength={120}
+            aria-label="New case title" placeholder="Case title" className="h-7 w-32 rounded-md border border-line bg-app px-2 text-xs text-fg" />
+          <button type="submit" disabled={!caseTitle.trim() || runtime !== "native"}
+            className="h-7 px-2 text-fg disabled:opacity-40">Save</button>
+          <button type="button" onClick={() => setCreating(false)} className="h-7 px-2">Cancel</button>
         </form>
       ) : (
-        <button type="button" disabled={!isDesktop()} onClick={() => setCreating(true)}
-          title="Create a new case" className="border border-line px-1 disabled:opacity-40">+ case</button>
+        <button type="button" disabled={runtime !== "native"} onClick={() => setCreating(true)}
+          title="Create case" className="h-7 rounded-md px-2 text-fg hover:bg-raised disabled:opacity-40">+ Case</button>
       )}
-      {caseError ? <span className="max-w-44 truncate text-err" title={caseError}>case error</span> : null}
-      <span className={running > 0 ? "text-orange" : ""}>jobs: {running > 0 ? `${running} running` : "idle"}</span>
-      <span className="ml-auto flex items-center gap-3">
-        <button
-          type="button"
-          onClick={() => {
-            wb.setDockTab("console");
-            wb.setDockOpen(true);
-          }}
-          className="border border-line px-2 py-0.5 hover:border-line-strong hover:text-fg"
-        >
-          console (Ctrl+`)
-        </button>
-        <span>CyberDeck v0.1.0 · local workbench</span>
+      {wb.caseSession.phase === "selecting" ? <span role="status">Linking…</span> : null}
+      {linked ? <span role="status" title="Backend-selected active case">Linked</span> : null}
+      {wb.caseSession.phase === "error" ? <span role="alert" className="max-w-56 truncate text-err" title={wb.caseSession.error ?? undefined}>Case unavailable</span> : null}
+      {caseError ? <span role="alert" className="max-w-40 truncate text-err" title={caseError}>Case error</span> : null}
+      <span className="ml-auto shrink-0" title={runtime === "browser" ? "Native commands are unavailable in browser fallback" : undefined}>
+        {runtime === "native" ? "Native" : runtime === "browser" ? "Browser · native unavailable" : "Checking runtime…"}
       </span>
     </footer>
   );

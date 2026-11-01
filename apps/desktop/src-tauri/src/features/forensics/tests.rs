@@ -680,6 +680,7 @@ fn case_backed_jpeg_carving_handles_scans_integrity_and_isolation() {
     jpeg.extend(marker(0xdb, &[0, 1, 1, 1]));
     jpeg.extend(marker(0xc0, &[8, 0, 1, 0, 1, 1, 1, 0x11, 0]));
     jpeg.extend(marker(0xc4, &[0, 0, 1]));
+    jpeg.extend(marker(0xdd, &[0, 1]));
     jpeg.extend(marker(0xda, &[1, 1, 0, 0, 63, 0]));
     jpeg.extend_from_slice(&[0x11, 0xff, 0x00, 0x22, 0xff, 0xd0, 0x33]);
     jpeg.extend(marker(0xc4, &[0, 0, 1]));
@@ -711,4 +712,135 @@ fn case_backed_jpeg_carving_handles_scans_integrity_and_isolation() {
     altered[0] ^= 1;
     std::fs::write(&imported.stored_path, altered).unwrap();
     assert!(carve_preview(&ctx, DEFAULT_CASE, &imported.id, start, jpeg.len()).is_err());
+}
+
+#[test]
+fn case_backed_gps_altitude_metadata_preserves_integrity_and_case_scope() {
+    let mut tiff = vec![0u8; 72];
+    tiff[..2].copy_from_slice(b"II");
+    tiff[2..4].copy_from_slice(&42u16.to_le_bytes());
+    tiff[4..8].copy_from_slice(&8u32.to_le_bytes());
+    tiff[8..10].copy_from_slice(&1u16.to_le_bytes());
+    tiff[10..12].copy_from_slice(&0x8825u16.to_le_bytes());
+    tiff[12..14].copy_from_slice(&4u16.to_le_bytes());
+    tiff[14..18].copy_from_slice(&1u32.to_le_bytes());
+    tiff[18..22].copy_from_slice(&26u32.to_le_bytes());
+    tiff[26..28].copy_from_slice(&2u16.to_le_bytes());
+    tiff[28..30].copy_from_slice(&5u16.to_le_bytes());
+    tiff[30..32].copy_from_slice(&1u16.to_le_bytes());
+    tiff[32..36].copy_from_slice(&1u32.to_le_bytes());
+    tiff[36] = 1;
+    tiff[40..42].copy_from_slice(&6u16.to_le_bytes());
+    tiff[42..44].copy_from_slice(&5u16.to_le_bytes());
+    tiff[44..48].copy_from_slice(&1u32.to_le_bytes());
+    tiff[48..52].copy_from_slice(&64u32.to_le_bytes());
+    tiff[64..68].copy_from_slice(&247u32.to_le_bytes());
+    tiff[68..72].copy_from_slice(&2u32.to_le_bytes());
+
+    let mut source = b"\xff\xd8\xff\xe1".to_vec();
+    source.extend_from_slice(&((tiff.len() + 8) as u16).to_be_bytes());
+    source.extend_from_slice(b"Exif\0\0");
+    source.extend_from_slice(&tiff);
+    source.extend_from_slice(b"\xff\xd9");
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = test_ctx(dir.path());
+    let original = import_bytes(
+        &ctx,
+        Path::new("gps-altitude.jpg"),
+        &source,
+        DEFAULT_CASE,
+        true,
+    )
+    .unwrap();
+    let before = list_artifacts(&ctx, DEFAULT_CASE).unwrap().len();
+    let report = metadata_scan(&ctx, DEFAULT_CASE, &original.id).unwrap();
+    assert!(report.integrity_checked);
+    assert!(!report.coverage_truncated);
+    assert!(report
+        .report
+        .fields
+        .iter()
+        .any(|f| f.namespace == "exif.gps"
+            && f.key == "altitude_meters"
+            && f.value == "-123.500"
+            && f.offset == 76));
+    assert_eq!(list_artifacts(&ctx, DEFAULT_CASE).unwrap().len(), before);
+    assert!(metadata_scan(&ctx, "unrelated-case", &original.id).is_err());
+
+    let mut altered = source;
+    altered[3] = 0xe0;
+    std::fs::write(&original.stored_path, altered).unwrap();
+    assert!(metadata_scan(&ctx, DEFAULT_CASE, &original.id).is_err());
+}
+
+#[test]
+fn case_backed_exif_subifd_metadata_preserves_offsets_and_integrity() {
+    let mut tiff = vec![0u8; 140];
+    tiff[..2].copy_from_slice(b"II");
+    tiff[2..4].copy_from_slice(&42u16.to_le_bytes());
+    tiff[4..8].copy_from_slice(&8u32.to_le_bytes());
+    tiff[8..10].copy_from_slice(&2u16.to_le_bytes());
+    tiff[10..12].copy_from_slice(&0x010fu16.to_le_bytes());
+    tiff[12..14].copy_from_slice(&2u16.to_le_bytes());
+    tiff[14..18].copy_from_slice(&4u32.to_le_bytes());
+    tiff[18..22].copy_from_slice(b"ACME");
+    tiff[22..24].copy_from_slice(&0x8769u16.to_le_bytes());
+    tiff[24..26].copy_from_slice(&4u16.to_le_bytes());
+    tiff[26..30].copy_from_slice(&1u32.to_le_bytes());
+    tiff[30..34].copy_from_slice(&40u32.to_le_bytes());
+    tiff[40..42].copy_from_slice(&2u16.to_le_bytes());
+    tiff[42..44].copy_from_slice(&0x9003u16.to_le_bytes());
+    tiff[44..46].copy_from_slice(&2u16.to_le_bytes());
+    tiff[46..50].copy_from_slice(&20u32.to_le_bytes());
+    tiff[50..54].copy_from_slice(&80u32.to_le_bytes());
+    tiff[54..56].copy_from_slice(&0x8827u16.to_le_bytes());
+    tiff[56..58].copy_from_slice(&3u16.to_le_bytes());
+    tiff[58..62].copy_from_slice(&1u32.to_le_bytes());
+    tiff[62..64].copy_from_slice(&400u16.to_le_bytes());
+    tiff[80..100].copy_from_slice(b"2024:02:29 13:47:59\0");
+
+    let mut source = b"\xff\xd8\xff\xe1".to_vec();
+    source.extend_from_slice(&((tiff.len() + 8) as u16).to_be_bytes());
+    source.extend_from_slice(b"Exif\0\0");
+    source.extend_from_slice(&tiff);
+    source.extend_from_slice(b"\xff\xd9");
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = test_ctx(dir.path());
+    let record = import_bytes(
+        &ctx,
+        Path::new("original-camera.jpg"),
+        &source,
+        DEFAULT_CASE,
+        true,
+    )
+    .unwrap();
+    let before = list_artifacts(&ctx, DEFAULT_CASE).unwrap().len();
+    let report = metadata_scan(&ctx, DEFAULT_CASE, &record.id).unwrap();
+    assert!(report.integrity_checked);
+    assert!(!report.coverage_truncated);
+    assert_eq!(report.analyzed_bytes, source.len());
+    for (namespace, key, value, offset) in [
+        ("exif.ifd0", "make", "ACME", 22),
+        (
+            "exif.subifd",
+            "datetime_original",
+            "2024:02:29 13:47:59",
+            92,
+        ),
+        ("exif.subifd", "iso", "400", 74),
+    ] {
+        assert!(
+            report.report.fields.iter().any(|f| f.namespace == namespace
+                && f.key == key
+                && f.value == value
+                && f.offset == offset),
+            "missing {key}"
+        );
+    }
+    assert_eq!(list_artifacts(&ctx, DEFAULT_CASE).unwrap().len(), before);
+    assert!(metadata_scan(&ctx, "other-case", &record.id).is_err());
+    let mut changed = source;
+    changed[12 + 80] = b'9';
+    std::fs::write(&record.stored_path, changed).unwrap();
+    assert!(metadata_scan(&ctx, DEFAULT_CASE, &record.id).is_err());
 }
