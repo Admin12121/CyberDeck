@@ -30,8 +30,15 @@ if (argIndex < 0 || !process.argv[argIndex + 1] || !resolve(process.argv[argInde
   process.exit(2);
 }
 const output = resolve(process.argv[argIndex + 1]);
+const installIndex = process.argv.indexOf("--install");
+const install = installIndex >= 0 && process.argv[installIndex + 1]
+  ? resolve(process.argv[installIndex + 1]) : null;
 if (output === root || root.startsWith(output + sep) || output.startsWith(root + sep)) {
   throw new Error("build output must not overlap vendored sources");
+}
+if (install && (install === root || root.startsWith(install + sep) || install.startsWith(root + sep)
+  || install === output || install.startsWith(output + sep) || output.startsWith(install + sep))) {
+  throw new Error("package install must not overlap source or build inputs");
 }
 const files = JSON.parse(readFileSync(manifestPath, "utf8"));
 if (files.schema !== 1 || files.commit !== "1994b513b550edfe3e7fcaa1103759a9343e57a4") {
@@ -116,6 +123,24 @@ if (process.platform === "win32") {
   checked(c, args, build);
 }
 copyFileSync(libPath, join(runtime, library));
+// Build a separately supervised, narrow Rust worker from the same pinned
+// runtime. It receives a versioned, bounded binary frame via stdin; there is
+// no generic CLI argument forwarding or external installed hashcat executable.
+const workerName = process.platform === "win32"
+  ? "cyberdeck-recovery-worker.exe" : "cyberdeck-recovery-worker";
+const workerSource = join(root, "native/recovery_worker.rs");
+const workerFlags = [
+  "--edition=2021", "-C", "opt-level=2", "-C", "panic=abort",
+  "-L", "native=" + runtime,
+  "-o", join(runtime, workerName), workerSource,
+];
+if (process.platform === "linux") {
+  workerFlags.push("-C", "link-arg=-Wl,-rpath,$ORIGIN");
+} else if (process.platform === "darwin") {
+  workerFlags.push("-C", "link-arg=-Wl,-rpath,@loader_path");
+}
+checked(process.env.RUSTC || "rustc", workerFlags, build);
+
 const modeDir = join(runtime, "modules");
 mkdirSync(modeDir, { recursive: true });
 copyFileSync(join(build, "modules", module), join(modeDir, module));
@@ -127,9 +152,18 @@ copyFileSync(join(build, "docs/license.txt"), join(licenses, "HASHCAT_MIT.txt"))
 copyFileSync(join(build, "docs/credits.txt"), join(licenses, "HASHCAT_CREDITS.txt"));
 copyFileSync(join(build, "deps/OpenCL-Headers/LICENSE"), join(licenses, "OPENCL_HEADERS.txt"));
 copyFileSync(join(build, "deps/sse2neon/LICENSE"), join(licenses, "SSE2NEON.txt"));
+cpSync(join(build, "docs/license_libs"), join(licenses, "upstream_notices"), { recursive: true });
 copyFileSync(manifestPath, join(runtime, "source-manifest.json"));
-for (const name of [library, shim, "modules/" + module, "source-manifest.json"]) {
+for (const name of [library, shim, workerName, "modules/" + module, "source-manifest.json"]) {
   if (!statSync(join(runtime, name)).isFile()) throw new Error("package missing " + name);
 }
+if (install) {
+  mkdirSync(install, { recursive: true });
+  cpSync(runtime, install, { recursive: true, force: true });
+  for (const name of [library, shim, workerName, "modules/" + module, "source-manifest.json"]) {
+    if (!statSync(join(install, name)).isFile()) throw new Error("installed package missing " + name);
+  }
+  console.log("CyberDeck managed Hashcat runtime staged for Tauri resources:", install);
+}
 console.log("Embedded Hashcat source-compiled runtime ready:", runtime);
-console.log("Mode: 1400 SHA-256 only. No device/algorithm execution is implied.");
+console.log("Mode: 1400 SHA-256 only. Bundled private Rust worker compiled; no device/algorithm execution is implied.");

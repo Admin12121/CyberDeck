@@ -19,3 +19,16 @@ pub struct ScanSummaryWire {
     pub duration_ms: u64,
     pub at_ms: u64,
 }
+
+#[derive(Debug, Serialize)]
+pub struct ScanObservationPage {
+    pub offset: usize,
+    pub total: usize,
+    pub shown: usize,
+    pub open: usize,
+    pub closed: usize,
+    pub filtered: usize,
+    pub unreachable: usize,
+    pub inconclusive: usize,
+    pub entries: Vec<super::ScanObservation>,
+}

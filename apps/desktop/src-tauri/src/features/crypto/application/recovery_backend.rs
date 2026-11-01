@@ -166,7 +166,7 @@ fn validate_backend(backend: BackendSelection, probe: Option<&GpuProbe>) -> Resu
         }
     }
 }
-fn validate_request(request: &RecoveryRequest) -> Result<(), String> {
+pub(super) fn validate_request(request: &RecoveryRequest) -> Result<(), String> {
     if request.algorithm != "sha256" {
         return Err("selected-backend recovery supports sha256 only".into());
     }
@@ -187,6 +187,41 @@ fn validate_request(request: &RecoveryRequest) -> Result<(), String> {
         return Err("expected raw SHA-256 digest".into());
     }
     Ok(())
+}
+
+/// Construct confidential results from a supervised embedded worker only
+/// after independent Rust digest checks. Plaintext never becomes IPC data.
+pub(super) fn embedded_result(
+    request: &RecoveryRequest,
+    hits: Vec<(u64, Vec<u8>)>,
+    cancelled: bool,
+    duration_ms: u64,
+) -> RecoveryRun {
+    let (matches, confidential_hits) = hits
+        .into_iter()
+        .map(|(candidate_index, secret)| {
+            (
+                MatchMetadata {
+                    candidate_index,
+                    masked: true,
+                },
+                secret,
+            )
+        })
+        .unzip();
+    RecoveryRun {
+        summary: RecoverySummaryWire {
+            algorithm: "sha256".into(),
+            backend: request.backend,
+            engine: "embedded_hashcat_1400".into(),
+            tried: 0, // ABI v1 lacks trusted per-candidate progress.
+            cancelled,
+            limit_reached: false,
+            duration_ms,
+            matches,
+        },
+        confidential_hits,
+    }
 }
 
 /// Reader may be a streamed local file, an in-memory fixture, or a bounded

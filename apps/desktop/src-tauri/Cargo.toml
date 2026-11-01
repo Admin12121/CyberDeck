@@ -26,6 +26,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 tauri = { workspace = true }
 tauri-plugin-dialog = "2"
+tempfile = "3"
 tokio = { workspace = true }
 tokio-util = { workspace = true }
 
@@ -33,4 +34,3 @@ tokio-util = { workspace = true }
 custom-protocol = ["tauri/custom-protocol"]
 
 [dev-dependencies]
-tempfile = "3"

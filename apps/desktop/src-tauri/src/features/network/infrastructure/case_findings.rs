@@ -1,5 +1,5 @@
 //! Persist authorized TCP scan observations into the selected evidence case.
-use super::ScanEntry;
+use super::{ScanEntry, ScanObservation};
 use crate::features::forensics::ipc::evidence::EvidenceCtx;
 use crate::features::shared::session::{CaseSessionCtx, CaseSessionWire};
 use cyberdeck_storage::NewFinding;
@@ -12,11 +12,16 @@ pub(super) fn save_scan(
     expected: &CaseSessionWire,
     scan_id: u64,
     entries: &[ScanEntry],
+    observations: &[ScanObservation],
 ) -> Result<usize, String> {
-    if entries.is_empty() {
+    if entries.is_empty() && observations.is_empty() {
         return Ok(0);
     }
-    let findings = build_findings(entries, scan_id);
+    let findings = if observations.is_empty() {
+        build_findings(entries, scan_id)
+    } else {
+        build_observation_findings(observations, scan_id)
+    };
     let context = app.state::<EvidenceCtx>();
     let store = context.store.lock().map_err(|_| "case store unavailable")?;
     let case_selection = app.state::<CaseSessionCtx>();
@@ -29,6 +34,28 @@ pub(super) fn save_scan(
         }
         Ok(count)
     })
+}
+
+fn build_observation_findings(observations: &[ScanObservation], scan_id: u64) -> Vec<NewFinding> {
+    let mut findings = observations.iter().take(256).map(|observation| NewFinding {
+        title: format!("TCP {} {}:{}", observation.state, observation.host, observation.port),
+        severity: "info".into(),
+        details: format!(
+            "Authorized TCP connect scan #{scan_id}\nHost: {}\nPort: {}\nState: {}\nReason: {}\nMethod: {}\nService: {}\nService evidence: {}\nObserved unix ms: {}\nElapsed ms: {}\nAttempts: {}\nRetries: {}",
+            observation.host, observation.port, observation.state, observation.reason,
+            observation.method, observation.service, observation.service_basis,
+            observation.started_at_ms, observation.elapsed_ms,
+            observation.attempts, observation.retries,
+        ),
+    }).collect::<Vec<_>>();
+    if observations.len() > 256 {
+        findings.push(NewFinding {
+            title: "Additional TCP scan observations not indexed".into(),
+            severity: "info".into(),
+            details: format!("Scan #{scan_id}: {} total observations; first 256 persisted in this case. The remaining volatile observations are accessible only during the selected scan session.", observations.len()),
+        });
+    }
+    findings
 }
 
 fn build_findings(entries: &[ScanEntry], scan_id: u64) -> Vec<NewFinding> {
@@ -69,6 +96,32 @@ mod tests {
             service: "http".to_string(),
             banner: "Server: sample".to_string(),
         }
+    }
+
+    #[test]
+    fn refused_timeout_and_service_evidence_persist_as_bounded_case_findings() {
+        let make = |port, state: &str, reason: &str| ScanObservation {
+            host: "127.0.0.1".into(), port, protocol: "tcp".into(),
+            state: state.into(), reason: reason.into(),
+            method: "tcp_connect".into(), service: "unknown".into(),
+            service_basis: "none".into(), banner: String::new(),
+            started_at_ms: 1_700_000, elapsed_ms: 10, attempts: 1, retries: 0,
+            os_error_code: None,
+        };
+        let observations = vec![
+            make(22, "closed", "tcp_connect_refused"),
+            make(23, "inconclusive", "connect_timeout_no_response"),
+        ];
+        let findings = build_observation_findings(&observations, 77);
+        assert_eq!(findings.len(), 2);
+        assert!(findings[0].title.contains("closed"));
+        assert!(findings[0].details.contains("tcp_connect_refused"));
+        assert!(findings[1].details.contains("connect_timeout_no_response"));
+        assert!(findings[1].details.contains("Observed unix ms: 1700000"));
+        let many = vec![make(1234, "closed", "tcp_connect_refused"); 300];
+        let capped = build_observation_findings(&many, 77);
+        assert_eq!(capped.len(), 257);
+        assert!(capped[256].details.contains("300 total observations"));
     }
 
     #[test]

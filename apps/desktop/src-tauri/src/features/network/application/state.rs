@@ -1,5 +1,5 @@
 //! Thread-safe in-memory scan session state; no UI or filesystem operations.
-use super::{ScanEntry, ScanHistoryItem};
+use super::{ScanEntry, ScanHistoryItem, ScanObservation};
 use crate::features::shared::session::{CaseSessionCtx, CaseSessionWire};
 use std::sync::atomic::Ordering;
 use std::sync::atomic::{AtomicBool, AtomicU64};
@@ -8,6 +8,7 @@ use std::sync::{Arc, Mutex as StdMutex};
 /// Compatible with the original Tauri managed state layout.
 pub struct ScanCtx {
     pub results: Arc<StdMutex<Vec<ScanEntry>>>,
+    pub observations: Arc<StdMutex<Vec<ScanObservation>>>,
     pub running: Arc<AtomicBool>,
     pub stop: Arc<AtomicBool>,
     pub history: Arc<StdMutex<Vec<ScanHistoryItem>>>,
@@ -21,6 +22,7 @@ impl Default for ScanCtx {
     fn default() -> Self {
         Self {
             results: Arc::new(StdMutex::new(Vec::new())),
+            observations: Arc::new(StdMutex::new(Vec::new())),
             running: Arc::new(AtomicBool::new(false)),
             stop: Arc::new(AtomicBool::new(false)),
             history: Arc::new(StdMutex::new(Vec::new())),

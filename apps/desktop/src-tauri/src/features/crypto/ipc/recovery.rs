@@ -1,6 +1,8 @@
 //! Additive, cancellable native SHA-256 CPU/OpenCL recovery IPC.
 //! Only masked progress and summaries are sent automatically. A plaintext
 //! reveal requires a separate native operator confirmation and active scope.
+#[path = "../application/embedded_hashcat.rs"]
+mod embedded_hashcat;
 #[path = "../application/recovery_backend.rs"]
 mod recovery_backend;
 
@@ -17,7 +19,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tauri::ipc::Channel;
-use tauri::{AppHandle, State};
+use tauri::{AppHandle, Manager, State};
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons};
 
 const MAX_RUNNING: usize = 2;
@@ -261,6 +263,19 @@ fn start_recovery_with_wordlist(
     wordlist: PathBuf,
     emit: impl Fn(RecoveryEvent) + Send + 'static,
 ) -> Result<u64, String> {
+    start_recovery_with_wordlist_engine(state, session, request, wordlist, None, emit)
+}
+
+/// Both engines share the exact same authoritative case/job/reveal lifecycle.
+/// An embedded runtime is never a frontend-provided path or CLI switch.
+fn start_recovery_with_wordlist_engine(
+    state: &RecoveryCtx,
+    session: &CaseSessionCtx,
+    request: RecoveryRequest,
+    wordlist: PathBuf,
+    embedded_runtime: Option<PathBuf>,
+    emit: impl Fn(RecoveryEvent) + Send + 'static,
+) -> Result<u64, String> {
     let scope = RecoveryCtx::scope_from_session(session)?;
     let (job_id, token) = state.with_active(session, |registry, verified| {
         if *verified != scope {
@@ -272,7 +287,7 @@ fn start_recovery_with_wordlist(
     emit(RecoveryEvent::Started { job_id });
     std::thread::spawn(move || {
         let result = catch_unwind(AssertUnwindSafe(|| {
-            execute_path(&request, &wordlist, &token, |progress| {
+            let progress_callback = |progress| {
                 let should_emit = {
                     let Ok(mut lock) = registry.lock() else {
                         return;
@@ -295,7 +310,18 @@ fn start_recovery_with_wordlist(
                         matches: progress.matches,
                     });
                 }
-            })
+            };
+            if let Some(runtime) = embedded_runtime.as_deref() {
+                embedded_hashcat::execute_path(
+                    &request,
+                    &wordlist,
+                    runtime,
+                    &token,
+                    progress_callback,
+                )
+            } else {
+                execute_path(&request, &wordlist, &token, progress_callback)
+            }
         }));
         let event = {
             let Ok(mut lock) = registry.lock() else {
@@ -428,6 +454,84 @@ pub fn recovery_start_v1(
     start_recovery_with_wordlist(&state, &session, request, selected.path, move |event| {
         let _ = on_event.send(event);
     })
+}
+
+#[derive(Serialize)]
+pub struct EmbeddedHashcatCapability {
+    pub available: bool,
+    pub mode: u32,
+    pub hardware_verified: bool,
+    pub detail: String,
+}
+
+fn hashcat_resource_root(app: &AppHandle) -> Result<PathBuf, String> {
+    let packaged = app
+        .path()
+        .resource_dir()
+        .map_err(|_| "Hashcat bundle resources unavailable")?
+        .join("hashcat");
+    if embedded_hashcat::runtime_available(&packaged).is_ok() {
+        return Ok(packaged);
+    }
+    #[cfg(debug_assertions)]
+    {
+        let dev = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("resources/hashcat");
+        if embedded_hashcat::runtime_available(&dev).is_ok() {
+            return Ok(dev);
+        }
+    }
+    Err("embedded Hashcat native runtime not packaged".into())
+}
+
+/// Reports availability of packaged upstream mode 1400; hardware_verified
+/// stays false until actual host device/kernel KAT, not merely library loading.
+#[tauri::command]
+pub fn recovery_hashcat_capabilities_v1(app: AppHandle) -> EmbeddedHashcatCapability {
+    match hashcat_resource_root(&app) {
+        Ok(_) => EmbeddedHashcatCapability {
+            available: true,
+            mode: 1400,
+            hardware_verified: false,
+            detail: "Bundled SHA-256 wordlist mode; GPU acceptance not yet verified".into(),
+        },
+        Err(error) => EmbeddedHashcatCapability {
+            available: false,
+            mode: 1400,
+            hardware_verified: false,
+            detail: error,
+        },
+    }
+}
+
+/// Deliberate opt-in to independently compiled Hashcat C core: never falls
+/// back to Rust or an external system executable without user intent.
+#[tauri::command]
+pub fn recovery_start_hashcat_v1(
+    app: AppHandle,
+    request: RecoveryRequest,
+    on_event: Channel<RecoveryEvent>,
+    state: State<'_, RecoveryCtx>,
+    session: State<'_, CaseSessionCtx>,
+) -> Result<u64, String> {
+    recovery_backend::validate_request(&request)?;
+    let runtime = hashcat_resource_root(&app)?;
+    let selected = state.with_active(&session, |registry, _| {
+        registry
+            .selected_wordlist
+            .clone()
+            .ok_or_else(|| "choose a wordlist before starting recovery".to_owned())
+    })?;
+    crate::features::crypto::ipc::crack::inspect_recovery_wordlist(&selected.path)?;
+    start_recovery_with_wordlist_engine(
+        &state,
+        &session,
+        request,
+        selected.path,
+        Some(runtime),
+        move |event| {
+            let _ = on_event.send(event);
+        },
+    )
 }
 
 #[tauri::command]

@@ -13,6 +13,8 @@ import {
   isDesktop, recoveryCancelV1, recoveryDevicesV1, recoveryDiscardV1,
   recoverySelectWordlistV1, recoveryWordlistStatusV1, type RecoveryWordlistV1,
   recoveryRevealV1, recoveryStartV1, recoveryStatusV1,
+  recoveryHashcatCapabilitiesV1, recoveryStartHashcatV1,
+  type EmbeddedHashcatCapabilityV1,
   type RecoveryBackendV1, type RecoveryDeviceInventoryV1,
   type RecoveryJobStatusV1, type RecoveryRequestV1,
 } from "@lib/ipc";
@@ -29,6 +31,8 @@ function useRecoveryController(targetHash: string) {
   const scopeRef = useRef(scope);
   scopeRef.current = scope;
   const [backend, setBackend] = useState("auto");
+  const [engineChoice, setEngineChoice] = useState<"rust" | "hashcat">("rust");
+  const [hashcatCapability, setHashcatCapability] = useState<EmbeddedHashcatCapabilityV1 | null>(null);
   const [inventory, setInventory] = useState<RecoveryDeviceInventoryV1 | null>(null);
   const [deviceError, setDeviceError] = useState<string | null>(null);
   const [batchSize, setBatchSize] = useState(DEFAULT_OPENCL_BATCH);
@@ -83,6 +87,20 @@ function useRecoveryController(targetHash: string) {
     });
     return () => { active = false; };
   }, [desktop, scope]);
+
+  useEffect(() => {
+    if (!desktop) { setHashcatCapability(null); return; }
+    let active = true;
+    void recoveryHashcatCapabilitiesV1().then((capability) => {
+      if (active) setHashcatCapability(capability);
+    }).catch(() => {
+      if (active) setHashcatCapability({
+        available: false, mode: 1400, hardware_verified: false,
+        detail: "Bundled native Hashcat is unavailable",
+      });
+    });
+    return () => { active = false; };
+  }, [desktop]);
 
   useEffect(() => {
     if (!scope || !desktop) { setWordlist(null); return; }
@@ -144,7 +162,9 @@ function useRecoveryController(targetHash: string) {
   };
 
   const start = async () => {
-    if (!scope || !validHash || !selectedWordlist || busy || !deviceAvailable || jobId !== null) return;
+    if (!scope || !validHash || !selectedWordlist || busy ||
+      (engineChoice === "hashcat" ? !hashcatCapability?.available : !deviceAvailable) ||
+      jobId !== null) return;
     clearReveal(); setError(null); setBusy(true); setStatus(null); setJobId(null);
     setDiscarded(false);
     const requestScope = scope;
@@ -208,7 +228,9 @@ function useRecoveryController(targetHash: string) {
       : caseSession.error ?? "Waiting for native case selection")
     : !validHash ? "Enter a SHA-256 digest (64 hexadecimal characters)"
     : !selectedWordlist ? "Choose a local wordlist before starting"
-    : !deviceAvailable ? "Selected OpenCL device unavailable" : null;
+    : engineChoice === "hashcat" && !hashcatCapability?.available
+      ? hashcatCapability?.detail ?? "Embedded Hashcat capability unavailable"
+    : engineChoice === "rust" && !deviceAvailable ? "Selected OpenCL device unavailable" : null;
   const progress = status?.progress;
   const percent = progress && progress.budget > 0
     ? Math.min(100, Math.round(progress.tried / progress.budget * 100)) : 0;
@@ -217,6 +239,7 @@ function useRecoveryController(targetHash: string) {
 
   return {
     desktop, scope, backend, setBackend, inventory, deviceError, batchSize, setBatchSize,
+    engineChoice, setEngineChoice, hashcatCapability,
     maxCandidates, setMaxCandidates, maxMatches, setMaxMatches,
     jobId: scopedJob ? jobId : null,
     status: scopedJob ? status : null,
@@ -265,7 +288,7 @@ export function NativeRecoveryControls() {
         <Chip tone={r.scope ? "ok" : "muted"}>{r.scope ? "Case ready" : "Case required"}</Chip>
       </div>
       <div className="mt-2 flex items-center justify-between gap-2 text-[11px]">
-        <span className="min-w-0 truncate text-fg-dim">SHA-256 · Wordlist · {r.selection.backend === "cpu" ? "CPU" : "OpenCL"}</span>
+        <span className="min-w-0 truncate text-fg-dim">SHA-256 · Wordlist · {r.engineChoice === "hashcat" ? "Hashcat embedded (GPU unverified)" : r.selection.backend === "cpu" ? "CPU" : "OpenCL"}</span>
         <details className="shrink-0 text-fg-muted">
           <summary className="inline-flex cursor-pointer items-center gap-1 rounded px-1 outline-none focus-visible:ring-2 focus-visible:ring-orange"
             aria-label="Recovery security and limits information">
@@ -348,8 +371,33 @@ export function NativeRecoveryControls() {
           </AccordionTrigger>
           <AccordionPanel className="space-y-3 border-t border-line/50 pt-3 pb-1">
             <div className="space-y-1.5">
+              <span className="text-[10px] font-semibold uppercase tracking-wider text-fg-muted">Engine</span>
+              <Select ariaLabel="Recovery execution engine" value={r.engineChoice}
+                onChange={(value) => {
+                  if (r.jobId === null && !r.busy && (value === "rust" || value === "hashcat"))
+                    r.setEngineChoice(value);
+                }}
+                options={[
+                  { value: "rust", label: "CyberDeck native Rust" },
+                  ...(r.hashcatCapability?.available ? [
+                    { value: "hashcat", label: "Hashcat embedded · SHA-256 (experimental)" },
+                  ] : []),
+                ]} className="w-full" />
+              <p className="text-[10px] leading-relaxed text-fg-muted">
+                {r.hashcatCapability?.detail ?? "Checking bundled Hashcat capability…"}
+                {r.engineChoice === "hashcat"
+                  ? " Hashcat uses its own device enumeration; no CPU/GPU speed or hardware guarantee."
+                  : ""}
+              </p>
+            </div>
+            <div className="space-y-1.5">
               <span className="text-[10px] font-semibold uppercase tracking-wider text-fg-muted">Compute</span>
-              <Select ariaLabel="Recovery V1 backend" value={r.backend}
+              {r.engineChoice === "hashcat" ? (
+                <p className="text-[11px] leading-relaxed text-fg-muted">
+                  Embedded Hashcat uses its own device selection. GPU detection,
+                  kernel execution and performance remain unverified; no silent fallback.
+                </p>
+              ) : <Select ariaLabel="Recovery V1 backend" value={r.backend}
                 onChange={(value) => {
                   if (r.jobId === null && !r.busy) { r.setBackend(value); r.clearReveal(); }
                 }}
@@ -361,7 +409,7 @@ export function NativeRecoveryControls() {
                     label: "OpenCL " + device.device_index + " · " + device.name
                       + (device.hardware_verified ? "" : " (unverified)"),
                   })),
-                ]} className="w-full" />
+                ]} className="w-full" />}
             </div>
             <div className="space-y-1.5">
               <span className="text-[10px] font-semibold uppercase tracking-wider text-fg-muted">Processing limits</span>
@@ -485,7 +533,9 @@ export function NativeRecoveryResults() {
       )}
       {r.status?.summary && (
         <div className="flex flex-wrap gap-3 text-[11px] text-fg-muted">
-          <span>{r.status.summary.tried.toLocaleString()} checked</span>
+          {r.status.summary.engine.startsWith("embedded_hashcat")
+              ? <span>Hashcat processed · count unavailable in ABI v1</span>
+              : <span>{r.status.summary.tried.toLocaleString()} checked</span>}
           <span>{r.status.summary.duration_ms.toLocaleString()} ms</span>
           {r.status.summary.limit_reached ? <span>Candidate limit reached</span> : null}
         </div>

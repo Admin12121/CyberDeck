@@ -7,10 +7,12 @@ import {
   isDesktop,
   netscanExport,
   netscanResults,
+  netscanObservationsV1,
   netscanStart,
   netscanStatus,
   netscanStop,
   type ScanEntryWire,
+  type ScanObservationPageWire,
   type ScanProgressWire,
   type NetscanStatusWire,
 } from "@lib/ipc";
@@ -40,6 +42,8 @@ export function ScanView() {
   const [running, setRunning] = useState(false);
   const [progress, setProgress] = useState<ScanProgressWire | null>(null);
   const [results, setResults] = useState<ScanEntryWire[]>([]);
+  const [observationPage, setObservationPage] = useState<ScanObservationPageWire | null>(null);
+  const [observationOffset, setObservationOffset] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const [status, setStatus] = useState<NetscanStatusWire>({ running: false, results: 0, saved_findings: 0, save_error: null });
   // Native status/results now enforce the selected case generation on every read.
@@ -56,6 +60,8 @@ export function ScanView() {
     scanTicket.current += 1;
     pollTicket.current += 1;
     setResults([]);
+    setObservationPage(null);
+    setObservationOffset(0);
     setProgress(null);
     setError(null);
     setRunning(false);
@@ -73,10 +79,16 @@ export function ScanView() {
       // The backend independently gates these results by selected case revision.
       const currentResults = await netscanResults();
       if (isCurrent()) setResults(currentResults);
+      try {
+        const page = await netscanObservationsV1(observationOffset, 100);
+        if (isCurrent()) setObservationPage(page);
+      } catch {
+        if (isCurrent()) setObservationPage(null);
+      }
     } catch (cause) {
       if (isCurrent()) setError("Scanner status unavailable: " + String(cause));
     }
-  }, [identity]);
+  }, [identity, observationOffset]);
 
   useEffect(() => {
     if (!desktop) return;
@@ -96,6 +108,8 @@ export function ScanView() {
     setRunning(true);
     setError(null);
     setResults([]);
+    setObservationPage(null);
+    setObservationOffset(0);
     setProgress({ tried: 0, total: 0, percent: 0 });
     try {
       await netscanStart(target, ports, caseId, authorized, (p) => {
@@ -123,7 +137,8 @@ export function ScanView() {
     }
   };
 
-  const openCount = results.filter((r) => r.state === "open").length;
+  const openCount = observationPage?.open ?? results.filter((r) => r.state === "open").length;
+  const observedCount = observationPage?.total ?? results.length;
 
   const exportResults = async (format: "json" | "csv") => {
     if (results.length === 0) return;
@@ -181,7 +196,7 @@ export function ScanView() {
             <ToolButton onClick={() => void exportResults("csv")} title="Save results as CSV">CSV</ToolButton>
           </>
         ) : null}
-        <span className="ml-auto font-mono text-[10px] text-fg-muted">{openCount} open / {results.length} probed</span>
+        <span className="ml-auto font-mono text-[10px] text-fg-muted">{openCount} open / {observedCount} observed</span>
       </div>
       {error ? <div className="border-b border-err/50 bg-err/10 px-2 py-1 font-mono text-[10px] text-err">{error}</div> : null}
       <div className="flex min-h-0 flex-1 gap-px bg-line">
@@ -210,8 +225,8 @@ export function ScanView() {
               </div>
             </div>
           ) : null}
-          <Pane title={`Results: ${openCount} open`} className="min-h-0 flex-1">
-            {results.length === 0 ? (
+          <Pane title={"TCP observations: " + observedCount + " · " + openCount + " open · " + (observationPage?.closed ?? 0) + " closed · " + (observationPage?.inconclusive ?? 0) + " inconclusive"} className="min-h-0 flex-1">
+            {results.length === 0 && !observationPage?.entries.length ? (
               <EmptyState
                 title={running ? "Scanning…" : "No results"}
                 detail="TCP connect scan with observed banners. Select a saved case, acknowledge scope, confirm in the native dialog and run."
@@ -226,22 +241,44 @@ export function ScanView() {
                     <th className="w-20">State</th>
                     <th className="w-28">Service</th>
                     <th>Banner</th>
+                    <th>Reason / evidence</th>
+                    <th>Elapsed</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {results.map((r, i) => (
-                    <tr key={`${r.host}-${r.port}-${i}`}>
-                      <td className="text-fg">{r.host}</td>
-                      <td>{r.port}</td>
-                      <td className={r.state === "open" ? "text-ok" : "text-fg-muted"}>{r.state}</td>
-                      <td className="text-orange">{r.service}</td>
-                      <td className="truncate text-fg-muted" title={r.banner}>{r.banner}</td>
-                    </tr>
-                  ))}
+                  {observationPage
+                    ? observationPage.entries.map((r, i) => (
+                      <tr key={"obs-" + r.host + "-" + r.port + "-" + i}>
+                        <td className="text-fg">{r.host}</td>
+                        <td>{r.port}</td>
+                        <td className={r.state === "open" ? "text-ok" : "text-fg-muted"}>{r.state}</td>
+                        <td className="text-orange" title={r.service_basis}>{r.service}{r.service_basis === "port_hint_only" ? " (port hint)" : ""}</td>
+                        <td className="truncate text-fg-muted" title={r.banner}>{r.banner || "—"}</td>
+                        <td className="text-fg-muted" title={"Method: " + r.method + "; attempts: " + r.attempts + "; retries: " + r.retries + "; OS error: " + (r.os_error_code ?? "n/a")}>{r.reason}</td>
+                        <td>{r.elapsed_ms} ms</td>
+                      </tr>
+                    ))
+                    : results.map((r, i) => (
+                      <tr key={"open-" + r.host + "-" + r.port + "-" + i}>
+                        <td className="text-fg">{r.host}</td>
+                        <td>{r.port}</td>
+                        <td className="text-ok">{r.state}</td>
+                        <td className="text-orange">{r.service}</td>
+                        <td className="truncate text-fg-muted" title={r.banner}>{r.banner}</td>
+                        <td>—</td><td>—</td>
+                      </tr>
+                    ))}
                 </tbody>
               </table>
             )}
           </Pane>
+          {observationPage && observationPage.total > 100 && (
+            <div className="flex shrink-0 items-center gap-2 border-t border-line px-3 py-1 text-xs text-fg-muted">
+              <ToolButton disabled={observationOffset === 0} onClick={() => setObservationOffset(Math.max(0, observationOffset - 100))}>Previous</ToolButton>
+              <span>{observationPage.offset + 1}–{Math.min(observationPage.offset + observationPage.shown, observationPage.total)} / {observationPage.total}</span>
+              <ToolButton disabled={observationOffset + observationPage.shown >= observationPage.total} onClick={() => setObservationOffset(observationOffset + 100)}>Next</ToolButton>
+            </div>
+          )}
         </div>
         <Resizer direction="horizontal" flip ariaLabel="Resize scan notes" value={notesWidth} onChange={setNotesWidth} min={220} max={500} />
         <Pane title="Notes" className="shrink-0" style={{ width: notesWidth }}>

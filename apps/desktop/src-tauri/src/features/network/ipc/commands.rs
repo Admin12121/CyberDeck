@@ -116,8 +116,8 @@ pub(super) fn start(
                 .ensure(&probe_scope)
                 .is_ok()
         },
-        move |scan_id, entries| {
-            case_findings::save_scan(&app, &case_id, &save_scope, scan_id, entries)
+        move |scan_id, entries, observations| {
+            case_findings::save_scan(&app, &case_id, &save_scope, scan_id, entries, observations)
         },
     )?;
     Ok(ScanSummaryWire {
@@ -139,6 +139,70 @@ pub(super) fn results(
         return Vec::new();
     }
     ctx.results.lock().expect("scan results poisoned").clone()
+}
+
+/// Additive pagination; never transmit all original probe results unchecked.
+/// Case authorization is verified both before and after reading the page.
+pub(super) fn observation_page(
+    offset: usize,
+    limit: usize,
+    ctx: State<'_, ScanCtx>,
+    selected: State<'_, CaseSessionCtx>,
+) -> Result<super::scan_wire::ScanObservationPage, String> {
+    if !(1..=100).contains(&limit) || offset > 20_000 {
+        return Err("scan observation page outside 0..=20000 and limit 1..=100".into());
+    }
+    let scope = selected.selected()?;
+    if !ctx.visible_for(&selected) {
+        return Err("no observations authorized for current case revision".into());
+    }
+    let rows = ctx
+        .observations
+        .lock()
+        .map_err(|_| "observations unavailable")?;
+    let page = paginate_scan_observations(&rows, offset, limit)?;
+    drop(rows);
+    selected.ensure(&scope)?;
+    if !ctx.visible_for(&selected) {
+        return Err("scan session was revoked during observation read".into());
+    }
+    Ok(page)
+}
+
+fn paginate_scan_observations(
+    rows: &[super::ScanObservation],
+    offset: usize,
+    limit: usize,
+) -> Result<super::scan_wire::ScanObservationPage, String> {
+    if !(1..=100).contains(&limit) || offset > 20_000 {
+        return Err("invalid observation offset or page size".into());
+    }
+    let total = rows.len();
+    let entries = rows
+        .get(offset.min(total)..(offset.saturating_add(limit)).min(total))
+        .ok_or("observation page invalid")?
+        .to_vec();
+    let mut page = super::scan_wire::ScanObservationPage {
+        offset,
+        total,
+        shown: entries.len(),
+        open: 0,
+        closed: 0,
+        filtered: 0,
+        unreachable: 0,
+        inconclusive: 0,
+        entries,
+    };
+    for observation in rows.iter() {
+        match observation.state.as_str() {
+            "open" => page.open += 1,
+            "closed" => page.closed += 1,
+            "filtered" => page.filtered += 1,
+            "unreachable" => page.unreachable += 1,
+            _ => page.inconclusive += 1,
+        }
+    }
+    Ok(page)
 }
 
 pub(super) fn stop(ctx: State<'_, ScanCtx>) {
@@ -219,6 +283,32 @@ mod scope_tests {
     use super::*;
     use cyberdeck_storage::ArtifactStore;
     use std::sync::atomic::Ordering;
+
+    #[test]
+    fn paginated_tcp_outcomes_keep_reasons_and_full_state_counts() {
+        let sample = |port: u16, state: &str, reason: &str| super::super::ScanObservation {
+            host: "127.0.0.1".into(), port, protocol: "tcp".into(),
+            state: state.into(), reason: reason.into(), method: "tcp_connect".into(),
+            service: "unknown".into(), service_basis: "none".into(), banner: String::new(),
+            started_at_ms: 100, elapsed_ms: 13, attempts: 1, retries: 0,
+            os_error_code: None,
+        };
+        let records = vec![
+            sample(22, "open", "tcp_connect_accepted"),
+            sample(23, "closed", "tcp_connect_refused"),
+            sample(24, "inconclusive", "connect_timeout_no_response"),
+            sample(25, "unreachable", "host_unreachable"),
+        ];
+        let page = paginate_scan_observations(&records, 1, 2).unwrap();
+        assert_eq!((page.total, page.shown, page.offset), (4, 2, 1));
+        assert_eq!((page.open, page.closed, page.inconclusive, page.unreachable, page.filtered), (1, 1, 1, 1, 0));
+        assert_eq!(page.entries[0].reason, "tcp_connect_refused");
+        assert_eq!(page.entries[1].reason, "connect_timeout_no_response");
+        assert!(paginate_scan_observations(&records, 0, 0).is_err());
+        assert!(paginate_scan_observations(&records, 0, 101).is_err());
+        assert!(paginate_scan_observations(&records, 20_001, 100).is_err());
+        assert_eq!(paginate_scan_observations(&records, 4, 100).unwrap().shown, 0);
+    }
 
     #[test]
     fn scanner_scope_never_accepts_client_case_or_stale_revision_as_authority() {

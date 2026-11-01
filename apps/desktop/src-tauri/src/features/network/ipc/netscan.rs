@@ -38,11 +38,11 @@ mod tcp_probe;
 
 pub use host_targets::parse_targets;
 pub use port_rules::{parse_ports, TOP_PORTS_100};
-pub use scan_models::{ScanEntry, ScanHistoryItem, ScanProgress};
+pub use scan_models::{ScanEntry, ScanHistoryItem, ScanObservation, ScanProgress};
 #[cfg(test)]
 use scan_service::scan_probe_count;
 pub use scan_state::ScanCtx;
-pub use scan_wire::{NetscanStatusWire, ScanSummaryWire};
+pub use scan_wire::{NetscanStatusWire, ScanObservationPage, ScanSummaryWire};
 #[cfg(test)]
 use tcp_probe::{classify_connect_error, summarize_banner};
 
@@ -104,6 +104,16 @@ pub fn netscan_results(
     selected: State<'_, CaseSessionCtx>,
 ) -> Vec<ScanEntry> {
     scan_commands::results(ctx, selected)
+}
+
+#[tauri::command]
+pub fn netscan_observations_v1(
+    offset: usize,
+    limit: usize,
+    ctx: State<'_, ScanCtx>,
+    selected: State<'_, CaseSessionCtx>,
+) -> Result<ScanObservationPage, String> {
+    scan_commands::observation_page(offset, limit, ctx, selected)
 }
 
 #[tauri::command]

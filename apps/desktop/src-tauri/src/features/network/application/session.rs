@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use super::scan_service;
-use super::{ScanCtx, ScanEntry, ScanHistoryItem, ScanProgress};
+use super::{ScanCtx, ScanEntry, ScanHistoryItem, ScanObservation, ScanProgress};
 use crate::features::shared::session::CaseSessionWire;
 
 pub(super) fn now_ms() -> u64 {
@@ -31,7 +31,7 @@ pub(super) fn start<P, G, F>(
 where
     P: Fn(ScanProgress) + Sync + Send + 'static,
     G: Fn() -> bool + Sync + Send + 'static,
-    F: FnOnce(u64, &[ScanEntry]) -> Result<usize, String> + Send + 'static,
+    F: FnOnce(u64, &[ScanEntry], &[ScanObservation]) -> Result<usize, String> + Send + 'static,
 {
     let host_count = hosts.len();
     scan_service::scan_probe_count(host_count, port_list.len())?;
@@ -59,10 +59,16 @@ where
     ctx.saved_findings.store(0, Ordering::Relaxed);
     ctx.stop.store(false, Ordering::Relaxed);
     ctx.results.lock().expect("scan results poisoned").clear();
+    ctx.observations
+        .lock()
+        .expect("scan observations poisoned")
+        .clear();
 
     let id = ctx.next_id.fetch_add(1, Ordering::Relaxed);
     let started = Instant::now();
     let results_out = Arc::clone(&ctx.results);
+    let observed_out = Arc::clone(&ctx.observations);
+    let stop_when_full = Arc::clone(&ctx.stop);
     let stop_out = Arc::clone(&ctx.stop);
     let running_out = Arc::clone(&ctx.running);
     let history_out = Arc::clone(&ctx.history);
@@ -70,21 +76,32 @@ where
     let saved_out = Arc::clone(&ctx.saved_findings);
 
     std::thread::spawn(move || {
-        let entries = scan_service::run_scan_into_scoped(
+        let entries = scan_service::run_scan_into_scoped_v1(
             hosts,
             port_list,
             &stop_out,
             &on_progress,
             &results_out,
             &scope_is_active,
+            &|observed| {
+                let mut data = observed_out.lock().expect("scan observations poisoned");
+                if data.len() < 20_000 {
+                    data.push(observed);
+                } else {
+                    stop_when_full.store(true, Ordering::Release);
+                }
+            },
         );
         let open = entries.len();
         let duration = started.elapsed().as_millis() as u64;
-        if !entries.is_empty() && !stop_out.load(Ordering::Acquire) && scope_is_active() {
-            match save_findings(id, &entries) {
-                Ok(count) => saved_out.store(count as u64, Ordering::Relaxed),
-                Err(error) => {
-                    *save_error_out.lock().expect("scan error state poisoned") = Some(error);
+        if !stop_out.load(Ordering::Acquire) && scope_is_active() {
+            let observed = observed_out.lock().expect("scan observations poisoned");
+            if !observed.is_empty() {
+                match save_findings(id, &entries, &observed) {
+                    Ok(count) => saved_out.store(count as u64, Ordering::Relaxed),
+                    Err(error) => {
+                        *save_error_out.lock().expect("scan error state poisoned") = Some(error);
+                    }
                 }
             }
         }
@@ -130,7 +147,7 @@ mod tests {
             "65000".into(),
             |_| {},
             || false,
-            move |_, _| {
+            move |_, _, _| {
                 tx.send(()).unwrap();
                 Ok(1)
             },
@@ -167,7 +184,7 @@ mod tests {
             "80".into(),
             |_| {},
             || true,
-            move |_, _| {
+            move |_, _, _| {
                 tx.send(()).unwrap();
                 Ok(0)
             },

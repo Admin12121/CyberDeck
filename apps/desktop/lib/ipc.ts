@@ -136,6 +136,34 @@ export async function recoveryStartV1(
   channel.onmessage = onEvent;
   return invoke<number>("recovery_start_v1", { request, onEvent: channel });
 }
+export interface EmbeddedHashcatCapabilityV1 {
+  available: boolean;
+  mode: number;
+  hardware_verified: boolean;
+  detail: string;
+}
+
+/** Checks bundled native SHA-256 Hashcat availability; no hardware KAT implied. */
+export async function recoveryHashcatCapabilitiesV1(): Promise<EmbeddedHashcatCapabilityV1> {
+  if (!inTauri) return {
+    available: false, mode: 1400, hardware_verified: false,
+    detail: "Embedded Hashcat is available only in the native desktop runtime",
+  };
+  return invoke<EmbeddedHashcatCapabilityV1>("recovery_hashcat_capabilities_v1");
+}
+
+/** Explicit opt-in to bundled native Hashcat mode 1400.
+ * No system hashcat process, arbitrary flags or silent CPU fallback.
+ */
+export async function recoveryStartHashcatV1(
+  request: RecoveryRequestV1, onEvent: (event: RecoveryEventV1) => void,
+): Promise<number> {
+  if (!inTauri) throw new Error("Embedded Hashcat requires native CyberDeck");
+  const channel = new Channel<RecoveryEventV1>();
+  channel.onmessage = onEvent;
+  return invoke<number>("recovery_start_hashcat_v1", { request, onEvent: channel });
+}
+
 export async function recoveryCancelV1(jobId: number): Promise<boolean> {
   if (!inTauri) throw new Error("Recovery cancellation requires the desktop runtime");
   return invoke<boolean>("recovery_cancel_v1", { jobId });
@@ -1283,6 +1311,44 @@ export interface ScanEntryWire {
   state: string;
   service: string;
   banner: string;
+}
+
+export interface ScanObservationWire {
+  host: string;
+  port: number;
+  protocol: string;
+  state: "open" | "closed" | "filtered" | "unreachable" | "inconclusive";
+  reason: string;
+  method: string;
+  service: string;
+  service_basis: "observed_response" | "port_hint_only" | "none";
+  banner: string;
+  started_at_ms: number;
+  elapsed_ms: number;
+  attempts: number;
+  retries: number;
+  os_error_code: number | null;
+}
+
+export interface ScanObservationPageWire {
+  offset: number;
+  total: number;
+  shown: number;
+  open: number;
+  closed: number;
+  filtered: number;
+  unreachable: number;
+  inconclusive: number;
+  entries: ScanObservationWire[];
+}
+
+export async function netscanObservationsV1(offset: number, limit = 100): Promise<ScanObservationPageWire> {
+  if (!inTauri) throw new Error("scan observations require the desktop runtime");
+  if (!Number.isSafeInteger(offset) || offset < 0 || offset > 20_000
+      || !Number.isSafeInteger(limit) || limit < 1 || limit > 100) {
+    throw new Error("invalid bounded scan observation page");
+  }
+  return invoke<ScanObservationPageWire>("netscan_observations_v1", { offset, limit });
 }
 
 export interface ScanSummaryWire {

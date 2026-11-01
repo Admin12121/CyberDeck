@@ -2,9 +2,9 @@
 use crate::features::forensics::ipc::evidence::EvidenceCtx;
 use cyberdeck_storage::ArtifactStore;
 
+pub(crate) mod authorized_transfer;
 pub mod storage_paths;
 pub(crate) mod temp_work;
-pub(crate) mod authorized_transfer;
 
 /// Hold the existing case-store lock for exactly one synchronous operation.
 pub fn with_store<T>(

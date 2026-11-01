@@ -36,9 +36,13 @@ mod tests {
     #[test]
     fn tcp_refusal_is_a_response_but_timeout_is_not() {
         use std::io::{Error, ErrorKind};
-        assert!(refusal_is_response(&Error::from(ErrorKind::ConnectionRefused)));
+        assert!(refusal_is_response(&Error::from(
+            ErrorKind::ConnectionRefused
+        )));
         assert!(!refusal_is_response(&Error::from(ErrorKind::TimedOut)));
-        assert!(!refusal_is_response(&Error::from(ErrorKind::NetworkUnreachable)));
+        assert!(!refusal_is_response(&Error::from(
+            ErrorKind::NetworkUnreachable
+        )));
     }
 
     #[test]

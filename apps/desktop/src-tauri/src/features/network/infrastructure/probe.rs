@@ -1,7 +1,8 @@
 //! Platform TCP connect and bounded banner probing. Active scanning only after
 //! the legacy IPC command performs explicit authorization checks.
+use super::ScanObservation;
 use std::net::{IpAddr, TcpStream};
-use std::time::Duration;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const CONNECT_TIMEOUT: Duration = Duration::from_millis(900);
 const BANNER_TIMEOUT: Duration = Duration::from_millis(400);
@@ -37,10 +38,16 @@ pub(super) fn well_known_service(port: u16) -> &'static str {
 /// Independently authored from common protocol greeting formats.
 pub(super) fn observed_service(banner: &str) -> Option<&'static str> {
     let first = banner.lines().next()?.trim();
-    if first.starts_with("SSH-2.0-") || first.starts_with("SSH-1.99-") || first.starts_with("SSH-1.5-") {
+    if first.starts_with("SSH-2.0-")
+        || first.starts_with("SSH-1.99-")
+        || first.starts_with("SSH-1.5-")
+    {
         return Some("ssh");
     }
-    if first.starts_with("HTTP/1.0 ") || first.starts_with("HTTP/1.1 ") || first.starts_with("HTTP/2 ") {
+    if first.starts_with("HTTP/1.0 ")
+        || first.starts_with("HTTP/1.1 ")
+        || first.starts_with("HTTP/2 ")
+    {
         return Some("http");
     }
     if first.starts_with("220 ") || first.starts_with("220-") {
@@ -85,32 +92,89 @@ pub(super) fn classify_connect_error(kind: std::io::ErrorKind) -> &'static str {
     }
 }
 
-/// Connect + optional banner grab for one host:port.
-pub(super) fn probe(host: IpAddr, port: u16) -> (String, String) {
-    let addr = std::net::SocketAddr::new(host, port);
-    match TcpStream::connect_timeout(&addr, CONNECT_TIMEOUT) {
-        Err(error) => (
-            classify_connect_error(error.kind()).to_string(),
-            String::new(),
-        ),
+/// Original TCP-connect observation: refusal is closed; timeout is uncertain.
+pub(super) fn probe_observation(host: IpAddr, port: u16) -> ScanObservation {
+    let started_at_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|time| time.as_millis().min(u64::MAX as u128) as u64)
+        .unwrap_or(0);
+    let began = Instant::now();
+    let address = std::net::SocketAddr::new(host, port);
+    let mut obs = ScanObservation {
+        host: host.to_string(),
+        port,
+        protocol: "tcp".into(),
+        state: "inconclusive".into(),
+        reason: "unknown_error".into(),
+        method: "tcp_connect".into(),
+        service: "unknown".into(),
+        service_basis: "none".into(),
+        banner: String::new(),
+        started_at_ms,
+        elapsed_ms: 0,
+        attempts: 1,
+        retries: 0,
+        os_error_code: None,
+    };
+    match TcpStream::connect_timeout(&address, CONNECT_TIMEOUT) {
+        Err(error) => {
+            let (state, reason) = classify_observation_error(error.kind());
+            obs.state = state.into();
+            obs.reason = reason.into();
+            obs.os_error_code = error.raw_os_error();
+        }
         Ok(mut stream) => {
+            obs.state = "open".into();
+            obs.reason = "tcp_connect_accepted".into();
             let _ = stream.set_read_timeout(Some(BANNER_TIMEOUT));
             let _ = stream.set_write_timeout(Some(BANNER_TIMEOUT));
-            let mut banner = String::new();
-            // light service probes: HTTP HEAD on web ports, SSH announces itself
             if matches!(port, 80 | 8080 | 8000 | 8888) {
-                let probe = format!("HEAD / HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n");
-                let _ = std::io::Write::write_all(&mut stream, probe.as_bytes());
+                let request =
+                    format!("HEAD / HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n");
+                let _ = std::io::Write::write_all(&mut stream, request.as_bytes());
             }
-            let mut buf = [0u8; 512];
-            if let Ok(n) = std::io::Read::read(&mut stream, &mut buf) {
-                if n > 0 {
-                    banner = summarize_banner(&String::from_utf8_lossy(&buf[..n]));
+            let mut buffer = [0u8; 512];
+            if let Ok(length) = std::io::Read::read(&mut stream, &mut buffer) {
+                if length > 0 {
+                    obs.banner = summarize_banner(&String::from_utf8_lossy(&buffer[..length]));
                 }
             }
-            ("open".to_string(), banner)
+            if let Some(name) = observed_service(&obs.banner) {
+                obs.service = name.into();
+                obs.service_basis = "observed_response".into();
+            } else {
+                let guessed = well_known_service(port);
+                if !guessed.is_empty() {
+                    obs.service = guessed.into();
+                    obs.service_basis = "port_hint_only".into();
+                }
+            }
         }
     }
+    obs.elapsed_ms = began.elapsed().as_millis().min(u64::MAX as u128) as u64;
+    obs
+}
+
+pub(super) fn classify_observation_error(kind: std::io::ErrorKind) -> (&'static str, &'static str) {
+    use std::io::ErrorKind;
+    match kind {
+        ErrorKind::ConnectionRefused => ("closed", "tcp_connect_refused"),
+        ErrorKind::NetworkUnreachable => ("unreachable", "network_unreachable"),
+        ErrorKind::HostUnreachable => ("unreachable", "host_unreachable"),
+        ErrorKind::TimedOut => ("inconclusive", "connect_timeout_no_response"),
+        ErrorKind::WouldBlock => ("inconclusive", "connect_would_block"),
+        ErrorKind::PermissionDenied => ("inconclusive", "local_or_network_permission_denied"),
+        ErrorKind::ConnectionAborted => ("inconclusive", "connection_aborted"),
+        ErrorKind::Interrupted => ("inconclusive", "interrupted"),
+        _ => ("inconclusive", "connect_error_unclassified"),
+    }
+}
+
+/// Preserve original open-port caller wire.
+#[allow(dead_code)]
+pub(super) fn probe(host: IpAddr, port: u16) -> (String, String) {
+    let value = probe_observation(host, port);
+    (value.state, value.banner)
 }
 
 #[cfg(test)]
@@ -118,11 +182,60 @@ mod evidence_tests {
     use super::*;
 
     #[test]
+    fn error_kind_mapping_keeps_refusal_and_uncertain_timeout_distinct() {
+        use std::io::ErrorKind;
+        assert_eq!(
+            classify_observation_error(ErrorKind::ConnectionRefused),
+            ("closed", "tcp_connect_refused")
+        );
+        assert_eq!(
+            classify_observation_error(ErrorKind::TimedOut),
+            ("inconclusive", "connect_timeout_no_response")
+        );
+        assert_eq!(
+            classify_observation_error(ErrorKind::PermissionDenied),
+            ("inconclusive", "local_or_network_permission_denied")
+        );
+        assert_eq!(
+            classify_observation_error(ErrorKind::HostUnreachable),
+            ("unreachable", "host_unreachable")
+        );
+        assert_eq!(
+            classify_observation_error(ErrorKind::NetworkUnreachable),
+            ("unreachable", "network_unreachable")
+        );
+    }
+
+    #[test]
+    fn real_loopback_listener_and_refusal_have_distinct_grounded_states() {
+        let socket = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = socket.local_addr().unwrap().port();
+        let opened = probe_observation("127.0.0.1".parse().unwrap(), port);
+        assert_eq!(opened.state, "open");
+        assert_eq!(opened.reason, "tcp_connect_accepted");
+        assert_eq!(opened.attempts, 1);
+        drop(socket);
+        let refused = probe_observation("127.0.0.1".parse().unwrap(), port);
+        assert_eq!(refused.state, "closed");
+        assert_eq!(refused.reason, "tcp_connect_refused");
+        assert_eq!(refused.retries, 0);
+    }
+
+    #[test]
     fn observed_protocol_recognizes_responses_on_unexpected_ports() {
         assert_eq!(observed_service("SSH-2.0-OpenSSH_9.6\r\n"), Some("ssh"));
-        assert_eq!(observed_service("HTTP/1.1 200 OK\r\nServer: test\r\n"), Some("http"));
-        assert_eq!(observed_service("220 smtp.example ESMTP ready\r\n"), Some("smtp"));
-        assert_eq!(observed_service("220 ftp.example FTP server ready\r\n"), Some("ftp"));
+        assert_eq!(
+            observed_service("HTTP/1.1 200 OK\r\nServer: test\r\n"),
+            Some("http")
+        );
+        assert_eq!(
+            observed_service("220 smtp.example ESMTP ready\r\n"),
+            Some("smtp")
+        );
+        assert_eq!(
+            observed_service("220 ftp.example FTP server ready\r\n"),
+            Some("ftp")
+        );
     }
 
     #[test]

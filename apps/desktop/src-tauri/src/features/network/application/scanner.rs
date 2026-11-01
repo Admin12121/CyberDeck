@@ -4,8 +4,8 @@ use std::net::IpAddr;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 
-use super::tcp_probe::{observed_service, probe, well_known_service};
-use super::{ScanEntry, ScanProgress};
+use super::tcp_probe::probe_observation;
+use super::{ScanEntry, ScanObservation, ScanProgress};
 
 const MAX_RESULTS: usize = 20_000;
 
@@ -63,6 +63,28 @@ pub(super) fn run_scan_into_scoped(
     results: &Arc<StdMutex<Vec<ScanEntry>>>,
     scope_is_active: &(impl Fn() -> bool + Sync),
 ) -> Vec<ScanEntry> {
+    run_scan_into_scoped_v1(
+        hosts,
+        ports,
+        stop,
+        on_progress,
+        results,
+        scope_is_active,
+        &|_| {},
+    )
+}
+
+/// Observe every completed TCP connect attempt, not only open-port results.
+/// Callbacks receive bounded, independently observed state and reason records.
+pub(super) fn run_scan_into_scoped_v1(
+    hosts: Vec<IpAddr>,
+    ports: Vec<u16>,
+    stop: &AtomicBool,
+    on_progress: &(impl Fn(ScanProgress) + Sync),
+    results: &Arc<StdMutex<Vec<ScanEntry>>>,
+    scope_is_active: &(impl Fn() -> bool + Sync),
+    on_observation: &(impl Fn(ScanObservation) + Sync),
+) -> Vec<ScanEntry> {
     let total = (hosts.len() as u64).saturating_mul(ports.len() as u64);
     if total == 0 || total > MAX_SCAN_PROBES {
         return Vec::new();
@@ -101,30 +123,28 @@ pub(super) fn run_scan_into_scoped(
                     stop.store(true, Ordering::Release);
                     break;
                 }
-                let (state, banner) = probe(host, port);
+                let observation = probe_observation(host, port);
                 if !scope_is_active() {
                     stop.store(true, Ordering::Release);
-                    break; // Never publish an observation after case revocation.
+                    break;
                 }
-                if state == "open" {
+                // Callback owns the bounded case-scoped store. The underlying
+                // original status is never changed by service-name inference.
+                if observation.state == "open" {
                     let mut output = results.lock().expect("scan results poisoned");
                     if output.len() >= MAX_RESULTS {
                         stop.store(true, Ordering::Relaxed);
                     } else {
-                        let service = observed_service(&banner).unwrap_or_else(|| well_known_service(port));
                         output.push(ScanEntry {
-                            host: host.to_string(),
+                            host: observation.host.clone(),
                             port,
-                            state,
-                            service: if service.is_empty() {
-                                "unknown".into()
-                            } else {
-                                service.into()
-                            },
-                            banner,
+                            state: observation.state.clone(),
+                            service: observation.service.clone(),
+                            banner: observation.banner.clone(),
                         });
                     }
                 }
+                on_observation(observation);
                 let tried = completed.fetch_add(1, Ordering::Relaxed) + 1;
                 if tried % 32 == 0 || tried == total {
                     report_progress(on_progress, reported, tried, total);

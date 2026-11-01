@@ -27,3 +27,24 @@ pub struct ScanHistoryItem {
     pub duration_ms: u64,
     pub at_ms: u64,
 }
+
+/// V1 additive observation: the connect outcome is retained even when it
+/// contains no open-port banner. `filtered` is reserved for affirmative
+/// network-policy evidence, not guessed from a silent TCP connect timeout.
+#[derive(Debug, Clone, Serialize)]
+pub struct ScanObservation {
+    pub host: String,
+    pub port: u16,
+    pub protocol: String,
+    pub state: String,
+    pub reason: String,
+    pub method: String,
+    pub service: String,
+    pub service_basis: String,
+    pub banner: String,
+    pub started_at_ms: u64,
+    pub elapsed_ms: u64,
+    pub attempts: u8,
+    pub retries: u8,
+    pub os_error_code: Option<i32>,
+}
