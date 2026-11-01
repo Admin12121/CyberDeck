@@ -6,6 +6,11 @@
 use super::{forensic_native, jpeg_boundary, riff_wave, scan_signatures, MAX_SIGNATURE_HITS};
 use serde::Serialize;
 
+#[path = "gif_boundary.rs"]
+mod gif_boundary;
+#[path = "uboot_image.rs"]
+mod uboot_image;
+
 pub const MAX_CARVE_SCAN_BYTES: usize = 4 * 1024 * 1024;
 pub const MAX_CARVE_CANDIDATES: usize = 32;
 
@@ -31,7 +36,7 @@ pub fn preview_png_carving(data: &[u8], base: u64) -> Result<CarvePreview, Strin
     preview_carving_impl(data, base, false)
 }
 
-/// Extended preview for PNG, RIFF/WAVE and JPEG structurally validated members.
+/// Extended preview for PNG, RIFF/WAVE, JPEG, GIF and CRC-checked U-Boot uImage members.
 /// Does not decode pixels or audio. AVI is rejected.
 pub fn preview_validated_carving(data: &[u8], base: u64) -> Result<CarvePreview, String> {
     preview_carving_impl(data, base, true)
@@ -50,7 +55,7 @@ fn preview_carving_impl(data: &[u8], base: u64, include_wav: bool) -> Result<Car
     let mut rejected_or_incomplete = 0usize;
     let mut candidate_limit_reached = scanner_cap_reached;
     for hit in signatures {
-        if hit.format != "png" && !(include_wav && matches!(hit.format, "riff" | "jpeg")) {
+        if hit.format != "png" && !(include_wav && matches!(hit.format, "riff" | "jpeg" | "gif" | "uimage")) {
             continue;
         }
         if candidates.len() + rejected_or_incomplete >= MAX_CARVE_CANDIDATES {
@@ -69,6 +74,14 @@ fn preview_carving_impl(data: &[u8], base: u64, include_wav: bool) -> Result<Car
             riff_wave::validated_wave_length(&data[rel..])
                 .ok()
                 .map(|length| ("wav", length))
+        } else if hit.format == "gif" {
+            gif_boundary::validated_gif_length(&data[rel..])
+                .ok()
+                .map(|length| ("gif", length))
+        } else if hit.format == "uimage" {
+            uboot_image::validated_uimage_length(&data[rel..])
+                .ok()
+                .map(|length| ("uimage", length))
         } else {
             jpeg_boundary::validated_jpeg_length(&data[rel..], base + hit.offset)
                 .ok()

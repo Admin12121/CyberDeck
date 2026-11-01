@@ -64,7 +64,7 @@ export function YaraSubsetPanel({
         <div id="forensics-yara-subset" className="mt-2 space-y-2">
           <p className="text-[11px] leading-relaxed text-fg-muted">
             Read-only native rule subset: ASCII / nocase or hex bytes (?? wildcard), 1–16 patterns,
-            any/all condition; no regex, modules, full YARA compatibility or executable evaluation.
+            any/all/N-of-them condition (N up to 16); no regex, modules, full YARA compatibility or executable evaluation.
             Rules stay in this view only and are not saved to evidence.
           </p>
           <label className="block text-[11px] text-fg-dim" htmlFor="forensics-yara-source">Rule source (ASCII, up to 4096 bytes)</label>

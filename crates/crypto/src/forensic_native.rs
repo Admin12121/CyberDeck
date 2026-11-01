@@ -539,6 +539,27 @@ fn valid_exif_datetime(text: &str) -> bool {
     year > 0 && day > 0 && day <= days && num(11, 13) < 24 && num(14, 16) < 60 && num(17, 19) < 60
 }
 
+// EXIF 2.3x records fractional seconds and UTC offsets independently of
+// its local calendar fields. Never create an absolute instant from an absent
+// offset: return the exact validated text and evidence byte position instead.
+fn valid_exif_subseconds(value: &str) -> bool {
+    (1..=18).contains(&value.len()) && value.as_bytes().iter().all(u8::is_ascii_digit)
+}
+
+fn valid_exif_utc_offset(value: &str) -> bool {
+    let b = value.as_bytes();
+    if b.len() != 6
+        || !matches!(b[0], b'+' | b'-')
+        || b[3] != b':'
+        || ![1usize, 2, 4, 5].iter().all(|&i| b[i].is_ascii_digit())
+    {
+        return false;
+    }
+    let hour = (b[1] - b'0') * 10 + (b[2] - b'0');
+    let minute = (b[4] - b'0') * 10 + (b[5] - b'0');
+    hour <= 14 && minute < 60 && (hour < 14 || minute == 0)
+}
+
 fn exif_rational(data: &[u8], entry: usize, le: bool) -> Result<(u32, u32, usize), String> {
     let at = tiff_u32(data, entry + 8, le)? as usize;
     let numerator = tiff_u32(data, at, le)?;
@@ -567,6 +588,12 @@ fn exif_subifd(
         let key = match tag {
             0x9003 => "datetime_original",
             0x9004 => "datetime_digitized",
+            0x9010 => "utc_offset",
+            0x9011 => "utc_offset_original",
+            0x9012 => "utc_offset_digitized",
+            0x9290 => "subsecond",
+            0x9291 => "subsecond_original",
+            0x9292 => "subsecond_digitized",
             0x829a => "exposure_time",
             0x8827 => "iso",
             0x920a => "focal_length_mm",
@@ -585,6 +612,26 @@ fn exif_subifd(
                 let (value, offset) = exif_text(data, entry, le, num, 20, true)?;
                 if !valid_exif_datetime(&value) {
                     return Err("invalid EXIF date/time".into());
+                }
+                (value, offset)
+            }
+            0x9010 | 0x9011 | 0x9012 => {
+                if kind != 2 || num != 7 {
+                    return Err("invalid EXIF UTC offset type or size".into());
+                }
+                let (value, offset) = exif_text(data, entry, le, num, 7, true)?;
+                if !valid_exif_utc_offset(&value) {
+                    return Err("invalid EXIF UTC offset".into());
+                }
+                (value, offset)
+            }
+            0x9290 | 0x9291 | 0x9292 => {
+                if kind != 2 || !(2..=19).contains(&num) {
+                    return Err("invalid EXIF fractional seconds type or size".into());
+                }
+                let (value, offset) = exif_text(data, entry, le, num, 19, true)?;
+                if !valid_exif_subseconds(&value) {
+                    return Err("invalid EXIF fractional seconds".into());
                 }
                 (value, offset)
             }
@@ -1135,6 +1182,143 @@ mod tests {
             assert!(!f.iter().any(|f| f.namespace == "exif.subifd"));
             assert!(metadata(&jpeg(&original)[..45], 0).is_err());
             assert!(metadata(&data, u64::MAX).is_err());
+        }
+    }
+
+    #[test]
+    fn exif_optional_time_precision_offsets_and_malformed_values_both_endians() {
+        fn write16(out: &mut [u8], at: usize, value: u16, le: bool) {
+            out[at..at + 2].copy_from_slice(&if le {
+                value.to_le_bytes()
+            } else {
+                value.to_be_bytes()
+            });
+        }
+        fn write32(out: &mut [u8], at: usize, value: u32, le: bool) {
+            out[at..at + 4].copy_from_slice(&if le {
+                value.to_le_bytes()
+            } else {
+                value.to_be_bytes()
+            });
+        }
+        fn fixture(le: bool) -> Vec<u8> {
+            let mut t = vec![0u8; 310];
+            t[..2].copy_from_slice(if le { b"II" } else { b"MM" });
+            write16(&mut t, 2, 42, le);
+            write32(&mut t, 4, 8, le);
+            write16(&mut t, 8, 1, le);
+            write16(&mut t, 10, 0x8769, le);
+            write16(&mut t, 12, 4, le);
+            write32(&mut t, 14, 1, le);
+            write32(&mut t, 18, 32, le);
+            write16(&mut t, 32, 8, le);
+            for (i, tag, n, value) in [
+                (0, 0x9003, 20, 160),
+                (1, 0x9004, 20, 200),
+                (2, 0x9010, 7, 240),
+                (3, 0x9011, 7, 248),
+                (4, 0x9012, 7, 256),
+                (5, 0x9290, 3, 0),
+                (6, 0x9291, 6, 270),
+                (7, 0x9292, 2, 0),
+            ] {
+                let e = 34 + i * 12;
+                write16(&mut t, e, tag, le);
+                write16(&mut t, e + 2, 2, le);
+                write32(&mut t, e + 4, n, le);
+                write32(&mut t, e + 8, value, le);
+            }
+            t[160..180].copy_from_slice(b"2024:02:29 13:47:59\0");
+            t[200..220].copy_from_slice(b"2024:02:29 14:47:59\0");
+            t[240..247].copy_from_slice(b"+00:00\0");
+            t[248..255].copy_from_slice(b"-05:45\0");
+            t[256..263].copy_from_slice(b"+02:30\0");
+            t[102..105].copy_from_slice(b"12\0"); // inline short ASCII
+            t[270..276].copy_from_slice(b"12345\0");
+            t[126..128].copy_from_slice(b"7\0");
+            t
+        }
+        fn jpeg(tiff: &[u8]) -> Vec<u8> {
+            let mut result = b"\xff\xd8\xff\xe1".to_vec();
+            result.extend_from_slice(&((tiff.len() + 8) as u16).to_be_bytes());
+            result.extend_from_slice(b"Exif\0\0");
+            result.extend_from_slice(tiff);
+            result.extend_from_slice(b"\xff\xd9");
+            result
+        }
+        for le in [true, false] {
+            let original = fixture(le);
+            let report = metadata(&jpeg(&original), 512).unwrap();
+            for (key, value, offset) in [
+                ("datetime_original", "2024:02:29 13:47:59", 160),
+                ("utc_offset", "+00:00", 240),
+                ("utc_offset_original", "-05:45", 248),
+                ("utc_offset_digitized", "+02:30", 256),
+                ("subsecond", "12", 102),
+                ("subsecond_original", "12345", 270),
+                ("subsecond_digitized", "7", 126),
+            ] {
+                assert!(
+                    report
+                        .fields
+                        .iter()
+                        .any(|field| field.namespace == "exif.subifd"
+                            && field.key == key
+                            && field.value == value
+                            && field.offset == 512 + 12 + offset),
+                    "missing or misplaced EXIF time field {key}, little-endian={le}"
+                );
+            }
+            let mut absent = original.clone();
+            write16(&mut absent, 34 + 3 * 12, 0xff01, le);
+            let fields = metadata(&jpeg(&absent), 0).unwrap().fields;
+            assert!(!fields.iter().any(|f| f.key == "utc_offset_original"));
+            assert!(fields.iter().any(|f| f.key == "datetime_original"));
+            let mut no_base = original.clone();
+            write16(&mut no_base, 34, 0xff03, le);
+            let fields = metadata(&jpeg(&no_base), 0).unwrap().fields;
+            assert!(!fields.iter().any(|f| f.key == "datetime_original"));
+            assert!(fields.iter().any(|f| f.key == "utc_offset_original"));
+            let mut bad = original.clone();
+            bad[248] = b'Z'; // EXIF offset is +HH:MM / -HH:MM, not arbitrary zone text
+            assert!(metadata(&jpeg(&bad), 0).is_err());
+            let mut bad = original.clone();
+            bad[249..251].copy_from_slice(b"15"); // maximum accepted magnitude is 14:00
+            assert!(metadata(&jpeg(&bad), 0).is_err());
+            let mut bad = original.clone();
+            bad[251] = b' '; // invalid colon
+            assert!(metadata(&jpeg(&bad), 0).is_err());
+            let mut bad = original.clone();
+            bad[252..254].copy_from_slice(b"60"); // invalid minutes
+            assert!(metadata(&jpeg(&bad), 0).is_err());
+            let mut bad = original.clone();
+            bad[254] = b'?'; // not NUL terminated
+            assert!(metadata(&jpeg(&bad), 0).is_err());
+            let mut bad = original.clone();
+            bad[270] = b'x'; // nondigit subsecond
+            assert!(metadata(&jpeg(&bad), 0).is_err());
+            let mut bad = original.clone();
+            bad[272] = 0; // embedded NUL with trailing bytes rejected
+            assert!(metadata(&jpeg(&bad), 0).is_err());
+            let mut bad = original.clone();
+            write16(&mut bad, 34 + 4 * 12, 0x9011, le); // duplicate offsets
+            assert!(metadata(&jpeg(&bad), 0).is_err());
+            let mut bad = original.clone();
+            write16(&mut bad, 34 + 6 * 12 + 2, 3, le); // wrong field type
+            assert!(metadata(&jpeg(&bad), 0).is_err());
+            let mut bad = original.clone();
+            write32(&mut bad, 34 + 6 * 12 + 4, 200, le); // unbounded subsecond count
+            assert!(metadata(&jpeg(&bad), 0).is_err());
+            let mut bad = original.clone();
+            write32(&mut bad, 34 + 2 * 12 + 8, 9000, le); // offset out of range
+            assert!(metadata(&jpeg(&bad), 0).is_err());
+            assert!(metadata(&jpeg(&original)[..60], 0).is_err());
+            assert!(metadata(&jpeg(&original), u64::MAX).is_err());
+            let mut valid = original.clone();
+            valid[248..255].copy_from_slice(b"+14:00\0");
+            assert!(metadata(&jpeg(&valid), 0).is_ok());
+            valid[252..254].copy_from_slice(b"01"); // +14:01 is impossible
+            assert!(metadata(&jpeg(&valid), 0).is_err());
         }
     }
 

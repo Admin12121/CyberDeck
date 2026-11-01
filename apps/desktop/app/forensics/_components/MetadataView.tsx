@@ -77,7 +77,7 @@ export function MetadataView({ active }: { active: boolean }) {
             </section>
             <section aria-label="Parsed native metadata" className="space-y-3">
               <h3 className="font-mono text-xs font-semibold text-fg">Native metadata inspector</h3>
-              <p className="text-xs text-fg-muted">Read-only, bounded TIFF/EXIF and PNG/JPEG metadata subset. Values are parsed from the selected case artifact; no timezone is inferred from EXIF capture timestamps.</p>
+              <p className="text-xs text-fg-muted">Read-only, bounded TIFF/EXIF and PNG/JPEG metadata subset. Values are parsed from the selected case artifact. Original/digitized times are local camera clock values; separate optional UTC offsets and fractional-second digits appear exactly as recorded. A missing offset is unknown, not UTC; no timestamp conversion is performed.</p>
               {error ? <div role="alert" className="border border-err/50 p-2 text-xs text-err">{error}</div> : null}
               {loading ? <div role="status" className="text-xs text-fg-muted">Verifying complete source SHA-256 and parsing available metadata…</div> : null}
               {data ? (

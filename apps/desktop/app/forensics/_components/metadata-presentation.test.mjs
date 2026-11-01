@@ -28,3 +28,21 @@ test("unknown optional tags remain visible, never fabricate values", () => {
   assert.equal(presentMetadataFields([{ namespace: "exif.gps", key: "latitude", value: "27.012345", offset: 44 }])[0].suffix, "°");
   assert.equal(sourceOffsetHex(Number.NaN), "unavailable");
 });
+
+test("EXIF fractional and UTC-offset tags remain separately sourced and do not imply UTC conversion", () => {
+  const fields = [
+    { namespace: "exif.subifd", key: "datetime_original", value: "2024:02:29 13:47:59", offset: 92 },
+    { namespace: "exif.subifd", key: "utc_offset_original", value: "+05:45", offset: 116 },
+    { namespace: "exif.subifd", key: "subsecond_original", value: "00420", offset: 127 },
+    { namespace: "exif.subifd", key: "utc_offset_digitized", value: "-05:00", offset: 248 },
+  ];
+  const groups = availableMetadataGroups(fields);
+  assert.deepEqual(groups.map((group) => group.name), ["Capture times"]);
+  const presented = groups[0].fields;
+  assert.equal(presented[0].value, "2024:02:29 13:47:59");
+  assert.match(presented[0].label, /timezone unspecified without offset/);
+  assert.deepEqual(presented.slice(1).map((f) => f.value), ["+05:45", "00420", "-05:00"]);
+  for (const item of presented) assert.equal(item.offsetBasis, "Evidence source value offset");
+  assert.equal(sourceOffsetHex(presented[2].offset), "0x7f");
+  assert.ok(!presented.some((f) => f.key === "datetime_digitized"));
+});

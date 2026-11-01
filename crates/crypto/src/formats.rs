@@ -31,6 +31,9 @@ pub struct SignatureHit {
 }
 
 fn matched(tail: &[u8]) -> Option<(&'static str, &'static str)> {
+    if tail.len() >= 64 && tail.starts_with(b"\x27\x05\x19\x56") {
+        return Some(("uimage", "U-Boot legacy image header candidate"));
+    }
     if tail.starts_with(b"\x89PNG\r\n\x1a\n") {
         return Some(("png", "PNG image header"));
     }
@@ -127,7 +130,7 @@ pub fn scan_signatures(bytes: &[u8], max_hits: usize) -> Vec<SignatureHit> {
         // Cheap dispatch avoids a full signature table check on most bytes.
         let candidate = if matches!(
             first,
-            0xfe | 0xce
+            0x27 | 0xfe | 0xce
                 | 0xcf
                 | 0x89
                 | b'%'

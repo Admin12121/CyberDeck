@@ -186,3 +186,50 @@ fn active_scans_require_acknowledgment() {
     assert!(require_authorization(false).is_err());
     assert!(require_authorization(true).is_ok());
 }
+
+#[test]
+fn get_form_action_discovery_never_turns_post_into_get() {
+    let html = "<form method='POST' action='/submit'></form>        <form action='/search' method='GET'></form>        <form action=/lookup></form>        <form method='dialog' action='/dialog'></form>        <script>const x = \"<form action='/fake'>\";</script>        <!-- <form action='/comment'> -->        <a href=/home>Home</a>";
+    assert_eq!(extract_hrefs(html), vec!["/search", "/lookup", "/home"]);
+}
+
+#[tokio::test]
+async fn spider_get_forms_reach_only_same_origin_without_post_submission() {
+    use tokio::io::AsyncWriteExt;
+    tokio::time::timeout(std::time::Duration::from_secs(9), async {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let pages = [
+            "/", "/safe", "/default"
+        ];
+        let server = tokio::spawn(async move {
+            let mut visited = Vec::new();
+            for _ in 0..pages.len() {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let (head, _) =
+                    crate::features::web::webtls::read_http_message(&mut stream).await.unwrap();
+                assert!(head.starts_with("GET "), "{head}");
+                let path = head.split_whitespace().nth(1).unwrap_or("").to_owned();
+                visited.push(path.clone());
+                let body = if path == "/" {
+                    "<form action='/safe' method='GET'></form>                     <form method='post' action='/submit'></form>                     <form action=/default></form>                     <form action='http://outside.invalid/escape'></form>"
+                } else { "" };
+                let response = format!("HTTP/1.1 200 OK\\r\\nContent-Type: text/html\\r\\nContent-Length: {}\\r\\nConnection: close\\r\\n\\r\\n", body.len());
+                stream.write_all(response.as_bytes()).await.unwrap();
+                stream.write_all(body.as_bytes()).await.unwrap();
+            }
+            visited
+        });
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(3))
+            .redirect(reqwest::redirect::Policy::none()).no_proxy().build().unwrap();
+        let urls = crawl_application::run_spider_with_progress(
+            &client, format!("http://127.0.0.1:{port}/"), 3, true, &|_, _| {}
+        ).await.unwrap();
+        assert_eq!(urls.len(), 3, "{urls:?}");
+        assert!(urls.iter().any(|u| u.ends_with("/safe")));
+        assert!(urls.iter().any(|u| u.ends_with("/default")));
+        assert!(!urls.iter().any(|u| u.contains("/submit") || u.contains("outside.invalid")));
+        assert_eq!(server.await.unwrap(), vec!["/", "/safe", "/default"]);
+    }).await.expect("same-origin GET form crawler fixture timed out");
+}

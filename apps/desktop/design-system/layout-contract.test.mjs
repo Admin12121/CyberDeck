@@ -44,7 +44,7 @@ test("all browser exports use one checked helper rather than local anchor implem
   for (const view of [
     "app/crypto/_components/RecipesView.tsx",
     "app/forensics/_components/CaseFindingsView.tsx",
-    "app/web/_components/ProxyView.tsx",
+    "app/web/_components/ProxyCertificateAction.tsx",
   ]) {
     assert.match(source(view), /downloadContent\(/);
     assert.doesNotMatch(source(view), /URL\.createObjectURL\(/);

@@ -3,8 +3,9 @@
 use super::scan_domain::require_authorization;
 use std::collections::{HashSet, VecDeque};
 
-/// Extract href values from bounded HTML, recognizing single, double and
-/// unquoted forms. Comment/script/style content is ignored by the crawler.
+/// Extract safe navigational links and GET-form actions from bounded HTML.
+/// POST forms are never submitted or converted into automatic GET requests.
+/// Comment/script/style content is ignored by this deliberately limited parser.
 pub(super) fn extract_hrefs(html: &str) -> Vec<&str> {
     let bytes = html.as_bytes();
     let mut links = Vec::new();
@@ -36,12 +37,16 @@ pub(super) fn extract_hrefs(html: &str) -> Vec<&str> {
             }
             continue;
         }
+        let is_form = tag.eq_ignore_ascii_case("form");
         if !(tag.eq_ignore_ascii_case("a")
             || tag.eq_ignore_ascii_case("link")
-            || tag.eq_ignore_ascii_case("area"))
+            || tag.eq_ignore_ascii_case("area")
+            || is_form)
         {
             continue;
         }
+        let mut form_action = None;
+        let mut form_method = None;
         while i < bytes.len() && bytes[i] != b'>' {
             while i < bytes.len() && (bytes[i].is_ascii_whitespace() || bytes[i] == b'/') {
                 i += 1;
@@ -56,7 +61,9 @@ pub(super) fn extract_hrefs(html: &str) -> Vec<&str> {
                 i += 1;
                 continue;
             }
-            let is_href = bytes[key_start..i].eq_ignore_ascii_case(b"href");
+            let is_href = !is_form && bytes[key_start..i].eq_ignore_ascii_case(b"href");
+            let is_form_action = is_form && bytes[key_start..i].eq_ignore_ascii_case(b"action");
+            let is_form_method = is_form && bytes[key_start..i].eq_ignore_ascii_case(b"method");
             while i < bytes.len() && bytes[i].is_ascii_whitespace() {
                 i += 1;
             }
@@ -84,15 +91,26 @@ pub(super) fn extract_hrefs(html: &str) -> Vec<&str> {
                 }
                 i += 1;
             }
-            if is_href {
-                if let Some(href) = html.get(start..i) {
-                    if !href.is_empty() {
-                        links.push(href);
-                    }
+            if let Some(value) = html.get(start..i) {
+                if is_href && !value.is_empty() {
+                    links.push(value);
+                }
+                if is_form_action {
+                    form_action = Some(value);
+                }
+                if is_form_method {
+                    form_method = Some(value);
                 }
             }
             if quote.is_some() && i < bytes.len() {
                 i += 1;
+            }
+        }
+        // HTML defaults missing method to GET. Unknown/POST methods are
+        // intentionally skipped: no accidental form submissions.
+        if is_form && form_method.is_none_or(|method: &str| method.eq_ignore_ascii_case("get")) {
+            if let Some(action) = form_action.filter(|value: &&str| !value.is_empty()) {
+                links.push(action);
             }
         }
     }

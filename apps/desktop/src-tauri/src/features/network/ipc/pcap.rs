@@ -6,7 +6,9 @@ use std::sync::Mutex;
 use cyberdeck_packet::{parse_capture, PacketMeta};
 use tauri::{AppHandle, State};
 
+use crate::features::forensics::ipc::evidence::EvidenceCtx;
 use crate::features::forensics::ipc::evidence::HexResponse;
+use crate::features::shared::session::CaseSessionCtx;
 
 #[path = "../application/capture_cache.rs"]
 mod capture_cache;
@@ -20,6 +22,8 @@ mod hex_format;
 mod pcap_commands;
 #[path = "pcap_wire.rs"]
 mod pcap_wire;
+#[path = "saved_capture.rs"]
+mod saved_capture;
 pub use capture_cache::CachedCapture;
 #[cfg(test)]
 use pcap_wire::wire_packet;
@@ -76,6 +80,39 @@ pub fn pcap_packet_bytes(
     len: i64,
 ) -> Result<HexResponse, String> {
     pcap_commands::packet_bytes(ctx, index, offset, len)
+}
+
+/// Case-authorized verified original PCAP reopen: artifact ID only, no path.
+#[tauri::command]
+pub fn pcap_open_case_v1(
+    artifact_id: String,
+    evidence: State<'_, EvidenceCtx>,
+    session: State<'_, CaseSessionCtx>,
+) -> Result<PcapOpenWire, String> {
+    saved_capture::open(&evidence, &session, &artifact_id)
+}
+
+/// Read an original saved frame through Agent5's pinned verified handle.
+#[tauri::command]
+pub fn pcap_case_packet_bytes_v1(
+    artifact_id: String,
+    index: usize,
+    offset: i64,
+    len: i64,
+    evidence: State<'_, EvidenceCtx>,
+    session: State<'_, CaseSessionCtx>,
+) -> Result<HexResponse, String> {
+    saved_capture::packet_bytes(&evidence, &session, &artifact_id, index, offset, len)
+}
+
+#[tauri::command]
+pub fn pcap_case_follow_stream_v1(
+    artifact_id: String,
+    stream_id: String,
+    evidence: State<'_, EvidenceCtx>,
+    session: State<'_, CaseSessionCtx>,
+) -> Result<cyberdeck_packet::streams::StreamTranscript, String> {
+    saved_capture::follow_stream(&evidence, &session, &artifact_id, &stream_id)
 }
 
 #[cfg(test)]

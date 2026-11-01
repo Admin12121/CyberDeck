@@ -21,6 +21,8 @@ pub struct CompiledRule {
     pub name: String,
     pub patterns: Vec<Pattern>,
     pub require_all: bool,
+    /// Number of distinct bounded literal/hex identifiers required to match.
+    pub minimum_matches: usize,
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuleHit {
@@ -141,7 +143,7 @@ fn parse_pattern(src: &str, id: String) -> Result<Pattern, String> {
 ///     $name = "ASCII" [ascii] [nocase]
 ///     $other = { 4D 5A ?? 00 }
 ///   condition:
-///     any of them | all of them
+///     any of them | all of them | N of them (1 <= N <= number of patterns)
 /// }
 ///
 /// Rule must be <=4 KiB, with 1..=16 patterns of <=64 bytes each.
@@ -182,10 +184,23 @@ pub fn compile_yara_subset(src: &str) -> Result<CompiledRule, String> {
     if !found_condition || patterns.is_empty() {
         return Err("missing condition or patterns".into());
     }
-    let require_all = match lines.next() {
-        Some("any of them") => false,
-        Some("all of them") => true,
-        _ => return Err("only any/all of them conditions supported".into()),
+    let (require_all, minimum_matches) = match lines.next() {
+        Some("any of them") => (false, 1),
+        Some("all of them") => (true, patterns.len()),
+        Some(line) => {
+            let parts = line.split_ascii_whitespace().collect::<Vec<_>>();
+            if parts.len() != 3 || parts[1] != "of" || parts[2] != "them" {
+                return Err("only any/all/N of them conditions supported".into());
+            }
+            let minimum = parts[0]
+                .parse::<usize>()
+                .map_err(|_| "invalid numeric YARA threshold")?;
+            if minimum == 0 || minimum > patterns.len() {
+                return Err("YARA threshold must be between 1 and pattern count".into());
+            }
+            (false, minimum)
+        }
+        None => return Err("missing YARA condition".into()),
     };
     if lines.next() != Some("}") || lines.next().is_some() {
         return Err("unexpected trailing rule syntax".into());
@@ -194,6 +209,7 @@ pub fn compile_yara_subset(src: &str) -> Result<CompiledRule, String> {
         name: header[1].to_owned(),
         patterns,
         require_all,
+        minimum_matches,
     })
 }
 
@@ -241,11 +257,10 @@ pub fn evaluate_yara_subset(
             break;
         }
     }
-    let matched = if rule.require_all {
-        hits.len() == rule.patterns.len()
-    } else {
-        !hits.is_empty()
-    };
+    if rule.minimum_matches == 0 || rule.minimum_matches > rule.patterns.len() {
+        return Err("invalid compiled YARA match threshold".into());
+    }
+    let matched = hits.len() >= rule.minimum_matches;
     Ok(RuleResult {
         rule: rule.name.clone(),
         matched,
@@ -298,6 +313,53 @@ mod tests {
             );
         }
     }
+    #[test]
+    fn numeric_threshold_counts_distinct_identifiers_not_occurrences() {
+        let mk = |condition: &str| {
+            format!(
+            "rule marker {{\nstrings:\n$a = \"ALPHA\"\n$b = {{ 4D 5A ?? 90 }}\n$c = \"GAMMA\"\ncondition:\n{condition}\n}}"
+        )
+        };
+        let corpus = b"ALPHA-ALPHA-MZ\x10\x90-ALPHA";
+        let two = compile_yara_subset(&mk("2 of them")).unwrap();
+        assert_eq!(two.minimum_matches, 2);
+        assert!(!two.require_all);
+        let found = evaluate_yara_subset(&two, corpus, 500).unwrap();
+        assert!(found.matched);
+        assert_eq!(found.hits.len(), 2);
+        assert_eq!(found.hits[0].identifier, "a");
+        assert_eq!(found.hits[0].offset, 500);
+        assert_eq!(found.hits[1].identifier, "b");
+        assert_eq!(found.hits[1].offset, 500 + 12);
+        let three = compile_yara_subset(&mk("3 of them")).unwrap();
+        assert!(!evaluate_yara_subset(&three, corpus, 0).unwrap().matched);
+        assert!(
+            evaluate_yara_subset(&compile_yara_subset(&mk("any of them")).unwrap(), corpus, 0)
+                .unwrap()
+                .matched
+        );
+        assert!(
+            !evaluate_yara_subset(&compile_yara_subset(&mk("all of them")).unwrap(), corpus, 0)
+                .unwrap()
+                .matched
+        );
+        for condition in [
+            "0 of them",
+            "4 of them",
+            "999999999999999999999 of them",
+            "-1 of them",
+            "2 of $a",
+            "2 of ($a,$b)",
+            "2.5 of them",
+            "1 of them or true",
+        ] {
+            assert!(compile_yara_subset(&mk(condition)).is_err(), "{condition}");
+        }
+        let mut corrupt = two;
+        corrupt.minimum_matches = 4;
+        assert!(evaluate_yara_subset(&corrupt, corpus, 0).is_err());
+    }
+
     #[test]
     fn deterministic_bounded_work_and_offset_overflow() {
         let rule =

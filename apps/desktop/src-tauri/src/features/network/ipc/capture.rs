@@ -87,9 +87,25 @@ impl CaptureCtx {
     }
 }
 
+/// Existing interface fields stay compatible; support is independently reported
+/// so discovery never falsely advertises capture-ready Windows adapters.
+#[derive(serde::Serialize)]
+pub struct CaptureInterfaceWire {
+    #[serde(flatten)]
+    interface: CaptureInterface,
+    capture_supported: bool,
+}
+
 #[tauri::command]
-pub fn capture_interfaces_v1() -> Result<Vec<CaptureInterface>, String> {
-    live::discover_interfaces().map_err(|e| e.message)
+pub fn capture_interfaces_v1() -> Result<Vec<CaptureInterfaceWire>, String> {
+    Ok(live::discover_interfaces()
+        .map_err(|error| error.message)?
+        .into_iter()
+        .map(|interface| CaptureInterfaceWire {
+            interface,
+            capture_supported: cfg!(target_os = "linux"),
+        })
+        .collect())
 }
 
 /// The operator must select a real Linux interface. The OS prompt is a

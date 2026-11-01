@@ -8,6 +8,9 @@ import {
   pcapFollowStream,
   pcapOpenDialog,
   pcapPacketBytes,
+  pcapOpenCaseV1,
+  pcapCasePacketBytesV1,
+  pcapCaseFollowStreamV1,
   type HexResponseWire,
   type PcapOpenWire,
   type PcapPacketWire,
@@ -54,6 +57,7 @@ function ImportedCaptureView() {
   const desktop = isDesktop();
   const wb = useWorkbench();
   const [capture, setCapture] = useState<PcapOpenWire | null>(null);
+  const [savedArtifactId, setSavedArtifactId] = useState<string | null>(null);
   const [screen, setScreen] = useState<"welcome" | "offline" | "native">("welcome");
   const [showSample, setShowSample] = useState(false);
   const [openError, setOpenError] = useState<string | null>(null);
@@ -73,6 +77,7 @@ function ImportedCaptureView() {
   useEffect(() => {
     openSequence.current += 1;
     setCapture(null);
+    setSavedArtifactId(null);
     setScreen("welcome");
     setShowSample(false);
     setSelected(0);
@@ -93,6 +98,7 @@ function ImportedCaptureView() {
       const wire = await pcapOpenDialog();
       if (!isCurrent()) return;
       setCapture(wire);
+      setSavedArtifactId(null);
       setScreen("offline");
       setShowSample(false);
       setSelected(0);
@@ -105,6 +111,30 @@ function ImportedCaptureView() {
     }
   };
 
+
+  const openSavedCase = async (artifactId: string) => {
+    const caseId = wb.caseId;
+    const ticket = ++openSequence.current;
+    const isCurrent = () => currentCase.current === caseId && ticket === openSequence.current;
+    setOpening(true);
+    setOpenError(null);
+    try {
+      // Storage verifies same-descriptor SHA256, selected case revision and
+      // original capture eligibility before any packet metadata is exposed.
+      const wire = await pcapOpenCaseV1(artifactId);
+      if (!isCurrent()) return;
+      setSavedArtifactId(artifactId);
+      setCapture(wire);
+      setScreen("offline");
+      setShowSample(false);
+      setSelected(0);
+      setPacketBytes(null);
+    } catch (cause) {
+      if (isCurrent()) setOpenError("Could not reopen verified case capture: " + String(cause));
+    } finally {
+      if (isCurrent()) setOpening(false);
+    }
+  };
 
   const filtered = useMemo(() => {
     const q = filter.trim();
@@ -129,7 +159,7 @@ function ImportedCaptureView() {
     let cancelled = false;
     const caseId = wb.caseId;
     setPacketBytes(null);
-    pcapPacketBytes(currentIndex, 0, 512)
+    (savedArtifactId ? pcapCasePacketBytesV1(savedArtifactId, currentIndex, 0, 512) : pcapPacketBytes(currentIndex, 0, 512))
       .then((data) => {
         if (!cancelled && currentCase.current === caseId) setPacketBytes({ frameIndex: currentIndex, data });
       })
@@ -139,12 +169,19 @@ function ImportedCaptureView() {
         }
       });
     return () => { cancelled = true; };
-  }, [capture, currentIndex, wb.caseId]);
+  }, [capture, currentIndex, wb.caseId, savedArtifactId]);
 
   const sampleBytes = useMemo(
     () => (!capture && current ? sampleFrameBytes(current.index + 1, Math.min(current.length, 160)) : new Uint8Array()),
     [capture, current],
   );
+
+  const inspectProtocol = (protocol: string) => {
+    // Statistics are derived from actual dissected packet.protocol values.
+    // The supported display-filter language accepts these protocol tokens.
+    setFilter(protocol.toLowerCase());
+    setTab("packets");
+  };
 
   const timeLabel = (ms: number) => `${(ms / 1000).toFixed(6)}`;
 
@@ -163,6 +200,7 @@ function ImportedCaptureView() {
         <div className={screen === "welcome" ? "mt-auto shrink-0 pt-2" : "min-h-0 flex-1"}>
           <LiveCaptureView presentation={screen === "welcome" ? "setup" : "full"}
             onCaptureStarted={() => setScreen("native")}
+            onOpenSavedArtifact={(artifactId) => void openSavedCase(artifactId)}
             onReturnToStart={() => setScreen("welcome")} />
         </div>
       </div>
@@ -260,7 +298,15 @@ function ImportedCaptureView() {
                   const totalBytes = filtered.reduce((sum, item) => sum + item.length, 0) || 1;
                   return (
                     <tr key={stat.protocol}>
-                      <td className={PROTOCOL_COLORS[stat.protocol.toLowerCase()] ?? "text-fg-dim"}>{stat.protocol}</td>
+                      <td>
+                        <button type="button"
+                          className={`w-full rounded-sm px-1 py-0.5 text-left font-mono text-[11px] hover:bg-selected focus-visible:outline focus-visible:outline-1 focus-visible:outline-ring ${PROTOCOL_COLORS[stat.protocol.toLowerCase()] ?? "text-fg-dim"}`}
+                          title={`Filter packets by ${stat.protocol}`}
+                          aria-label={`Show ${stat.protocol} packets`}
+                          onClick={() => inspectProtocol(stat.protocol)}>
+                          {stat.protocol}
+                        </button>
+                      </td>
                       <td>{stat.packets}</td>
                       <td>{stat.bytes}</td>
                       <td>
@@ -274,7 +320,7 @@ function ImportedCaptureView() {
               </tbody>
             </table>
           ) : (
-            <FollowStreamView packets={filtered} />
+            <FollowStreamView packets={filtered} artifactId={savedArtifactId} />
           )}
         </div>
 }
@@ -360,7 +406,7 @@ function DetailBranch({ node, depth }: { node: DetailNode; depth: number }) {
 
 // ---------------------------------------------------------- follow stream ---
 
-function FollowStreamView({ packets }: { packets: DisplayPacket[] }) {
+function FollowStreamView({ packets, artifactId }: { packets: DisplayPacket[]; artifactId?: string | null }) {
   const wb = useWorkbench();
   const desktop = isDesktop();
   const withStream = packets.filter((p) => p.stream_id);
@@ -399,7 +445,7 @@ function FollowStreamView({ packets }: { packets: DisplayPacket[] }) {
     setStreamError(null);
     if (!selected) return;
     let cancelled = false;
-    pcapFollowStream(selected)
+    (artifactId ? pcapCaseFollowStreamV1(artifactId, selected) : pcapFollowStream(selected))
       .then((data) => {
         if (!cancelled) setTranscript(data);
       })
@@ -409,7 +455,7 @@ function FollowStreamView({ packets }: { packets: DisplayPacket[] }) {
     return () => {
       cancelled = true;
     };
-  }, [selected, packets]);
+  }, [selected, packets, artifactId]);
 
   if (!desktop) {
     return (

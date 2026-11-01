@@ -71,7 +71,12 @@ pub fn discover_interfaces() -> Result<Vec<CaptureInterface>, CaptureError> {
     discover_from(std::path::Path::new("/sys/class/net"))
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(target_os = "windows")]
+pub fn discover_interfaces() -> Result<Vec<CaptureInterface>, CaptureError> {
+    crate::infrastructure::windows_interfaces::discover()
+}
+
+#[cfg(all(not(target_os = "linux"), not(target_os = "windows")))]
 pub fn discover_interfaces() -> Result<Vec<CaptureInterface>, CaptureError> {
     Err(CaptureError::new(
         CaptureErrorCode::UnsupportedPlatform,

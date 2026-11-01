@@ -659,6 +659,7 @@ export async function fileExtractNestedArchive(
 // --- native bounded Linux capture sessions (host verification pending) -------
 
 export interface CaptureInterfaceV1 {
+  capture_supported?: boolean;
   name: string;
   index: number;
   ethernet: boolean;
@@ -845,6 +846,26 @@ export async function pcapFollowStream(streamId: string): Promise<StreamTranscri
 export async function pcapPacketBytes(index: number, offset: number, len: number): Promise<HexResponseWire> {
   if (!inTauri) throw new Error("capture inspection requires the desktop runtime");
   return invoke<HexResponseWire>("pcap_packet_bytes", { index, offset, len });
+}
+
+
+// Original saved case capture uses a backend-selected case, verified immutable
+// artifact handle and limited parser outputs; no evidence path or raw PCAP IPC.
+export async function pcapOpenCaseV1(artifactId: string): Promise<PcapOpenWire> {
+  if (!inTauri) throw new Error("Opening saved case evidence requires desktop");
+  return invoke<PcapOpenWire>("pcap_open_case_v1", { artifactId });
+}
+export async function pcapCasePacketBytesV1(
+  artifactId: string, index: number, offset: number, len: number,
+): Promise<HexResponseWire> {
+  if (!inTauri) throw new Error("Saved packet evidence requires desktop");
+  return invoke<HexResponseWire>("pcap_case_packet_bytes_v1", { artifactId, index, offset, len });
+}
+export async function pcapCaseFollowStreamV1(
+  artifactId: string, streamId: string,
+): Promise<StreamTranscriptWire> {
+  if (!inTauri) throw new Error("Saved stream evidence requires desktop");
+  return invoke<StreamTranscriptWire>("pcap_case_follow_stream_v1", { artifactId, streamId });
 }
 
 // --- recovery + file digests --------------------------------------------------

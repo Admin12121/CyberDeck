@@ -20,6 +20,22 @@ const INTERESTING_PATHS: &[(&str, &str)] = &[
     ("/server-status", "Apache server-status reachable"),
 ];
 
+/// A non-secret, intentionally unrelated Origin used to test whether an
+/// endpoint grants credentialed browser reads to an arbitrary web origin.
+const CORS_PROBE_ORIGIN: &str = "https://cyberdeck-cors-probe.invalid";
+
+fn credentialed_cors_reflection(headers: &reqwest::header::HeaderMap) -> bool {
+    let origin = headers
+        .get("access-control-allow-origin")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    let credentials = headers
+        .get("access-control-allow-credentials")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    origin == CORS_PROBE_ORIGIN && credentials.eq_ignore_ascii_case("true")
+}
+
 const SECURITY_HEADERS: &[(&str, &str)] = &[
     ("content-security-policy", "Content-Security-Policy"),
     ("strict-transport-security", "Strict-Transport-Security"),
@@ -45,7 +61,7 @@ pub(super) async fn run_scan_with_progress(
     on_progress: &impl Fn(usize, usize),
 ) -> Result<Vec<Finding>, String> {
     require_authorization(authorized)?;
-    let total = INTERESTING_PATHS.len() + 1;
+    let total = INTERESTING_PATHS.len() + 2;
     on_progress(0, total);
     let mut origin = reqwest::Url::parse(target_url.trim())
         .map_err(|e| format!("invalid scan target URL: {e}"))?;
@@ -114,8 +130,28 @@ pub(super) async fn run_scan_with_progress(
         }
     }
 
+    // One extra bounded, origin-scoped active request. Wildcard ACAO with
+    // credentials is deliberately NOT reported: browsers reject that pair.
+    // Only a reflected arbitrary Origin together with credentials is a
+    // potential issue, and the report asks for operator validation.
+    let cors = client
+        .get(&base)
+        .header(reqwest::header::ORIGIN, CORS_PROBE_ORIGIN)
+        .send()
+        .await;
+    if let Ok(response) = cors {
+        if response.status().is_success() && credentialed_cors_reflection(response.headers()) {
+            findings.push(Finding {
+                severity: "medium".into(),
+                title: "potential credentialed CORS origin reflection".into(),
+                detail: "Server accepted an unrelated Origin with credentials. Verify authenticated browser read access and intended cross-origin policy before treating this as exploitable.".into(),
+                evidence: format!("{base} -> Access-Control-Allow-Origin: {CORS_PROBE_ORIGIN}; Access-Control-Allow-Credentials: true"),
+            });
+        }
+    }
+    on_progress(2, total);
     for (index, (path, note)) in INTERESTING_PATHS.iter().enumerate() {
-        on_progress(index + 1, total);
+        on_progress(index + 2, total);
         let url = format!("{base}{path}");
         if let Ok(resp) = client.get(&url).send().await {
             let status = resp.status().as_u16();
@@ -146,4 +182,80 @@ pub(super) async fn run_scan_with_progress(
     }
     on_progress(total, total);
     Ok(findings)
+}
+
+#[cfg(test)]
+mod cors_probe_tests {
+    use super::*;
+    use tokio::io::AsyncWriteExt;
+
+    #[test]
+    fn only_credentialed_arbitrary_origin_reflection_is_reportable() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(
+            "access-control-allow-origin",
+            reqwest::header::HeaderValue::from_static(CORS_PROBE_ORIGIN),
+        );
+        headers.insert(
+            "access-control-allow-credentials",
+            reqwest::header::HeaderValue::from_static("true"),
+        );
+        assert!(credentialed_cors_reflection(&headers));
+        headers.insert(
+            "access-control-allow-origin",
+            reqwest::header::HeaderValue::from_static("*"),
+        );
+        assert!(!credentialed_cors_reflection(&headers));
+        headers.insert(
+            "access-control-allow-origin",
+            reqwest::header::HeaderValue::from_static(CORS_PROBE_ORIGIN),
+        );
+        headers.insert(
+            "access-control-allow-credentials",
+            reqwest::header::HeaderValue::from_static("false"),
+        );
+        assert!(!credentialed_cors_reflection(&headers));
+        headers.remove("access-control-allow-credentials");
+        assert!(!credentialed_cors_reflection(&headers));
+    }
+
+    #[tokio::test]
+    async fn localhost_scan_reports_only_confirmed_credentialed_cors_reflection() {
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let base = format!("http://{}", listener.local_addr().unwrap());
+            let server = tokio::spawn(async move {
+                for _ in 0..INTERESTING_PATHS.len() + 2 {
+                    let (mut stream, _) = listener.accept().await.unwrap();
+                    let (head, _) =
+                        crate::features::web::webtls::read_http_message(&mut stream).await.unwrap();
+                    let cors = head.to_ascii_lowercase().contains(&format!(
+                        "origin: {CORS_PROBE_ORIGIN}"
+                    ));
+                    let response = if cors {
+                        format!("HTTP/1.1 200 OK\r\nAccess-Control-Allow-Origin: {CORS_PROBE_ORIGIN}\r\nAccess-Control-Allow-Credentials: true\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                    } else {
+                        "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".into()
+                    };
+                    stream.write_all(response.as_bytes()).await.unwrap();
+                }
+            });
+            let client = reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(2))
+                .redirect(reqwest::redirect::Policy::none()).no_proxy()
+                .build().unwrap();
+            let progress = std::sync::Mutex::new(Vec::new());
+            let findings = run_scan_with_progress(&client, base.clone(), true, &|a,b| {
+                progress.lock().unwrap().push((a,b));
+            }).await.unwrap();
+            let cors: Vec<_> = findings.iter()
+                .filter(|f| f.title.contains("credentialed CORS")).collect();
+            assert_eq!(cors.len(), 1);
+            assert_eq!(cors[0].severity, "medium");
+            assert!(!cors[0].evidence.contains("cookie"));
+            assert_eq!(progress.lock().unwrap().last().copied(),
+                Some((INTERESTING_PATHS.len() + 2, INTERESTING_PATHS.len() + 2)));
+            server.await.unwrap();
+        }).await.expect("scoped CORS fixture timed out");
+    }
 }

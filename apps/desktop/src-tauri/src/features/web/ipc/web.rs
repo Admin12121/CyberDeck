@@ -125,6 +125,7 @@ pub(crate) async fn replay_authorized_case_message(
     permit: cyberdeck_storage::HistoryRevealPermit,
     id: u64,
     forwarded: bool,
+    pinned: &target_scope::PinnedTarget,
 ) -> Result<HttpResponseWire, String> {
     // Only backend-held case revision and Agent5's live grant are authority.
     // All synchronous locks are released before HTTP network awaits.
@@ -145,20 +146,36 @@ pub(crate) async fn replay_authorized_case_message(
     };
     authorize()?;
     let request = webhistory::replay_draft_authorized(grant, permit, id, forwarded)?;
-    // Captured traffic may originate from an attacker-controlled browser.
-    // Replay is a NEW active operation, not automatically authorized by capture.
-    // Until pinned DNS transport is available, fail closed for hostnames and
-    // non-private/public/metadata destinations, even with a valid reveal permit.
-    validate_assessment_target(&request.url)?;
+    // Captured traffic is untrusted. Only the exact origin and concrete
+    // addresses approved by the operator may be used. This also rules out
+    // a changed original/forwarded request or a second DNS lookup.
+    verify_pinned_replay_origin(&request.url, pinned)?;
     authorize()?;
-    // The authorized transport polls the backend authority while waiting for
-    // headers and each response chunk; passive consent expiry also cancels.
-    let reply = repeater_application::send_binary_authorized(request, &authorize).await?;
+    let reply = repeater_application::send_binary_authorized_with_client(
+        &pinned.client,
+        request,
+        &authorize,
+    )
+    .await?;
     // Shared publication lock serializes final check/return against reselect.
     session.with_current_publication(selected, || {
         authorize()?;
         Ok(reply)
     })
+}
+
+/// Compare the full origin, including scheme and port. DNS destinations
+/// are checked while preparing the pinned client, before native approval.
+fn verify_pinned_replay_origin(
+    request_url: &str,
+    pinned: &target_scope::PinnedTarget,
+) -> Result<(), String> {
+    let request = target_scope::parse_target(request_url)?;
+    if request.origin() != pinned.url.origin() || pinned.sockets.is_empty() {
+        return Err("replay target differs from approved pinned destination".into());
+    }
+    target_scope::vetted_answers(pinned.sockets.iter().copied())?;
+    Ok(())
 }
 
 /// A browser bool or a case_id parameter can never mint this grant.
@@ -245,11 +262,27 @@ pub async fn web_history_access_v1(
         return Err("invalid protected history action".into());
     }
     let is_replay = action == "replay";
-    let description = if is_replay {
+    // Resolve and validate ALL DNS answers before asking the operator for
+    // permission. The same isolated reqwest connector is used for dispatch.
+    let pinned = if is_replay {
         let selected_grant = selected_history_grant(&session, &selected, &proxy)?;
         let origin = webhistory::replay_target_origin(&selected_grant, id, forwarded)?;
-        format!("Replay the {} HTTP request #{} to {}? This sends a NEW network request, potentially with credentials. Only approve an authorized target.",
-            if forwarded { "forwarded" } else { "original" }, id, origin)
+        let prepared = target_scope::prepare_private_target(&origin).await?;
+        selected_history_grant(&session, &selected, &proxy)?;
+        Some(prepared)
+    } else {
+        None
+    };
+    let description = if let Some(prepared) = pinned.as_ref() {
+        let addresses = prepared
+            .sockets
+            .iter()
+            .map(|socket| socket.ip().to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!("Replay the {} HTTP request #{} to {} through pinned address(es) {}? This sends a NEW network request that may contain credentials. Only authorize systems you own or may test.",
+            if forwarded { "forwarded" } else { "original" }, id,
+            prepared.url.origin().ascii_serialization(), addresses)
     } else {
         format!("Reveal captured request/response headers and binary bodies for history #{}? This may include passwords, cookies and tokens. Sensitive content will be shown temporarily.", id)
     };
@@ -269,8 +302,18 @@ pub async fn web_history_access_v1(
     if is_replay {
         // Browser-captured URLs are untrusted: replay checks target restrictions
         // before any request is sent and rechecks consent/revision in-flight.
+        let approved_target = pinned
+            .as_ref()
+            .ok_or("approved replay destination missing")?;
         let result = replay_authorized_case_message(
-            &session, &selected, &proxy, &grant, permit, id, forwarded,
+            &session,
+            &selected,
+            &proxy,
+            &grant,
+            permit,
+            id,
+            forwarded,
+            approved_target,
         )
         .await?;
         Ok(WebHistoryAccessWire::Replay(result))
@@ -306,6 +349,41 @@ mod protected_history_ipc_tests {
                 ws: Mutex::new(vec![]),
             }),
         }
+    }
+
+    #[test]
+    fn replay_rejects_different_origin_and_unsafe_preapproved_socket() {
+        let url = reqwest::Url::parse("http://fixture.cyberdeck.test:8080/").unwrap();
+        let pinned = target_scope::PinnedTarget {
+            url,
+            client: reqwest::Client::new(),
+            sockets: vec!["127.0.0.1:8080".parse().unwrap()],
+        };
+        assert!(verify_pinned_replay_origin(
+            "http://fixture.cyberdeck.test:8080/original",
+            &pinned
+        )
+        .is_ok());
+        for changed in [
+            "http://fixture.cyberdeck.test:9090/modified",
+            "https://fixture.cyberdeck.test:8080/modified",
+            "http://attacker.cyberdeck.test:8080/modified",
+            "http://169.254.169.254:8080/",
+            "file:///tmp/secret",
+        ] {
+            assert!(
+                verify_pinned_replay_origin(changed, &pinned).is_err(),
+                "{changed}"
+            );
+        }
+        let untrusted = target_scope::PinnedTarget {
+            url: pinned.url.clone(),
+            client: reqwest::Client::new(),
+            sockets: vec!["169.254.169.254:8080".parse().unwrap()],
+        };
+        assert!(
+            verify_pinned_replay_origin("http://fixture.cyberdeck.test:8080/", &untrusted).is_err()
+        );
     }
 
     #[test]
@@ -792,11 +870,30 @@ pub fn ws_list(ctx: State<'_, WebCtx>) -> Vec<WsConnectionWire> {
 
 // --- external engine slots (GPLv2, user-approved) ------------------------------
 
+/// Only list engines whose entire outbound traffic is scoped by the native
+/// transport. Third-party sidecars can initiate undisclosed secondary network
+/// requests and must not be advertised as executable until sandboxed.
 #[tauri::command]
 pub async fn web_engines_detect() -> Vec<WebEngineStatus> {
-    engine_infrastructure::detect_engines().await
+    vec![WebEngineStatus {
+        id: "cyberdeck-native".into(),
+        label: "CyberDeck Native Web Scanner".into(),
+        license: "MIT".into(),
+        available: true,
+        version: "0.1".into(),
+    }]
 }
 
+fn require_scoped_engine(tool: &str) -> Result<(), String> {
+    if tool == "cyberdeck-native" {
+        Ok(())
+    } else {
+        Err("external Web engines are disabled until outbound scope can be enforced".into())
+    }
+}
+
+/// Compatible legacy command, but every executable path uses an approved
+/// pinned connector and the authoritative case/revision publication gate.
 #[tauri::command]
 pub async fn engine_scan(
     tool: String,
@@ -806,17 +903,38 @@ pub async fn engine_scan(
     session: State<'_, crate::features::shared::session::CaseSessionCtx>,
 ) -> Result<EngineScanResult, String> {
     scan_domain::require_authorization(authorized)?;
-    let url = validate_assessment_target(&target)?;
+    require_scoped_engine(&tool)?;
     let selected = session.selected()?;
-    // External engines are optional, separately licensed sidecars; require
-    // the same per-operation native authorization and backend case gate.
-    authorize_assessment(app, &session, &selected, &url).await?;
-    execute_case_scoped_assessment(
+    let pinned = target_scope::prepare_private_target(&target).await?;
+    session.ensure(&selected)?;
+    authorize_pinned_assessment(app, &session, &selected, &pinned).await?;
+    let started = std::time::Instant::now();
+    let findings = execute_case_scoped_assessment(
         &session,
         &selected,
-        engine_infrastructure::run_engine(tool, url.to_string(), true),
+        scan_application::run_scan(&pinned.client, pinned.url.to_string(), true),
     )
-    .await
+    .await?;
+    let raw = serde_json::to_string_pretty(&findings)
+        .map_err(|_| "cannot encode native Web assessment".to_string())?;
+    Ok(EngineScanResult {
+        tool,
+        raw,
+        duration_ms: started.elapsed().as_millis() as u64,
+    })
+}
+
+#[cfg(test)]
+mod native_engine_scope_tests {
+    use super::*;
+
+    #[test]
+    fn only_pinned_native_web_engine_may_launch() {
+        assert!(require_scoped_engine("cyberdeck-native").is_ok());
+        for sidecar in ["sqlmap", "nikto", "xsstrike", "", "cyberdeck-native.exe"] {
+            assert!(require_scoped_engine(sidecar).is_err(), "{sidecar}");
+        }
+    }
 }
 
 #[cfg(test)]

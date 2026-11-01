@@ -257,7 +257,7 @@ pub(super) fn carve_preview(
 }
 
 /// Case-backed, read-only detection using only bounded YARA-style ASCII/hex
-/// strings and the "any/all of them" condition. Unsupported rule features fail.
+/// strings and bounded "any/all/N of them" conditions. Unsupported grammar fails.
 pub(super) fn yara_subset_scan(
     ctx: &EvidenceCtx,
     case_id: &str,
@@ -294,6 +294,6 @@ pub(super) fn yara_subset_scan(
         integrity_checked: true,
         coverage_truncated: analyzed_offset != 0
             || analyzed_offset + (bytes.len() as u64) < record.size,
-        language_subset: "YARA-literal-hex-any-all-v1",
+        language_subset: "YARA-literal-hex-any-all-count-v2",
     })
 }

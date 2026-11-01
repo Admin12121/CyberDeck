@@ -38,13 +38,14 @@ test("native discovery, capture and Stop are reused without new backend commands
   assert.match(studio, /pcapFollowStream\(/);
 });
 
-test("real capture status and original provenance remain visible, demo is labeled", () => {
+test("native capture retains original provenance, authorized save and parsed packet details", () => {
   const start = read("PacketStartView.tsx");
   const live = read("LiveCaptureView.tsx");
   const studio = read("PacketStudioView.tsx");
   assert.match(live, /Native capture/);
   assert.match(live, /Original captured frame/);
-  assert.match(live, /Save to Case unavailable/);
+  assert.match(live, /captureSaveV1\(/);
+  assert.match(live, /Save Capture to Case/);
   assert.match(live, /caseSession\.phase === "ready"/);
   assert.doesNotMatch(start, /Demonstration packets/);
   assert.match(studio, /DEMO: sample packets/);
@@ -73,7 +74,8 @@ test("opened files and native capture share one packet list presentation", () =>
   assert.match(native, /Packet details:/);
   assert.match(native, /Packet bytes \(offset/);
   assert.match(native, /Frame inspection available once capture completes/);
-  assert.match(native, /protocol hierarchy need Agent 1/);
+  assert.match(native, /capturePacketDetailsV1\(/);
+  assert.match(native, /decoded\.layers\.map/);
   assert.match(native, /<WorkspaceTabs items=\{\["packets", "hosts", "flows", "statistics"\]/);
 });
 

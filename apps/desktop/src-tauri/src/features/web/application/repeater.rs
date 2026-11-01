@@ -45,7 +45,17 @@ pub(super) async fn send_binary_authorized(
     authorize: &impl Fn() -> Result<(), String>,
 ) -> Result<HttpResponseWire, String> {
     let client = http_client();
-    send_binary_with_client_authorized(&client, request, authorize).await
+    send_binary_authorized_with_client(&client, request, authorize).await
+}
+
+/// Use the exact pre-approved, pinned per-operation HTTP connector. No second
+/// DNS lookup or shared connection pool can replace the authorized destination.
+pub(super) async fn send_binary_authorized_with_client(
+    client: &reqwest::Client,
+    request: BinaryReplayRequest,
+    authorize: &impl Fn() -> Result<(), String>,
+) -> Result<HttpResponseWire, String> {
+    send_binary_with_client_authorized(client, request, authorize).await
 }
 
 async fn await_authorized<T>(
@@ -333,6 +343,54 @@ mod binary_replay_tests {
             let _ = release_tx.send(());
             server.await.unwrap();
         }).await.expect("partial-stream revocation fixture timed out");
+    }
+
+    #[tokio::test]
+    async fn approved_pinned_hostname_replays_exact_binary_to_fixture() {
+        tokio::time::timeout(std::time::Duration::from_secs(8), async {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let host = "private.replay.cyberdeck.test";
+            let url = format!("http://{host}:{}/binary", addr.port());
+            let client = reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(5))
+                .redirect(reqwest::redirect::Policy::none())
+                .no_proxy()
+                .resolve(host, addr)
+                .build().unwrap();
+            let server = tokio::spawn(async move {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let (headers, body) =
+                    crate::features::web::webtls::read_http_message(&mut socket).await.unwrap();
+                assert!(headers.starts_with("POST /binary HTTP/1.1"), "{headers}");
+                assert!(headers.to_lowercase().contains(&format!(
+                    "host: {host}:{}", addr.port()
+                )), "{headers}");
+                assert_eq!(body, [0xff, 0, 0x7f, 0x10]);
+                socket.write_all(
+                    b"HTTP/1.1 206 Partial Content\r\nContent-Length: 4\r\nConnection: close\r\n\r\n"
+                ).await.unwrap();
+                socket.write_all(&[0xfe, 0, 0x55, 0x40]).await.unwrap();
+            });
+            let response = send_binary_authorized_with_client(
+                &client,
+                BinaryReplayRequest {
+                    method: "POST".into(),
+                    url: url.clone(),
+                    headers: vec![("Content-Type".into(), "application/octet-stream".into())],
+                    body: vec![0xff, 0, 0x7f, 0x10],
+                },
+                &|| Ok(()),
+            ).await.unwrap();
+            assert_eq!(response.status, 206);
+            assert_eq!(response.url, url);
+            assert_eq!(
+                base64::engine::general_purpose::STANDARD
+                    .decode(&response.body_base64).unwrap(),
+                [0xfe, 0, 0x55, 0x40]
+            );
+            server.await.unwrap();
+        }).await.expect("pinned replay fixture timed out");
     }
 
     #[tokio::test]

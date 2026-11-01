@@ -80,6 +80,19 @@ pub fn native_operation(id: &str) -> bool {
             | "json_minify"
             | "slice_bytes"
             | "to_utf8"
+            | "hex_dump"
+            | "from_hexdump"
+            | "html_encode"
+            | "html_decode"
+            | "strip_html_tags"
+            | "to_charcode"
+            | "from_charcode"
+            | "vigenere"
+            | "nato_encode"
+            | "morse_encode"
+            | "morse_decode"
+            | "escape_string"
+            | "unescape_string"
     )
 }
 
@@ -339,6 +352,15 @@ fn number(param: Option<&str>, fallback: i64) -> i64 {
 
 fn transform(op: &str, bytes: &[u8], param: Option<&str>) -> Result<Vec<u8>, String> {
     use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
+    if crate::recipe_native_parity::supports(op) {
+        return crate::recipe_native_parity::apply(op, bytes, param);
+    }
+    if crate::recipe_text_parity::supports(op) {
+        return crate::recipe_text_parity::apply(op, bytes, param);
+    }
+    if crate::recipe_escape_parity::supports(op) {
+        return crate::recipe_escape_parity::apply(op, bytes);
+    }
     match op {
         "to_base64" => Ok(STANDARD.encode(bytes).into_bytes()),
         "from_base64" => STANDARD

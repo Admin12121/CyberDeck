@@ -662,6 +662,21 @@ fn case_backed_yara_subset_is_bounded_reproducible_and_immutable() {
     .is_err());
     assert!(yara_subset_scan(&ctx, DEFAULT_CASE, &record.id, 0, 2 * 1024 * 1024, rule).is_err());
     assert!(yara_subset_scan(&ctx, "wrong-case", &record.id, 0, source.len(), rule).is_err());
+    let numeric = "rule threshold {\nstrings:\n$a = \"PAYLOAD\"\n$b = { 4D 5A ?? 90 }\n$c = \"not-here\"\ncondition:\n2 of them\n}";
+    let threshold =
+        yara_subset_scan(&ctx, DEFAULT_CASE, &record.id, 0, source.len(), numeric).unwrap();
+    assert!(threshold.integrity_checked && threshold.matched);
+    assert_eq!(threshold.hits.len(), 2);
+    assert_eq!(threshold.hits[0].offset, 7);
+    assert_eq!(threshold.hits[1].offset, 16);
+    let only_one = numeric.replace("2 of them", "3 of them");
+    assert!(
+        !yara_subset_scan(&ctx, DEFAULT_CASE, &record.id, 0, source.len(), &only_one)
+            .unwrap()
+            .matched
+    );
+    let invalid = numeric.replace("2 of them", "0 of them");
+    assert!(yara_subset_scan(&ctx, DEFAULT_CASE, &record.id, 0, source.len(), &invalid).is_err());
     let mut altered = source.to_vec();
     altered[0] ^= 1;
     std::fs::write(&record.stored_path, &altered).unwrap();
@@ -843,4 +858,154 @@ fn case_backed_exif_subifd_metadata_preserves_offsets_and_integrity() {
     changed[12 + 80] = b'9';
     std::fs::write(&record.stored_path, changed).unwrap();
     assert!(metadata_scan(&ctx, DEFAULT_CASE, &record.id).is_err());
+}
+
+#[test]
+fn case_backed_exif_fractional_utc_offsets_are_verifiable_and_read_only() {
+    let mut tiff = vec![0u8; 144];
+    tiff[..2].copy_from_slice(b"MM"); // independently exercise big-endian case path
+    let put16 =
+        |bytes: &mut [u8], at: usize, n: u16| bytes[at..at + 2].copy_from_slice(&n.to_be_bytes());
+    let put32 =
+        |bytes: &mut [u8], at: usize, n: u32| bytes[at..at + 4].copy_from_slice(&n.to_be_bytes());
+    put16(&mut tiff, 2, 42);
+    put32(&mut tiff, 4, 8);
+    put16(&mut tiff, 8, 1);
+    put16(&mut tiff, 10, 0x8769);
+    put16(&mut tiff, 12, 4);
+    put32(&mut tiff, 14, 1);
+    put32(&mut tiff, 18, 32);
+    put16(&mut tiff, 32, 3);
+    for (index, tag, count, ptr) in [
+        (0usize, 0x9003u16, 20u32, 80u32),
+        (1, 0x9011, 7, 104),
+        (2, 0x9291, 6, 115),
+    ] {
+        let e = 34 + index * 12;
+        put16(&mut tiff, e, tag);
+        put16(&mut tiff, e + 2, 2);
+        put32(&mut tiff, e + 4, count);
+        put32(&mut tiff, e + 8, ptr);
+    }
+    tiff[80..100].copy_from_slice(b"2024:02:29 13:47:59\0");
+    tiff[104..111].copy_from_slice(b"+05:45\0");
+    tiff[115..121].copy_from_slice(b"00420\0");
+    let mut source = b"\xff\xd8\xff\xe1".to_vec();
+    source.extend_from_slice(&((tiff.len() + 8) as u16).to_be_bytes());
+    source.extend_from_slice(b"Exif\0\0");
+    source.extend_from_slice(&tiff);
+    source.extend_from_slice(b"\xff\xd9");
+
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = test_ctx(dir.path());
+    let original = import_bytes(
+        &ctx,
+        Path::new("time-source.jpg"),
+        &source,
+        DEFAULT_CASE,
+        true,
+    )
+    .unwrap();
+    let before = list_artifacts(&ctx, DEFAULT_CASE).unwrap().len();
+    let report = metadata_scan(&ctx, DEFAULT_CASE, &original.id).unwrap();
+    assert!(report.integrity_checked && !report.coverage_truncated);
+    assert_eq!(report.analyzed_bytes, source.len());
+    for (key, value, offset) in [
+        ("datetime_original", "2024:02:29 13:47:59", 92u64),
+        ("utc_offset_original", "+05:45", 116),
+        ("subsecond_original", "00420", 127),
+    ] {
+        assert!(
+            report
+                .report
+                .fields
+                .iter()
+                .any(|f| f.namespace == "exif.subifd"
+                    && f.key == key
+                    && f.value == value
+                    && f.offset == offset),
+            "missing {key}"
+        );
+    }
+    assert_eq!(list_artifacts(&ctx, DEFAULT_CASE).unwrap().len(), before);
+    assert!(metadata_scan(&ctx, "other-case", &original.id).is_err());
+    source[12 + 115] = b'8';
+    std::fs::write(&original.stored_path, &source).unwrap();
+    assert!(metadata_scan(&ctx, DEFAULT_CASE, &original.id).is_err());
+}
+
+#[test]
+fn case_backed_gif_structural_carve_has_exact_provenance_and_rejects_tampering() {
+    let gif = b"GIF89a\x01\x00\x01\x00\x80\x00\x00\x00\x00\x00\xff\xff\xff\x2c\x00\x00\x00\x00\x01\x00\x01\x00\x00\x02\x02\x4c\x01\x00\x3b";
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = test_ctx(dir.path());
+    let mut source = b"prefix-carving-data".to_vec();
+    let offset = source.len() as u64;
+    source.extend_from_slice(gif);
+    source.extend_from_slice(b"other evidence after gif trailer");
+    let original = import_bytes(
+        &ctx,
+        Path::new("embedded.gif.raw"),
+        &source,
+        DEFAULT_CASE,
+        true,
+    )
+    .unwrap();
+    let before = list_artifacts(&ctx, DEFAULT_CASE).unwrap().len();
+    let report = carve_preview(&ctx, DEFAULT_CASE, &original.id, 0, source.len()).unwrap();
+    assert!(report.integrity_checked && !report.coverage_truncated);
+    assert_eq!(report.candidates.len(), 1);
+    assert_eq!(report.candidates[0].format, "gif");
+    assert_eq!(report.candidates[0].offset, offset);
+    assert_eq!(report.candidates[0].length, gif.len());
+    assert_eq!(list_artifacts(&ctx, DEFAULT_CASE).unwrap().len(), before);
+    assert!(carve_preview(&ctx, "different-case", &original.id, 0, source.len()).is_err());
+    let mut changed = source;
+    changed[0] ^= 0x80;
+    std::fs::write(&original.stored_path, changed).unwrap();
+    assert!(carve_preview(&ctx, DEFAULT_CASE, &original.id, offset, gif.len()).is_err());
+}
+
+#[test]
+fn case_backed_uboot_image_carving_checks_both_crcs_and_source_provenance() {
+    // Independent bitwise CRC32 fixture encoder, not the production fast CRC code.
+    fn crc32(bytes: &[u8]) -> u32 {
+        let mut crc = !0u32;
+        for &b in bytes {
+            crc ^= u32::from(b);
+            for _ in 0..8 {
+                crc = (crc >> 1) ^ (0xedb8_8320u32 & (0u32.wrapping_sub(crc & 1)));
+            }
+        }
+        !crc
+    }
+    let payload = b"read-only test firmware payload";
+    let mut image = vec![0u8; 64];
+    image[..4].copy_from_slice(&[0x27, 0x05, 0x19, 0x56]);
+    image[12..16].copy_from_slice(&(payload.len() as u32).to_be_bytes());
+    image[24..28].copy_from_slice(&crc32(payload).to_be_bytes());
+    image[28..32].copy_from_slice(&[5, 2, 2, 0]);
+    image[32..42].copy_from_slice(b"DeviceTest");
+    let header_crc = crc32(&image);
+    image[4..8].copy_from_slice(&header_crc.to_be_bytes());
+    image.extend_from_slice(payload);
+    let mut source = b"unrelated prefix in evidence".to_vec();
+    let offset = source.len() as u64;
+    source.extend_from_slice(&image);
+    source.extend_from_slice(b"unrelated suffix after checked member");
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = test_ctx(dir.path());
+    let imported = import_bytes(&ctx, Path::new("firmware-container.raw"), &source, DEFAULT_CASE, true).unwrap();
+    let before = list_artifacts(&ctx, DEFAULT_CASE).unwrap().len();
+    let preview = carve_preview(&ctx, DEFAULT_CASE, &imported.id, 0, source.len()).unwrap();
+    assert!(preview.integrity_checked && !preview.coverage_truncated);
+    assert_eq!(preview.candidates.len(), 1);
+    assert_eq!(preview.candidates[0].format, "uimage");
+    assert_eq!(preview.candidates[0].offset, offset);
+    assert_eq!(preview.candidates[0].length, image.len());
+    assert_eq!(list_artifacts(&ctx, DEFAULT_CASE).unwrap().len(), before);
+    assert!(carve_preview(&ctx, "not-the-case", &imported.id, 0, source.len()).is_err());
+    source[0] ^= 0x40; // even a change outside the selected window invalidates original source
+    std::fs::write(&imported.stored_path, &source).unwrap();
+    assert!(carve_preview(&ctx, DEFAULT_CASE, &imported.id, offset, image.len()).is_err());
 }

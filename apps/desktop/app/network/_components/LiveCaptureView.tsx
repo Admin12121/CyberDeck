@@ -47,10 +47,11 @@ function bytesAsHex(bytes: number[], startOffset = 0): string {
 }
 
 /** Native jobs continue in Rust across route navigation; cache only a session reference, never raw evidence. */
-export function LiveCaptureView({ presentation = "full", onCaptureStarted, onReturnToStart }: {
+export function LiveCaptureView({ presentation = "full", onCaptureStarted, onReturnToStart, onOpenSavedArtifact }: {
   presentation?: "setup" | "full";
   onCaptureStarted?: () => void;
   onReturnToStart?: () => void;
+  onOpenSavedArtifact?: (artifactId: string) => void;
 }) {
   const desktop = isDesktop();
   const { caseId, caseSession } = useWorkbenchCase();
@@ -89,7 +90,7 @@ export function LiveCaptureView({ presentation = "full", onCaptureStarted, onRet
 
   const valid = useCallback((key: string, version: number) =>
     currentIdentity.current === key && token.current === version, []);
-  const eligible = devices.filter((entry) => entry.up && entry.ethernet && !entry.loopback);
+  const eligible = devices.filter((entry) => entry.up && entry.ethernet && !entry.loopback && entry.capture_supported !== false);
   const running = status?.phase === "running" || status?.phase === "stopping";
   const readable = status?.results_available === true && matchesCaptureIdentity(status, sessionId, caseId);
   const canStart = desktop && revision !== null && !running && !working && eligible.some((entry) => entry.name === device);
@@ -319,7 +320,7 @@ export function LiveCaptureView({ presentation = "full", onCaptureStarted, onRet
             ) : (
               <div aria-label="Native capture interfaces" className="max-h-52 overflow-y-auto">
                 {devices.map((entry) => {
-                  const supported = entry.up && entry.ethernet && !entry.loopback;
+                  const supported = entry.up && entry.ethernet && !entry.loopback && entry.capture_supported !== false;
                   const selected = device === entry.name;
                   return (
                     <Button key={entry.index + ":" + entry.name} type="button"
@@ -334,7 +335,7 @@ export function LiveCaptureView({ presentation = "full", onCaptureStarted, onRet
                         {entry.loopback ? "Loopback" : entry.ethernet ? "Ethernet" : "Other"}
                       </span>
                       <span className={`shrink-0 text-xs ${supported ? "text-fg-dim" : "text-fg-muted"}`}>
-                        {entry.up ? supported ? "Ready" : "Unsupported" : "Down"}
+                        {entry.up ? supported ? "Ready" : entry.capture_supported === false ? "Native capture pending" : "Unsupported" : "Down"}
                       </span>
                     </Button>
                   );
@@ -361,7 +362,7 @@ export function LiveCaptureView({ presentation = "full", onCaptureStarted, onRet
           )}
           {desktop && (
             <Button variant="ghost" size="icon" aria-label="Capture permissions and limitations"
-              title="Linux desktop only. Live capture needs a saved authorized case, explicit operator consent and raw-socket permission. Capture filters are not supported; display filters apply during offline inspection.">
+              title="Native Linux capture requires case consent and CAP_NET_RAW. Windows native adapter discovery is available but full-fidelity Ethernet frame capture is pending an independent driver/host test.">
               <Info size={14} aria-hidden="true" />
             </Button>
           )}
@@ -422,7 +423,7 @@ export function LiveCaptureView({ presentation = "full", onCaptureStarted, onRet
         </Chip>
         <span className="ml-auto flex items-center gap-2 truncate text-[10px] text-fg-muted">
           <CaptureActivity samples={activity}/>
-          {status ? status.progress.packets + " frames · " + status.progress.stored_pcap_bytes + " PCAP bytes" : "Native Linux Ethernet"}
+          {status ? status.progress.packets + " frames · " + status.progress.stored_pcap_bytes + " PCAP bytes" : "Native Ethernet capture"}
         </span>
       </div>
       <div className="flex shrink-0 flex-wrap items-center gap-3 border-b border-line px-3 py-1.5 text-[11px] text-fg-muted">
@@ -434,6 +435,11 @@ export function LiveCaptureView({ presentation = "full", onCaptureStarted, onRet
           title={readable ? "Save the byte-exact original PCAP as immutable case evidence, after native confirmation" : "Complete a capture with original frames first"}>
           {saving ? "Saving…" : saved ? "Saved to Case" : "Save Capture to Case"}
         </ToolButton>
+        {saved && onOpenSavedArtifact && (
+          <ToolButton onClick={() => onOpenSavedArtifact(saved.artifact_id)} title="Reopen SHA-256-verified case PCAP in the full packet analyzer">
+            Open Verified Capture
+          </ToolButton>
+        )}
         {saved && <span className="font-mono text-[10px] text-fg-muted" title={saved.artifact_id}>
           SHA-256 {saved.sha256.slice(0, 16)}… · {saved.frame_count} frames verified
         </span>}

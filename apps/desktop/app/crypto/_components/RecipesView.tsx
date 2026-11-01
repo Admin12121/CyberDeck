@@ -47,6 +47,9 @@ const NATIVE_RECIPE_OPS = new Set([
   "unique_lines", "reverse_lines", "filter_lines", "head_lines",
   "tail_lines", "text_split", "find_replace", "json_beautify",
   "json_minify", "slice_bytes", "to_utf8",
+  "hex_dump", "from_hexdump", "html_encode", "html_decode", "strip_html_tags",
+  "to_charcode", "from_charcode", "vigenere", "nato_encode", "morse_encode", "morse_decode",
+  "escape_string", "unescape_string",
 ]);
 
 function nativeUiResult(wire: RecipeRunWire): RecipeResult {
