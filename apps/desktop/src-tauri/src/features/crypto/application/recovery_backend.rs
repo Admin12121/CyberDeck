@@ -3,8 +3,9 @@
 pub mod access;
 use cyberdeck_crypto::gpu::{self, GpuProbe, MAX_GPU_BATCH};
 use cyberdeck_crypto::recovery::{
-    recover_sha256_wordlist_on_backend, FastHash, RecoveryBackend, RecoveryLimits,
-    RecoveryProgress, RecoveryTarget, MAX_FAST_CANDIDATES, MAX_MATCHES,
+    recover_sha256_wordlist_on_backend, recover_wordlist_with_progress,
+    recover_wordlist_with_rules, CompiledRule, RecoveryBackend, RecoveryLimits, RecoveryProgress,
+    RecoveryTarget, MAX_FAST_CANDIDATES, MAX_MATCHES,
 };
 use serde::{Deserialize, Serialize};
 use std::fs::File;
@@ -123,8 +124,50 @@ pub struct ProbeDeviceWire {
     /// Probing a device is not validation of its kernels.
     pub hardware_verified: bool,
 }
+/// Use the CPU's own CPUID brand string where the architecture supports it.
+/// This is local identification, not a performance or GPU verification result.
+fn cpu_brand_name() -> String {
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    {
+        #[cfg(target_arch = "x86")]
+        use std::arch::x86::__cpuid;
+        #[cfg(target_arch = "x86_64")]
+        use std::arch::x86_64::__cpuid;
+        // CPUID is an unprivileged processor identification instruction.
+        let max = __cpuid(0x8000_0000).eax;
+        if max >= 0x8000_0004 {
+            let mut buffer = [0u8; 48];
+            for (part, leaf) in (0x8000_0002..=0x8000_0004).enumerate() {
+                let registers = __cpuid(leaf);
+                for (offset, value) in [registers.eax, registers.ebx, registers.ecx, registers.edx]
+                    .into_iter()
+                    .enumerate()
+                {
+                    let first = part * 16 + offset * 4;
+                    buffer[first..first + 4].copy_from_slice(&value.to_le_bytes());
+                }
+            }
+            let brand = String::from_utf8_lossy(&buffer)
+                .trim_matches(char::from(0))
+                .trim()
+                .to_owned();
+            if !brand.is_empty() {
+                return brand;
+            }
+        }
+    }
+    std::env::consts::ARCH.to_owned()
+}
+#[derive(Debug, Clone, Serialize)]
+pub struct RecoveryCpuInfo {
+    /// Local native processor brand or architecture fallback, not a benchmark.
+    pub model: String,
+    pub architecture: &'static str,
+    pub logical_processors: usize,
+}
 #[derive(Debug, Clone, Serialize)]
 pub struct RecoveryDeviceInventory {
+    pub cpu: RecoveryCpuInfo,
     pub opencl_detected: bool,
     pub detail: String,
     pub devices: Vec<ProbeDeviceWire>,
@@ -132,6 +175,13 @@ pub struct RecoveryDeviceInventory {
 pub fn probe_recovery_devices() -> RecoveryDeviceInventory {
     let state = gpu::probe();
     RecoveryDeviceInventory {
+        cpu: RecoveryCpuInfo {
+            model: cpu_brand_name(),
+            architecture: std::env::consts::ARCH,
+            logical_processors: std::thread::available_parallelism()
+                .map(std::num::NonZeroUsize::get)
+                .unwrap_or(1),
+        },
         opencl_detected: state.available,
         detail: state.detail,
         devices: state
@@ -176,8 +226,11 @@ fn validate_backend(backend: BackendSelection, probe: Option<&GpuProbe>) -> Resu
     }
 }
 pub(super) fn validate_request(request: &RecoveryRequest) -> Result<(), String> {
-    if request.algorithm != "sha256" {
-        return Err("selected-backend recovery supports sha256 only".into());
+    if matches!(request.backend, BackendSelection::HashcatManaged) {
+        return Err("use the separately authorized embedded Hashcat command".into());
+    }
+    if matches!(request.backend, BackendSelection::OpenCl { .. }) && request.algorithm != "sha256" {
+        return Err("this OpenCL backend currently supports SHA-256 only; select CPU".into());
     }
     if !(1..=MAX_FAST_CANDIDATES).contains(&request.max_candidates) {
         return Err("max_candidates exceeds global recovery limit".into());
@@ -185,15 +238,9 @@ pub(super) fn validate_request(request: &RecoveryRequest) -> Result<(), String> 
     if !(1..=MAX_MATCHES).contains(&request.max_matches) {
         return Err("max_matches exceeds global recovery limit".into());
     }
-    let parsed = RecoveryTarget::parse("sha256", &request.target_hash)?;
-    if !matches!(
-        parsed,
-        RecoveryTarget::Digest {
-            algorithm: FastHash::Sha256,
-            ..
-        }
-    ) {
-        return Err("expected raw SHA-256 digest".into());
+    let parsed = RecoveryTarget::parse(&request.algorithm, &request.target_hash)?;
+    if !matches!(parsed, RecoveryTarget::Digest { .. }) {
+        return Err("wordlist recovery requires a raw hexadecimal digest".into());
     }
     Ok(())
 }
@@ -247,24 +294,78 @@ pub fn execute_reader<R: BufRead, P: FnMut(RecoveryProgressWire)>(
     request: &RecoveryRequest,
     reader: R,
     cancel: &RecoveryCancel,
+    on_progress: P,
+) -> Result<RecoveryRun, String> {
+    execute_reader_options(request, reader, cancel, on_progress, None)
+}
+
+/// CPU-only streamed rule mutations share exactly the ordinary recovery
+/// budget, job cancellation and transient confidential-result lifecycle.
+pub fn execute_reader_with_rules<R: BufRead, P: FnMut(RecoveryProgressWire)>(
+    request: &RecoveryRequest,
+    reader: R,
+    cancel: &RecoveryCancel,
+    on_progress: P,
+    rules: Vec<CompiledRule>,
+) -> Result<RecoveryRun, String> {
+    execute_reader_options(request, reader, cancel, on_progress, Some(rules))
+}
+
+fn execute_reader_options<R: BufRead, P: FnMut(RecoveryProgressWire)>(
+    request: &RecoveryRequest,
+    reader: R,
+    cancel: &RecoveryCancel,
     mut on_progress: P,
+    rules: Option<Vec<CompiledRule>>,
 ) -> Result<RecoveryRun, String> {
     validate_request(request)?;
+    if rules.is_some() && !matches!(request.backend, BackendSelection::Cpu) {
+        return Err(
+            "wordlist rules require the native Rust CPU backend; select CPU explicitly".into(),
+        );
+    }
     if let BackendSelection::OpenCl { .. } = request.backend {
         validate_backend(request.backend, Some(&gpu::probe()))?;
     }
     let started = Instant::now();
-    let completed = recover_sha256_wordlist_on_backend(
-        request.backend.try_into()?,
-        &request.target_hash,
-        reader,
-        RecoveryLimits {
-            max_candidates: request.max_candidates,
-            max_matches: request.max_matches,
-        },
-        || cancel.is_cancelled(),
-        |p| on_progress(p.into()),
-    )?;
+    let limits = RecoveryLimits {
+        max_candidates: request.max_candidates,
+        max_matches: request.max_matches,
+    };
+    let completed = match request.backend {
+        BackendSelection::Cpu => {
+            let target = RecoveryTarget::parse(&request.algorithm, &request.target_hash)?;
+            if let Some(rules) = rules {
+                recover_wordlist_with_rules(
+                    &target,
+                    reader,
+                    rules,
+                    limits,
+                    || cancel.is_cancelled(),
+                    |p| on_progress(p.into()),
+                )?
+            } else {
+                recover_wordlist_with_progress(
+                    &target,
+                    reader,
+                    limits,
+                    || cancel.is_cancelled(),
+                    |p| on_progress(p.into()),
+                )?
+            }
+        }
+        BackendSelection::OpenCl { .. } => recover_sha256_wordlist_on_backend(
+            request.backend.try_into()?,
+            &request.target_hash,
+            reader,
+            limits,
+            || cancel.is_cancelled(),
+            |p| on_progress(p.into()),
+        )?,
+        BackendSelection::HashcatManaged => {
+            return Err("use the embedded Hashcat command for that backend".into())
+        }
+    };
     let (matches, confidential_hits): (Vec<_>, Vec<_>) = completed
         .hits
         .into_iter()
@@ -291,6 +392,29 @@ pub fn execute_reader<R: BufRead, P: FnMut(RecoveryProgressWire)>(
         },
         confidential_hits,
     })
+}
+
+/// Rules execute against streamed local wordlist data; no expanded
+/// dictionary is stored or sent to the UI.
+pub fn execute_path_with_rules<P: FnMut(RecoveryProgressWire)>(
+    request: &RecoveryRequest,
+    path: &Path,
+    cancel: &RecoveryCancel,
+    progress: P,
+    rules: Vec<CompiledRule>,
+) -> Result<RecoveryRun, String> {
+    validate_request(request)?;
+    if !path.is_file() {
+        return Err("wordlist must be a regular file".into());
+    }
+    let file = File::open(path).map_err(|_| "cannot open selected wordlist")?;
+    execute_reader_with_rules(
+        request,
+        BufReader::with_capacity(1 << 20, file),
+        cancel,
+        progress,
+        rules,
+    )
 }
 
 /// The IPC/controller owner handles path authorization and dialog selection.
@@ -348,6 +472,84 @@ mod tests {
             assert!(!public_wire.contains("private-fixture"));
             assert!(public_wire.contains(algorithm));
         }
+    }
+
+    #[test]
+    fn cpu_fast_hash_modes_recover_real_candidates_without_plaintext_ipc() {
+        for algorithm in ["md5", "sha1", "ntlm", "sha256", "sha512", "sha3_256"] {
+            let mut req = request(BackendSelection::Cpu);
+            req.algorithm = algorithm.into();
+            req.target_hash =
+                hex::encode(cyberdeck_crypto::apply_op(algorithm, b"abc", None).unwrap());
+            let run = execute_reader(
+                &req,
+                Cursor::new(b"wrong\nabc\n"),
+                &RecoveryCancel::new(),
+                |_| {},
+            )
+            .unwrap();
+            assert_eq!(run.summary.tried, 2, "{algorithm}");
+            assert_eq!(run.summary.matches.len(), 1, "{algorithm}");
+            assert_eq!(run.summary.algorithm, algorithm);
+            assert_eq!(run.confidential_hits[0], b"abc");
+            assert!(!serde_json::to_string(&run.summary).unwrap().contains("abc"));
+        }
+    }
+
+    #[test]
+    fn cpu_native_streamed_rules_recover_mutated_candidates_without_secret_in_ipc() {
+        let mut request = request(BackendSelection::Cpu);
+        request.algorithm = "md5".into();
+        request.target_hash =
+            hex::encode(cyberdeck_crypto::apply_op("md5", b"abc1", None).unwrap());
+        let rules = cyberdeck_crypto::recovery::parse_rule_lines(std::io::Cursor::new(
+            b":\n$1\n".as_slice(),
+        ))
+        .unwrap();
+        let result = execute_reader_with_rules(
+            &request,
+            std::io::Cursor::new(b"abc\n"),
+            &RecoveryCancel::new(),
+            |_| {},
+            rules,
+        )
+        .unwrap();
+        assert_eq!(result.summary.tried, 2);
+        assert!(result.summary.matches.iter().all(|hit| hit.masked));
+        assert_eq!(result.confidential_hits[0], b"abc1");
+        assert!(!serde_json::to_string(&result.summary)
+            .unwrap()
+            .contains("abc1"));
+    }
+    #[test]
+    fn cpu_only_rules_cannot_fallback_to_opencl_or_managed_hashcat() {
+        let request = request(BackendSelection::OpenCl {
+            device_index: 0,
+            batch_size: 64,
+        });
+        let rules =
+            cyberdeck_crypto::recovery::parse_rule_lines(std::io::Cursor::new(b"$1\n".as_slice()))
+                .unwrap();
+        assert!(execute_reader_with_rules(
+            &request,
+            std::io::Cursor::new(b"abc\n"),
+            &RecoveryCancel::new(),
+            |_| {},
+            rules,
+        )
+        .err()
+        .unwrap()
+        .contains("CPU backend"));
+    }
+    #[test]
+    fn non_sha256_gpu_request_is_explicitly_rejected() {
+        let mut req = request(BackendSelection::OpenCl {
+            device_index: 0,
+            batch_size: 256,
+        });
+        req.algorithm = "md5".into();
+        req.target_hash = "0".repeat(32);
+        assert!(validate_request(&req).unwrap_err().contains("SHA-256 only"));
     }
 
     #[test]

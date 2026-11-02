@@ -93,8 +93,94 @@ impl CaptureCtx {
 pub struct CaptureInterfaceWire {
     #[serde(flatten)]
     interface: CaptureInterface,
+    /// OS display name, separate from the strict backend interface identity.
+    display_name: String,
     capture_supported: bool,
     capture_unavailable_reason: Option<String>,
+}
+
+/// Native platform policy, separate from interface enumeration and session
+/// authorization. The UI must never infer raw scanning support from a WebView
+/// user agent or the presence of an adapter in the Windows device list.
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct NetworkRuntimeCapabilitiesWire {
+    pub platform: &'static str,
+    pub tcp_connect: bool,
+    pub udp: bool,
+    pub ipv4_echo: bool,
+    pub ipv4_trace: bool,
+    pub linux_on_link: bool,
+    /// Driver/backend presence is not proof of OS permission or a working NIC.
+    pub capture_backend_present: bool,
+    pub capture_detail: String,
+}
+
+pub fn runtime_capabilities() -> NetworkRuntimeCapabilitiesWire {
+    #[cfg(target_os = "windows")]
+    {
+        let driver = live::probe_windows_capture();
+        return NetworkRuntimeCapabilitiesWire {
+            platform: "windows",
+            tcp_connect: true, udp: true,
+            ipv4_echo: true, ipv4_trace: true,
+            linux_on_link: false,
+            capture_backend_present: driver.is_ok(),
+            capture_detail: driver
+                .map(|_| "Compatible native capture backend detected; authorization and live capture are still checked on Start".into())
+                .unwrap_or_else(|error| error.message),
+        };
+    }
+    #[cfg(target_os = "linux")]
+    {
+        return NetworkRuntimeCapabilitiesWire {
+            platform: "linux",
+            tcp_connect: true, udp: true,
+            ipv4_echo: true, ipv4_trace: true,
+            linux_on_link: true,
+            capture_backend_present: true,
+            capture_detail: "Linux AF_PACKET support exists; CAP_NET_RAW and interface permission are checked on Start".into(),
+        };
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
+    {
+        NetworkRuntimeCapabilitiesWire {
+            platform: if cfg!(target_os = "macos") { "macos" } else { "unsupported" },
+            tcp_connect: true, udp: true,
+            ipv4_echo: false, ipv4_trace: false,
+            linux_on_link: false, capture_backend_present: false,
+            capture_detail: "Native live capture and raw probes are not implemented on this platform. Offline PCAP analysis remains available".into(),
+        }
+    }
+}
+
+#[tauri::command]
+pub fn network_runtime_capabilities_v1() -> NetworkRuntimeCapabilitiesWire {
+    runtime_capabilities()
+}
+
+#[cfg(test)]
+mod capability_policy_tests {
+    use super::*;
+    #[test]
+    fn runtime_capability_advertising_is_platform_accurate() {
+        let caps = runtime_capabilities();
+        assert!(caps.tcp_connect && caps.udp);
+        #[cfg(target_os = "linux")]
+        {
+            assert_eq!(caps.platform, "linux");
+            assert!(caps.linux_on_link && caps.ipv4_echo && caps.ipv4_trace);
+            assert!(caps.capture_detail.contains("CAP_NET_RAW"));
+        }
+        #[cfg(target_os = "windows")]
+        {
+            assert_eq!(caps.platform, "windows");
+            assert!(!caps.linux_on_link);
+            assert!(caps.ipv4_echo && caps.ipv4_trace);
+            assert!(!caps.capture_detail.is_empty());
+        }
+        #[cfg(not(any(target_os = "windows", target_os = "linux")))]
+        assert!(!caps.linux_on_link && !caps.ipv4_echo);
+    }
 }
 
 #[tauri::command]
@@ -108,10 +194,18 @@ pub fn capture_interfaces_v1() -> Result<Vec<CaptureInterfaceWire>, String> {
     let support: Result<(), String> = Err("native Ethernet capture unsupported on this OS".into());
     Ok(interfaces
         .into_iter()
-        .map(|interface| CaptureInterfaceWire {
-            interface,
-            capture_supported: support.is_ok(),
-            capture_unavailable_reason: support.as_ref().err().cloned(),
+        .map(|interface| {
+            #[cfg(target_os = "windows")]
+            let display_name = live::windows_interface_alias(interface.index)
+                .unwrap_or_else(|| format!("Windows adapter #{}", interface.index));
+            #[cfg(not(target_os = "windows"))]
+            let display_name = interface.name.clone();
+            CaptureInterfaceWire {
+                interface,
+                display_name,
+                capture_supported: support.is_ok(),
+                capture_unavailable_reason: support.as_ref().err().cloned(),
+            }
         })
         .collect())
 }

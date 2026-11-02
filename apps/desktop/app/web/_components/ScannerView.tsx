@@ -6,6 +6,7 @@ import { isDesktop } from "@lib/ipc";
 import { useWebWorkflow } from "./WebWorkflow";
 import { useWorkbench, useWorkbenchCase } from "@state/workbench";
 import { useWorkspaceDraft } from "@state/workspace-sessions";
+import { AuthorizedCaseAction } from "@/app/_components/AuthorizedCaseAction";
 import {
   cancelWebAssessment, startWebAssessment, webAssessmentStatus, waitForWebAssessment, saveWebAssessmentFindings,
   type WebAssessmentJob,
@@ -29,6 +30,7 @@ export function ScannerView() {
   const [jobId, setJobId] = useWorkspaceDraft<number | null>(caseId, "web", "scanner-job", null);
   const [job, setJob] = useState<WebAssessmentJob | null>(null);
   const [authorized, setAuthorized] = useState(false);
+  const [advancedOpen, setAdvancedOpen] = useState(false);
   const [postFormat, setPostFormat] = useState<"form" | "json">("form");
   const [scanIntensity, setScanIntensity] = useState<"quick" | "standard" | "thorough">("standard");
   // Volatile input, never written to workspace drafts or SQLite.
@@ -47,9 +49,11 @@ export function ScannerView() {
   const [savedCount, setSavedCount] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const context = useRef({ caseId, target: normalized, revision: 0 });
+  const lastBinding = useRef({ caseId, caseRevision: caseSession.revision, target: normalized });
   context.current.caseId = caseId;
   context.current.target = normalized;
   const running = busy || job?.state === "running";
+  const caseReady = caseId !== "scratchpad" && caseSession.phase === "ready" && caseSession.caseId === caseId;
   const hasQuery = (() => {
     try { return new URL(normalized).searchParams.size > 0; }
     catch { return false; }
@@ -57,7 +61,18 @@ export function ScannerView() {
   const findings = job?.state === "completed" ? job.findings : [];
 
   useEffect(() => {
+    const previous = lastBinding.current;
+    const changed = previous.caseId !== caseId ||
+      previous.caseRevision !== caseSession.revision || previous.target !== normalized;
+    lastBinding.current = { caseId, caseRevision: caseSession.revision, target: normalized };
     context.current.revision++;
+    if (changed) {
+      // A target or native scope transition must not leave an old active
+      // assessment consuming the two-job budget invisibly. The backend alone
+      // decides whether this old ID is still authorized for cancellation.
+      if (jobId !== null) void cancelWebAssessment(jobId).catch(() => {});
+      setJobId(null);
+    }
     setJob(null); setAuthorized(false); setSavedCount(0);
     setPostTemplate(""); setPostRiskApproved(false);
     setSessionCookie(""); setSessionHeaders("");
@@ -84,7 +99,7 @@ export function ScannerView() {
   }, [desktop, jobId, caseId, caseSession.revision]);
 
   const start = async (kind: "scanner" | "active-query" | "active-form" | "active-json" | "active-sql" | "active-sql-boolean" | "active-traversal" | "active-oast" = "scanner") => {
-    if (!desktop || running || !normalized || !authorized) return;
+    if (!desktop || running || !normalized || !authorized || !caseReady) return;
     const post = kind === "active-form" || kind === "active-json";
     if (post && (!postRiskApproved || !postTemplate.trim())) return;
     const template = post ? postTemplate : undefined;
@@ -111,6 +126,7 @@ export function ScannerView() {
         const id = await startWebAssessment(kind, stamp.target, true, 2, template,
           kind === "scanner" ? undefined : scanIntensity, auth, oast);
         if (context.current.revision === stamp.revision) setJobId(id);
+        else void cancelWebAssessment(id).catch(() => {});
         return waitForWebAssessment(id, (current) => {
           if (context.current.revision === stamp.revision &&
               context.current.caseId === stamp.caseId) setJob(current);
@@ -133,7 +149,7 @@ export function ScannerView() {
   };
   const save = async () => {
     if (saving || !job || job.state !== "completed" || !findings.length ||
-        caseId === "scratchpad") return;
+        !caseReady) return;
     const selectedCase = caseId;
     const selectedJob = job.job_id;
     setSaving(true);
@@ -156,8 +172,27 @@ export function ScannerView() {
         ariaLabel="Scanner target" className="w-72" />
       {running && jobId !== null
         ? <ToolButton tone="danger" onClick={() => void stop()}><Square size={12} /> Stop</ToolButton>
-        : <ToolButton tone="primary" disabled={!desktop || !normalized || !authorized || running}
+        : <ToolButton tone="primary" disabled={!desktop || !caseReady || !normalized || !authorized || running}
             onClick={() => void start("scanner")}><Play size={12} /> Start review</ToolButton>}
+      <ToolButton onClick={() => setAdvancedOpen((open) => !open)}
+        title="Show additional bounded active Web testing tools">
+        {advancedOpen ? "Hide advanced tests" : "Advanced tests"}
+      </ToolButton>
+      {(sessionCookie.trim() || sessionHeaders.trim()) && (
+        <span className="flex items-center gap-1 text-[11px] text-fg-dim">
+          Session context enabled (volatile)
+          <ToolButton onClick={() => { setSessionCookie(""); setSessionHeaders(""); }}
+            title="Discard all volatile authentication headers and cookies before another scan">
+            Clear session
+          </ToolButton>
+        </span>
+      )}
+      <span className="ml-auto font-mono text-[10px] text-fg-muted">
+        {job ? `${job.kind} · ${job.state} · ${job.processed} requests · ${job.discovered} findings` : "Native review"}
+      </span>
+    </div>
+    {advancedOpen && (
+      <div className="flex flex-wrap items-center gap-2 border-b border-line bg-panel p-2">
       <label className="flex items-center gap-1 text-[11px] text-fg-muted">
         Intensity
         <select value={scanIntensity} disabled={running}
@@ -169,43 +204,48 @@ export function ScannerView() {
           <option value="thorough">Thorough · 8 GET / 4 POST</option>
         </select>
       </label>
-      <ToolButton disabled={!desktop || !normalized || !authorized || running || !hasQuery}
+      <ToolButton disabled={!desktop || !caseReady || !normalized || !authorized || running || !hasQuery}
         title="Send a baseline and bounded inert GET parameter probes, only to the approved private origin"
         onClick={() => void start("active-query")}>
         <Play size={12} /> Test query parameters
       </ToolButton>
-      <ToolButton disabled={!desktop || !normalized || !authorized || running || !hasQuery}
+      <ToolButton disabled={!desktop || !caseReady || !normalized || !authorized || running || !hasQuery}
         title="Append one quote to each eligible GET parameter and compare database error signatures; read-only, bounded"
         onClick={() => void start("active-sql")}>
         <Play size={12} /> Test SQL injection
       </ToolButton>
-      <ToolButton disabled={!desktop || !normalized || !authorized || running || !hasQuery}
+      <ToolButton disabled={!desktop || !caseReady || !normalized || !authorized || running || !hasQuery}
         title="Compare tautological and contradictory GET clauses against the baseline; heuristic, read-only, bounded"
         onClick={() => void start("active-sql-boolean")}>
         <Play size={12} /> Test SQL boolean
       </ToolButton>
-      <ToolButton disabled={!desktop || !normalized || !authorized || running || !hasQuery}
+      <ToolButton disabled={!desktop || !caseReady || !normalized || !authorized || running || !hasQuery}
         title="Substitute traversal sequences in file-like GET parameters and confirm known file signatures; read-only, bounded"
         onClick={() => void start("active-traversal")}>
         <Play size={12} /> Test file inclusion
       </ToolButton>
-      <ToolButton disabled={!desktop || !normalized || !authorized || running || !hasQuery ||
+      <ToolButton disabled={!desktop || !caseReady || !normalized || !authorized || running || !hasQuery ||
         !oastBind.trim() || !oastBase.trim()}
         title="Send a URL-like parameter a local callback address and confirm only an actual out-of-band connection; read-only"
         onClick={() => void start("active-oast")}>
         <Play size={12} /> Test SSRF (OAST)
       </ToolButton>
-      <span className="ml-auto font-mono text-[10px] text-fg-muted">
-        {job ? `${job.kind} · ${job.state} · ${job.processed} requests · ${job.discovered} findings` : "Native review"}
-      </span>
-    </div>
+
+        {!hasQuery && <span className="text-[11px] text-fg-muted">
+          To run parameter tests, enter a URL with a query string, e.g. /search?q=sample.
+        </span>}
+      </div>
+    )}
+    {!caseReady && <AuthorizedCaseAction activity="Web security assessment" />}
     <label className="flex items-center gap-2 border-b border-line px-2 py-1.5 text-[11px] text-fg-dim">
       <input type="checkbox" checked={authorized} onChange={(e) => setAuthorized(e.target.checked)} />
       Authorized target · native approval required
     </label>
     <div className="border-b border-line px-2 py-1 text-[10px] text-fg-muted">
-      Query probes send a baseline plus a bounded number of GET mutations according to intensity, skip credential/CSRF-like parameters, and report potential markup reflection—not confirmed executable XSS. The URL must contain query parameters; native approval and private-address scope are mandatory.
+      Start review checks an approved private or loopback target with the native engine. Expand Advanced tests for optional bounded query mutations; these are heuristics, not confirmed exploitation. A saved case, target ownership and native approval remain required.
     </div>
+    {advancedOpen && (
+      <>
     <div className="border-b border-line bg-panel px-2 py-1 text-[11px]">
       <div className="flex flex-wrap items-center gap-2">
         <ToolButton onClick={() => setOastOpen((value) => !value)}>
@@ -277,7 +317,7 @@ export function ScannerView() {
           <option value="form">Form URL-encoded</option>
           <option value="json">JSON object</option>
         </select>
-        <ToolButton disabled={!desktop || !normalized || !authorized || running ||
+        <ToolButton disabled={!desktop || !caseReady || !normalized || !authorized || running ||
           !postRiskApproved || !postTemplate.trim()}
           onClick={() => void start(postFormat === "form" ? "active-form" : "active-json")}>
           <Play size={12} /> Test POST fields
@@ -297,9 +337,11 @@ export function ScannerView() {
         Do not enter passwords, session tokens or CSRF values. Native confirmation is also required.
       </label>
     </div>
+      </>
+    )}
     {error ? <div role="alert" className="border-b border-line px-2 py-1 text-xs text-err">{error}</div> : null}
     <Pane title="Findings" className="min-h-0 flex-1"
-      actions={job?.state === "completed" && findings.length > 0 && caseId !== "scratchpad"
+      actions={job?.state === "completed" && findings.length > 0 && caseReady
         ? <ToolButton disabled={saving || savedCount > 0} onClick={() => void save()}>
             {savedCount ? `${savedCount} saved` : saving ? "Saving…" : "Save to case"}
           </ToolButton> : undefined}>

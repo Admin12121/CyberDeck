@@ -10,6 +10,7 @@ import {
 import { useWorkbenchCase } from "@state/workbench";
 import { useWebWorkflow } from "./WebWorkflow";
 import { PassiveRulesPanel } from "./PassiveRulesPanel";
+import { AuthorizedCaseAction } from "@/app/_components/AuthorizedCaseAction";
 import {
   decodedBody, editableHistoryDraft, protectedHistoryAccess,
   type ProtectedHistoryDetail,
@@ -38,6 +39,7 @@ export function HistoryView() {
   const desktop = isDesktop();
   const { caseId, caseSession } = useWorkbenchCase();
   const nativeRevision = caseSession.revision;
+  const caseReady = caseId !== "scratchpad" && caseSession.phase === "ready" && caseSession.caseId === caseId;
   const { draftInRepeater } = useWebWorkflow();
   const [rows, setRows] = useState<CapturedRequestWire[]>([]);
   const [query, setQuery] = useState("");
@@ -146,6 +148,7 @@ export function HistoryView() {
 
   return (
     <div className="flex h-full min-h-0 flex-col bg-line">
+      {!caseReady && <AuthorizedCaseAction activity="Private Web history" />}
       <PassiveRulesPanel enabled={Boolean(desktop && captureGeneration)} caseId={caseId}
         revision={nativeRevision} generation={captureGeneration} />
       <div className="flex min-h-0 flex-1 gap-px">
@@ -153,7 +156,9 @@ export function HistoryView() {
         actions={<TextInput value={query} onChange={setQuery} placeholder="Filter requests" ariaLabel="History filter" className="w-40" />}>
         {error ? <div role="alert" className="border-b border-line px-2 py-1 text-xs text-err">{error}</div> : null}
         {!captureGeneration
-          ? <EmptyState title="No active history" detail="Enable case-bound capture consent in Proxy." />
+          ? <EmptyState title="No active history" detail={caseReady
+              ? "In Proxy, start the listener, open Advanced and authorize private History for this case. Configure an isolated browser to use the local proxy."
+              : "First select or create a saved case, then authorize private History capture in Proxy."} />
           : <div className="h-full overflow-auto">
             <table className="data-table">
               <thead><tr><th>#</th><th>Method</th><th>Host</th><th>Path</th><th>Status</th><th>Size</th><th /></tr></thead>

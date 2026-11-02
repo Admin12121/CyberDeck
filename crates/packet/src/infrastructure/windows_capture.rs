@@ -90,6 +90,25 @@ unsafe extern "system" {
 #[link(name = "Iphlpapi")]
 unsafe extern "system" {
     fn ConvertInterfaceIndexToLuid(index: u32, luid: *mut u64) -> u32;
+    fn ConvertInterfaceLuidToAlias(luid: *const u64, alias: *mut u16, length: usize) -> u32;
+}
+
+/// Get the real user-visible adapter alias from the Windows IP Helper API.
+/// The stable win{index} identifier remains the backend selection key, so
+/// display names cannot redirect capture/ICMP to another interface.
+pub fn interface_alias(index: u32) -> Option<String> {
+    let luid = interface_luid(index).ok()?;
+    // IF_MAX_STRING_SIZE is 256 WCHAR; reserve an extra NUL unit.
+    let mut alias = [0u16; 257];
+    let result = unsafe { ConvertInterfaceLuidToAlias(&luid, alias.as_mut_ptr(), alias.len()) };
+    if result != 0 {
+        return None;
+    }
+    let end = alias.iter().position(|unit| *unit == 0)?;
+    if end == 0 {
+        return None;
+    }
+    String::from_utf16(&alias[..end]).ok()
 }
 
 fn error(context: &str, code: u32) -> CaptureError {

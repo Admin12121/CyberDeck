@@ -9,8 +9,8 @@ mod recovery_backend;
 use crate::features::shared::session::CaseSessionCtx;
 use recovery_backend::access::{RecoveryResultAccess, VerifiedScope};
 use recovery_backend::{
-    execute_path, probe_recovery_devices, RecoveryCancel, RecoveryDeviceInventory,
-    RecoveryProgressWire, RecoveryRequest, RecoverySummaryWire,
+    execute_path, execute_path_with_rules, probe_recovery_devices, RecoveryCancel,
+    RecoveryDeviceInventory, RecoveryProgressWire, RecoveryRequest, RecoverySummaryWire,
 };
 use serde::Serialize;
 use std::collections::HashMap;
@@ -75,6 +75,7 @@ struct Job {
     cancel: RecoveryCancel,
     status: RecoveryJobStatus,
     expires_at: Option<Instant>,
+    finished_at: Option<Instant>,
 }
 struct Registry {
     next_id: u64,
@@ -89,6 +90,15 @@ struct SelectedWordlist {
     path: PathBuf,
     name: String,
     size_bytes: u64,
+}
+
+fn recheck_selected_wordlist(selection: &SelectedWordlist) -> Result<(), String> {
+    let (_, size) =
+        crate::features::crypto::ipc::crack::inspect_recovery_wordlist(&selection.path)?;
+    if size != selection.size_bytes {
+        return Err("wordlist changed after selection; choose the file again".into());
+    }
+    Ok(())
 }
 
 #[derive(Clone, Serialize)]
@@ -113,7 +123,27 @@ impl Registry {
             return Err("too many concurrent recovery jobs".into());
         }
         if self.jobs.len() >= MAX_TRACKED {
-            return Err("discard completed recovery jobs before starting more".into());
+            // Quick, repeated recoveries must not permanently block the UI.
+            // Evict only an already-terminal job, oldest first. Revocation is
+            // deliberate; an evicted job's confidential bytes cannot be read.
+            let evict = self
+                .jobs
+                .iter()
+                .filter(|(_, job)| {
+                    !matches!(
+                        job.status.phase,
+                        RecoveryPhase::Running | RecoveryPhase::Cancelling
+                    )
+                })
+                .min_by_key(|(_, job)| job.finished_at)
+                .map(|(id, _)| *id);
+            let Some(id) = evict else {
+                return Err("recovery job capacity reached by active jobs".into());
+            };
+            self.jobs.remove(&id);
+            if let Some(scope) = self.current.as_ref() {
+                self.secrets.discard(id, scope);
+            }
         }
         let id = self.next_id;
         self.next_id = id.checked_add(1).ok_or("recovery job IDs exhausted")?;
@@ -131,6 +161,7 @@ impl Registry {
                     reveal_available: false,
                 },
                 expires_at: None,
+                finished_at: None,
             },
         );
         Ok((id, cancel))
@@ -143,6 +174,27 @@ impl Registry {
             if job.expires_at.is_some_and(|expiry| now >= expiry) {
                 job.expires_at = None;
                 job.status.reveal_available = false;
+            }
+        }
+        // Job summaries are short-lived UX state, not evidence. Clean up
+        // terminal entries without a UI Discard click so repeated sessions
+        // never become permanently unable to reserve another job. Results
+        // may only be revealed inside their original retention interval.
+        let stale: Vec<_> = self
+            .jobs
+            .iter()
+            .filter(|(_, job)| {
+                job.finished_at
+                    .is_some_and(|finished| now.duration_since(finished) >= RETAIN_DURATION)
+            })
+            .map(|(id, _)| *id)
+            .collect();
+        for id in stale {
+            if let Some(job) = self.jobs.remove(&id) {
+                job.cancel.cancel();
+                if let Some(scope) = &self.current {
+                    self.secrets.discard(id, scope);
+                }
             }
         }
         removed
@@ -270,6 +322,7 @@ fn start_recovery_with_wordlist(
         wordlist,
         None,
         embedded_hashcat::WordlistPreset::Plain,
+        None,
         emit,
     )
 }
@@ -283,8 +336,15 @@ fn start_recovery_with_wordlist_engine(
     wordlist: PathBuf,
     embedded_runtime: Option<PathBuf>,
     preset: embedded_hashcat::WordlistPreset,
+    rules: Option<Vec<cyberdeck_crypto::recovery::CompiledRule>>,
     emit: impl Fn(RecoveryEvent) + Send + 'static,
 ) -> Result<u64, String> {
+    if rules.is_some()
+        && (!matches!(request.backend, recovery_backend::BackendSelection::Cpu)
+            || embedded_runtime.is_some())
+    {
+        return Err("native wordlist rules require the Rust CPU backend".into());
+    }
     if embedded_runtime.is_some() {
         embedded_hashcat::validate_embedded_request(&request)?;
     } else {
@@ -342,6 +402,8 @@ fn start_recovery_with_wordlist_engine(
                     preset,
                     progress_callback,
                 )
+            } else if let Some(compiled) = rules {
+                execute_path_with_rules(&request, &wordlist, &token, progress_callback, compiled)
             } else {
                 execute_path(&request, &wordlist, &token, progress_callback)
             }
@@ -372,6 +434,7 @@ fn start_recovery_with_wordlist_engine(
                         return;
                     };
                     job.status.summary = Some(summary.clone());
+                    job.finished_at = Some(Instant::now());
                     job.status.reveal_available = retained;
                     job.expires_at = retained.then(|| Instant::now() + RETAIN_DURATION);
                     if summary.cancelled {
@@ -387,6 +450,7 @@ fn start_recovery_with_wordlist_engine(
                         return;
                     };
                     job.status.phase = RecoveryPhase::Failed;
+                    job.finished_at = Some(Instant::now());
                     job.status.error = Some(error.clone());
                     RecoveryEvent::Failed { job_id, error }
                 }
@@ -395,6 +459,7 @@ fn start_recovery_with_wordlist_engine(
                         return;
                     };
                     job.status.phase = RecoveryPhase::Failed;
+                    job.finished_at = Some(Instant::now());
                     job.status.error = Some("native recovery worker failed".into());
                     RecoveryEvent::Failed {
                         job_id,
@@ -412,15 +477,21 @@ fn start_recovery_with_wordlist_engine(
 /// case/revision, and retain only the path in process memory. Never expose the
 /// raw filesystem path to the JavaScript interface.
 #[tauri::command]
-pub fn recovery_select_wordlist_v1(
+pub async fn recovery_select_wordlist_v1(
     app: AppHandle,
     state: State<'_, RecoveryCtx>,
     session: State<'_, CaseSessionCtx>,
 ) -> Result<RecoveryWordlistInfo, String> {
     let before = session.selected()?;
-    // Ensure a usable, already-authorized case before opening the OS dialog.
+    // Releasing the UI dispatcher while the OS file picker is visible is
+    // essential on Windows. Recheck the authoritative case revision AFTER
+    // the user closes the dialog; never attach a file to a different case.
     state.with_active(&session, |_, _| Ok(()))?;
-    let (path, name) = crate::features::crypto::ipc::crack::resolved_wordlist(&app, None)?;
+    let (path, name) = tauri::async_runtime::spawn_blocking(move || {
+        crate::features::crypto::ipc::crack::resolved_wordlist(&app, None)
+    })
+    .await
+    .map_err(|_| "native wordlist picker could not complete")??;
     session.ensure(&before)?;
     let size_bytes = std::fs::metadata(&path)
         .map_err(|_| "selected wordlist is no longer accessible")?
@@ -461,6 +532,7 @@ pub fn recovery_wordlist_status_v1(
 #[tauri::command]
 pub fn recovery_start_v1(
     request: RecoveryRequest,
+    rules: Option<String>,
     on_event: Channel<RecoveryEvent>,
     state: State<'_, RecoveryCtx>,
     session: State<'_, CaseSessionCtx>,
@@ -471,6 +543,20 @@ pub fn recovery_start_v1(
     ) {
         return Err("Hashcat-managed backend requires the embedded engine command".into());
     }
+    let compiled = match rules {
+        Some(text) if !text.trim().is_empty() => {
+            if text.len() > 4096 {
+                return Err("native recovery rule text exceeds 4 KiB".into());
+            }
+            if !matches!(request.backend, recovery_backend::BackendSelection::Cpu) {
+                return Err("wordlist rules run on native CPU only; select CPU".into());
+            }
+            Some(cyberdeck_crypto::recovery::parse_rule_lines(
+                std::io::BufReader::new(text.as_bytes()),
+            )?)
+        }
+        _ => None,
+    };
     let selected = state.with_active(&session, |registry, _| {
         registry
             .selected_wordlist
@@ -479,10 +565,19 @@ pub fn recovery_start_v1(
     })?;
     // Revalidate that the selected file still exists and passes native
     // wordlist inspection; do not accept an untrusted frontend-supplied path.
-    let _ = crate::features::crypto::ipc::crack::inspect_recovery_wordlist(&selected.path)?;
-    start_recovery_with_wordlist(&state, &session, request, selected.path, move |event| {
-        let _ = on_event.send(event);
-    })
+    recheck_selected_wordlist(&selected)?;
+    start_recovery_with_wordlist_engine(
+        &state,
+        &session,
+        request,
+        selected.path,
+        None,
+        embedded_hashcat::WordlistPreset::Plain,
+        compiled,
+        move |event| {
+            let _ = on_event.send(event);
+        },
+    )
 }
 
 #[derive(Serialize)]
@@ -542,64 +637,55 @@ fn hashcat_resource_root(app: &AppHandle) -> Result<PathBuf, String> {
     Err("embedded Hashcat native runtime not packaged".into())
 }
 
-/// Reports the four source-built wordlist modes; hardware_verified
-/// stays false until actual host device/kernel KAT, not merely library loading.
+/// Source presence or an OpenCL loader alone must NOT offer a non-working
+/// Hashcat option in the UI. A fixed, public, supervised known-answer test is
+/// required for EACH enabled raw mode; it runs off the Tauri UI dispatcher.
 #[tauri::command]
-pub fn recovery_hashcat_capabilities_v1(app: AppHandle) -> EmbeddedHashcatCapability {
-    match hashcat_resource_root(&app) {
-        Ok(runtime) => {
-            // Native loader probing runs through the exact packaged worker,
-            // not an unrelated Rust OpenCL backend or an executable on PATH.
-            match embedded_hashcat::probe_opencl_loader(&runtime) {
-                Ok(false) => return EmbeddedHashcatCapability {
-                    available: false,
-                    mode: 1400,
-                    modes: bundled_hashcat_modes(),
-                    hardware_verified: false,
-                    detail: "Hashcat is bundled, but the system OpenCL loader is unavailable; install a compatible GPU driver/runtime".into(),
-                },
-                Err(error) => return EmbeddedHashcatCapability {
-                    available: false,
-                    mode: 1400,
-                    modes: bundled_hashcat_modes(),
-                    hardware_verified: false,
-                    detail: error,
-                },
-                Ok(true) => {}
-            }
-            // The Rust OpenCL probe is a diagnostic only. Its indices are NOT
-            // Hashcat native device IDs, and enumeration is never a kernel KAT.
-            let probe = recovery_backend::probe_recovery_devices();
-            let detail = if probe.opencl_detected {
-                format!(
-                    "Bundled MD5/SHA-1/NTLM/SHA-256/SHA-512 modes; {} OpenCL device(s) detected by Rust, Hashcat mapping and execution unverified",
-                    probe.devices.len()
-                )
-            } else {
-                "Bundled MD5/SHA-1/NTLM/SHA-256/SHA-512 modes, but no compatible OpenCL runtime was detected; native execution may fail".into()
-            };
+pub async fn recovery_hashcat_capabilities_v1(app: AppHandle) -> EmbeddedHashcatCapability {
+    let standard = |detail: String| EmbeddedHashcatCapability {
+        available: false,
+        mode: 1400,
+        modes: Vec::new(),
+        hardware_verified: false,
+        detail,
+    };
+    let runtime = match hashcat_resource_root(&app) {
+        Ok(root) => root,
+        Err(error) => return standard(error),
+    };
+    let supported =
+        tauri::async_runtime::spawn_blocking(move || embedded_hashcat::verified_modes(&runtime))
+            .await;
+    match supported {
+        Ok(Ok(modes)) => {
+            let catalog = bundled_hashcat_modes()
+                .into_iter()
+                .filter(|item| modes.contains(&item.mode))
+                .collect::<Vec<_>>();
             EmbeddedHashcatCapability {
-                available: true,
+                available: !catalog.is_empty(),
                 mode: 1400,
-                modes: bundled_hashcat_modes(),
+                modes: catalog,
                 hardware_verified: false,
-                detail,
+                detail: format!(
+                    "{} bundled mode(s) passed actual private known-answer recovery. \
+                     This validates native execution, NOT GPU type/speed or other untested modes.",
+                    modes.len(),
+                ),
             }
         }
-        Err(error) => EmbeddedHashcatCapability {
-            available: false,
-            mode: 1400,
-            modes: bundled_hashcat_modes(),
-            hardware_verified: false,
-            detail: error,
-        },
+        Ok(Err(error)) => standard(format!(
+            "Bundled Hashcat did not pass actual native recovery: {error}. \
+             Native Rust CPU wordlist recovery remains available."
+        )),
+        Err(_) => standard("Bundled Hashcat readiness test could not finish".into()),
     }
 }
 
 /// Deliberate opt-in to independently compiled Hashcat C core: never falls
 /// back to Rust or an external system executable without user intent.
 #[tauri::command]
-pub fn recovery_start_hashcat_v1(
+pub async fn recovery_start_hashcat_v1(
     app: AppHandle,
     request: RecoveryRequest,
     preset: Option<embedded_hashcat::WordlistPreset>,
@@ -614,10 +700,22 @@ pub fn recovery_start_hashcat_v1(
     ) {
         return Err("embedded Hashcat requires a Hashcat-managed backend selection".into());
     }
+    // Authorize and snapshot the original case before asynchronous KAT.
+    // Never apply a stale request to a different selected investigation.
+    let before = session.selected()?;
+    state.with_active(&session, |_, _| Ok(()))?;
     let runtime = hashcat_resource_root(&app)?;
-    if !embedded_hashcat::probe_opencl_loader(&runtime)? {
+    let mode = embedded_hashcat::validate_embedded_request(&request)?;
+    let verification_root = runtime.clone();
+    let verified = tauri::async_runtime::spawn_blocking(move || {
+        embedded_hashcat::verified_modes(&verification_root)
+    })
+    .await
+    .map_err(|_| "native Hashcat readiness check failed")??;
+    session.ensure(&before)?;
+    if !verified.contains(&mode) {
         return Err(
-            "Hashcat requires a compatible system OpenCL loader before recovery can start".into(),
+            "selected native Hashcat mode did not pass its actual known-answer test".into(),
         );
     }
     let selected = state.with_active(&session, |registry, _| {
@@ -626,7 +724,7 @@ pub fn recovery_start_hashcat_v1(
             .clone()
             .ok_or_else(|| "choose a wordlist before starting recovery".to_owned())
     })?;
-    crate::features::crypto::ipc::crack::inspect_recovery_wordlist(&selected.path)?;
+    recheck_selected_wordlist(&selected)?;
     start_recovery_with_wordlist_engine(
         &state,
         &session,
@@ -634,6 +732,7 @@ pub fn recovery_start_hashcat_v1(
         selected.path,
         Some(runtime),
         preset.unwrap_or_default(),
+        None,
         move |event| {
             let _ = on_event.send(event);
         },
@@ -772,6 +871,7 @@ mod tests {
                         reveal_available: false,
                     },
                     expires_at: None,
+                    finished_at: None,
                 },
             );
             inner.current = Some(second.clone());
@@ -783,6 +883,22 @@ mod tests {
         }
         assert!(token.is_cancelled());
         assert!(ctx.registry.lock().unwrap().jobs.is_empty());
+    }
+    #[test]
+    fn changing_wordlist_after_selection_fails_closed_before_running() {
+        let temp = tempfile::tempdir().unwrap();
+        let file = temp.path().join("wordlist.txt");
+        std::fs::write(&file, b"abc\n").unwrap();
+        let selection = SelectedWordlist {
+            path: file.clone(),
+            name: "wordlist.txt".into(),
+            size_bytes: 4,
+        };
+        assert!(recheck_selected_wordlist(&selection).is_ok());
+        std::fs::write(&file, b"longer-password\n").unwrap();
+        assert!(recheck_selected_wordlist(&selection)
+            .unwrap_err()
+            .contains("changed"));
     }
     #[test]
     fn selected_native_wordlist_is_cleared_on_case_revision_and_shutdown() {
@@ -884,6 +1000,7 @@ mod tests {
                     reveal_available: true,
                 },
                 expires_at: Some(Instant::now() + Duration::from_millis(2)),
+                finished_at: Some(Instant::now()),
             },
         );
         std::thread::sleep(Duration::from_millis(10));
@@ -892,6 +1009,39 @@ mod tests {
         assert!(registry.secrets.authorize_reveal(42, &scope).is_err());
     }
 
+    #[test]
+    fn repeated_completed_recoveries_evict_oldest_terminal_job_at_capacity() {
+        let mut registry = Registry::default();
+        let mut first = 0;
+        for i in 0..MAX_TRACKED {
+            let (id, _) = registry.reserve_job().unwrap();
+            if i == 0 {
+                first = id;
+            }
+            let job = registry.jobs.get_mut(&id).unwrap();
+            job.status.phase = RecoveryPhase::Completed;
+            job.finished_at = Some(Instant::now() - Duration::from_secs((MAX_TRACKED - i) as u64));
+        }
+        let (new_id, _) = registry.reserve_job().unwrap();
+        assert_eq!(registry.jobs.len(), MAX_TRACKED);
+        assert!(!registry.jobs.contains_key(&first));
+        assert!(registry.jobs.contains_key(&new_id));
+    }
+    #[test]
+    fn idle_cleanup_reclaims_terminal_job_capacity_without_touching_active_jobs() {
+        let mut registry = Registry::default();
+        let (completed, _) = registry.reserve_job().unwrap();
+        let (running, running_token) = registry.reserve_job().unwrap();
+        let old = registry.jobs.get_mut(&completed).unwrap();
+        old.status.phase = RecoveryPhase::Completed;
+        old.finished_at = Some(Instant::now() - RETAIN_DURATION - Duration::from_secs(1));
+        assert_eq!(registry.prune_expired(), 0);
+        assert!(!registry.jobs.contains_key(&completed));
+        assert!(registry.jobs.contains_key(&running));
+        assert!(!running_token.is_cancelled());
+        let (next, _) = registry.reserve_job().unwrap();
+        assert!(next > running);
+    }
     #[test]
     fn backend_case_reselect_cancels_and_revokes_older_generation() {
         let temp = tempfile::tempdir().unwrap();

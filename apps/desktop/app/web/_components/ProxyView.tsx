@@ -2,6 +2,8 @@
 import { useEffect, useRef, useState } from "react";
 import { Copy, PlayCircle, Settings2, Square, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { useWorkbenchCase } from "@state/workbench";
+import { AuthorizedCaseAction } from "@/app/_components/AuthorizedCaseAction";
 import { Frame, FrameHeader, FramePanel, FrameTitle } from "@/components/ui/frame";
 import { Chip, TextInput, ToolButton } from "@ds/panes";
 import {
@@ -25,6 +27,8 @@ import {
 
 export function ProxyView() {
   const desktop = isDesktop();
+  const { caseId, caseSession } = useWorkbenchCase();
+  const caseReady = caseId !== "scratchpad" && caseSession.phase === "ready" && caseSession.caseId === caseId;
   const [status, setStatus] = useState<ProxyStatusWire>({ running: false, port: 8080, captured: 0 });
   const [port, setPort] = useState("8080");
   const [interceptOn, setInterceptOn] = useState(false);
@@ -131,7 +135,7 @@ export function ProxyView() {
     } finally { setBusy(false); }
   };
   const requestCaptureConsent = async () => {
-    if (!desktop || consentBusy || !status.running) return;
+    if (!desktop || consentBusy || !status.running || !caseReady) return;
     setConsentBusy(true);
     setConsentError(null);
     try {
@@ -244,6 +248,11 @@ export function ProxyView() {
           </div>
 
           {error && <p role="alert" className="text-xs text-err">{error}</p>}
+          <p className="text-xs leading-relaxed text-fg-muted">
+            To inspect traffic: start the proxy, select a saved case, authorize private History
+            in Advanced, and point an isolated test browser to 127.0.0.1:{status.running ? status.port : port}.
+            HTTPS interception also requires explicit CA trust in that browser; CyberDeck does not install trust automatically.
+          </p>
           {!desktop && <p className="text-xs text-fg-muted">Proxy control requires the desktop application.</p>}
 
           <div className="flex items-center">
@@ -262,7 +271,7 @@ export function ProxyView() {
                 <Chip tone={consent?.enabled && status.running ? "ok" : "muted"}>
                   {consent?.enabled && status.running ? "Authorized" : "Off"}
                 </Chip>
-                <ToolButton disabled={!desktop || !status.running || consentBusy || !!consent?.enabled}
+                <ToolButton disabled={!desktop || !caseReady || !status.running || consentBusy || !!consent?.enabled}
                   onClick={() => void requestCaptureConsent()}
                   title="Requires a saved case and explicit native operator confirmation">
                   {consentBusy ? "Checking…" : "Authorize"}
@@ -273,6 +282,7 @@ export function ProxyView() {
                   Revoke & clear
                 </ToolButton>
               </div>
+              {!caseReady && <AuthorizedCaseAction activity="Private HTTP history capture" />}
               {consentError && <p role="alert" className="text-xs text-err">{consentError}</p>}
               <div className="flex flex-wrap items-center gap-3">
                 <span className="text-xs font-semibold">CA trust</span>

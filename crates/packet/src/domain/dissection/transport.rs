@@ -45,6 +45,8 @@ pub(super) fn dissect_tcp(
         (0x04, "RST"),
         (0x08, "PSH"),
         (0x20, "URG"),
+        (0x40, "ECE"),
+        (0x80, "CWR"),
     ] {
         if flags_byte & mask != 0 {
             if !flags.is_empty() {
@@ -53,6 +55,16 @@ pub(super) fn dissect_tcp(
             flags.push_str(name);
         }
     }
+    if transport[12] & 0x01 != 0 {
+        if !flags.is_empty() {
+            flags.push_str(", ");
+        }
+        flags.push_str("NS");
+    }
+    let ack = u32::from_be_bytes([transport[8], transport[9], transport[10], transport[11]]);
+    let window = u16::from_be_bytes([transport[14], transport[15]]);
+    let checksum = u16::from_be_bytes([transport[16], transport[17]]);
+    let urgent = u16::from_be_bytes([transport[18], transport[19]]);
     let payload_len = ip_payload_len
         .saturating_sub(data_offset)
         .min(transport.len().saturating_sub(data_offset));
@@ -116,6 +128,18 @@ pub(super) fn dissect_tcp(
         info
     };
     let color = color_for(protocol);
+    if data_offset > 20 {
+        // TCP options are within the header, not the application payload.
+        // Decode only complete, bounded TLVs; report malformed claims
+        // without discarding original frame evidence.
+        match super::tcp_options::decode(&transport[20..data_offset]) {
+            Ok(fields) => layers.extend(fields),
+            Err(reason) => layers.push(Layer {
+                label: "TCP option warning".into(),
+                value: format!("Malformed TCP options: {reason}"),
+            }),
+        }
+    }
     layers.push(Layer {
         label: "Transmission Control Protocol".to_string(),
         value: info.clone(),
@@ -132,6 +156,28 @@ pub(super) fn dissect_tcp(
         label: "flags".to_string(),
         value: flags,
     });
+    layers.push(Layer {
+        label: "TCP acknowledgment number".into(),
+        value: ack.to_string(),
+    });
+    layers.push(Layer {
+        label: "TCP receive window (raw)".into(),
+        value: window.to_string(),
+    });
+    layers.push(Layer {
+        label: "TCP header length".into(),
+        value: format!("{data_offset} byte(s)"),
+    });
+    layers.push(Layer {
+        label: "TCP checksum (not independently verified)".into(),
+        value: format!("0x{checksum:04x}"),
+    });
+    if transport[13] & 0x20 != 0 {
+        layers.push(Layer {
+            label: "TCP urgent pointer".into(),
+            value: urgent.to_string(),
+        });
+    }
     Dissected {
         source: source.to_string(),
         destination: destination.to_string(),
@@ -200,6 +246,32 @@ pub(super) fn dissect_udp(
     let service = well_known_name(17, src_port, dst_port);
     let protocol = if service.is_empty() { "UDP" } else { service };
     let mut info = format!("{src_port} → {dst_port} Len={}", length.saturating_sub(8));
+    let decoded_service = if matches!(src_port, 67 | 68) || matches!(dst_port, 67 | 68) {
+        super::udp_services::dhcp(&payload)
+    } else if src_port == 123 || dst_port == 123 {
+        super::udp_services::ntp(&payload)
+    } else if matches!(src_port, 3478 | 3479 | 5349) || matches!(dst_port, 3478 | 3479 | 5349) {
+        super::udp_services::stun(&payload)
+    } else if (src_port == 5353 || dst_port == 5353) && src_port != 53 && dst_port != 53 {
+        super::udp_services::mdns(&payload)
+    } else if (src_port == 5355 || dst_port == 5355) && src_port != 53 && dst_port != 53 {
+        super::udp_services::llmnr(&payload)
+    } else {
+        None
+    };
+    // Port numbers alone are not proof of these application protocols.
+    // An incomplete or malformed packet remains valid transport evidence.
+    let protocol = if matches!(protocol, "DHCP" | "NTP") && decoded_service.is_none() {
+        "UDP"
+    } else if let Some(service) = &decoded_service {
+        service.protocol
+    } else {
+        protocol
+    };
+    if let Some(service) = decoded_service {
+        info = service.info;
+        layers.extend(service.layers);
+    }
     if protocol == "DNS" {
         if let Some(summary) = dns::parse_dns(&payload) {
             info = dns::describe_dns(&summary);

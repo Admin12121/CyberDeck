@@ -51,7 +51,7 @@ pub(super) fn status(
     }
 }
 
-pub(super) fn start(
+pub(super) async fn start(
     targets: String,
     ports: String,
     on_progress: Channel<ScanProgress>,
@@ -74,10 +74,11 @@ pub(super) fn start(
         selected,
         ctx,
     )
+    .await
 }
 
 /// Additive, explicitly authorized UDP scan. Legacy netscan_start stays TCP.
-pub(super) fn start_udp(
+pub(super) async fn start_udp(
     targets: String,
     ports: String,
     on_progress: Channel<ScanProgress>,
@@ -100,9 +101,10 @@ pub(super) fn start_udp(
         selected,
         ctx,
     )
+    .await
 }
 
-fn start_for_transport(
+async fn start_for_transport(
     transport: ScanTransport,
     targets: String,
     ports: String,
@@ -160,12 +162,22 @@ fn start_for_transport(
     } else {
         ""
     };
-    // A frontend acknowledgment alone does not authorize active network probes.
-    let approved = app.dialog().message(format!(
+    // Run the native Yes/No confirmation off the IPC/UI dispatcher.
+    let prompt = format!(
         "Authorize {transport_name} probes of {host_count} parsed hosts and {} ports in this saved case? An uncertain timeout may be retried once (maximum two attempts per host and port). Only test systems you are permitted to assess.{uncertainty}",
         port_list.len(),
-    )).title("Confirm scoped network scan")
-        .buttons(MessageDialogButtons::YesNo).blocking_show();
+    );
+    let dialog = app.clone();
+    let approved = tokio::task::spawn_blocking(move || {
+        dialog
+            .dialog()
+            .message(prompt)
+            .title("Confirm scoped network scan")
+            .buttons(MessageDialogButtons::YesNo)
+            .blocking_show()
+    })
+    .await
+    .map_err(|_| "scan confirmation dialog unavailable")?;
     if !approved {
         return Err("scan cancelled by operator".into());
     }
@@ -337,11 +349,12 @@ pub(super) fn export(
     Ok(path.to_string_lossy().to_string())
 }
 
-pub(super) fn discover_hosts(
+pub(super) async fn discover_hosts(
     targets: String,
     authorized: bool,
     app: AppHandle,
     selected: State<'_, CaseSessionCtx>,
+    ctx: State<'_, ScanCtx>,
 ) -> Result<Vec<String>, String> {
     if !authorized {
         return Err("explicit scan authorization acknowledgment required".to_string());
@@ -357,24 +370,46 @@ pub(super) fn discover_hosts(
             host_discovery::MAX_DISCOVERY_HOSTS
         ));
     }
-    let approved = app
-        .dialog()
-        .message(format!(
-            "Authorize bounded TCP reachability probes of {} hosts (maximum 30-second run) in this selected case?",
-            hosts.len()
-        ))
-        .title("Confirm network discovery")
-        .buttons(MessageDialogButtons::YesNo)
-        .blocking_show();
+    let prompt = format!(
+        "Authorize bounded TCP reachability probes of {} hosts (maximum 30-second run) in this selected case?",
+        hosts.len()
+    );
+    let dialog = app.clone();
+    let approved = tokio::task::spawn_blocking(move || {
+        dialog
+            .dialog()
+            .message(prompt)
+            .title("Confirm network discovery")
+            .buttons(MessageDialogButtons::YesNo)
+            .blocking_show()
+    })
+    .await
+    .map_err(|_| "host discovery confirmation unavailable")?;
     if !approved {
         return Err("host discovery cancelled by operator".into());
     }
     selected.ensure(&scope)?;
-    let _permit = app
+    let permit = app
         .state::<Arc<crate::features::network::ipc::operation_gate::NetworkOperationGate>>()
         .acquire(crate::features::network::ipc::operation_gate::ActiveOperation::TcpDiscovery)?;
-    let found =
-        host_discovery::responding_hosts_scoped(hosts, &|| selected.ensure(&scope).is_ok())?;
+    // Worker holds the global permit and verifies backend case revision before
+    // each probe. The network loop never blocks Tauri's command dispatcher.
+    ctx.stop.store(false, Ordering::Release);
+    let stop = Arc::clone(&ctx.stop);
+    let worker_app = app.clone();
+    let worker_scope = scope.clone();
+    let found = tokio::task::spawn_blocking(move || {
+        let _active_operation = permit;
+        host_discovery::responding_hosts_scoped(hosts, &|| {
+            !stop.load(Ordering::Acquire)
+                && worker_app
+                    .state::<CaseSessionCtx>()
+                    .ensure(&worker_scope)
+                    .is_ok()
+        })
+    })
+    .await
+    .map_err(|_| "host discovery worker unavailable")??;
     selected.ensure(&scope)?;
     Ok(found)
 }

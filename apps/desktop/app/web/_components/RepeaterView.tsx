@@ -6,6 +6,7 @@ import { httpSend, isDesktop, type HttpResponseWire } from "@lib/ipc";
 import { hexDump } from "@lib/hex";
 import { useWebWorkflow } from "./WebWorkflow";
 import { useWorkbenchCase } from "@state/workbench";
+import { AuthorizedCaseAction } from "@/app/_components/AuthorizedCaseAction";
 
 interface RepeaterTab {
   name: string;
@@ -34,23 +35,33 @@ export function RepeaterView() {
   const desktop = isDesktop();
   const { repeaterHandoff } = useWebWorkflow();
   const { caseId, caseSession } = useWorkbenchCase();
+  const caseReady = caseId !== "scratchpad" && caseSession.phase === "ready" && caseSession.caseId === caseId;
   const caseRef = useRef(caseId);
   caseRef.current = caseId;
   const inFlightRevision = useRef(0);
   const nextTabId = useRef(2);
   const lastHandoff = useRef(0);
+  const lastCaseIdentity = useRef({ caseId, revision: caseSession.revision });
   const [tabs, setTabs] = useState<RepeaterTab[]>([{ name: "R1", request: SAMPLE_REQUEST, response: null, error: null }]);
   const [active, setActive] = useState(0);
   const [busy, setBusy] = useState(false);
   const [bodyMode, setBodyMode] = useState<"inspector" | "raw" | "hex">("inspector");
 
-  // A native case switch invalidates all pending UI response publication.
-  // Retain editable drafts, but never present a previous case's response.
+  // Repeater drafts may contain Authorization and Cookie headers. Never carry
+  // requests, responses or in-flight jobs from one case revision to another.
   useEffect(() => {
-    inFlightRevision.current += 1;
-    setTabs((previous) => previous.map((tab) => ({ ...tab, response: null, error: null })));
-    setBusy(false);
-  }, [caseId, caseSession.revision]);
+    const changed = lastCaseIdentity.current.caseId !== caseId ||
+      lastCaseIdentity.current.revision !== caseSession.revision;
+    lastCaseIdentity.current = { caseId, revision: caseSession.revision };
+    if (changed) {
+      inFlightRevision.current += 1;
+      lastHandoff.current = repeaterHandoff?.id ?? 0;
+      setTabs([{ name: "R1", request: SAMPLE_REQUEST, response: null, error: null }]);
+      setActive(0);
+      nextTabId.current = 2;
+      setBusy(false);
+    }
+  }, [caseId, caseSession.revision, repeaterHandoff?.id]);
 
   useEffect(() => {
     if (!repeaterHandoff || repeaterHandoff.id === lastHandoff.current) return;
@@ -65,7 +76,7 @@ export function RepeaterView() {
     setTabs((prev) => prev.map((t, i) => (i === active ? { ...t, ...patch } : t)));
 
   const send = async () => {
-    if (busy || !current) return;
+    if (busy || !current || !caseReady) return;
     const revision = ++inFlightRevision.current;
     const selectedCase = caseId;
     const name = current.name;
@@ -121,13 +132,14 @@ export function RepeaterView() {
           +
         </ToolButton>
         <span className="mx-1 h-4 w-px bg-line" />
-        <ToolButton tone="primary" onClick={() => void send()} disabled={busy || !desktop} title={desktop ? "Send the raw request through the native HTTP engine" : "Sending requires the desktop runtime"}>
+        <ToolButton tone="primary" onClick={() => void send()} disabled={busy || !desktop || !caseReady} title={desktop ? "Send the raw request through the native HTTP engine" : "Sending requires the desktop runtime"}>
           <Play size={11} /> {busy ? "sending…" : "Send"}
         </ToolButton>
         <span className="ml-auto font-mono text-[10px] text-fg-muted" title="A native selected case, a private/loopback literal-IP target and per-request OS confirmation are required">
           {current.response ? `${current.response.status} · ${current.response.size} B · ${current.response.duration_ms} ms` : "Native approval · scoped private/loopback IP only"}
         </span>
       </div>
+      {!caseReady && <AuthorizedCaseAction activity="Web request replay" />}
       <div className="flex min-h-0 flex-1 gap-px bg-line">
         <Pane title={`Request: ${current.name}`} className="min-w-0 flex-1" bodyClassName="p-0">
           <textarea

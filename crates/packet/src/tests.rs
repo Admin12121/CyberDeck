@@ -527,3 +527,173 @@ fn ipv6_udp_length_larger_than_complete_ip_payload_is_not_streamed() {
     assert_eq!(valid.protocol, "UDP");
     assert_eq!(valid.payload, b"test");
 }
+
+/// The actual raw-IP and classic PCAP entrypoints must expose the same
+/// bounded passive UDP dissection used by the Packet Analysis UI.
+fn udp_packet_ipv4(src_port: u16, dst_port: u16, body: &[u8]) -> Vec<u8> {
+    assert!(body.len() < 1500);
+    let size = 20 + 8 + body.len();
+    let mut ip = vec![
+        0x45, 0, 0, 0, 0, 0, 0, 0, 64, 17, 0, 0, 192, 0, 2, 10, 192, 0, 2, 11,
+    ];
+    ip[2..4].copy_from_slice(&(size as u16).to_be_bytes());
+    ip.extend_from_slice(&src_port.to_be_bytes());
+    ip.extend_from_slice(&dst_port.to_be_bytes());
+    ip.extend_from_slice(&((body.len() + 8) as u16).to_be_bytes());
+    ip.extend_from_slice(&[0, 0]);
+    ip.extend_from_slice(body);
+    ip
+}
+#[test]
+fn packet_analysis_udp_service_decoders_use_real_dissection_entrypoint() {
+    let mut dhcp = vec![0u8; 240];
+    dhcp[0] = 2;
+    dhcp[1] = 1;
+    dhcp[2] = 6;
+    dhcp[4..8].copy_from_slice(&0x12345678u32.to_be_bytes());
+    dhcp[16..20].copy_from_slice(&[192, 0, 2, 99]);
+    dhcp[28..34].copy_from_slice(&[2, 3, 4, 5, 6, 7]);
+    dhcp[236..240].copy_from_slice(&[99, 130, 83, 99]);
+    dhcp.extend_from_slice(&[53, 1, 2, 54, 4, 192, 0, 2, 1, 255]);
+    let dhcp_ip = udp_packet_ipv4(67, 68, &dhcp);
+    let result = dissect(101, &dhcp_ip);
+    assert_eq!(result.protocol, "DHCP");
+    assert!(result.info.contains("Offer"));
+    assert!(result
+        .layers
+        .iter()
+        .any(|layer| layer.label == "DHCP server identifier" && layer.value == "192.0.2.1"));
+    assert_eq!(result.payload, dhcp);
+
+    let mut ntp = [0u8; 48];
+    ntp[0] = 0x24;
+    ntp[1] = 2;
+    let time = dissect(101, &udp_packet_ipv4(123, 4242, &ntp));
+    assert_eq!(time.protocol, "NTP");
+    assert!(time
+        .layers
+        .iter()
+        .any(|l| l.label == "NTP stratum" && l.value == "2"));
+
+    let mut stun = vec![0u8; 20];
+    stun[0..2].copy_from_slice(&0x0001u16.to_be_bytes());
+    stun[4..8].copy_from_slice(&[0x21, 0x12, 0xa4, 0x42]);
+    stun[8..20].copy_from_slice(&[9; 12]);
+    let result = dissect(101, &udp_packet_ipv4(51000, 3478, &stun));
+    assert_eq!(result.protocol, "STUN");
+    assert!(result.info.contains("Binding Request"));
+
+    let mut names = vec![0u8; 12];
+    names[4..6].copy_from_slice(&1u16.to_be_bytes());
+    names.extend_from_slice(b"\x04host\x05local\x00\x00\x01\x00\x01");
+    let mdns = dissect(101, &udp_packet_ipv4(5353, 5353, &names));
+    assert_eq!(mdns.protocol, "MDNS");
+    assert!(mdns.layers.iter().any(
+        |layer| layer.label == "Name resolution question" && layer.value.contains("host.local")
+    ));
+    names[0..2].copy_from_slice(&0x1234u16.to_be_bytes());
+    let llmnr = dissect(101, &udp_packet_ipv4(5355, 5355, &names));
+    assert_eq!(llmnr.protocol, "LLMNR");
+    assert!(llmnr
+        .layers
+        .iter()
+        .any(|layer| layer.label == "Link-local name resolution"));
+    let broken = dissect(101, &udp_packet_ipv4(5353, 5353, &names[..13]));
+    assert_eq!(broken.protocol, "UDP");
+
+    // Port hints alone never upgrade malformed or incomplete application data.
+    for (src, dst, bad) in [
+        (67, 68, &b"not dhcp"[..]),
+        (123, 1024, &b"not ntp"[..]),
+        (3478, 1024, &b"not stun"[..]),
+    ] {
+        let invalid = dissect(101, &udp_packet_ipv4(src, dst, bad));
+        assert_eq!(invalid.protocol, "UDP");
+        assert!(invalid
+            .layers
+            .iter()
+            .all(|layer| !layer.label.starts_with("DHCP ")
+                && !layer.label.starts_with("NTP ")
+                && !layer.label.starts_with("STUN ")));
+    }
+
+    // Native original capture parsing also preserves the same layer tree.
+    let mut ethernet = vec![0u8; 12];
+    ethernet.extend_from_slice(&0x0800u16.to_be_bytes());
+    ethernet.extend_from_slice(&dhcp_ip);
+    let bytes = build_pcap(&[(12345, ethernet)]);
+    let parsed = parse_capture(&bytes).expect("PCAP DHCP fixture");
+    assert_eq!(parsed.packets.len(), 1);
+    assert_eq!(parsed.packets[0].dissected.protocol, "DHCP");
+    assert_eq!(parsed.packets[0].dissected.payload, dhcp);
+}
+
+#[test]
+fn native_tcp_options_reach_packet_details_without_claiming_os_family() {
+    let options = [2u8, 4, 0x05, 0xb4, 1, 3, 3, 7, 4, 2, 0, 0];
+    let mut ip = vec![
+        0x45, 0, 0, 0, 0, 0, 0, 0, 64, 6, 0, 0, 192, 0, 2, 1, 192, 0, 2, 2,
+    ];
+    ip[2..4].copy_from_slice(&(20u16 + 32).to_be_bytes());
+    let mut tcp = vec![0u8; 20];
+    tcp[..2].copy_from_slice(&50000u16.to_be_bytes());
+    tcp[2..4].copy_from_slice(&443u16.to_be_bytes());
+    tcp[12] = 0x80; // 8 x 4 byte words, including 12 bytes of options
+    tcp[13] = 2; // SYN
+    tcp[14..16].copy_from_slice(&65535u16.to_be_bytes());
+    ip.extend_from_slice(&tcp);
+    ip.extend_from_slice(&options);
+    let decoded = dissect(101, &ip);
+    assert!(decoded.tcp.is_some());
+    assert!(decoded
+        .layers
+        .iter()
+        .any(|l| l.label == "TCP maximum segment size" && l.value == "1460"));
+    assert!(decoded
+        .layers
+        .iter()
+        .any(|l| l.label == "TCP window scale" && l.value == "7"));
+    assert!(decoded
+        .layers
+        .iter()
+        .any(|l| l.label == "TCP SACK permitted" && l.value == "yes"));
+    assert!(decoded
+        .layers
+        .iter()
+        .any(|l| l.label == "TCP receive window (raw)" && l.value == "65535"));
+    assert!(decoded
+        .layers
+        .iter()
+        .any(|l| l.label == "TCP header length" && l.value == "32 byte(s)"));
+    assert!(decoded
+        .layers
+        .iter()
+        .any(|l| l.label == "TCP checksum (not independently verified)" && l.value == "0x0000"));
+    assert!(!decoded.info.contains("Windows") && !decoded.info.contains("Linux"));
+
+    let mut ethernet = vec![0u8; 12];
+    ethernet.extend_from_slice(&0x0800u16.to_be_bytes());
+    ethernet.extend_from_slice(&ip);
+    let capture = parse_capture(&build_pcap(&[(1, ethernet)])).unwrap();
+    assert_eq!(capture.packets.len(), 1);
+    assert!(capture.packets[0]
+        .dissected
+        .layers
+        .iter()
+        .any(|l| l.label == "TCP maximum segment size"));
+
+    // A malformed option must never become a positive MSS, but TCP payload
+    // identity and the original frame remain inspectable.
+    let mut malformed = ip;
+    malformed[41] = 0; // option length zero in TCP option area
+    let parsed = dissect(101, &malformed);
+    assert!(parsed.tcp.is_some());
+    assert!(parsed
+        .layers
+        .iter()
+        .any(|l| l.label == "TCP option warning"));
+    assert!(!parsed
+        .layers
+        .iter()
+        .any(|l| l.label == "TCP maximum segment size"));
+}

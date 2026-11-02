@@ -125,6 +125,7 @@ fn main() {
             features::network::ipc::pcap::pcap_case_follow_stream_v1,
             features::network::ipc::pcap::pcap_follow_stream,
             features::network::ipc::capture::capture_interfaces_v1,
+            features::network::ipc::capture::network_runtime_capabilities_v1,
             features::network::ipc::capture::capture_start_v1,
             features::network::ipc::capture::capture_stop_v1,
             features::network::ipc::capture::capture_status_v1,

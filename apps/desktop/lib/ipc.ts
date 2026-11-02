@@ -56,9 +56,11 @@ export type RecoveryBackendV1 =
   | { backend: "hashcat_managed" };
 
 export type HashcatRawAlgorithmV1 = "md5" | "sha1" | "ntlm" | "sha256" | "sha512";
+/** Native Rust CPU supports SHA3-256; the embedded Hashcat build does not. */
+export type RecoveryRawAlgorithmV1 = HashcatRawAlgorithmV1 | "sha3_256";
 export type HashcatWordlistPresetV1 = "plain" | "uppercase" | "append_one";
 export interface RecoveryRequestV1 {
-  algorithm: HashcatRawAlgorithmV1;
+  algorithm: RecoveryRawAlgorithmV1;
   target_hash: string;
   backend: RecoveryBackendV1;
   max_candidates: number;
@@ -72,6 +74,7 @@ export interface RecoveryDeviceWireV1 {
   hardware_verified: boolean;
 }
 export interface RecoveryDeviceInventoryV1 {
+  cpu: { model: string; architecture: string; logical_processors: number };
   opencl_detected: boolean;
   detail: string;
   devices: RecoveryDeviceWireV1[];
@@ -132,12 +135,16 @@ export async function recoveryWordlistStatusV1(): Promise<RecoveryWordlistV1 | n
 
 /** Starts recovery using the previously OS-selected backend wordlist. */
 export async function recoveryStartV1(
-  request: RecoveryRequestV1, onEvent: (event: RecoveryEventV1) => void,
+  request: RecoveryRequestV1,
+  onEvent: (event: RecoveryEventV1) => void,
+  rules?: string,
 ): Promise<number> {
-  if (!inTauri) throw new Error("Native SHA-256 recovery requires the desktop runtime");
+  if (!inTauri) throw new Error("Native wordlist recovery requires the desktop runtime");
   const channel = new Channel<RecoveryEventV1>();
   channel.onmessage = onEvent;
-  return invoke<number>("recovery_start_v1", { request, onEvent: channel });
+  // Rules are bounded, never persisted, parsed again by Rust and strictly
+  // CPU-only. The default remains ordinary streaming wordlist recovery.
+  return invoke<number>("recovery_start_v1", { request, rules: rules?.trim() || null, onEvent: channel });
 }
 export interface EmbeddedHashcatCapabilityV1 {
   available: boolean;
@@ -693,7 +700,24 @@ export async function fileExtractNestedArchive(
 
 // --- native bounded Linux capture sessions (host verification pending) -------
 
+/** OS-authoritative Network capabilities; never guessed from WebView user agent. */
+export interface NetworkRuntimeCapabilitiesV1 {
+  platform: "windows" | "linux" | "macos" | "unsupported";
+  tcp_connect: boolean;
+  udp: boolean;
+  ipv4_echo: boolean;
+  ipv4_trace: boolean;
+  linux_on_link: boolean;
+  capture_backend_present: boolean;
+  capture_detail: string;
+}
+export async function networkRuntimeCapabilitiesV1(): Promise<NetworkRuntimeCapabilitiesV1> {
+  if (!inTauri) throw new Error("Native network capability inventory requires the desktop runtime");
+  return invoke<NetworkRuntimeCapabilitiesV1>("network_runtime_capabilities_v1", {});
+}
+
 export interface CaptureInterfaceV1 {
+  display_name?: string;
   capture_supported?: boolean;
   capture_unavailable_reason?: string | null;
   name: string;

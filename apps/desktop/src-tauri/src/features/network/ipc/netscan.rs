@@ -80,7 +80,7 @@ pub fn netscan_status(
 }
 
 #[tauri::command]
-pub fn netscan_start(
+pub async fn netscan_start(
     targets: String,
     ports: String,
     on_progress: Channel<ScanProgress>,
@@ -102,12 +102,13 @@ pub fn netscan_start(
         selected,
         ctx,
     )
+    .await
 }
 
 /// Additive UDP method: user-mode connected datagrams with conservative
 /// response evidence; the original seven netscan_* calls remain unchanged.
 #[tauri::command]
-pub fn netscan_udp_start_v1(
+pub async fn netscan_udp_start_v1(
     targets: String,
     ports: String,
     on_progress: Channel<ScanProgress>,
@@ -129,6 +130,7 @@ pub fn netscan_udp_start_v1(
         selected,
         ctx,
     )
+    .await
 }
 
 #[tauri::command]
@@ -173,13 +175,14 @@ pub fn netscan_export(
 }
 
 #[tauri::command]
-pub fn netscan_discover_hosts(
+pub async fn netscan_discover_hosts(
     targets: String,
     authorized: bool,
     app: AppHandle,
     selected: State<'_, CaseSessionCtx>,
+    ctx: State<'_, ScanCtx>,
 ) -> Result<Vec<String>, String> {
-    scan_commands::discover_hosts(targets, authorized, app, selected)
+    scan_commands::discover_hosts(targets, authorized, app, selected, ctx).await
 }
 
 #[cfg(test)]

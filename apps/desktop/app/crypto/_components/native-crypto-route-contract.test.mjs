@@ -98,11 +98,15 @@ test("Recovery V1 real route uses existing typed native calls and authorized rev
     assert.ok(combo.includes('id: "' + id + '"'), "Verify must offer native " + id);
     assert.ok(catalog.includes('op("' + id + '"'), "Verify should not offer unimplemented " + id);
   }
-  assert.ok(view.includes('<Accordion defaultValue={[]}'));
+  assert.ok(view.includes('<Accordion defaultValue={["verify"]}'), "Verify must be visible without first expanding a hidden panel");
+  assert.ok(ui.includes('AuthorizedCaseAction'), "Recovery must offer an actionable saved-case setup");
+  assert.ok(ui.includes('inventory?.cpu'), "Recovery must show native CPU resources");
   assert.ok(view.includes('value="verify"'));
   assert.ok(view.includes('VerifyAlgorithmCombobox'));
   assert.ok(view.includes('hashDrafts = new Map'));
   assert.ok(view.includes('keepHash(caseId, value)'));
+  assert.ok(view.includes('onCaseCreated={(newCaseId) => keepHash(newCaseId, input)}'),
+    "Explicit new-case creation must retain the operator-authored hash draft");
   assert.ok(view.includes('file.size > 8192'));
   assert.ok(view.includes('setHashImportError'));
   assert.ok(!view.includes("hashDrafts.set(caseId, candidate)"));

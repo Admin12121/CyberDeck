@@ -81,7 +81,7 @@ pub(super) fn responding_hosts_scoped(
         }
     });
     if !scope_is_active() {
-        return Err("discovery revoked: selected case changed".into());
+        return Err("discovery cancelled or selected case revision changed".into());
     }
     let mut hosts = found
         .into_inner()

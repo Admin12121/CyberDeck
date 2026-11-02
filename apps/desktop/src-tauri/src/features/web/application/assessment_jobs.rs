@@ -1,12 +1,11 @@
 //! Backend-owned bounded Web assessment jobs: no UI-owned cancellation truth.
+use super::auth_context_application::AuthContext;
 use super::{
     active_body_application, active_injection_application, active_oast_application,
-    active_query_application,
-    authorize_pinned_assessment,
-    crawl_application, execute_case_scoped_assessment, passive_rules_application, scan_application,
-    scan_domain, selected_history_grant, target_scope, webhistory, Finding, WebCtx,
+    active_query_application, authorize_pinned_assessment, crawl_application,
+    execute_case_scoped_assessment, passive_rules_application, scan_application, scan_domain,
+    selected_history_grant, target_scope, webhistory, Finding, WebCtx,
 };
-use super::auth_context_application::AuthContext;
 use crate::features::forensics::ipc::evidence::EvidenceCtx;
 use crate::features::shared::session::{CaseSessionCtx, CaseSessionWire};
 use cyberdeck_storage::{ArtifactStore, HistoryCaptureGrant, NewFinding};
@@ -259,6 +258,7 @@ impl Job {
             || !matches!(
                 state.kind.as_str(),
                 "scanner"
+                    | "spider"
                     | "passive"
                     | "active-query"
                     | "active-form"
@@ -303,7 +303,41 @@ impl Job {
             .collect();
         // The source field identifies the native producer, and these bounded
         // non-secret findings have no borrowed/foreign artifact references.
-        let records = if state.kind == "passive" {
+        let records = if state.kind == "spider" {
+            // The crawler has already enforced same-origin, DNS pinning,
+            // no query/fragment credentials and bounded discovery. Validate
+            // the final immutable URLs again before any SQLite write. Saving
+            // is explicit: no automatic persistence of browsing history.
+            state
+                .urls
+                .iter()
+                .take(60)
+                .map(|url| {
+                    if url.len() > 4096 {
+                        return Err("discovered Web route exceeds case evidence limit".into());
+                    }
+                    let parsed = reqwest::Url::parse(url)
+                        .map_err(|_| "discovered Web route is malformed")?;
+                    if !matches!(parsed.scheme(), "http" | "https")
+                        || parsed.host_str().is_none()
+                        || !parsed.username().is_empty()
+                        || parsed.password().is_some()
+                        || parsed.query().is_some()
+                        || parsed.fragment().is_some()
+                    {
+                        return Err("Web route contains unsupported or sensitive URL parts".into());
+                    }
+                    Ok(NewFinding {
+                        title: "Discovered Web route".into(),
+                        severity: "info".into(),
+                        details: format!(
+                            "URL: {}\\nSource: authorized bounded same-origin Spider",
+                            url
+                        ),
+                    })
+                })
+                .collect::<Result<Vec<_>, String>>()?
+        } else if state.kind == "passive" {
             state
                 .rule_findings
                 .iter()
@@ -332,6 +366,7 @@ impl Job {
         };
         let source = match state.kind.as_str() {
             "passive" => "web.passive",
+            "spider" => "web.spider",
             "active-query" => "web.active.query",
             "active-form" => "web.active.form",
             "active-json" => "web.active.json",
@@ -700,8 +735,8 @@ pub async fn web_assessment_start_v4(
                     let config = oast
                         .as_ref()
                         .ok_or("out-of-band callback configuration is not available")?;
-                    let collector = active_oast_application::OastCollector::bind(config.bind)
-                        .await?;
+                    let collector =
+                        active_oast_application::OastCollector::bind(config.bind).await?;
                     active_oast_application::run_oast_with_budget(
                         &pinned.client,
                         pinned.url.clone(),
@@ -1128,7 +1163,7 @@ mod tests {
     }
 
     #[test]
-    fn native_scan_findings_refuse_scratchpad_pending_cancelled_and_spider() {
+    fn native_scan_findings_refuse_scratchpad_pending_and_cancelled() {
         let temp = tempfile::tempdir().unwrap();
         let store = ArtifactStore::open(&temp.path().join("db.sqlite")).unwrap();
         let other = store.create_case("Web evidence", "").unwrap();
@@ -1140,13 +1175,64 @@ mod tests {
         assert!(pending.save_completed(&store, &other.id).is_err());
         pending.cancelled();
         assert!(pending.save_completed(&store, &other.id).is_err());
-        let spider = Job::new(8, case.clone(), Kind::Spider);
-        spider.finish(Ok(Outcome::Urls(vec!["http://127.0.0.1".into()])));
-        assert!(spider.save_completed(&store, &other.id).is_err());
         let finished = Job::new(9, case, Kind::Scanner);
         finished.finish(Ok(Outcome::Findings(vec![])));
         assert!(finished.save_completed(&store, "scratchpad").is_err());
         assert!(finished.save_completed(&store, "anothercase").is_err());
+    }
+
+    #[test]
+    fn spider_discovered_routes_require_explicit_case_save_and_preserve_scope() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = ArtifactStore::open(&temp.path().join("web-spider.db")).unwrap();
+        let own = store.create_case("Authorized Spider case", "").unwrap();
+        let other = store.create_case("Unrelated case", "").unwrap();
+        let session = CaseSessionCtx::default();
+        let selected = session.select(&store, &own.id).unwrap();
+        let spider = Job::new(806, selected.clone(), Kind::Spider);
+        spider.finish(Ok(Outcome::Urls(vec![
+            "http://127.0.0.1:8080/".into(),
+            "http://127.0.0.1:8080/about".into(),
+        ])));
+        assert!(spider.save_completed(&store, &other.id).is_err());
+        let first = session
+            .with_current_publication(&selected, || spider.save_completed(&store, &own.id))
+            .unwrap();
+        assert_eq!(first, 2);
+        assert_eq!(spider.save_completed(&store, &own.id).unwrap(), first);
+        let findings = store.list_findings(&own.id).unwrap();
+        assert_eq!(findings.len(), 2);
+        assert!(findings
+            .iter()
+            .all(|entry| entry.source == "web.spider" && entry.severity == "info"));
+        assert!(findings
+            .iter()
+            .any(|entry| entry.details.contains("/about")));
+        assert!(store.list_findings(&other.id).unwrap().is_empty());
+        session.select(&store, &own.id).unwrap();
+        assert!(session
+            .with_current_publication(&selected, || spider.save_completed(&store, &own.id))
+            .is_err());
+    }
+
+    #[test]
+    fn spider_rejects_sensitive_or_malformed_routes_before_any_case_write() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = ArtifactStore::open(&temp.path().join("web-spider-invalid.db")).unwrap();
+        let own = store.create_case("Sensitive path case", "").unwrap();
+        let session = CaseSessionCtx::default();
+        let selected = session.select(&store, &own.id).unwrap();
+        for (id, url) in [
+            (90, "http://127.0.0.1/?token=secret"),
+            (91, "http://user:secret@127.0.0.1/private"),
+            (92, "file:///etc/passwd"),
+            (93, "not a URL"),
+        ] {
+            let spider = Job::new(id, selected.clone(), Kind::Spider);
+            spider.finish(Ok(Outcome::Urls(vec![url.to_string()])));
+            assert!(spider.save_completed(&store, &own.id).is_err());
+        }
+        assert!(store.list_findings(&own.id).unwrap().is_empty());
     }
 
     #[test]

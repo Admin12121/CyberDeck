@@ -19,6 +19,8 @@ import {
   netscanSynStopV1,
   netscanArpStopV1,
   captureInterfacesV1,
+  networkRuntimeCapabilitiesV1,
+  type NetworkRuntimeCapabilitiesV1,
   netscanResults,
   netscanObservationsV1,
   netscanStart,
@@ -36,6 +38,7 @@ import {
   type NetscanStatusWire,
 } from "@lib/ipc";
 import { useWorkbench, useWorkbenchCase } from "@state/workbench";
+import { AuthorizedCaseAction } from "@/app/_components/AuthorizedCaseAction";
 import { useWorkspaceDraft } from "@state/workspace-sessions";
 
 const PORT_PRESETS = [
@@ -46,6 +49,24 @@ const PORT_PRESETS = [
 
 export function ScanView() {
   const desktop = isDesktop();
+  const [capabilities, setCapabilities] = useState<NetworkRuntimeCapabilitiesV1 | null>(null);
+  const windowsHost = capabilities?.platform === "windows";
+  const linuxHost = capabilities?.platform === "linux";
+  useEffect(() => {
+    if (!desktop) return;
+    let live = true;
+    void networkRuntimeCapabilitiesV1()
+      .then((caps) => { if (live) setCapabilities(caps); })
+      .catch((cause) => {
+        if (live) setCapabilities({
+          platform: "unsupported", tcp_connect: false, udp: false,
+          ipv4_echo: false, ipv4_trace: false, linux_on_link: false,
+          capture_backend_present: false,
+          capture_detail: "Cannot query native platform capabilities: " + String(cause),
+        });
+      });
+    return () => { live = false; };
+  }, [desktop]);
   const wb = useWorkbench();
   const { caseSession } = useWorkbenchCase();
   const revision = caseSession.phase === "ready" && caseSession.caseId === wb.caseId
@@ -55,7 +76,7 @@ export function ScanView() {
     wb.caseId, "network", "scan-session-revision", null,
   );
   const [target, setTarget] = useWorkspaceDraft(wb.caseId, "network", "scan-target", "127.0.0.1");
-  const [notesWidth, setNotesWidth] = useState(320);
+  const [notesWidth, setNotesWidth] = useState(264);
   const [ports, setPorts] = useWorkspaceDraft(wb.caseId, "network", "scan-ports", "top25");
   const [transport, setTransport] = useWorkspaceDraft<"tcp" | "udp">(
     wb.caseId, "network", "scan-transport", "tcp",
@@ -65,6 +86,7 @@ export function ScanView() {
   const [progress, setProgress] = useState<ScanProgressWire | null>(null);
   const [results, setResults] = useState<ScanEntryWire[]>([]);
   const [discovered, setDiscovered] = useState<string[] | null>(null);
+  const [discoveryBusy, setDiscoveryBusy] = useState(false);
   const [arpInterfaces, setArpInterfaces] = useState<CaptureInterfaceV1[]>([]);
   const [arpInterface, setArpInterface] = useWorkspaceDraft(
     wb.caseId, "network", "scan-arp-interface", "",
@@ -86,6 +108,9 @@ export function ScanView() {
   const [observationOffset, setObservationOffset] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const [status, setStatus] = useState<NetscanStatusWire>({ running: false, results: 0, saved_findings: 0, save_error: null });
+  // One case-scoped active operation at a time. Stop buttons remain enabled.
+  const networkBusy = running || status.running || discoveryBusy || arpBusy ||
+    ndpBusy || icmpBusy || synBusy || traceBusy;
   // Native status/results now enforce the selected case generation on every read.
   const activeCase = useRef(identity);
   activeCase.current = identity;
@@ -101,6 +126,7 @@ export function ScanView() {
     pollTicket.current += 1;
     setResults([]);
     setDiscovered(null);
+    setDiscoveryBusy(false);
     setArpNeighbors(null);
     setNdpNeighbors(null);
     setArpBusy(false);
@@ -119,21 +145,28 @@ export function ScanView() {
     setProgress(null);
     setError(null);
     setRunning(false);
+    // Operator authorization is tied to one backend-selected case revision.
+    setAuthorized(false);
+    setStatus({ running: false, results: 0, saved_findings: 0, save_error: null });
   }, [identity]);
 
   useEffect(() => {
     if (!desktop) return;
     let active = true;
     void captureInterfacesV1().then((interfaces) => {
-      if (active) setArpInterfaces(interfaces.filter(
-        (iface) => iface.ethernet && iface.up && !iface.loopback,
-      ));
+      if (active) {
+        const connected = interfaces.filter((iface) => iface.ethernet && iface.up && !iface.loopback);
+        setArpInterfaces(connected);
+        if (!arpInterface && connected.length > 0) setArpInterface(connected[0].name);
+      }
     }).catch(() => { if (active) setArpInterfaces([]); });
     return () => { active = false; };
-  }, [desktop]);
+  }, [desktop, arpInterface, setArpInterface]);
 
   const poll = useCallback(async () => {
-    const caseId = wb.caseId;
+    // Do not issue backend case-scoped reads while no saved case is selected.
+    // A scratchpad startup must show the Create Case path, not a scan error.
+    if (revision === null) return;
     const key = identity;
     const ticket = ++pollTicket.current;
     const isCurrent = () => activeCase.current === key && ticket === pollTicket.current;
@@ -153,17 +186,17 @@ export function ScanView() {
     } catch (cause) {
       if (isCurrent()) setError("Scanner status unavailable: " + String(cause));
     }
-  }, [identity, observationOffset]);
+  }, [identity, revision, observationOffset]);
 
   useEffect(() => {
-    if (!desktop) return;
+    if (!desktop || revision === null) return;
     void poll();
     const timer = setInterval(() => void poll(), 900);
     return () => clearInterval(timer);
-  }, [poll, desktop]);
+  }, [poll, desktop, revision]);
 
   const start = async () => {
-    if (running || status.running || revision === null) return;
+    if (networkBusy || revision === null || !authorized) return;
     const caseId = wb.caseId;
     const key = identity;
     const ticket = ++scanTicket.current;
@@ -194,19 +227,31 @@ export function ScanView() {
   };
 
   const discover = async () => {
-    if (!desktop || revision === null || !authorized || running || status.running) return;
+    if (!desktop || revision === null || !authorized || discoveryBusy ||
+      running || status.running || synBusy || arpBusy || ndpBusy || icmpBusy || traceBusy) return;
     const key = identity;
     setError(null);
     setDiscovered(null);
+    setDiscoveryBusy(true);
     try {
       const found = await netscanDiscoverHosts(target, authorized);
       if (activeCase.current === key) setDiscovered(found);
     } catch (err) {
-      if (activeCase.current === key) setError(err instanceof Error ? err.message : String(err));
+      if (activeCase.current === key) {
+        const text = err instanceof Error ? err.message : String(err);
+        if (!text.includes("cancelled")) setError(text);
+      }
+    } finally {
+      if (activeCase.current === key) setDiscoveryBusy(false);
     }
+  };
+  const stopDiscovery = async () => {
+    try { await netscanStop(); }
+    catch (err) { setError(err instanceof Error ? err.message : String(err)); }
   };
 
   const runSyn = async () => {
+    if (networkBusy) return;
     if (!desktop || revision === null || !authorized || !arpInterface
       || synBusy || arpBusy || ndpBusy || icmpBusy || status.running || running) return;
     const key = identity;
@@ -230,6 +275,7 @@ export function ScanView() {
     }
   };
   const runSyn6 = async () => {
+    if (networkBusy) return;
     if (!desktop || revision === null || !authorized || !arpInterface ||
       synBusy || arpBusy || ndpBusy || icmpBusy || traceBusy || status.running || running) return;
     const key = identity;
@@ -259,6 +305,7 @@ export function ScanView() {
   };
 
   const discoverArp = async () => {
+    if (networkBusy) return;
     if (!desktop || revision === null || !authorized || !arpInterface
         || running || status.running || arpBusy || ndpBusy || synBusy || icmpBusy || traceBusy) return;
     const key = identity;
@@ -278,6 +325,7 @@ export function ScanView() {
   };
 
   const discoverIcmp = async () => {
+    if (networkBusy) return;
     if (!desktop || revision === null || !authorized || !arpInterface ||
       running || status.running || arpBusy || ndpBusy || synBusy || icmpBusy) return;
     const key = identity;
@@ -295,6 +343,7 @@ export function ScanView() {
     }
   };
   const runTrace = async () => {
+    if (networkBusy) return;
     if (!desktop || revision === null || !authorized || !arpInterface ||
       running || status.running || arpBusy || ndpBusy || synBusy || icmpBusy || traceBusy) return;
     const key = identity;
@@ -316,6 +365,7 @@ export function ScanView() {
   };
 
   const discoverIcmp6 = async () => {
+    if (networkBusy) return;
     if (!desktop || revision === null || !authorized || !arpInterface ||
       running || status.running || arpBusy || ndpBusy || synBusy || icmpBusy || traceBusy) return;
     const key = identity;
@@ -339,6 +389,7 @@ export function ScanView() {
   };
 
   const discoverNdp = async () => {
+    if (networkBusy) return;
     if (!desktop || revision === null || !authorized || !arpInterface ||
       running || status.running || arpBusy || synBusy || ndpBusy) return;
     const key = identity;
@@ -417,13 +468,20 @@ export function ScanView() {
         {!isPreset ? (
           <TextInput value={ports} onChange={setPorts} placeholder="80,443,8000-8100" ariaLabel="Custom ports" className="w-40" />
         ) : null}
-        <ToolButton
-          onClick={() => void discover()}
-          disabled={!desktop || revision === null || !authorized || !target.trim() || running || status.running}
-          title="Discover responding hosts using bounded case-authorized TCP probes"
-        >
-          Discover
-        </ToolButton>
+        {discoveryBusy ? (
+          <ToolButton tone="danger" onClick={() => void stopDiscovery()}
+            title="Cancel the current saved-case TCP host discovery">
+            <Square size={11} /> Stop discovery
+          </ToolButton>
+        ) : (
+          <ToolButton
+            onClick={() => void discover()}
+            disabled={!desktop || revision === null || !authorized || !target.trim() || networkBusy}
+            title="Discover responding hosts using bounded case-authorized TCP probes"
+          >
+            Discover hosts
+          </ToolButton>
+        )}
         {status.running || (running && scanCase.current === wb.caseId) ? (
           <ToolButton tone="danger" onClick={() => void stop()}>
             <Square size={11} /> Stop
@@ -432,7 +490,7 @@ export function ScanView() {
           <ToolButton
             tone="primary"
             onClick={() => void start()}
-            disabled={!desktop || revision === null || !authorized || !target.trim() || status.running || running}
+            disabled={!desktop || revision === null || !authorized || !target.trim() || networkBusy}
             title={revision === null ? "Select a saved native investigation case before scanning" : "Backend-selected case and native confirmation are required before network probes"}
           >
             <Play size={11} /> {running ? "scanning…" : "Run scan"}
@@ -450,6 +508,7 @@ export function ScanView() {
         <span className="ml-auto font-mono text-[10px] text-fg-muted">{openCount} open / {observedCount} observed</span>
       </div>
       {error ? <div className="border-b border-err/50 bg-err/10 px-2 py-1 font-mono text-[10px] text-err">{error}</div> : null}
+      {revision === null && <AuthorizedCaseAction activity="Network scanning" />}
       <div className="flex min-h-0 flex-1 gap-px bg-line">
         <div className="flex min-w-0 flex-1 flex-col gap-px bg-line">
           <Pane title="Authorization (§9.3)" className="shrink-0">
@@ -464,6 +523,44 @@ export function ScanView() {
                 I confirm the target is mine or I have explicit authorization to assess it. The backend verifies the selected saved case and asks for native confirmation before starting.
               </span>
             </label>
+            {windowsHost ? (
+              <div className="flex flex-wrap items-center gap-2 border-t border-line p-2">
+                <span className="text-xs text-fg-muted">Windows discovery · TCP/UDP above; ICMP and trace below require a connected adapter</span>
+                <Select value={arpInterface} onChange={setArpInterface}
+                  options={[{ value: "", label: "Select network adapter" }, ...arpInterfaces.map((iface) => ({ value: iface.name, label: iface.display_name || "Windows adapter #" + iface.index }))]}
+                  ariaLabel="Windows source network adapter" className="w-52" />
+                {icmpBusy ? (
+                  <ToolButton tone="danger" onClick={() => void stopIcmp()}
+                    title="Cancel active Windows ICMPv4 discovery">
+                    <Square size={11} /> Stop ping
+                  </ToolButton>
+                ) : (
+                  <ToolButton onClick={() => void discoverIcmp()}
+                    disabled={!desktop || !authorized || networkBusy || revision === null || !arpInterface ||
+                      !target.trim() || running || status.running || traceBusy}
+                    title="Windows IP Helper ICMPv4 Echo with native confirmation">
+                    Ping IPv4
+                  </ToolButton>
+                )}
+                {traceBusy ? (
+                  <ToolButton tone="danger" onClick={() => void stopTrace()}
+                    title="Cancel active Windows traceroute">
+                    <Square size={11} /> Stop trace
+                  </ToolButton>
+                ) : (
+                  <ToolButton onClick={() => void runTrace()}
+                    disabled={!desktop || !authorized || networkBusy || revision === null || !arpInterface ||
+                      !target.trim() || running || status.running || icmpBusy}
+                    title="Windows IP Helper IPv4 traceroute with native authorization">
+                    Trace IPv4
+                  </ToolButton>
+                )}
+                <span className="text-xs text-fg-muted">TCP/UDP scans do not require the capture driver. ARP, NDP and raw SYN are Linux-only.</span>
+                {arpInterfaces.length === 0 && <span role="status" className="text-xs text-fg-muted">
+                  No active IPv4 source adapter. TCP/UDP scans remain available above.
+                </span>}
+              </div>
+            ) : linuxHost ? (
             <div className="flex flex-wrap items-center gap-2 border-t border-line p-2">
               <span className="font-mono text-[10px] text-fg-muted">Linux on-link discovery</span>
               <Select
@@ -486,7 +583,7 @@ export function ScanView() {
               ) : (
                 <ToolButton
                   onClick={() => void discoverArp()}
-                  disabled={!desktop || !authorized || revision === null || !arpInterface
+                  disabled={!desktop || !authorized || networkBusy || revision === null || !arpInterface
                     || !target.trim() || running || status.running || ndpBusy || synBusy}
                   title="Linux only: native confirmation, on-link scope, CAP_NET_RAW and case authorization required">
                   Discover ARP
@@ -501,7 +598,7 @@ export function ScanView() {
                 </ToolButton>
               ) : (
                 <ToolButton onClick={() => void discoverNdp()}
-                  disabled={!desktop || !authorized || revision === null || !arpInterface ||
+                  disabled={!desktop || !authorized || networkBusy || revision === null || !arpInterface ||
                     !target.trim() || running || status.running || arpBusy || synBusy}
                   title="Linux only: native case confirmation, selected NIC, fe80::/10 IPv6 target and CAP_NET_RAW required">
                   Discover NDP
@@ -517,7 +614,7 @@ export function ScanView() {
                 </ToolButton>
               ) : (
                 <ToolButton onClick={() => void runTrace()}
-                  disabled={!desktop || !authorized || revision === null || !arpInterface ||
+                  disabled={!desktop || !authorized || networkBusy || revision === null || !arpInterface ||
                     !target.trim() || running || status.running || arpBusy || ndpBusy || synBusy || icmpBusy}
                   title="Linux or Windows: up to 12 TTL-limited ICMPv4 probes, backend confirmation and saved-case authorization required">
                   Trace IPv4
@@ -529,7 +626,7 @@ export function ScanView() {
                 </ToolButton>
               ) : (
                 <ToolButton onClick={() => void discoverIcmp()}
-                  disabled={!desktop || !authorized || revision === null || !arpInterface ||
+                  disabled={!desktop || !authorized || networkBusy || revision === null || !arpInterface ||
                     !target.trim() || running || status.running || arpBusy || ndpBusy || synBusy}
                   title="Windows native IP Helper or Linux CAP_NET_RAW: explicitly confirmed case-scoped ICMPv4 discovery">
                   ICMP Echo
@@ -539,7 +636,7 @@ export function ScanView() {
                 ICMPv4: up to 32 hosts
               </span>
               <ToolButton onClick={() => void discoverIcmp6()}
-                disabled={!desktop || !authorized || revision === null || !arpInterface ||
+                disabled={!desktop || !authorized || networkBusy || revision === null || !arpInterface ||
                   !target.trim() || running || status.running || arpBusy || ndpBusy || synBusy || icmpBusy || traceBusy}
                 title="Linux native ICMPv6 Echo: 32 distinct fe80::/10 targets on the selected Ethernet interface, native confirmation, CAP_NET_RAW">
                 IPv6 Echo
@@ -550,14 +647,14 @@ export function ScanView() {
                 </ToolButton>
               ) : (
                 <ToolButton onClick={() => void runSyn()}
-                  disabled={!desktop || !authorized || revision === null || !arpInterface
+                  disabled={!desktop || !authorized || networkBusy || revision === null || !arpInterface
                     || !target.trim() || !ports.trim() || running || status.running || arpBusy}
                   title="Linux only: CAP_NET_RAW, selected interface, backend saved-case authorization and native confirmation required">
                   <Play size={11} /> Raw SYN
                 </ToolButton>
               )}
               <ToolButton onClick={() => void runSyn6()}
-                disabled={!desktop || !authorized || revision === null || !arpInterface ||
+                disabled={!desktop || !authorized || networkBusy || revision === null || !arpInterface ||
                   !target.trim() || !ports.trim() || running || status.running ||
                   synBusy || arpBusy || ndpBusy || icmpBusy || traceBusy}
                 title="Linux: max 16 distinct fe80::/10 hosts, 64 ports, 512 SYN probes and 8 in flight; requires CAP_NET_RAW and native consent">
@@ -569,6 +666,12 @@ export function ScanView() {
                 </span>
               ) : null}
             </div>
+            ) : (
+              <div role="status" className="border-t border-line p-3 text-xs text-fg-muted">
+                Native raw probes and ICMP are not available on this platform.
+                TCP/UDP connect scans remain supported. {capabilities?.capture_detail ?? "Reading native capabilities…"}
+              </div>
+            )}
           </Pane>
           {progress ? (
             <div className="shrink-0 border-b border-line bg-panel px-2 py-1.5">
@@ -584,9 +687,13 @@ export function ScanView() {
           <Pane title={"Network observations: " + observedCount + " · " + openCount + " open · " + (observationPage?.closed ?? 0) + " closed · " + (observationPage?.inconclusive ?? 0) + " inconclusive"} className="min-h-0 flex-1">
             {results.length === 0 && !observationPage?.entries.length ? (
               <EmptyState
-                title={running ? "Scanning…" : "No results"}
-                detail="Case-authorized TCP connect or connected-UDP scan. UDP silence remains inconclusive, not filtered. Confirm scope in the native dialog."
-                badge="netscan"
+                title={running ? "Scanning…" : revision === null ? "Create a case to begin" : !authorized ? "Confirm the authorized target" : "Ready to scan"}
+                detail={revision === null
+                  ? "Create or select a saved case above. This enables the scan controls without starting network traffic."
+                  : !authorized
+                    ? "Review the scope authorization checkbox, then select TCP or UDP and Run scan. A native confirmation is required."
+                    : "Enter an authorized host, choose ports and press Run scan. Results, including closed and inconclusive observations, appear here."}
+                badge="TCP / UDP"
               />
             ) : (
               <table className="data-table">
@@ -642,10 +749,9 @@ export function ScanView() {
         <Resizer direction="horizontal" flip ariaLabel="Resize scan notes" value={notesWidth} onChange={setNotesWidth} min={220} max={500} />
         <Pane title="Notes" className="shrink-0" style={{ width: notesWidth }}>
           <div className="p-2 font-mono text-[10px] leading-relaxed text-fg-muted">
-            native TCP connect and connected UDP observations; IPv4/IPv6 CIDR and
-            comma-separated exclusions (!address or !CIDR). DNS/NTP UDP replies must match
-            our queries; UDP timeouts stay inconclusive. Full SYN/UDP-ICMP parity is not
-            yet available. Nmap source and fingerprints are not bundled.
+            {windowsHost
+              ? "Windows: TCP connect and bounded UDP scanning; IPv4 Ping and Trace use the Windows IP Helper API and do not need the missing packet-capture driver. Select a saved case, check authorization, and confirm the operation."
+              : "Linux: TCP connect, bounded UDP, and privileged native raw probes. ARP/NDP/SYN require CAP_NET_RAW and an on-link interface. UDP silence is inconclusive. All active probes require case selection and native confirmation."}
           </div>
           <div className="border-t border-line px-2 py-1.5 font-mono text-[10px] text-fg-muted">
             {scanCase.current === wb.caseId

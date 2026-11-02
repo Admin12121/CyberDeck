@@ -78,7 +78,7 @@ test("Hashcat opt-in preserves native Rust as default and masked-result IPC", ()
   assert.ok(ui.includes('useState<"rust" | "hashcat">("rust")'));
   assert.ok(ui.includes('recoveryStartHashcatV1'));
   assert.match(ui, /engineChoice === "hashcat"\s*\? await recoveryStartHashcatV1\(request, onEvent, hashcatPreset\)/);
-  assert.ok(ui.includes("await recoveryStartV1(request, onEvent)"), "native Rust must remain the distinct fallback");
+  assert.ok(ui.includes("await recoveryStartV1(request, onEvent, ruleText)"), "native Rust must remain the distinct streamed wordlist/rules fallback");
   assert.ok(ui.includes('hashcatCapability?.available'));
   assert.ok(ui.includes("GPU detection,"));
   assert.ok(ui.includes('recoveryRevealV1'));
@@ -102,7 +102,7 @@ test("Hashcat-managed backend is explicit and never silently becomes Rust CPU/Op
   assert.ok(read(hc + "/native/smoke-known-answer.mjs").includes("spawnSync(worker"));
 });
 
-test("Hashcat capabilities probe exactly the private worker with a bounded, secret-free loader check", () => {
+test("Hashcat readiness requires a bounded private known-answer per mode, not a loader check", () => {
   const header = read(hc + "/native/cyberdeck_hashcat.h");
   const shim = read(hc + "/native/cyberdeck_hashcat.c");
   const worker = read(hc + "/native/recovery_worker.rs");
@@ -117,7 +117,14 @@ test("Hashcat capabilities probe exactly the private worker with a bounded, secr
   assert.ok(supervisor.includes("pub fn probe_opencl_loader("));
   assert.ok(supervisor.includes("Duration::from_secs(3)"));
   assert.ok(supervisor.includes("Stdio::null()"));
-  assert.ok(controller.includes("embedded_hashcat::probe_opencl_loader(&runtime)"));
+  assert.ok(supervisor.includes("pub fn verified_modes(root: &Path)"));
+  assert.ok(supervisor.includes("PUBLIC_KATS"));
+  assert.ok(supervisor.includes("self_test_mode(root, mode, word, digest)"));
+  assert.ok(supervisor.includes("XDG_DATA_HOME"), "private self-test must never write profile data into the operator's account");
+  assert.ok(controller.includes("embedded_hashcat::verified_modes(&runtime)"));
+  assert.ok(controller.includes("embedded_hashcat::verified_modes(&verification_root)"));
+  assert.ok(controller.includes("modes.contains(&item.mode)"),
+    "unverified bundled modes must not be offered in the engine selector");
   assert.ok(controller.includes("available: false"));
   assert.ok(controller.includes("hardware_verified: false"));
 });
@@ -135,9 +142,9 @@ test("five bundled wordlist modes are explicitly validated and desktop-selectabl
     assert.ok(ipc.includes('"'+ algorithm + '"'), algorithm + " absent from typed request");
   }
   assert.ok(controller.includes("embedded_hashcat::validate_embedded_request(&request)?"));
-  assert.ok(ui.includes('algorithm: engineChoice === "hashcat" ? hashcatAlgorithm : "sha256"'));
+  assert.ok(ui.includes('algorithm: hashcatAlgorithm'), "Rust CPU and embedded Hashcat should use the explicitly selected raw digest mode");
   assert.ok(ui.includes("digest length alone is not proof") ||
-    ui.includes("digest length alone is not proof of its algorithm"));
+    ui.includes("digest length alone cannot identify it"));
   assert.ok(core.includes("target.is_match(candidate)"));
   assert.ok(core.includes("Hashcat output is not a verified original wordlist candidate"));
 });

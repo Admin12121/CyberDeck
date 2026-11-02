@@ -14,8 +14,12 @@ export function chooseRecoveryBackend(
   choice: string,
   inventory: RecoveryDeviceInventoryV1 | null,
   batchSize = DEFAULT_OPENCL_BATCH,
+  algorithm = "sha256",
 ): RecoveryBackendV1 {
   if (choice === "auto") {
+    // Native OpenCL recovery only implements SHA-256 today. Preserve CPU for
+    // all other digests even when an independently verified GPU is present.
+    if (algorithm !== "sha256") return { backend: "cpu" };
     const verified = inventory?.devices.find((device) => device.hardware_verified);
     return verified && inventory?.opencl_detected
       ? { backend: "open_cl", device_index: verified.device_index, batch_size: batchSize }

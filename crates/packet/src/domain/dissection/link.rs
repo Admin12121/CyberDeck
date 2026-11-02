@@ -22,7 +22,8 @@ pub(super) fn ipv4_to_string(bytes: &[u8]) -> String {
 
 pub(super) fn color_for(protocol: &str) -> String {
     match protocol {
-        "DNS" => "dns",
+        "DNS" | "MDNS" | "LLMNR" => "dns",
+        "DHCP" | "NTP" | "STUN" => "udp",
         "HTTP" => "http",
         "TLS" | "TLSv1.2" | "TLSv1.3" => "tls",
         "ARP" => "arp",

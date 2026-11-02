@@ -1,16 +1,17 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
-import { Play, RefreshCw, Square, Settings2, Info, MonitorDot } from "lucide-react";
+import { Play, RefreshCw, Square, Settings2, Info, MonitorDot, FolderOpen } from "lucide-react";
 import { Router } from "@lucasmarkes/hairline/react";
 import { Button } from "@/components/ui/button";
 import { Chip, EmptyState, Select, TextInput, ToolButton, WorkspaceTabs } from "@ds/panes";
 import { PacketTable } from "./PacketTable";
+import { AuthorizedCaseAction } from "@/app/_components/AuthorizedCaseAction";
 import { PacketPaneSplit } from "./PacketPaneSplit";
 import { CaptureActivity, type CaptureActivityPoint } from "./CaptureActivity";
 import { nativeCapturePacketRow } from "./packet-row-model";
 import {
-  isDesktop, captureInterfacesV1, captureStartV1, captureStatusV1, captureStopV1, captureSaveV1,
+  isDesktop, networkRuntimeCapabilitiesV1, captureInterfacesV1, captureStartV1, captureStatusV1, captureStopV1, captureSaveV1,
   type CaptureSaveReceiptV1,
   captureProvenanceV1, captureHostsV1, captureFlowsV1, captureFramePageV1,
   capturePacketDetailsV1, captureFollowStreamV1,
@@ -47,13 +48,29 @@ function bytesAsHex(bytes: number[], startOffset = 0): string {
 }
 
 /** Native jobs continue in Rust across route navigation; cache only a session reference, never raw evidence. */
-export function LiveCaptureView({ presentation = "full", onCaptureStarted, onReturnToStart, onOpenSavedArtifact }: {
+export function LiveCaptureView({ presentation = "full", onCaptureStarted, onReturnToStart, onOpenSavedArtifact, onOpenCaptureFile }: {
   presentation?: "setup" | "full";
   onCaptureStarted?: () => void;
   onReturnToStart?: () => void;
   onOpenSavedArtifact?: (artifactId: string) => void;
+  onOpenCaptureFile?: () => void;
 }) {
   const desktop = isDesktop();
+  const [nativePlatform, setNativePlatform] = useState<"windows" | "linux" | "macos" | "unsupported" | null>(null);
+  const [nativeCaptureStatus, setNativeCaptureStatus] = useState<string | null>(null);
+  const windowsHost = nativePlatform === "windows";
+  useEffect(() => {
+    if (!desktop) return;
+    let live = true;
+    void networkRuntimeCapabilitiesV1()
+      .then((caps) => {
+        if (!live) return;
+        setNativePlatform(caps.platform);
+        setNativeCaptureStatus(caps.capture_detail);
+      })
+      .catch((error) => { if (live) setNativeCaptureStatus("Native capability inventory unavailable: " + message(error)); });
+    return () => { live = false; };
+  }, [desktop]);
   const { caseId, caseSession } = useWorkbenchCase();
   const revision = caseSession.phase === "ready" && caseSession.caseId === caseId ? caseSession.revision : null;
   const identity = caseId + ":" + String(revision);
@@ -330,7 +347,9 @@ export function LiveCaptureView({ presentation = "full", onCaptureStarted, onRet
                       className={`flex h-auto min-h-10 w-full justify-start gap-3 rounded-none border-b border-line px-4 py-2.5 text-left font-normal last:border-b-0 hover:bg-accent ${selected ? "bg-selected" : ""}`}>
                       <span aria-hidden="true" className={`size-2.5 shrink-0 rounded-full border ${selected ? "border-fg bg-fg" : "border-fg-muted"}`} />
                       <MonitorDot size={16} className="shrink-0 text-fg-muted" />
-                      <span className="min-w-0 flex-1 truncate font-mono text-xs text-fg">{entry.name}</span>
+                      <span className="min-w-0 flex-1 truncate text-xs text-fg" title={entry.display_name || (windowsHost ? "Windows adapter #" + entry.index : entry.name)}>
+                          {entry.display_name || (windowsHost ? "Windows adapter #" + entry.index : entry.name)}
+                        </span>
                       <span className="shrink-0 text-xs text-fg-muted">
                         {entry.loopback ? "Loopback" : entry.ethernet ? "Ethernet" : "Other"}
                       </span>
@@ -342,6 +361,15 @@ export function LiveCaptureView({ presentation = "full", onCaptureStarted, onRet
                 })}
               </div>
             )}
+            {windowsHost && eligible.length === 0 && (
+              <div role="status" className="mt-3 space-y-2 rounded-md border border-line p-3 text-xs text-fg-dim">
+                <p className="font-medium text-fg">Windows live packet capture is not operational</p>
+                <p>Windows adapters are listed by their OS display names. Live Ethernet frame capture requires a compatible native capture driver; adapter discovery alone cannot record packets.</p>
+                {nativeCaptureStatus && <p className="font-mono text-[11px]">{nativeCaptureStatus}</p>}
+                <p>You can still analyze PCAP/PCAPNG files with the native Rust packet analyzer.</p>
+                {onOpenCaptureFile && <Button size="sm" variant="outline" onClick={onOpenCaptureFile}><FolderOpen size={14} /> Open capture file</Button>}
+              </div>
+            )}
             {eligible.length === 0 && devices.some((entry) => entry.capture_unavailable_reason) && (
               <p role="status" className="mt-2 px-4 text-xs text-fg-muted">
                 {devices.find((entry) => entry.capture_unavailable_reason)?.capture_unavailable_reason}
@@ -349,6 +377,7 @@ export function LiveCaptureView({ presentation = "full", onCaptureStarted, onRet
             )}
           </div>
         )}
+        {revision === null && eligible.length > 0 && <AuthorizedCaseAction activity="Live packet capture" />}
         <div className="mt-3 flex flex-wrap items-center gap-2">
           {running && sessionId !== null && (
             <Button variant="destructive-outline" size="sm" disabled={working || status?.phase === "stopping"}

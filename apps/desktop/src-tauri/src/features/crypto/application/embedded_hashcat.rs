@@ -9,10 +9,12 @@ use cyberdeck_crypto::recovery::RecoveryTarget;
 mod preset;
 pub use preset::WordlistPreset;
 
+use std::collections::HashMap;
 use std::fs::{self, File};
-use std::io::{BufReader, Write};
-use std::path::Path;
+use std::io::{BufReader, Read, Write};
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::{Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -175,6 +177,146 @@ pub fn probe_opencl_loader(root: &Path) -> Result<bool, String> {
         }
         thread::sleep(Duration::from_millis(25));
     }
+}
+
+/// Trusted built-in KATs use only public fixtures: zero user hashes, wordlists,
+/// case context or secret output ever passes into this capability probe.
+const PUBLIC_KATS: &[(u32, &str, &str)] = &[
+    (1400, "abc", "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"),
+    (0, "abc", "900150983cd24fb0d6963f7d28e17f72"),
+    (100, "abc", "a9993e364706816aba3e25717850c26c9cd0d89d"),
+    (1000, "password", "8846f7eaee8fb117ad06bdd830b7586c"),
+    (1700, "abc", "ddaf35a193617abacc417349ae20413112e6fa4e89a97ea20a9eeee64b55d39a2192992a274fc1a836ba3c23a3feebbd454d4423643ce80e2a9ac94fa54ca49f"),
+];
+type Readiness = Result<Vec<u32>, String>;
+static READINESS_CACHE: OnceLock<Mutex<HashMap<PathBuf, Readiness>>> = OnceLock::new();
+
+fn self_test_mode(root: &Path, mode: u32, word: &str, digest: &str) -> Result<(), String> {
+    let scratch = tempfile::Builder::new()
+        .prefix("cyberdeck-hc-selftest-")
+        .tempdir()
+        .map_err(|_| "could not create private Hashcat self-test workspace")?;
+    let target_path = scratch.path().join("public.hash");
+    let wordlist_path = scratch.path().join("public.words");
+    let result_path = scratch.path().join("public.out");
+    fs::write(&target_path, format!("{digest}\n"))
+        .map_err(|_| "could not create private Hashcat self-test hash")?;
+    fs::write(&wordlist_path, format!("not-the-solution\n{word}\n"))
+        .map_err(|_| "could not create private Hashcat self-test dictionary")?;
+    let packet = frame_mode(
+        root,
+        &target_path,
+        &wordlist_path,
+        &result_path,
+        2,
+        30,
+        0,
+        mode,
+    )?;
+    let mut child = PrivateChild(
+        Command::new(root.join(worker_name()))
+            .current_dir(scratch.path())
+            .env("HOME", scratch.path())
+            .env("XDG_DATA_HOME", scratch.path())
+            .env("XDG_CACHE_HOME", scratch.path())
+            .env("XDG_CONFIG_HOME", scratch.path())
+            .env("APPDATA", scratch.path())
+            .env("LOCALAPPDATA", scratch.path())
+            .env("TMP", scratch.path())
+            .env("TEMP", scratch.path())
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .map_err(|_| "could not start bundled Hashcat self-test worker")?,
+    );
+    child
+        .0
+        .stdin
+        .take()
+        .ok_or("Hashcat self-test worker input unavailable")?
+        .write_all(&packet)
+        .map_err(|_| "could not send bounded Hashcat self-test")?;
+    let deadline = Instant::now() + Duration::from_secs(45);
+    loop {
+        match child.0.try_wait() {
+            Ok(Some(status)) if status.success() => break,
+            Ok(Some(status)) => return Err(worker_failure(status.code()).into()),
+            Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(30)),
+            Ok(None) => return Err("native Hashcat self-test timed out".into()),
+            Err(_) => return Err("native Hashcat self-test worker status unavailable".into()),
+        }
+    }
+    drop(child);
+    let metadata = fs::metadata(&result_path)
+        .map_err(|_| "native Hashcat self-test failed to produce a match")?;
+    if metadata.len() > 4096 {
+        return Err("native Hashcat self-test result limit exceeded".into());
+    }
+    let mut result = SensitiveBytes(Vec::with_capacity(metadata.len() as usize));
+    File::open(&result_path)
+        .map_err(|_| "native Hashcat self-test result inaccessible")?
+        .take(4097)
+        .read_to_end(&mut result.0)
+        .map_err(|_| "native Hashcat self-test result unreadable")?;
+    let output = result.0.strip_suffix(b"\n").unwrap_or(&result.0);
+    let output = output.strip_suffix(b"\r").unwrap_or(output);
+    let expected = RecoveryTarget::parse(
+        match mode {
+            0 => "md5",
+            100 => "sha1",
+            1000 => "ntlm",
+            1400 => "sha256",
+            1700 => "sha512",
+            _ => return Err("Hashcat self-test mode unsupported".into()),
+        },
+        digest,
+    )?;
+    if output != word.as_bytes() || !expected.is_match(output)? {
+        return Err(
+            "native Hashcat self-test failed independent digest/candidate verification".into(),
+        );
+    }
+    Ok(())
+}
+
+/// Only actually executed modes may be enabled in the desktop UI. A loader
+/// check or enumerated GPU is insufficient. Cache exact runtime-path findings
+/// for one process lifetime; after changing drivers, restart the application.
+/// Real hardware/type mapping remains a separate acceptance requirement.
+pub fn verified_modes(root: &Path) -> Readiness {
+    let cache = READINESS_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut guard = match cache.lock() {
+        Ok(lock) => lock,
+        Err(_) => return Err("Hashcat readiness cache unavailable".into()),
+    };
+    if let Some(stored) = guard.get(root) {
+        return stored.clone();
+    }
+    let result = (|| {
+        runtime_available(root)?;
+        if !probe_opencl_loader(root)? {
+            return Err("Bundled Hashcat OpenCL loader unavailable".into());
+        }
+        let mut verified = Vec::new();
+        let mut first_failure = None;
+        for &(mode, word, digest) in PUBLIC_KATS {
+            match self_test_mode(root, mode, word, digest) {
+                Ok(()) => verified.push(mode),
+                Err(error) if first_failure.is_none() => first_failure = Some(error),
+                Err(_) => {}
+            }
+        }
+        if verified.is_empty() {
+            Err(first_failure.unwrap_or_else(|| {
+                "No bundled Hashcat mode passed its private known-answer test".into()
+            }))
+        } else {
+            Ok(verified)
+        }
+    })();
+    guard.insert(root.to_path_buf(), result.clone());
+    result
 }
 
 fn push_path(buffer: &mut Vec<u8>, path: &Path) -> Result<(), String> {
@@ -352,6 +494,9 @@ pub fn execute_path<P: FnMut(RecoveryProgressWire)>(
         Command::new(runtime.join(worker_name()))
             .current_dir(scratch.path())
             .env("HOME", scratch.path())
+            // Hashcat may derive its profile from passwd(5), ignoring HOME.
+            // Keep potfiles, session metadata and cache under private scratch.
+            .env("XDG_DATA_HOME", scratch.path())
             .env("XDG_CACHE_HOME", scratch.path())
             .env("XDG_CONFIG_HOME", scratch.path())
             .env("APPDATA", scratch.path())
@@ -470,6 +615,33 @@ pub fn execute_path<P: FnMut(RecoveryProgressWire)>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn every_public_native_mode_fixture_is_independently_verifiable_without_gpu() {
+        assert_eq!(PUBLIC_KATS.len(), 5);
+        for &(mode, word, hash) in PUBLIC_KATS {
+            let algorithm = match mode {
+                0 => "md5",
+                100 => "sha1",
+                1000 => "ntlm",
+                1400 => "sha256",
+                1700 => "sha512",
+                _ => panic!("invalid pinned Hashcat self-test mode"),
+            };
+            let target = RecoveryTarget::parse(algorithm, hash).unwrap();
+            assert!(
+                target.is_match(word.as_bytes()).unwrap(),
+                "{algorithm} fixture"
+            );
+            assert!(!target.is_match(b"not-the-solution").unwrap());
+        }
+    }
+
+    #[test]
+    fn an_unbundled_directory_never_reports_native_mode_ready() {
+        let scratch = tempfile::tempdir().unwrap();
+        assert!(verified_modes(scratch.path()).is_err());
+    }
+
     #[test]
     fn digest_modes_and_worker_v2_packet_are_bounded() {
         for (algorithm, size, mode) in [

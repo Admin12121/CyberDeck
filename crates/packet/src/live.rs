@@ -443,6 +443,11 @@ pub fn capture_linux_with_progress(
 /// Uses the CyberDeck-owned native driver when actually installed and
 /// authorized; Windows adapter discovery alone does not enable capture.
 #[cfg(target_os = "windows")]
+pub fn windows_interface_alias(index: u32) -> Option<String> {
+    crate::infrastructure::windows_capture::interface_alias(index)
+}
+
+#[cfg(target_os = "windows")]
 pub fn authorized_windows_interface_luid(interface_name: &str) -> Result<u64, CaptureError> {
     let selected = select_interface(&discover_interfaces()?, interface_name)?;
     crate::infrastructure::windows_capture::interface_luid(selected.index)

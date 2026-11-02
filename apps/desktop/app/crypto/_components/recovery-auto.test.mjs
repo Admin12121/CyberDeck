@@ -26,3 +26,12 @@ test("Explicit device selection does not silently fall back to CPU", () => {
   assert.equal(DEFAULT_CANDIDATES, 100_000);
   assert.equal(DEFAULT_MATCHES, 1);
 });
+
+test("Auto uses CPU for non-SHA256 digests even when GPU is verified", () => {
+  for (const algorithm of ["md5", "ntlm", "sha1", "sha512", "sha3_256"]) {
+    assert.deepEqual(chooseRecoveryBackend("auto", devices(true), 4096, algorithm), { backend: "cpu" });
+  }
+  assert.deepEqual(chooseRecoveryBackend("open_cl:2", devices(true), 4096, "md5"), {
+    backend: "open_cl", device_index: 2, batch_size: 4096,
+  }, "Explicit OpenCL selection stays explicit so the Rust backend can reject unsupported modes");
+});

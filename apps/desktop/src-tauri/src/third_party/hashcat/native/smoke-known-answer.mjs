@@ -67,7 +67,7 @@ try {
     cwd: workDir,
     env: {
       ...process.env,
-      HOME: workDir, XDG_CACHE_HOME: workDir, XDG_CONFIG_HOME: workDir,
+      HOME: workDir, XDG_DATA_HOME: workDir, XDG_CACHE_HOME: workDir, XDG_CONFIG_HOME: workDir,
       APPDATA: workDir, LOCALAPPDATA: workDir, TEMP: workDir, TMP: workDir,
     },
     stdio: ["pipe", "ignore", "ignore"],
@@ -75,7 +75,7 @@ try {
   if (response.error) throw new Error("embedded worker launch/execution failed: " + response.error.code);
   if (response.status !== 0) {
     throw new Error("embedded worker failed with numeric status " + response.status +
-      "; verify compatible native OpenCL drivers, the SHA-256 module and kernels");
+      "; the numeric setup phase may occur before OpenCL; check native initialization and bundled runtime prerequisites");
   }
   const output = readFileSync(resultPath);
   if (output.length > 4096) throw new Error("fixture result exceeds safe bound");

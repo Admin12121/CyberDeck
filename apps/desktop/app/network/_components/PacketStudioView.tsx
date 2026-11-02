@@ -201,6 +201,7 @@ function ImportedCaptureView() {
           <LiveCaptureView presentation={screen === "welcome" ? "setup" : "full"}
             onCaptureStarted={() => setScreen("native")}
             onOpenSavedArtifact={(artifactId) => void openSavedCase(artifactId)}
+            onOpenCaptureFile={() => void openCapture()}
             onReturnToStart={() => setScreen("welcome")} />
         </div>
       </div>

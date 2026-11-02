@@ -6,10 +6,9 @@ import { VerifyAlgorithmCombobox, VERIFY_ALGORITHMS, type VerifyAlgorithmId } fr
 import { verifyDigestOutput } from "./verify-output";
 import { FileUp, Info, Link2, Play } from "lucide-react";
 import { Chip, Pane, Resizer, TextInput, ToolButton } from "@ds/panes";
-import { useWorkbenchCase } from "@state/workbench";
+import { useWorkbench, useWorkbenchCase } from "@state/workbench";
 import { cryptoOp, kdfVerify } from "@lib/ipc";
 import { detectHashFormats } from "./model/hash";
-import { isSha256WordlistTarget } from "./recovery-presentation";
 import {
   NativeRecoveryV1, NativeRecoveryControls, NativeRecoveryResults, NativeRecoveryDevices,
 } from "./NativeRecoveryV1";
@@ -31,6 +30,7 @@ function keepHash(caseId: string, value: string) {
 
 export function HashAnalysisView() {
   const { caseId } = useWorkbenchCase();
+  const { sendToRecipes } = useWorkbench();
   const [operationsWidth, setOperationsWidth] = useState(408);
   const [input, setInput] = useState("");
   const hashFileRef = useRef<HTMLInputElement>(null);
@@ -49,7 +49,16 @@ export function HashAnalysisView() {
     }
   };
   const hash = input.trim();
-  const compatibleShape = isSha256WordlistTarget(hash);
+  const cpuRecoveryEligible = /^[a-fA-F0-9]+$/.test(hash) && [32, 40, 64, 128].includes(hash.length);
+  // Digest length is a hint, not a guarantee of the hash algorithm.
+  useEffect(() => {
+    if (!/^[a-fA-F0-9]+$/.test(hash)) return;
+    if (hash.length === 32) setAlgorithm("md5");
+    else if (hash.length === 40) setAlgorithm("sha1");
+    else if (hash.length === 64) setAlgorithm("sha256");
+    else if (hash.length === 128) setAlgorithm("sha512");
+  }, [hash]);
+
   const kdfFormat = /^\$(?:2[abxy]\$|argon2(?:id|i|d)\$|y\$|7\$|scrypt\$|pbkdf2(?:-sha256|-sha512)?\$)/.test(hash);
 
   useEffect(() => {
@@ -107,7 +116,7 @@ export function HashAnalysisView() {
   };
 
   return (
-    <NativeRecoveryV1 targetHash={input}>
+    <NativeRecoveryV1 targetHash={input} onCaseCreated={(newCaseId) => keepHash(newCaseId, input)}>
       <div className="flex h-full min-h-0 min-w-0 gap-px bg-line">
         <div className="flex min-w-0 flex-1 flex-col gap-px">
           <Pane title="Hash Input" className="shrink-0" bodyClassName="p-3">
@@ -139,8 +148,9 @@ export function HashAnalysisView() {
                 onClick={() => hashFileRef.current?.click()}>
                 <FileUp size={13} aria-hidden="true" /> Import
               </ToolButton>
-              <ToolButton disabled title="Forensic handoff will be enabled after case integration">
-                <Link2 size={13} aria-hidden="true" /> Handoff
+              <ToolButton disabled={!hash.length} title="Send the entered hash to Recipes for further analysis without exposing verification candidates"
+                onClick={() => sendToRecipes(hash, "Hash Analysis target")}>
+                <Link2 size={13} aria-hidden="true" /> To Recipes
               </ToolButton>
               <span className="ml-auto font-mono text-[11px] text-fg-muted">{hash.length}/{MAX_HASH_INPUT_CHARS} characters</span>
             </div>
@@ -155,8 +165,9 @@ export function HashAnalysisView() {
                 </summary>
                 <p className="mt-1 max-w-sm rounded-sm border border-line bg-app p-2 leading-relaxed">
                   Formats are heuristic candidates based on string shape, not confirmed identities.
-                  Identical lengths can represent different algorithms. Recovery V1 only accepts
-                  64-character hexadecimal targets for SHA-256; shape alone does not establish SHA-256.
+                  Identical lengths can represent different algorithms. CPU wordlist recovery accepts
+                  MD5, SHA-1, NTLM, SHA-256, SHA-512 and SHA3-256 when explicitly selected;
+                  a matching digest length alone never proves the algorithm.
                 </p>
               </details>
             }>
@@ -189,10 +200,10 @@ export function HashAnalysisView() {
                           </Chip>
                         </td>
                         <td className="px-3 py-2 text-[11px]">
-                          {compatibleShape ? (
-                            <span className="text-warn">Shape eligible · SHA-256 only</span>
+                          {cpuRecoveryEligible ? (
+                            <span className="text-warn">CPU eligible · confirm algorithm</span>
                           ) : (
-                            <span className="text-fg-muted">Not supported in V1</span>
+                            <span className="text-fg-muted">Raw CPU mode not recognized</span>
                           )}
                         </td>
                       </tr>
@@ -213,14 +224,14 @@ export function HashAnalysisView() {
         />
         <Pane title="Operations" className="shrink-0" style={{ width: operationsWidth }}
           bodyClassName="overflow-y-auto">
-          <Accordion defaultValue={[]} className="border-b border-line">
+          <Accordion defaultValue={["verify"]} className="border-b border-line">
             <AccordionItem value="verify" className="border-none">
               <AccordionTrigger className="w-full rounded-none px-3 py-2.5 text-xs font-semibold text-fg hover:bg-app/40">
                 Verify
               </AccordionTrigger>
               <AccordionPanel className="space-y-3 px-3 pb-3">
                 <label className="block space-y-1">
-                  <span className="text-[11px] text-fg-muted">Algorithm · searchable</span>
+                  <span className="text-[11px] text-fg-muted">Hash algorithm (length is only a suggestion)</span>
                   <VerifyAlgorithmCombobox value={algorithm}
                     onChange={(value) => { setAlgorithm(value); setVerdict(null); }} />
                 </label>
@@ -238,7 +249,7 @@ export function HashAnalysisView() {
                 {verdict === "mismatch" ? <Chip tone="err">No match</Chip> : null}
                 {verifyError ? <p role="alert" className="text-[11px] text-err">{verifyError}</p> : null}
                 <p className="text-[11px] text-fg-muted">
-                  Structured bcrypt, Argon2, scrypt, yescrypt and PBKDF2 formats use native KDF verification.
+                  Verify a single password without creating a case. CPU wordlist recovery supports MD5, NTLM, SHA-1, SHA-256, SHA-512 and SHA3-256 after you select a saved case and wordlist. Structured bcrypt, Argon2, scrypt, yescrypt and PBKDF2 formats use native KDF verification.
                 </p>
               </AccordionPanel>
             </AccordionItem>
