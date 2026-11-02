@@ -55,7 +55,7 @@ export type RecoveryBackendV1 =
   | { backend: "open_cl"; device_index: number; batch_size: number }
   | { backend: "hashcat_managed" };
 
-export type HashcatRawAlgorithmV1 = "md5" | "sha1" | "sha256" | "sha512";
+export type HashcatRawAlgorithmV1 = "md5" | "sha1" | "ntlm" | "sha256" | "sha512";
 export type HashcatWordlistPresetV1 = "plain" | "uppercase" | "append_one";
 export interface RecoveryRequestV1 {
   algorithm: HashcatRawAlgorithmV1;

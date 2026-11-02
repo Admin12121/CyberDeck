@@ -139,3 +139,124 @@ mod tests {
         assert_eq!(flags(IF_TYPE_ETHERNET, 2), (true, false, false));
     }
 }
+
+#[repr(C)]
+struct SocketAddress {
+    sockaddr: *const c_void,
+    len: i32,
+}
+#[repr(C)]
+struct AdapterUnicast {
+    alignment: u64,
+    next: *const AdapterUnicast,
+    address: SocketAddress,
+}
+/// Resolve the *actual* Windows IPv4 source assigned to an OS-listed
+/// interface. This prevents a scan request naming one NIC while Windows
+/// silently originates ICMP traffic from an unrelated adapter.
+pub fn selected_ipv4_source(index: u32) -> Result<std::net::Ipv4Addr, CaptureError> {
+    if index == 0 {
+        return Err(CaptureError {
+            code: CaptureErrorCode::InterfaceNotFound,
+            message: "zero Windows interface index is not valid".into(),
+        });
+    }
+    const AF_INET: u32 = 2;
+    let mut size = 16384usize;
+    for _ in 0..5 {
+        if size > MAX_BUFFER {
+            break;
+        }
+        let words = size.div_ceil(mem::size_of::<usize>());
+        let mut buffer = vec![0usize; words];
+        let begin = buffer.as_ptr() as usize;
+        let end = begin.saturating_add(words * mem::size_of::<usize>());
+        let mut needed = (words * mem::size_of::<usize>()) as u32;
+        let code = unsafe {
+            GetAdaptersAddresses(
+                AF_INET,
+                0,
+                ptr::null(),
+                buffer.as_mut_ptr().cast::<AdapterAddress>(),
+                &raw mut needed,
+            )
+        };
+        if code == ERROR_BUFFER_OVERFLOW {
+            size = (needed as usize).max(size.saturating_mul(2));
+            continue;
+        }
+        if code != 0 {
+            return Err(CaptureError {
+                code: CaptureErrorCode::Io,
+                message: format!("Windows IPv4 adapter address lookup failed ({code})"),
+            });
+        }
+        let in_range = |pointer: usize, length: usize| {
+            pointer >= begin && pointer.checked_add(length).is_some_and(|v| v <= end)
+        };
+        let mut adapter = buffer.as_ptr().cast::<AdapterAddress>();
+        let mut visited = 0;
+        while !adapter.is_null() && visited < 256 {
+            visited += 1;
+            if !in_range(adapter as usize, mem::size_of::<AdapterAddress>()) {
+                return Err(CaptureError {
+                    code: CaptureErrorCode::Io,
+                    message: "Windows adapter address record outside OS-owned result".into(),
+                });
+            }
+            let entry = unsafe { &*adapter };
+            if entry.if_index == index {
+                let (ethernet, up, loopback) = flags(entry.if_type, entry.oper_status);
+                if !ethernet || !up || loopback {
+                    return Err(CaptureError {
+                        code: CaptureErrorCode::UnsupportedLinkLayer,
+                        message: "selected Windows NIC is not an active Ethernet/Wi-Fi interface"
+                            .into(),
+                    });
+                }
+                let mut unicast = entry.first_unicast.cast::<AdapterUnicast>();
+                let mut examined = 0;
+                while !unicast.is_null() && examined < 64 {
+                    examined += 1;
+                    if !in_range(unicast as usize, mem::size_of::<AdapterUnicast>()) {
+                        return Err(CaptureError {
+                            code: CaptureErrorCode::Io,
+                            message: "Windows unicast record outside OS-owned adapter buffer"
+                                .into(),
+                        });
+                    }
+                    let u = unsafe { &*unicast };
+                    let address = u.address.sockaddr as usize;
+                    // sockaddr_in includes family, port and the 4-byte IPv4 address.
+                    if u.address.len >= 16 && in_range(address, 8) {
+                        let raw = unsafe { std::slice::from_raw_parts(address as *const u8, 8) };
+                        if u16::from_ne_bytes([raw[0], raw[1]]) == 2 {
+                            let ip = std::net::Ipv4Addr::new(raw[4], raw[5], raw[6], raw[7]);
+                            if !ip.is_unspecified()
+                                && !ip.is_multicast()
+                                && !ip.is_broadcast()
+                                && !ip.is_loopback()
+                            {
+                                return Ok(ip);
+                            }
+                        }
+                    }
+                    unicast = u.next;
+                }
+                return Err(CaptureError {
+                    code: CaptureErrorCode::InterfaceNotFound,
+                    message: "selected Windows NIC has no usable configured IPv4 address".into(),
+                });
+            }
+            adapter = entry.next;
+        }
+        return Err(CaptureError {
+            code: CaptureErrorCode::InterfaceNotFound,
+            message: "selected Windows interface index was not found".into(),
+        });
+    }
+    Err(CaptureError {
+        code: CaptureErrorCode::Io,
+        message: "Windows IPv4 interface lookup exceeded bounded OS buffer".into(),
+    })
+}

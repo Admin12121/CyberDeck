@@ -157,7 +157,7 @@ int cd_hashcat_prepare_mode (
   if (max_candidates == 0 || max_candidates > 1000000
       || runtime_seconds == 0 || runtime_seconds > 300
       || device_id > 128) return -2;
-  if (hash_mode != 0 && hash_mode != 100 && hash_mode != 1400 && hash_mode != 1700) return -2;
+  if (hash_mode != 0 && hash_mode != 100 && hash_mode != 1000 && hash_mode != 1400 && hash_mode != 1700) return -2;
   snprintf (handle->hash_mode_option, sizeof (handle->hash_mode_option), "--hash-type=%u", hash_mode);
 
   snprintf (handle->candidate_limit, sizeof (handle->candidate_limit), "%llu",

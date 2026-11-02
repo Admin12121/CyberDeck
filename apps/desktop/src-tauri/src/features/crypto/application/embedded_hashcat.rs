@@ -116,7 +116,7 @@ pub fn runtime_available(root: &Path) -> Result<(), String> {
         }
     }
     // A bundled mode needs its actual module plus the optimized kernel family.
-    for mode in [0u32, 100, 1400, 1700] {
+    for mode in [0u32, 100, 1000, 1400, 1700] {
         let module = if cfg!(windows) {
             format!("modules/module_{mode:05}.dll")
         } else {
@@ -208,6 +208,7 @@ pub(super) fn validate_embedded_request(request: &RecoveryRequest) -> Result<u32
     let mode = match request.algorithm.as_str() {
         "md5" => 0,
         "sha1" => 100,
+        "ntlm" => 1000,
         "sha256" => 1400,
         "sha512" => 1700,
         _ => return Err("raw hash mode not bundled for embedded Hashcat".into()),
@@ -253,7 +254,7 @@ fn frame_mode(
     if budget == 0 || budget > 1_000_000 || runtime == 0 || runtime > 300 || device_id > 128 {
         return Err("embedded Hashcat work limits invalid".into());
     }
-    if !matches!(hash_mode, 0 | 100 | 1400 | 1700) {
+    if !matches!(hash_mode, 0 | 100 | 1000 | 1400 | 1700) {
         return Err("embedded Hashcat mode unsupported".into());
     }
     let mut packet = b"CDHC0002".to_vec();
@@ -267,7 +268,7 @@ fn frame_mode(
     Ok(packet)
 }
 
-/// Executes selected bundled MD5/SHA-1/SHA-256/SHA-512 wordlist mode. This function
+/// Executes selected bundled MD5/SHA-1/NTLM/SHA-256/SHA-512 wordlist mode. This function
 /// does not assume Hashcat's device identifiers match CyberDeck's Rust OpenCL
 /// inventory. Automatic GPU selection must not be certified without a KAT.
 pub fn execute_path<P: FnMut(RecoveryProgressWire)>(
@@ -472,6 +473,7 @@ mod tests {
         for (algorithm, size, mode) in [
             ("md5", 32, 0),
             ("sha1", 40, 100),
+            ("ntlm", 32, 1000),
             ("sha256", 64, 1400),
             ("sha512", 128, 1700),
         ] {
@@ -493,6 +495,25 @@ mod tests {
         }
         let path = Path::new("/tmp/fixture");
         assert!(frame_mode(path, path, path, path, 1, 10, 0, 999).is_err());
+    }
+
+    #[test]
+    fn ntlm_mode_1000_has_independent_utf16le_reference_verification() {
+        // NTLM and MD5 are both 32 hexadecimal characters; identification
+        // from digest shape alone must never silently choose the algorithm.
+        let ntlm_hash = "8846f7eaee8fb117ad06bdd830b7586c";
+        let target = RecoveryTarget::parse("ntlm", ntlm_hash).unwrap();
+        assert!(target.is_match(b"password").unwrap());
+        assert!(!target.is_match(b"Password").unwrap());
+        assert!(RecoveryTarget::parse("ntlm", "a").is_err());
+        let request = RecoveryRequest {
+            algorithm: "ntlm".into(),
+            target_hash: ntlm_hash.into(),
+            backend: recovery_backend::BackendSelection::HashcatManaged,
+            max_candidates: 100,
+            max_matches: 1,
+        };
+        assert_eq!(validate_embedded_request(&request), Ok(1000));
     }
 
     #[test]

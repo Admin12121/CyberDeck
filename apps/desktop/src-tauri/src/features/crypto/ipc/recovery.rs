@@ -505,6 +505,7 @@ fn bundled_hashcat_modes() -> Vec<EmbeddedHashcatMode> {
     [
         ("md5", 0, 32),
         ("sha1", 100, 40),
+        ("ntlm", 1000, 32),
         ("sha256", 1400, 64),
         ("sha512", 1700, 128),
     ]
@@ -566,11 +567,11 @@ pub fn recovery_hashcat_capabilities_v1(app: AppHandle) -> EmbeddedHashcatCapabi
             let probe = recovery_backend::probe_recovery_devices();
             let detail = if probe.opencl_detected {
                 format!(
-                    "Bundled MD5/SHA-1/SHA-256/SHA-512 modes; {} OpenCL device(s) detected by Rust, Hashcat mapping and execution unverified",
+                    "Bundled MD5/SHA-1/NTLM/SHA-256/SHA-512 modes; {} OpenCL device(s) detected by Rust, Hashcat mapping and execution unverified",
                     probe.devices.len()
                 )
             } else {
-                "Bundled MD5/SHA-1/SHA-256/SHA-512 modes, but no compatible OpenCL runtime was detected; native execution may fail".into()
+                "Bundled MD5/SHA-1/NTLM/SHA-256/SHA-512 modes, but no compatible OpenCL runtime was detected; native execution may fail".into()
             };
             EmbeddedHashcatCapability {
                 available: true,

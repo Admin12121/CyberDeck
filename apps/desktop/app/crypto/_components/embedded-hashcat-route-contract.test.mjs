@@ -15,12 +15,18 @@ test("Normal desktop build owns version-pinned C/shim/Rust-worker source graph",
   assert.ok(build.includes('tauri_build::build()'));
   assert.ok(build.includes('"--install"'));
   assert.equal(manifest.commit, "1994b513b550edfe3e7fcaa1103759a9343e57a4");
-  assert.equal(Object.keys(manifest.files).length, 573);
+  assert.equal(Object.keys(manifest.files).length, 577);
   assert.ok(manifest.files["src/modules/module_00000.c"], "upstream startup dependency must be pinned");
   assert.ok(manifest.files["src/modules/module_01400.c"], "SHA-256 selected mode must be pinned");
+  assert.ok(manifest.files["src/modules/module_01000.c"], "NTLM module must be pinned to upstream");
+  for (const suffix of ["a0", "a1", "a3"]) {
+    assert.ok(manifest.files[`OpenCL/m01000_${suffix}-optimized.cl`],
+      "NTLM OpenCL kernel missing: " + suffix);
+  }
+
   assert.ok(manifest.files["OpenCL/m04000-pure.cl"], "required upstream startup kernel must be pinned");
   const caps = JSON.parse(read(hc + "/capability-manifest.json"));
-  assert.deepEqual(caps.hash_modes.map(({id}) => id), [0,100,1400,1700]);
+  assert.deepEqual(caps.hash_modes.map(({id}) => id), [0,100,1000,1400,1700]);
   assert.ok(caps.hash_modes.every(({hardware_verified}) => hardware_verified === false));
   assert.ok(caps.attack_modes.every(({id}) => id === 0), "only wordlist currently worker-connected");
   assert.ok(native.includes('modulePaths'), "every selected module must be compiled");
@@ -116,13 +122,13 @@ test("Hashcat capabilities probe exactly the private worker with a bounded, secr
   assert.ok(controller.includes("hardware_verified: false"));
 });
 
-test("four bundled wordlist modes are explicitly validated and desktop-selectable", () => {
+test("five bundled wordlist modes are explicitly validated and desktop-selectable", () => {
   const core = read(root + "/src/features/crypto/application/embedded_hashcat.rs");
   const controller = read(root + "/src/features/crypto/ipc/recovery.rs");
   const backend = read(root + "/src/features/crypto/application/recovery_backend.rs");
   const ui = read("apps/desktop/app/crypto/_components/NativeRecoveryV1.tsx");
   const ipc = read("apps/desktop/lib/ipc.ts");
-  for (const [algorithm, mode] of [["md5",0],["sha1",100],["sha256",1400],["sha512",1700]]) {
+  for (const [algorithm, mode] of [["md5",0],["sha1",100],["ntlm",1000],["sha256",1400],["sha512",1700]]) {
     assert.ok(core.includes('"' + algorithm + '" => ' + mode + ','), algorithm + " not validated");
     assert.ok(ui.includes('value: "' + algorithm + '"'), algorithm + " not selectable");
     assert.ok(backend.includes('"'+ algorithm + '" => "embedded_hashcat_'), algorithm + " summary mislabeled");

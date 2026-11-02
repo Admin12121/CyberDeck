@@ -22,6 +22,7 @@ import {
 const EMBEDDED_MODES: readonly { value: HashcatRawAlgorithmV1; label: string; digits: number }[] = [
   { value: "md5", label: "MD5 · mode 0", digits: 32 },
   { value: "sha1", label: "SHA-1 · mode 100", digits: 40 },
+  { value: "ntlm", label: "NTLM · mode 1000", digits: 32 },
   { value: "sha256", label: "SHA-256 · mode 1400", digits: 64 },
   { value: "sha512", label: "SHA-512 · mode 1700", digits: 128 },
 ];
@@ -406,7 +407,7 @@ export function NativeRecoveryControls() {
                 options={[
                   { value: "rust", label: "CyberDeck native Rust" },
                   ...(r.hashcatCapability?.available ? [
-                    { value: "hashcat", label: "Hashcat embedded · 4 raw modes (experimental)" },
+                    { value: "hashcat", label: "Hashcat embedded · 5 raw modes (experimental)" },
                   ] : []),
                 ]} className="w-full" />
               {r.engineChoice === "hashcat" && (

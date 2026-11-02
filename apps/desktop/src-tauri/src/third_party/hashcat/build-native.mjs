@@ -3,7 +3,7 @@
  * CyberDeck pinned embedded Hashcat source build.
  * SPDX-License-Identifier: MIT
  *
- * Builds upstream shared CORE + selected SHA-256 module, CyberDeck narrow
+ * Builds upstream shared CORE + selected raw-digest modules, CyberDeck narrow
  * native C shim, and a private runtime tree. Does NOT build or execute hashcat
  * CLI, fetch anything, access the ignored reference/ directory, or alter Cargo.
  *
@@ -29,7 +29,7 @@ const capabilities = JSON.parse(readFileSync(capabilityPath, "utf8"));
 if (capabilities.schema !== 1 ||
     capabilities.source_commit !== "1994b513b550edfe3e7fcaa1103759a9343e57a4" ||
     capabilities.abi_version !== 4 ||
-    capabilities.hash_modes.map(x => x.id).join(",") !== "0,100,1400,1700") {
+    capabilities.hash_modes.map(x => x.id).join(",") !== "0,100,1000,1400,1700") {
   throw new Error("embedded Hashcat capability manifest conflicts with pinned C/worker contract");
 }
 const argIndex = process.argv.indexOf("--out");
@@ -96,6 +96,7 @@ const library = process.platform === "win32" ? "hashcat.dll" :
 const supportedModes = [
   { id: 0, algorithm: "md5" },
   { id: 100, algorithm: "sha1" },
+  { id: 1000, algorithm: "ntlm" },
   { id: 1400, algorithm: "sha256" },
   { id: 1700, algorithm: "sha512" },
 ];

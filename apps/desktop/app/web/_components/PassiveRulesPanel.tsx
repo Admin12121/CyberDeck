@@ -14,6 +14,15 @@ interface Props {
   generation: number | null;
 }
 
+const CATEGORY_LABELS: Record<WebPassiveRule["category"], string> = {
+  headers: "Response headers",
+  csp: "Content Security Policy",
+  cookies: "Cookies",
+  cors: "Cross-origin access",
+  transport: "Transport security",
+  disclosure: "Technology disclosure",
+};
+
 /** The frontend receives only safe rule metadata and redacted findings. */
 export function PassiveRulesPanel({ enabled, caseId, revision, generation }: Props) {
   const [open, setOpen] = useState(false);
@@ -83,27 +92,41 @@ export function PassiveRulesPanel({ enabled, caseId, revision, generation }: Pro
     } catch (err) { if (stamp.current === token) setError(String(err)); }
     finally { if (stamp.current === token) setSaving(false); }
   };
+  const categories = Array.from(new Set(rules.map((rule) => rule.category)));
+  const busy = job?.state === "running";
   return <div className="shrink-0 border-b border-line bg-panel">
     <div className="flex items-center gap-2 px-2 py-1 text-[11px]">
       <ToolButton onClick={() => setOpen((value) => !value)}>{open ? "Hide" : "Passive rules"}</ToolButton>
       <span className="text-fg-muted">Check consented volatile History without sending requests</span>
       <span className="ml-auto text-fg-muted">
-        {job ? job.state + " · " + job.processed + " responses · " + job.discovered + " findings" : "Offline only"}
+        {job ? job.state + " · " + job.processed + " responses · " + job.discovered + " findings"
+          : rules.length ? rules.length + " rules · offline only" : "Offline only"}
       </span>
     </div>
     {open && <div className="max-h-72 space-y-2 overflow-auto border-t border-line px-3 py-2 text-[11px]">
       {!enabled && <div className="text-fg-muted">Start the proxy and enable case-bound History consent first.</div>}
-      <div className="flex flex-wrap gap-x-4 gap-y-1">
-        {rules.map((rule) => <label key={rule.id} className="flex items-center gap-1 text-fg-dim"
-          title={rule.id + " · " + rule.severity}>
-          <input type="checkbox" disabled={!enabled || job?.state === "running"}
-            checked={chosen.includes(rule.id)} onChange={(e) => setChosen((selected) =>
-              e.target.checked ? [...selected, rule.id] : selected.filter((id) => id !== rule.id))} />
-          {rule.title}
-        </label>)}
-      </div>
       <div className="flex items-center gap-2">
-        {job?.state === "running" && jobId !== null
+        <ToolButton disabled={!enabled || busy} onClick={() => setChosen(rules.map((rule) => rule.id))}>All</ToolButton>
+        <ToolButton disabled={!enabled || busy} onClick={() => setChosen([])}>None</ToolButton>
+        <span className="text-fg-muted">{chosen.length} of {rules.length} selected</span>
+      </div>
+      {categories.map((category) => <div key={category} className="space-y-1">
+        <div className="text-[10px] uppercase tracking-wide text-fg-muted">
+          {CATEGORY_LABELS[category]}
+        </div>
+        <div className="flex flex-wrap gap-x-4 gap-y-1">
+          {rules.filter((rule) => rule.category === category).map((rule) => <label
+            key={rule.id} className="flex items-center gap-1 text-fg-dim"
+            title={rule.id + " · " + rule.severity + " severity · " + rule.confidence + " confidence"}>
+            <input type="checkbox" disabled={!enabled || busy}
+              checked={chosen.includes(rule.id)} onChange={(e) => setChosen((selected) =>
+                e.target.checked ? [...selected, rule.id] : selected.filter((id) => id !== rule.id))} />
+            {rule.title}
+          </label>)}
+        </div>
+      </div>)}
+      <div className="flex items-center gap-2">
+        {busy && jobId !== null
           ? <ToolButton tone="danger" onClick={() => void stop()}>Stop</ToolButton>
           : <ToolButton disabled={!enabled || !chosen.length} tone="primary"
             onClick={() => void start()}>Analyze History</ToolButton>}

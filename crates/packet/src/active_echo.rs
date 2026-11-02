@@ -83,12 +83,16 @@ pub fn discover_ipv4_echo(
     {
         linux::discover(interface_name, hosts, stop, scope_active)
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "windows")]
+    {
+        windows::discover(interface_name, hosts, stop, scope_active)
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
     {
         let _ = (interface_name, stop, scope_active);
         Err(EchoError::new(
             EchoErrorCode::Unsupported,
-            "native raw ICMPv4 echo currently requires Linux CAP_NET_RAW",
+            "native ICMPv4 discovery currently supports Windows and Linux",
         ))
     }
 }
@@ -139,6 +143,197 @@ pub fn trace_ipv4_echo(
             EchoErrorCode::Unsupported,
             "native ICMP traceroute requires Linux CAP_NET_RAW",
         ))
+    }
+}
+
+#[cfg(target_os = "windows")]
+mod windows {
+    use super::*;
+    use crate::live::{discover_interfaces, select_interface};
+    use std::ffi::c_void;
+    use std::ptr;
+
+    type Handle = *mut c_void;
+    const IP_SUCCESS: u32 = 0;
+    const IP_DEST_NET_UNREACHABLE: u32 = 11002;
+    const IP_DEST_HOST_UNREACHABLE: u32 = 11003;
+    const IP_REQ_TIMED_OUT: u32 = 11010;
+    const WIN_ERROR_TIMEOUT: u32 = 1460;
+    const WAIT_MS: u32 = 600;
+    const REQUEST: &[u8] = b"CyberDeck-echo-v1";
+    // The 1024-byte aligned reply buffer exceeds ICMP_ECHO_REPLY, payload,
+    // IPv4 header, and Windows IO_STATUS_BLOCK requirements.
+    const REPLY_WORDS: usize = 128;
+    #[link(name = "Iphlpapi")]
+    unsafe extern "system" {
+        fn IcmpCreateFile() -> Handle;
+        fn IcmpCloseHandle(handle: Handle) -> i32;
+        fn IcmpSendEcho2Ex(
+            handle: Handle,
+            event: Handle,
+            apc_routine: *const c_void,
+            apc_context: *const c_void,
+            source: u32,
+            destination: u32,
+            payload: *const c_void,
+            payload_size: u16,
+            request_options: *const c_void,
+            reply: *mut c_void,
+            reply_size: u32,
+            timeout: u32,
+        ) -> u32;
+    }
+    #[link(name = "Kernel32")]
+    unsafe extern "system" {
+        fn GetLastError() -> u32;
+    }
+    struct IcmpHandle(Handle);
+    impl Drop for IcmpHandle {
+        fn drop(&mut self) {
+            unsafe {
+                IcmpCloseHandle(self.0);
+            }
+        }
+    }
+    fn winaddr(ip: Ipv4Addr) -> u32 {
+        u32::from_ne_bytes(ip.octets())
+    }
+    fn classify(status: u32) -> (EchoState, &'static str) {
+        match status {
+            IP_SUCCESS => (EchoState::Responded, "icmp_echo_reply_windows"),
+            IP_DEST_NET_UNREACHABLE | IP_DEST_HOST_UNREACHABLE => {
+                (EchoState::Unreachable, "windows_icmp_network_unreachable")
+            }
+            _ => (EchoState::Inconclusive, "windows_icmp_no_confirmed_echo"),
+        }
+    }
+    pub(super) fn discover(
+        interface: &str,
+        targets: &[Ipv4Addr],
+        stop: &AtomicBool,
+        scope: &(impl Fn() -> bool + Sync),
+    ) -> Result<Vec<EchoObservation>, EchoError> {
+        let interfaces =
+            discover_interfaces().map_err(|e| EchoError::new(EchoErrorCode::Device, e.message))?;
+        let nic = select_interface(&interfaces, interface)
+            .map_err(|e| EchoError::new(EchoErrorCode::Device, e.message))?;
+        let source = crate::infrastructure::windows_interfaces::selected_ipv4_source(nic.index)
+            .map_err(|e| EchoError::new(EchoErrorCode::Device, e.message))?;
+        if targets.contains(&source) {
+            return Err(EchoError::new(
+                EchoErrorCode::InvalidScope,
+                "do not probe the selected NIC's own IPv4 address",
+            ));
+        }
+        let raw = unsafe { IcmpCreateFile() };
+        if raw.is_null() || raw == (-1isize as Handle) {
+            let code = unsafe { GetLastError() };
+            return Err(EchoError::new(
+                EchoErrorCode::Permission,
+                format!("open Windows IP Helper ICMP handle failed ({code})"),
+            ));
+        }
+        let handle = IcmpHandle(raw);
+        let mut reports = Vec::with_capacity(targets.len());
+        let mut last_send: Option<Instant> = None;
+        for &target in targets {
+            if stop.load(Ordering::Acquire) || !scope() {
+                return Err(EchoError::new(
+                    EchoErrorCode::Cancelled,
+                    "Windows ICMP operation scope was revoked",
+                ));
+            }
+            if let Some(previous) = last_send {
+                while previous.elapsed() < MIN_SEND_INTERVAL {
+                    if stop.load(Ordering::Acquire) || !scope() {
+                        return Err(EchoError::new(
+                            EchoErrorCode::Cancelled,
+                            "Windows ICMP operation scope was revoked",
+                        ));
+                    }
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+            }
+            let mut reply = [0u64; REPLY_WORDS];
+            let started = Instant::now();
+            // Synchronous Windows ICMP waits for <=600ms. No socket driver or
+            // elevated capture capability is required; per-host cancellation
+            // becomes effective immediately after this bounded OS call.
+            let count = unsafe {
+                IcmpSendEcho2Ex(
+                    handle.0,
+                    ptr::null_mut(),
+                    ptr::null(),
+                    ptr::null(),
+                    winaddr(source),
+                    winaddr(target),
+                    REQUEST.as_ptr().cast(),
+                    REQUEST.len() as u16,
+                    ptr::null(),
+                    reply.as_mut_ptr().cast(),
+                    std::mem::size_of_val(&reply) as u32,
+                    WAIT_MS,
+                )
+            };
+            last_send = Some(started);
+            if stop.load(Ordering::Acquire) || !scope() {
+                return Err(EchoError::new(
+                    EchoErrorCode::Cancelled,
+                    "Windows ICMP operation scope was revoked",
+                ));
+            }
+            let (state, reason) = if count > 0 {
+                // Windows ICMP_ECHO_REPLY begins with a 32-bit source, 32-bit
+                // status, 32-bit round-trip time on both Windows ABIs.
+                let bytes = unsafe {
+                    std::slice::from_raw_parts(
+                        reply.as_ptr().cast::<u8>(),
+                        std::mem::size_of_val(&reply),
+                    )
+                };
+                let address = u32::from_ne_bytes(bytes[0..4].try_into().unwrap());
+                let status = u32::from_ne_bytes(bytes[4..8].try_into().unwrap());
+                if address != winaddr(target) && status == IP_SUCCESS {
+                    (EchoState::Inconclusive, "windows_echo_unexpected_responder")
+                } else {
+                    classify(status)
+                }
+            } else {
+                let error = unsafe { GetLastError() };
+                if error == IP_REQ_TIMED_OUT || error == WIN_ERROR_TIMEOUT {
+                    (EchoState::Inconclusive, "windows_icmp_timeout")
+                } else if matches!(error, IP_DEST_NET_UNREACHABLE | IP_DEST_HOST_UNREACHABLE) {
+                    (EchoState::Unreachable, "windows_icmp_network_unreachable")
+                } else {
+                    return Err(EchoError::new(
+                        EchoErrorCode::Io,
+                        format!("Windows IP Helper ICMP failed ({error})"),
+                    ));
+                }
+            };
+            reports.push(EchoObservation {
+                target,
+                state,
+                reason,
+                elapsed_ms: started.elapsed().as_millis().min(u64::MAX as u128) as u64,
+            });
+        }
+        Ok(reports)
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        #[test]
+        fn native_reply_statuses_do_not_invent_reachability() {
+            assert_eq!(classify(IP_SUCCESS).0, EchoState::Responded);
+            assert_eq!(classify(IP_DEST_HOST_UNREACHABLE).0, EchoState::Unreachable);
+            assert_eq!(classify(IP_REQ_TIMED_OUT).0, EchoState::Inconclusive);
+            assert_eq!(
+                winaddr(Ipv4Addr::new(192, 0, 2, 4)).to_ne_bytes(),
+                [192, 0, 2, 4]
+            );
+        }
     }
 }
 

@@ -531,7 +531,7 @@ export function ScanView() {
                 <ToolButton onClick={() => void discoverIcmp()}
                   disabled={!desktop || !authorized || revision === null || !arpInterface ||
                     !target.trim() || running || status.running || arpBusy || ndpBusy || synBusy}
-                  title="Linux only: explicitly confirmed native ICMPv4 echo requests with CAP_NET_RAW">
+                  title="Windows native IP Helper or Linux CAP_NET_RAW: explicitly confirmed case-scoped ICMPv4 discovery">
                   ICMP Echo
                 </ToolButton>
               )}

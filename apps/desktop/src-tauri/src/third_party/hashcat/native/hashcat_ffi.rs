@@ -112,8 +112,16 @@ impl NativeHashcat {
         runtime_seconds: u32,
         device_id: u32,
     ) -> Result<(), NativeError> {
-        self.prepare_mode(root, hash_file, wordlist_file, scratch_outfile,
-                          max_candidates, runtime_seconds, device_id, 1400)
+        self.prepare_mode(
+            root,
+            hash_file,
+            wordlist_file,
+            scratch_outfile,
+            max_candidates,
+            runtime_seconds,
+            device_id,
+            1400,
+        )
     }
 
     /// Selected, bundled raw digest modes; no user-defined Hashcat flags.
@@ -134,7 +142,7 @@ impl NativeHashcat {
             || runtime_seconds == 0
             || runtime_seconds > MAX_RUNTIME_SECONDS
             || device_id > 128
-            || !matches!(hash_mode, 0 | 100 | 1400 | 1700)
+            || !matches!(hash_mode, 0 | 100 | 1000 | 1400 | 1700)
         {
             return Err(NativeError::InvalidBound);
         }
@@ -245,9 +253,14 @@ mod tests {
     fn selected_hash_modes_are_explicit_and_bounded() {
         let mut engine = NativeHashcat::new().expect("real native ABI");
         let failed = engine.prepare_mode(
-            Path::new("/tmp"), Path::new("/tmp/test.hash"),
-            Path::new("/tmp/test.words"), Path::new("/tmp/test.out"),
-            1, 1, 0, 99999,
+            Path::new("/tmp"),
+            Path::new("/tmp/test.hash"),
+            Path::new("/tmp/test.words"),
+            Path::new("/tmp/test.out"),
+            1,
+            1,
+            0,
+            99999,
         );
         assert_eq!(failed, Err(NativeError::InvalidBound));
         // Rejected modes must not initialize any native session.

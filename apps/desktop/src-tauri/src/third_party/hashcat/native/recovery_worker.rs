@@ -73,8 +73,11 @@ fn read_request(mut reader: impl Read) -> io::Result<Request> {
     } else {
         1400
     };
-    if !matches!(hash_mode, 0 | 100 | 1400 | 1700) {
-        return Err(io::Error::new(io::ErrorKind::InvalidInput, "unsupported hash mode"));
+    if !matches!(hash_mode, 0 | 100 | 1000 | 1400 | 1700) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "unsupported hash mode",
+        ));
     }
     if !(1..=MAX_CANDIDATES).contains(&max_candidates)
         || !(1..=MAX_SECONDS).contains(&max_seconds)
@@ -227,7 +230,7 @@ mod tests {
         assert_eq!(good.max_candidates, 123);
         assert_eq!(good.device_id, 0);
         assert_eq!(good.hash_mode, 1400);
-        for mode in [0_u32, 100, 1400, 1700] {
+        for mode in [0_u32, 100, 1000, 1400, 1700] {
             let mut frame2 = frame();
             frame2[..8].copy_from_slice(MAGIC_MULTI_MODE);
             frame2.splice(24..24, mode.to_le_bytes());

@@ -5,6 +5,8 @@ export interface WebPassiveRule {
   id: string;
   title: string;
   severity: "info" | "low" | "medium" | "high";
+  confidence: "low" | "medium" | "high";
+  category: "headers" | "csp" | "cookies" | "cors" | "transport" | "disclosure";
 }
 export interface WebPassiveFinding {
   rule_id: string;
@@ -16,6 +18,9 @@ export interface WebPassiveFinding {
   history_id: number;
   status: number;
 }
+
+/** Must match the fixed native catalog (`web_passive_rules_v1`). */
+const MAX_PASSIVE_RULES = 30;
 
 export interface WebAssessmentJob {
   job_id: number;
@@ -36,7 +41,7 @@ export async function listWebPassiveRules(): Promise<WebPassiveRule[]> {
 }
 export async function startWebPassiveScan(enabledRules: string[]): Promise<number> {
   if (!isDesktop()) throw new Error("Passive analysis requires CyberDeck desktop");
-  if (!enabledRules.length || enabledRules.length > 8 ||
+  if (!enabledRules.length || enabledRules.length > MAX_PASSIVE_RULES ||
       enabledRules.some((x) => typeof x !== "string")) {
     throw new Error("Select at least one known passive rule");
   }

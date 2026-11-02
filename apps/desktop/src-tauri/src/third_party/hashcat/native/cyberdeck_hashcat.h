@@ -37,7 +37,7 @@ CD_HC_API uint32_t cd_hashcat_last_setup_stage(cd_hashcat *context);
 CD_HC_API cd_hashcat *cd_hashcat_create(void);
 
 /*
- * Selected raw digest modes MD5(0), SHA-1(100), SHA-256(1400), SHA-512(1700)
+ * Selected raw digest modes MD5(0), SHA-1(100), NTLM(1000), SHA-256(1400), SHA-512(1700)
  * with straight wordlist attack 0 are permitted. No arbitrary mode/flags.
  * All paths must be trusted absolute paths within a worker-owned scope.
  * max_candidates in [1,1000000], runtime_seconds in [1,300].

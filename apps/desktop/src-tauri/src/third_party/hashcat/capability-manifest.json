@@ -37,6 +37,15 @@
       "desktop_routed": true
     },
     {
+      "id": 1000,
+      "algorithm": "ntlm",
+      "digest_hex_length": 32,
+      "source_build": true,
+      "desktop_available": false,
+      "hardware_verified": false,
+      "desktop_routed": true
+    },
+    {
       "id": 1400,
       "algorithm": "sha256",
       "digest_hex_length": 64,
@@ -66,7 +75,7 @@
     "Linux source build verified; Windows/MSVC toolchain and GPU host acceptance pending",
     "Mode source build does not imply successful native recovery",
     "Only attack mode 0 has a native worker protocol",
-    "Four selected raw-digest modes are desktop-routed, but execution on compatible GPU hardware remains unverified",
+    "Five selected raw-digest modes are desktop-routed, but execution on compatible GPU hardware remains unverified",
     "Uppercase and append-one are CyberDeck-owned private candidate preprocessing, not native Hashcat rule scripting"
   ],
   "candidate_presets": [

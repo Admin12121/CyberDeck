@@ -66,7 +66,7 @@ pub async fn netscan_icmp_discover_v1(
     if !authorized {
         return Err("explicit ICMPv4 authorization acknowledgment required".into());
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
     {
         let _ = (
             targets,
@@ -79,9 +79,9 @@ pub async fn netscan_icmp_discover_v1(
             syn,
             ctx,
         );
-        return Err("native ICMPv4 discovery requires Linux CAP_NET_RAW".into());
+        return Err("native ICMPv4 discovery currently supports Linux and Windows".into());
     }
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
     {
         let (scope, case) = saved_scope(&selected)?;
         if scanner.running.load(Ordering::Acquire) || arp.is_running() || syn.is_running() {
@@ -111,7 +111,7 @@ pub async fn netscan_icmp_discover_v1(
             return Err("selected saved case does not exist".into());
         }
         let message = format!(
-            "Authorize up to {} native ICMPv4 echo requests on Ethernet interface '{}' in case '{}'? The backend uses its actual interface source address and random echo IDs, at most 20 probes/s, no retries, 600ms per host. Linux CAP_NET_RAW and permission to assess this network are required.",
+            "Authorize up to {} native ICMPv4 echo requests on Ethernet interface '{}' in case '{}'? The backend uses the selected interface's real source IPv4 address, at most 20 probes/s, no retries and up to 600ms per host. Linux requires CAP_NET_RAW; Windows uses its native IP Helper ICMP API. Only assess authorized networks.",
             hosts.len(), interface_name, case
         );
         let dialog = app.clone();

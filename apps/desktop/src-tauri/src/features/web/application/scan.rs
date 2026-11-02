@@ -1,23 +1,42 @@
 //! Native authorized HTTP review application orchestration.
 //! A bounded, manually started review, not a general vulnerability scanner.
+use std::time::Duration;
+
 use super::scan_domain::{
-    confirmed_exposure, require_authorization, session_cookie_findings, Finding,
+    confirmed_exposure, is_sensitive_path, require_authorization, session_cookie_findings, Finding,
 };
+
+/// Every probe is individually capped so one slow path cannot consume the
+/// whole 60-second assessment budget or stall the remaining checks.
+const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 
 const INTERESTING_PATHS: &[(&str, &str)] = &[
     (
         "/robots.txt",
         "robots.txt present; review disallowed entries for hidden paths",
     ),
-    ("/sitemap.xml", "sitemap.xml present"),
+    (
+        "/.well-known/security.txt",
+        "security.txt present; review the published contact channel",
+    ),
     ("/.env", ".env file exposed: secrets leak"),
     ("/.git/HEAD", ".git directory exposed: source leak"),
-    ("/admin", "/admin responded; review authentication"),
-    ("/administrator", "/administrator responded"),
+    ("/.git/config", ".git configuration exposed: remote and branch metadata"),
+    ("/.svn/entries", ".svn directory exposed: source leak"),
+    ("/.DS_Store", "Finder metadata exposed: file name leak"),
+    ("/WEB-INF/web.xml", "Java web deployment descriptor exposed"),
+    ("/actuator/env", "Spring Actuator environment exposed: configuration leak"),
+    ("/actuator/health", "Spring Actuator health endpoint reachable"),
+    ("/swagger-ui.html", "API documentation UI reachable"),
+    ("/openapi.json", "OpenAPI description exposed"),
     ("/phpmyadmin", "phpMyAdmin reachable"),
     ("/wp-login.php", "WordPress login reachable"),
-    ("/backup", "/backup responded; possible data exposure"),
-    ("/server-status", "Apache server-status reachable"),
+    ("/admin", "/admin responded; review authentication"),
+    ("/phpinfo.php", "PHP configuration page exposed"),
+    ("/server-status", "Apache server-status reachable: request metadata leak"),
+    ("/elmah.axd", "ELMAH error log handler reachable"),
+    ("/backup.zip", "archive backup exposed"),
+    ("/backup.sql", "database dump exposed"),
 ];
 
 /// A non-secret, intentionally unrelated Origin used to test whether an
@@ -43,8 +62,37 @@ const SECURITY_HEADERS: &[(&str, &str)] = &[
     ("x-content-type-options", "X-Content-Type-Options"),
 ];
 
-/// Native active review of a target: reachable paths, header hygiene, banner
-/// disclosure. Our own checks; external engines add depth via slots below.
+/// Total bounded requests one review issues. Progress reporting and the
+/// localhost fixtures both derive from this single value.
+pub(super) fn planned_requests() -> usize {
+    INTERESTING_PATHS.len() + 4
+}
+
+async fn bounded_body(response: &mut reqwest::Response, limit: usize) -> Vec<u8> {
+    let mut body = Vec::new();
+    while let Ok(Some(chunk)) = response.chunk().await {
+        if body.len().saturating_add(chunk.len()) > limit {
+            break;
+        }
+        body.extend_from_slice(&chunk);
+    }
+    body
+}
+
+fn header_pairs(response: &reqwest::Response) -> Vec<(String, String)> {
+    let mut pairs = Vec::new();
+    for (key, value) in response.headers() {
+        pairs.push((
+            key.to_string().to_lowercase(),
+            value.to_str().unwrap_or("").to_string(),
+        ));
+    }
+    pairs
+}
+
+/// Native active review of a target: reachable paths, header hygiene, method
+/// policy, banner disclosure. Our own checks; external engines add depth via
+/// slots below.
 pub(super) async fn run_scan(
     client: &reqwest::Client,
     target_url: String,
@@ -61,7 +109,7 @@ pub(super) async fn run_scan_with_progress(
     on_progress: &impl Fn(usize, usize),
 ) -> Result<Vec<Finding>, String> {
     require_authorization(authorized)?;
-    let total = INTERESTING_PATHS.len() + 2;
+    let total = planned_requests();
     on_progress(0, total);
     let mut origin = reqwest::Url::parse(target_url.trim())
         .map_err(|e| format!("invalid scan target URL: {e}"))?;
@@ -76,57 +124,64 @@ pub(super) async fn run_scan_with_progress(
     origin.set_query(None);
     origin.set_fragment(None);
     let base = origin.as_str().trim_end_matches('/').to_string();
+    let https = origin.scheme() == "https";
     let mut findings: Vec<Finding> = Vec::new();
+    let mut done = 0usize;
 
-    let root = client.get(&base).send().await;
-    let root_headers = if let Ok(resp) = &root {
-        let mut map = Vec::new();
-        for (k, v) in resp.headers() {
-            map.push((
-                k.to_string().to_lowercase(),
-                v.to_str().unwrap_or("").to_string(),
-            ));
-        }
-        Some(map)
-    } else {
-        None
-    };
+    let root = client.get(&base).timeout(PROBE_TIMEOUT).send().await.ok();
+    let root_headers = root.as_ref().map(header_pairs);
+    let root_status = root.as_ref().map(|response| response.status().as_u16());
+    done += 1;
+    on_progress(done, total);
 
-    on_progress(1, total);
-    if let Some(headers) = &root_headers {
-        for (header, title) in SECURITY_HEADERS {
-            if *header == "strict-transport-security" && origin.scheme() != "https" {
-                continue;
+    if let (Some(headers), Some(status)) = (&root_headers, root_status) {
+        // A 404/500 root is usually a fallback shell or an error page; policy
+        // headers there say nothing about how the real documents are served.
+        if (200..400).contains(&status) {
+            for (header, title) in SECURITY_HEADERS {
+                if *header == "strict-transport-security" && !https {
+                    continue;
+                }
+                if *header == "x-frame-options"
+                    && headers.iter().any(|(k, v)| {
+                        k == "content-security-policy"
+                            && v.to_ascii_lowercase().contains("frame-ancestors")
+                    })
+                {
+                    continue;
+                }
+                if !headers.iter().any(|(k, _)| k == header) {
+                    findings.push(Finding {
+                        severity: "low".to_string(),
+                        title: format!("missing security header: {title}"),
+                        detail: "the response did not include this header; adds hardening against common web attacks".to_string(),
+                        evidence: base.clone(),
+                    });
+                }
             }
-            if *header == "x-frame-options"
-                && headers.iter().any(|(k, v)| {
-                    k == "content-security-policy"
-                        && v.to_ascii_lowercase().contains("frame-ancestors")
-                })
-            {
-                continue;
-            }
-            if !headers.iter().any(|(k, _)| k == header) {
+            findings.extend(session_cookie_findings(headers, https, &base));
+            if let Some((_, server)) = headers.iter().find(|(k, _)| k == "server") {
                 findings.push(Finding {
-                    severity: "low".to_string(),
-                    title: format!("missing security header: {title}"),
-                    detail: "the response did not include this header; adds hardening against common web attacks".to_string(),
-                    evidence: base.clone(),
+                    severity: "info".to_string(),
+                    title: "server banner disclosed".to_string(),
+                    detail: "the Server header reveals software and version; suppress it".to_string(),
+                    evidence: format!("server: {server}"),
                 });
             }
-        }
-        findings.extend(session_cookie_findings(
-            headers,
-            origin.scheme() == "https",
-            &base,
-        ));
-        if let Some((_, server)) = headers.iter().find(|(k, _)| k == "server") {
-            findings.push(Finding {
-                severity: "info".to_string(),
-                title: "server banner disclosed".to_string(),
-                detail: "the Server header reveals software and version; suppress it".to_string(),
-                evidence: format!("server: {server}"),
-            });
+            for (header, label) in [
+                ("x-powered-by", "X-Powered-By"),
+                ("x-aspnet-version", "X-AspNet-Version"),
+                ("x-aspnetmvc-version", "X-AspNetMvc-Version"),
+            ] {
+                if let Some((_, value)) = headers.iter().find(|(k, _)| k == header) {
+                    findings.push(Finding {
+                        severity: "info".to_string(),
+                        title: format!("framework banner disclosed: {label}"),
+                        detail: "the response advertises the application framework; suppress unnecessary technology disclosure".to_string(),
+                        evidence: format!("{header}: {value}"),
+                    });
+                }
+            }
         }
     }
 
@@ -136,6 +191,7 @@ pub(super) async fn run_scan_with_progress(
     // potential issue, and the report asks for operator validation.
     let cors = client
         .get(&base)
+        .timeout(PROBE_TIMEOUT)
         .header(reqwest::header::ORIGIN, CORS_PROBE_ORIGIN)
         .send()
         .await;
@@ -149,36 +205,86 @@ pub(super) async fn run_scan_with_progress(
             });
         }
     }
-    on_progress(2, total);
-    for (index, (path, note)) in INTERESTING_PATHS.iter().enumerate() {
-        on_progress(index + 2, total);
-        let url = format!("{base}{path}");
-        if let Ok(resp) = client.get(&url).send().await {
-            let status = resp.status().as_u16();
-            if status == 200 {
-                let sensitive = matches!(*path, "/.env" | "/.git/HEAD");
-                if sensitive {
-                    let mut response = resp;
-                    let mut preview = Vec::new();
-                    while let Ok(Some(chunk)) = response.chunk().await {
-                        if preview.len().saturating_add(chunk.len()) > 4096 {
-                            break;
-                        }
-                        preview.extend_from_slice(&chunk);
-                    }
-                    if !confirmed_exposure(path, &preview) {
-                        continue;
-                    }
-                }
-                let severity = if sensitive { "high" } else { "info" };
+    done += 1;
+    on_progress(done, total);
+
+    // Method policy: only diagnostic/proxy verbs are reportable. Advertised
+    // PUT/DELETE/PATCH is normal REST design and is intentionally ignored.
+    let options = client
+        .request(reqwest::Method::OPTIONS, &base)
+        .timeout(PROBE_TIMEOUT)
+        .send()
+        .await;
+    if let Ok(response) = options {
+        if let Some(allow) = response
+            .headers()
+            .get("allow")
+            .and_then(|value| value.to_str().ok())
+        {
+            let diagnostic: Vec<&str> = ["TRACE", "CONNECT"]
+                .into_iter()
+                .filter(|verb| allow.split(',').any(|m| m.trim().eq_ignore_ascii_case(verb)))
+                .collect();
+            if !diagnostic.is_empty() {
                 findings.push(Finding {
-                    severity: severity.to_string(),
-                    title: format!("found {path}"),
-                    detail: note.to_string(),
-                    evidence: format!("{url} -> {status}"),
+                    severity: "low".into(),
+                    title: "diagnostic HTTP methods advertised".into(),
+                    detail: "The Allow response lists a diagnostic or proxy verb. Confirm it is required in production.".into(),
+                    evidence: format!("{base} -> Allow includes {}", diagnostic.join(", ")),
                 });
             }
         }
+    }
+    done += 1;
+    on_progress(done, total);
+
+    // TRACE is idempotent and never changes server state; a 200 that echoes
+    // the request line is the only accepted evidence.
+    let trace = client
+        .request(reqwest::Method::TRACE, &base)
+        .timeout(PROBE_TIMEOUT)
+        .send()
+        .await;
+    if let Ok(mut response) = trace {
+        if response.status().is_success() {
+            let body = bounded_body(&mut response, 2048).await;
+            if body.starts_with(b"TRACE ") {
+                findings.push(Finding {
+                    severity: "medium".into(),
+                    title: "HTTP TRACE method is enabled".into(),
+                    detail: "The server echoed the request line for TRACE. Cross-site tracing can expose credentials to script in legacy clients; disable the method unless required.".into(),
+                    evidence: format!("{base} -> 200 with an echoed TRACE request line"),
+                });
+            }
+        }
+    }
+    done += 1;
+    on_progress(done, total);
+
+    for (path, note) in INTERESTING_PATHS {
+        done += 1;
+        on_progress(done, total);
+        let url = format!("{base}{path}");
+        let Ok(mut response) = client.get(&url).timeout(PROBE_TIMEOUT).send().await else {
+            continue;
+        };
+        let status = response.status().as_u16();
+        if status != 200 {
+            continue;
+        }
+        let sensitive = is_sensitive_path(path);
+        if sensitive {
+            let preview = bounded_body(&mut response, 4096).await;
+            if !confirmed_exposure(path, &preview) {
+                continue;
+            }
+        }
+        findings.push(Finding {
+            severity: if sensitive { "high" } else { "info" }.to_string(),
+            title: format!("found {path}"),
+            detail: note.to_string(),
+            evidence: format!("{url} -> {status}"),
+        });
     }
     on_progress(total, total);
     Ok(findings)
@@ -225,7 +331,7 @@ mod cors_probe_tests {
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let base = format!("http://{}", listener.local_addr().unwrap());
             let server = tokio::spawn(async move {
-                for _ in 0..INTERESTING_PATHS.len() + 2 {
+                for _ in 0..planned_requests() {
                     let (mut stream, _) = listener.accept().await.unwrap();
                     let (head, _) =
                         crate::features::web::webtls::read_http_message(&mut stream).await.unwrap();
@@ -254,7 +360,9 @@ mod cors_probe_tests {
             assert_eq!(cors[0].severity, "medium");
             assert!(!cors[0].evidence.contains("cookie"));
             assert_eq!(progress.lock().unwrap().last().copied(),
-                Some((INTERESTING_PATHS.len() + 2, INTERESTING_PATHS.len() + 2)));
+                Some((planned_requests(), planned_requests())));
+            // A 404 root must not produce policy-header findings.
+            assert!(findings.iter().all(|f| !f.title.contains("missing security header")));
             server.await.unwrap();
         }).await.expect("scoped CORS fixture timed out");
     }

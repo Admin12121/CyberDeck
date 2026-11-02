@@ -225,6 +225,7 @@ pub(super) fn embedded_result(
             engine: match request.algorithm.as_str() {
                 "md5" => "embedded_hashcat_00000",
                 "sha1" => "embedded_hashcat_00100",
+                "ntlm" => "embedded_hashcat_01000",
                 "sha256" => "embedded_hashcat_01400",
                 "sha512" => "embedded_hashcat_01700",
                 _ => "embedded_hashcat_unsupported",
@@ -326,10 +327,11 @@ mod tests {
         }
     }
     #[test]
-    fn embedded_four_mode_summary_is_typed_masked_and_not_hardcoded_sha256() {
+    fn embedded_five_mode_summary_is_typed_masked_and_not_hardcoded_sha256() {
         for (algorithm, digits, engine) in [
             ("md5", 32, "embedded_hashcat_00000"),
             ("sha1", 40, "embedded_hashcat_00100"),
+            ("ntlm", 32, "embedded_hashcat_01000"),
             ("sha256", 64, "embedded_hashcat_01400"),
             ("sha512", 128, "embedded_hashcat_01700"),
         ] {
