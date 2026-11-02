@@ -55,11 +55,14 @@ pub struct RecoveryRequest {
     pub max_candidates: u64,
     pub max_matches: usize,
 }
-#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct RecoveryProgressWire {
     pub tried: u64,
     pub budget: u64,
     pub matches: usize,
+    /// Autopilot stage label; absent for single-stage jobs.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stage: Option<String>,
 }
 impl From<RecoveryProgress> for RecoveryProgressWire {
     fn from(p: RecoveryProgress) -> Self {
@@ -67,6 +70,7 @@ impl From<RecoveryProgress> for RecoveryProgressWire {
             tried: p.tried,
             budget: p.budget,
             matches: p.matches,
+            stage: None,
         }
     }
 }
@@ -86,18 +90,54 @@ pub struct RecoverySummaryWire {
     pub limit_reached: bool,
     pub duration_ms: u64,
     pub matches: Vec<MatchMetadata>,
+    /// Autopilot per-stage reports; empty for single-stage jobs.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub stages: Vec<StageSummaryWire>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct StageSummaryWire {
+    pub label: String,
+    pub tried: u64,
+    pub duration_ms: u64,
+    pub matched: bool,
 }
 
 /// Non-serializable container. IPC must authorize a separate explicit reveal.
 pub struct RecoveryRun {
     pub summary: RecoverySummaryWire,
-    confidential_hits: Vec<Vec<u8>>,
+    pub(super) confidential_hits: Vec<Vec<u8>>,
+}
+impl RecoveryRun {
+    /// Assemble a completed multi-stage run (autopilot) from verified parts;
+    /// the confidential hits remain out of IPC until an explicit reveal.
+    pub(super) fn from_parts(
+        summary: RecoverySummaryWire,
+        confidential_hits: Vec<Vec<u8>>,
+    ) -> Self {
+        Self {
+            summary,
+            confidential_hits,
+        }
+    }
 }
 impl Drop for RecoveryRun {
     fn drop(&mut self) {
         for bytes in &mut self.confidential_hits {
             bytes.fill(0);
         }
+    }
+}
+impl RecoveryRun {
+    /// Split a completed run for the autopilot aggregator. Ownership of the
+    /// confidential bytes moves to the caller; nothing is zeroed en route.
+    pub(super) fn into_parts(self) -> (RecoverySummaryWire, Vec<Vec<u8>>) {
+        let this = std::mem::ManuallyDrop::new(self);
+        // SAFETY: both fields are read exactly once and the caller takes
+        // ownership; ManuallyDrop prevents the zeroing Drop from running.
+        let summary = unsafe { std::ptr::read(&this.summary) };
+        let hits = unsafe { std::ptr::read(&this.confidential_hits) };
+        (summary, hits)
     }
 }
 
@@ -288,6 +328,7 @@ pub(super) fn embedded_result(
             limit_reached: false,
             duration_ms,
             matches,
+            stages: Vec::new(),
         },
         confidential_hits,
     }
@@ -394,6 +435,7 @@ fn execute_reader_options<R: BufRead, P: FnMut(RecoveryProgressWire)>(
             limit_reached: completed.limit_reached,
             duration_ms: started.elapsed().as_millis() as u64,
             matches,
+            stages: Vec::new(),
         },
         confidential_hits,
     })

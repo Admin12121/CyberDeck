@@ -5,12 +5,31 @@
 mod embedded_hashcat;
 #[path = "../application/recovery_backend.rs"]
 mod recovery_backend;
+#[path = "../application/autopilot.rs"]
+mod autopilot;
+// Library modules are shared with ipc/library.rs; each include is a pure,
+// stateless view over the same verified resource files.
+// Twin includes of the library modules: this instance uses only the resolve/
+// load/list surface, so silence the dead-code warnings the unused remainder
+// would raise (ipc/library.rs exercises the full surface on its own copy).
+#[path = "../infrastructure/rules_library.rs"]
+#[allow(dead_code)]
+pub(crate) mod library_rules;
+#[path = "../infrastructure/wordlist_library.rs"]
+#[allow(dead_code)]
+pub(crate) mod library_wordlists;
+
+/// Alias so command bodies read cleanly about their support modules.
+mod library_support {
+    pub(crate) use super::library_rules as rules_library;
+}
 
 use crate::features::shared::session::CaseSessionCtx;
 use recovery_backend::access::{RecoveryResultAccess, VerifiedScope};
 use recovery_backend::{
     execute_path, execute_path_with_rules, probe_recovery_devices, RecoveryCancel,
-    RecoveryDeviceInventory, RecoveryProgressWire, RecoveryRequest, RecoverySummaryWire,
+    RecoveryDeviceInventory, RecoveryProgressWire, RecoveryRequest, RecoveryRun,
+    RecoverySummaryWire,
 };
 use serde::Serialize;
 use std::collections::HashMap;
@@ -52,6 +71,13 @@ pub enum RecoveryEvent {
     Started {
         job_id: u64,
     },
+    /// Autopilot announces each planned ladder stage before running it.
+    StageStarted {
+        job_id: u64,
+        stage_index: usize,
+        stage_count: usize,
+        label: String,
+    },
     Progress {
         job_id: u64,
         tried: u64,
@@ -77,19 +103,19 @@ struct Job {
     expires_at: Option<Instant>,
     finished_at: Option<Instant>,
 }
-struct Registry {
+pub(crate) struct Registry {
     next_id: u64,
     current: Option<VerifiedScope>,
     jobs: HashMap<u64, Job>,
     secrets: RecoveryResultAccess,
-    selected_wordlist: Option<SelectedWordlist>,
+    pub(crate) selected_wordlist: Option<SelectedWordlist>,
 }
 
 #[derive(Clone)]
-struct SelectedWordlist {
-    path: PathBuf,
-    name: String,
-    size_bytes: u64,
+pub(crate) struct SelectedWordlist {
+    pub path: PathBuf,
+    pub name: String,
+    pub size_bytes: u64,
 }
 
 fn recheck_selected_wordlist(selection: &SelectedWordlist) -> Result<(), String> {
@@ -269,7 +295,7 @@ impl RecoveryCtx {
         }
     }
 
-    fn with_active<T>(
+    pub(crate) fn with_active<T>(
         &self,
         session: &CaseSessionCtx,
         operation: impl FnOnce(&mut Registry, &VerifiedScope) -> Result<T, String>,
@@ -367,9 +393,59 @@ fn start_recovery_with_wordlist_engine(
     })?;
     let registry = state.registry.clone();
     emit(RecoveryEvent::Started { job_id });
+    let worker_token = token.clone();
+    let worker = move |sink: &(dyn Fn(RecoveryEvent) + Send + Sync),
+                       forward: &mut dyn FnMut(RecoveryProgressWire)|
+          -> Result<RecoveryRun, String> {
+        let _ = sink;
+        let token = &worker_token;
+        if let Some(runtime) = embedded_runtime.as_deref() {
+            embedded_hashcat::execute_path(
+                &request,
+                &wordlist,
+                runtime,
+                token,
+                preset,
+                |progress| forward(progress),
+            )
+        } else if let Some(compiled) = rules {
+            execute_path_with_rules(&request, &wordlist, &token, |progress| forward(progress), compiled)
+        } else {
+            execute_path(&request, &wordlist, &token, |progress| forward(progress))
+        }
+    };
+    spawn_recovery_worker(registry, job_id, scope, token, emit, worker);
+    Ok(job_id)
+}
+
+/// Shared job worker: gates progress on the live case, publishes masked
+/// terminal state, and enforces the confidential-result lifecycle. The
+/// single-stage engines and the autopilot ladder both run through here.
+fn spawn_recovery_worker<F>(
+    registry: Arc<Mutex<Registry>>,
+    job_id: u64,
+    scope: VerifiedScope,
+    token: RecoveryCancel,
+    emit: impl Fn(RecoveryEvent) + Send + 'static,
+    worker: F,
+) where
+    F: FnOnce(
+            &(dyn Fn(RecoveryEvent) + Send + Sync),
+            &mut dyn FnMut(RecoveryProgressWire),
+        ) -> Result<RecoveryRun, String>
+        + Send
+        + 'static,
+{
+    // The IPC closure may be merely Send (mpsc senders); a Mutex makes the
+    // shared sink Sync for the worker while preserving the emit contract.
+    let emit = Arc::new(Mutex::new(emit));
+    let sink_emit = emit.clone();
+    let sink = move |event: RecoveryEvent| {
+        (sink_emit.lock().unwrap())(event);
+    };
     std::thread::spawn(move || {
         let result = catch_unwind(AssertUnwindSafe(|| {
-            let progress_callback = |progress| {
+            let mut forward = |progress: RecoveryProgressWire| {
                 let should_emit = {
                     let Ok(mut lock) = registry.lock() else {
                         return;
@@ -378,14 +454,14 @@ fn start_recovery_with_wordlist_engine(
                         return;
                     }
                     if let Some(job) = lock.jobs.get_mut(&job_id) {
-                        job.status.progress = Some(progress);
+                        job.status.progress = Some(progress.clone());
                         true
                     } else {
                         false
                     }
                 };
                 if should_emit {
-                    emit(RecoveryEvent::Progress {
+                    (emit.lock().unwrap())(RecoveryEvent::Progress {
                         job_id,
                         tried: progress.tried,
                         budget: progress.budget,
@@ -393,20 +469,7 @@ fn start_recovery_with_wordlist_engine(
                     });
                 }
             };
-            if let Some(runtime) = embedded_runtime.as_deref() {
-                embedded_hashcat::execute_path(
-                    &request,
-                    &wordlist,
-                    runtime,
-                    &token,
-                    preset,
-                    progress_callback,
-                )
-            } else if let Some(compiled) = rules {
-                execute_path_with_rules(&request, &wordlist, &token, progress_callback, compiled)
-            } else {
-                execute_path(&request, &wordlist, &token, progress_callback)
-            }
+            worker(&sink, &mut forward)
         }));
         let event = {
             let Ok(mut lock) = registry.lock() else {
@@ -468,9 +531,8 @@ fn start_recovery_with_wordlist_engine(
                 }
             }
         };
-        emit(event);
+        (emit.lock().unwrap())(event);
     });
-    Ok(job_id)
 }
 
 /// Select a wordlist by native OS dialog, authorize against the backend
@@ -531,8 +593,10 @@ pub fn recovery_wordlist_status_v1(
 
 #[tauri::command]
 pub fn recovery_start_v1(
+    app: AppHandle,
     request: RecoveryRequest,
     rules: Option<String>,
+    rules_set: Option<String>,
     on_event: Channel<RecoveryEvent>,
     state: State<'_, RecoveryCtx>,
     session: State<'_, CaseSessionCtx>,
@@ -543,8 +607,8 @@ pub fn recovery_start_v1(
     ) {
         return Err("Hashcat-managed backend requires the embedded engine command".into());
     }
-    let compiled = match rules {
-        Some(text) if !text.trim().is_empty() => {
+    let compiled = match (rules, rules_set) {
+        (Some(text), _) if !text.trim().is_empty() => {
             if text.len() > 4096 {
                 return Err("native recovery rule text exceeds 4 KiB".into());
             }
@@ -554,6 +618,14 @@ pub fn recovery_start_v1(
             Some(cyberdeck_crypto::recovery::parse_rule_lines(
                 std::io::BufReader::new(text.as_bytes()),
             )?)
+        }
+        // Library rule sets load backend-side from verified app resources;
+        // the frontend only names a manifest id.
+        (None, Some(set_id)) => {
+            if !matches!(request.backend, recovery_backend::BackendSelection::Cpu) {
+                return Err("library rule sets run on native CPU only; select CPU".into());
+            }
+            Some(library_support::rules_library::load(&app, &set_id)?.rules)
         }
         _ => None,
     };
@@ -844,6 +916,150 @@ pub async fn recovery_reveal_v1(
     })
 }
 
+/// One command, one detected hash, one ladder: every plausible algorithm
+/// against the best available library wordlist, then rule escalation on the
+/// primary algorithm. Reuses the single-job lifecycle, cancellation and
+/// confidential reveal flow; the frontend only supplies the hash text.
+#[tauri::command]
+pub fn recovery_autopilot_v1(
+    app: AppHandle,
+    target_hash: String,
+    max_candidates: u64,
+    max_matches: usize,
+    on_event: Channel<RecoveryEvent>,
+    state: State<'_, RecoveryCtx>,
+    session: State<'_, CaseSessionCtx>,
+) -> Result<u64, String> {
+    let detection = autopilot::detect_target(&target_hash)?;
+    let wordlists = library_wordlists::list(&app)?;
+    let present: Vec<String> = wordlists
+        .iter()
+        .filter(|entry| entry.present)
+        .map(|entry| entry.id.clone())
+        .collect();
+    let rules_ids = library_rules::list(&app)?
+        .into_iter()
+        .map(|entry| entry.id)
+        .collect::<Vec<_>>();
+    let plan = autopilot::build_plan(&detection, &present, &rules_ids)?;
+    if !(1..=cyberdeck_crypto::recovery::MAX_FAST_CANDIDATES).contains(&max_candidates) {
+        return Err("max_candidates exceeds global recovery limit".into());
+    }
+    if !(1..=cyberdeck_crypto::recovery::MAX_MATCHES).contains(&max_matches) {
+        return Err("max_matches exceeds global recovery limit".into());
+    }
+    let scope = RecoveryCtx::scope_from_session(&session)?;
+    let (job_id, token) = state.with_active(&session, |registry, verified| {
+        if *verified != scope {
+            return Err("recovery case changed".into());
+        }
+        registry.reserve_job()
+    })?;
+    let registry = state.registry.clone();
+    let started = Instant::now();
+    emit_started(&on_event, job_id);
+    let worker_app = app.clone();
+    let worker_target = target_hash.trim().to_string();
+    let emit = move |event| {
+        let _ = on_event.send(event);
+    };
+    let stage_count = plan.stages.len();
+    let worker_token = token.clone();
+    let worker = move |sink: &(dyn Fn(RecoveryEvent) + Send + Sync),
+                       forward: &mut dyn FnMut(RecoveryProgressWire)|
+          -> Result<RecoveryRun, String> {
+        let token = &worker_token;
+        let mut total_tried = 0u64;
+        let mut stage_reports = Vec::new();
+        let mut matches_meta = Vec::new();
+        let mut confidential = Vec::new();
+        let mut cancelled = false;
+        let mut limit_reached = false;
+        for (index, stage) in plan.stages.iter().enumerate() {
+            if token.is_cancelled() {
+                cancelled = true;
+                break;
+            }
+            sink(RecoveryEvent::StageStarted {
+                job_id,
+                stage_index: index,
+                stage_count,
+                label: stage.label.clone(),
+            });
+            let request = RecoveryRequest {
+                algorithm: stage.algorithm.clone(),
+                target_hash: worker_target.clone(),
+                backend: recovery_backend::BackendSelection::Cpu,
+                max_candidates,
+                max_matches,
+            };
+            let path = library_wordlists::resolve(&worker_app, &stage.wordlist_id)?;
+            let label = stage.label.clone();
+            let progress_with_stage = |progress: RecoveryProgressWire| {
+                let mut labeled = progress;
+                labeled.stage = Some(label.clone());
+                forward(labeled);
+            };
+            let result = match &stage.rules_set {
+                Some(set_id) => {
+                    let compiled = library_rules::load(&worker_app, set_id)?;
+                    recovery_backend::execute_path_with_rules(
+                        &request,
+                        &path,
+                        &token,
+                        progress_with_stage,
+                        compiled.rules,
+                    )
+                }
+                None => recovery_backend::execute_path(
+                    &request,
+                    &path,
+                    &token,
+                    progress_with_stage,
+                ),
+            };
+            let run = result.map_err(|error| format!("stage '{}': {error}", stage.label))?;
+            let (summary, hits) = run.into_parts();
+            cancelled |= summary.cancelled;
+            limit_reached |= summary.limit_reached;
+            let matched = !summary.matches.is_empty();
+            stage_reports.push(recovery_backend::StageSummaryWire {
+                label: stage.label.clone(),
+                tried: summary.tried,
+                duration_ms: summary.duration_ms,
+                matched,
+            });
+            total_tried += summary.tried;
+            matches_meta.extend(summary.matches);
+            confidential.extend(hits);
+            if matched || cancelled {
+                break;
+            }
+        }
+        let _ = sink; // stage events already delivered through the sink
+        Ok(RecoveryRun::from_parts(
+            RecoverySummaryWire {
+                algorithm: plan.algorithm.clone(),
+                backend: recovery_backend::BackendSelection::Cpu,
+                engine: "cyberdeck-autopilot".into(),
+                tried: total_tried,
+                cancelled,
+                limit_reached,
+                duration_ms: started.elapsed().as_millis() as u64,
+                matches: matches_meta,
+                stages: stage_reports,
+            },
+            confidential,
+        ))
+    };
+    spawn_recovery_worker(registry, job_id, scope, token, emit, worker);
+    Ok(job_id)
+}
+
+fn emit_started(on_event: &Channel<RecoveryEvent>, job_id: u64) {
+    let _ = on_event.send(RecoveryEvent::Started { job_id });
+}
+
 #[cfg(test)]
 mod tests {
     use super::recovery_backend::execute_reader;
@@ -1118,6 +1334,9 @@ mod tests {
                     assert_eq!(id, job_id);
                     started = true;
                 }
+                RecoveryEvent::StageStarted { job_id, .. } => {
+                    assert_eq!(id, job_id);
+                }
                 RecoveryEvent::Progress { job_id, tried, .. } => {
                     assert_eq!(id, job_id);
                     saw_progress = true;
@@ -1205,7 +1424,7 @@ mod tests {
                 RecoveryEvent::Cancelled { job_id } => break job_id,
                 RecoveryEvent::Completed { .. } => panic!("cancelled job completed"),
                 RecoveryEvent::Failed { error, .. } => panic!("cancelled job failed: {error}"),
-                RecoveryEvent::Started { .. } => {}
+                RecoveryEvent::Started { .. } | RecoveryEvent::StageStarted { .. } => {}
             }
         };
         assert!(saw_progress);

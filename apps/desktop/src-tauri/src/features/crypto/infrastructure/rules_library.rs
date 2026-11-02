@@ -3,6 +3,7 @@
 //! rule engine. No frontend-supplied paths are accepted; only manifest ids.
 use serde::Serialize;
 use std::io::BufReader;
+use tauri::Manager;
 use std::path::PathBuf;
 
 const MAX_MANIFEST_BYTES: u64 = 1 << 20;
@@ -14,7 +15,6 @@ pub struct RuleSetEntry {
     pub size_bytes: u64,
 }
 
-#[derive(Serialize)]
 pub struct LoadedRuleSet {
     pub id: String,
     pub rules: Vec<cyberdeck_crypto::recovery::CompiledRule>,

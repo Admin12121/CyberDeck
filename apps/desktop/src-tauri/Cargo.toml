@@ -15,8 +15,9 @@ cyberdeck-packet = { path = "../../../crates/packet" }
 cyberdeck-storage = { path = "../../../crates/storage" }
 base64 = "0.22"
 hex = "0.4"
+sha2 = "0.10"
 flate2 = "1"
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
 futures-util = "0.3"
 rcgen = "0.13"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }

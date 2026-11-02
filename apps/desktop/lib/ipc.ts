@@ -58,9 +58,11 @@ export type RecoveryBackendV1 =
 export type HashcatRawAlgorithmV1 = "md5" | "sha1" | "ntlm" | "sha256" | "sha512";
 /** Native Rust CPU supports SHA3-256; the embedded Hashcat build does not. */
 export type RecoveryRawAlgorithmV1 = HashcatRawAlgorithmV1 | "sha3_256";
+/** "kdf" lets the backend derive the family from a modular hash string. */
+export type RecoveryRequestAlgorithmV1 = RecoveryRawAlgorithmV1 | "kdf";
 export type HashcatWordlistPresetV1 = "plain" | "uppercase" | "append_one";
 export interface RecoveryRequestV1 {
-  algorithm: RecoveryRawAlgorithmV1;
+  algorithm: RecoveryRequestAlgorithmV1;
   target_hash: string;
   backend: RecoveryBackendV1;
   max_candidates: number;
@@ -83,6 +85,14 @@ export interface RecoveryProgressV1 {
   tried: number;
   budget: number;
   matches: number;
+  /** Autopilot stage label; absent for single-stage jobs. */
+  stage?: string;
+}
+export interface RecoveryStageSummaryV1 {
+  label: string;
+  tried: number;
+  duration_ms: number;
+  matched: boolean;
 }
 export interface RecoverySummaryV1 {
   algorithm: string;
@@ -93,6 +103,7 @@ export interface RecoverySummaryV1 {
   limit_reached: boolean;
   duration_ms: number;
   matches: { candidate_index: number; masked: boolean }[];
+  stages?: RecoveryStageSummaryV1[];
 }
 export type RecoveryPhaseV1 = "running" | "cancelling" | "completed" | "cancelled" | "failed";
 export interface RecoveryJobStatusV1 {
@@ -105,6 +116,7 @@ export interface RecoveryJobStatusV1 {
 }
 export type RecoveryEventV1 =
   | { type: "started"; job_id: number }
+  | { type: "stage_started"; job_id: number; stage_index: number; stage_count: number; label: string }
   | ({ type: "progress"; job_id: number } & RecoveryProgressV1)
   | { type: "completed"; job_id: number; summary: RecoverySummaryV1 }
   | { type: "cancelled"; job_id: number }
@@ -133,18 +145,102 @@ export async function recoveryWordlistStatusV1(): Promise<RecoveryWordlistV1 | n
   return invoke<RecoveryWordlistV1 | null>("recovery_wordlist_status_v1");
 }
 
-/** Starts recovery using the previously OS-selected backend wordlist. */
+/** Starts recovery using the previously OS-selected backend wordlist.
+ * `rulesSet` names a bundled library rule set; `rules` stays bounded typed text.
+ */
 export async function recoveryStartV1(
   request: RecoveryRequestV1,
   onEvent: (event: RecoveryEventV1) => void,
   rules?: string,
+  rulesSet?: string | null,
 ): Promise<number> {
   if (!inTauri) throw new Error("Native wordlist recovery requires the desktop runtime");
   const channel = new Channel<RecoveryEventV1>();
   channel.onmessage = onEvent;
   // Rules are bounded, never persisted, parsed again by Rust and strictly
   // CPU-only. The default remains ordinary streaming wordlist recovery.
-  return invoke<number>("recovery_start_v1", { request, rules: rules?.trim() || null, onEvent: channel });
+  return invoke<number>("recovery_start_v1", {
+    request,
+    rules: rules?.trim() || null,
+    rulesSet: rulesSet || null,
+    onEvent: channel,
+  });
+}
+
+/** Recovery autopilot: one detected hash, one planned ladder job. */
+export async function recoveryAutopilotV1(
+  targetHash: string,
+  maxCandidates: number,
+  maxMatches: number,
+  onEvent: (event: RecoveryEventV1) => void,
+): Promise<number> {
+  if (!inTauri) throw new Error("Recovery autopilot requires the desktop runtime");
+  const channel = new Channel<RecoveryEventV1>();
+  channel.onmessage = onEvent;
+  return invoke<number>("recovery_autopilot_v1", {
+    targetHash,
+    maxCandidates,
+    maxMatches,
+    onEvent: channel,
+  });
+}
+
+// --- wordlist + rules library v1 ---------------------------------------------
+
+export type WordlistLibraryOriginV1 = "bundled" | "downloaded";
+export interface WordlistLibraryEntryV1 {
+  id: string;
+  name: string;
+  origin: WordlistLibraryOriginV1;
+  size_bytes: number;
+  present: boolean;
+  source_url: string | null;
+  license_note: string;
+}
+export interface WordlistFetchProgressV1 {
+  id: string;
+  downloaded_bytes: number;
+  total_bytes: number | null;
+}
+export interface RuleSetEntryV1 {
+  id: string;
+  rule_count: number;
+  size_bytes: number;
+}
+export interface RuleSetSummaryV1 {
+  id: string;
+  rule_count: number;
+  skipped: number;
+}
+
+export async function wordlistLibraryListV1(): Promise<WordlistLibraryEntryV1[]> {
+  if (!inTauri) throw new Error("The wordlist library requires the desktop runtime");
+  return invoke<WordlistLibraryEntryV1[]>("wordlist_library_list_v1");
+}
+export async function wordlistLibraryFetchV1(
+  id: string,
+  onProgress: (progress: WordlistFetchProgressV1) => void,
+): Promise<string> {
+  if (!inTauri) throw new Error("Wordlist downloads require the desktop runtime");
+  const channel = new Channel<WordlistFetchProgressV1>();
+  channel.onmessage = onProgress;
+  return invoke<string>("wordlist_library_fetch_v1", { id, onProgress: channel });
+}
+export async function wordlistLibraryDeleteV1(id: string): Promise<boolean> {
+  if (!inTauri) throw new Error("The wordlist library requires the desktop runtime");
+  return invoke<boolean>("wordlist_library_delete_v1", { id });
+}
+export async function wordlistLibraryUseV1(id: string): Promise<RecoveryWordlistV1> {
+  if (!inTauri) throw new Error("The wordlist library requires the desktop runtime");
+  return invoke<RecoveryWordlistV1>("wordlist_library_use_v1", { id });
+}
+export async function rulesLibraryListV1(): Promise<RuleSetEntryV1[]> {
+  if (!inTauri) throw new Error("The rules library requires the desktop runtime");
+  return invoke<RuleSetEntryV1[]>("rules_library_list_v1");
+}
+export async function rulesLibraryInspectV1(id: string): Promise<RuleSetSummaryV1> {
+  if (!inTauri) throw new Error("The rules library requires the desktop runtime");
+  return invoke<RuleSetSummaryV1>("rules_library_inspect_v1", { id });
 }
 export interface EmbeddedHashcatCapabilityV1 {
   available: boolean;

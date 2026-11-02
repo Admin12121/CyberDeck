@@ -77,8 +77,8 @@ test("Hashcat opt-in preserves native Rust as default and masked-result IPC", ()
   assert.ok(ipc.includes('"recovery_hashcat_capabilities_v1"'));
   assert.ok(ui.includes('useState<"rust" | "hashcat">("rust")'));
   assert.ok(ui.includes('recoveryStartHashcatV1'));
-  assert.match(ui, /engineChoice === "hashcat"\s*\? await recoveryStartHashcatV1\(request, onEvent, hashcatPreset\)/);
-  assert.ok(ui.includes("await recoveryStartV1(request, onEvent, ruleText)"), "native Rust must remain the distinct streamed wordlist/rules fallback");
+  assert.match(ui, /engineChoice === "hashcat" && !isKdfHash\s*\? await recoveryStartHashcatV1\(request, onEvent, hashcatPreset\)/);
+  assert.ok(ui.includes("await recoveryStartV1(request, onEvent, isKdfHash ? undefined : ruleText, ruleSetId)"), "native Rust must remain the distinct streamed wordlist/rules fallback");
   assert.ok(ui.includes('hashcatCapability?.available'));
   assert.ok(ui.includes("GPU detection,"));
   assert.ok(ui.includes('recoveryRevealV1'));
@@ -142,7 +142,7 @@ test("five bundled wordlist modes are explicitly validated and desktop-selectabl
     assert.ok(ipc.includes('"'+ algorithm + '"'), algorithm + " absent from typed request");
   }
   assert.ok(controller.includes("embedded_hashcat::validate_embedded_request(&request)?"));
-  assert.ok(ui.includes('algorithm: hashcatAlgorithm'), "Rust CPU and embedded Hashcat should use the explicitly selected raw digest mode");
+  assert.ok(ui.includes('algorithm: isKdfHash ? "kdf" : hashcatAlgorithm'), "Rust CPU and embedded Hashcat should use the explicitly selected raw digest mode; KDF derives the family backend-side");
   assert.ok(ui.includes("digest length alone is not proof") ||
     ui.includes("digest length alone cannot identify it"));
   assert.ok(core.includes("target.is_match(candidate)"));

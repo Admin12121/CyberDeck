@@ -158,6 +158,10 @@ mod tests {
         ids.iter().map(|id| id.to_string()).collect()
     }
 
+    fn rules(ids: &[&str]) -> Vec<String> {
+        ids.iter().map(|id| id.to_string()).collect()
+    }
+
     #[test]
     fn digest_shapes_expand_into_ordered_candidates() {
         let md5_like = detect_target("9a0364b9e99bb480dd25e1f0284c8555").unwrap();
@@ -197,7 +201,7 @@ mod tests {
         let plan = build_plan(
             &detection,
             &wordlists(&["seclists-top-100000", "rockyou", "cyberdeck-common"]),
-            &["best66", "rockyou-30000"],
+            &rules(&["best66", "rockyou-30000"]),
         )
         .unwrap();
         assert_eq!(plan.stages.len(), 4);
@@ -220,7 +224,7 @@ mod tests {
         let plan = build_plan(
             &detection,
             &wordlists(&["rockyou", "cyberdeck-common"]),
-            &["best66"],
+            &rules(&["best66"]),
         )
         .unwrap();
         assert_eq!(plan.stages.len(), 1);
@@ -240,7 +244,7 @@ mod tests {
     #[test]
     fn plan_requires_at_least_one_wordlist() {
         let detection = detect_target("a9993e364706816aba3e25717850c26c9cd0d89d").unwrap();
-        let error = build_plan(&detection, &[], &["best66"]).unwrap_err();
+        let error = build_plan(&detection, &[], &rules(&["best66"])).unwrap_err();
         assert!(error.contains("no wordlist"));
     }
 }

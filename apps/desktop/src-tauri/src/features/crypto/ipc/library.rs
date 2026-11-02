@@ -103,6 +103,3 @@ pub fn rules_library_inspect_v1(
 ) -> Result<rules_library::LoadedRuleSetSummary, String> {
     rules_library::load_summary(&app, &id)
 }
-
-// Used by the recovery IPC sibling to load a rules set for a live job.
-pub(crate) use rules_library::load as load_rule_set;

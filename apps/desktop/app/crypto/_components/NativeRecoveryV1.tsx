@@ -1,6 +1,6 @@
 "use client";
 import { createContext, useCallback, useContext, useEffect, useRef, useState, type ReactNode } from "react";
-import { Play, Square, Trash2, Eye, EyeOff, Info, FileUp, SlidersHorizontal, FileText } from "lucide-react";
+import { Play, Square, Trash2, Eye, EyeOff, Info, FileUp, SlidersHorizontal, FileText, Library, Download, Wand2 } from "lucide-react";
 import { Phosphor } from "@lucasmarkes/hairline/react";
 import { Accordion, AccordionItem, AccordionTrigger, AccordionPanel } from "@/components/ui/accordion";
 import { Chip } from "@ds/panes";
@@ -13,8 +13,11 @@ import { AuthorizedCaseAction } from "@/app/_components/AuthorizedCaseAction";
 import {
   isDesktop, recoveryCancelV1, recoveryDevicesV1, recoveryDiscardV1,
   recoverySelectWordlistV1, recoveryWordlistStatusV1, type RecoveryWordlistV1,
-  recoveryRevealV1, recoveryStartV1, recoveryStatusV1,
+  recoveryRevealV1, recoveryStartV1, recoveryStatusV1, recoveryAutopilotV1,
   recoveryHashcatCapabilitiesV1, recoveryStartHashcatV1,
+  wordlistLibraryListV1, wordlistLibraryFetchV1, wordlistLibraryDeleteV1, wordlistLibraryUseV1,
+  rulesLibraryListV1, rulesLibraryInspectV1,
+  type WordlistLibraryEntryV1, type WordlistFetchProgressV1, type RuleSetEntryV1,
   type EmbeddedHashcatCapabilityV1,
   type RecoveryBackendV1, type RecoveryDeviceInventoryV1,
   type RecoveryJobStatusV1, type RecoveryRequestV1, type HashcatRawAlgorithmV1, type RecoveryRawAlgorithmV1, type HashcatWordlistPresetV1,
@@ -71,7 +74,11 @@ function useRecoveryController(targetHash: string, onCaseCreated?: (caseId: stri
   const clearReveal = useCallback(() => setSecretHex(null), []);
   const hash = targetHash.trim();
   const hashcatMode = RUST_MODES.find((item) => item.value === hashcatAlgorithm)!;
-  const validHash = hash.length === hashcatMode.digits && /^[a-fA-F0-9]+$/.test(hash);
+  // Modular KDF strings (bcrypt, argon2, scrypt, pbkdf2, yescrypt) run on the
+  // native CPU engine; the backend re-derives the family from the hash text.
+  const isKdfHash = hash.startsWith("$") && hash.length >= 8;
+  const validHash = isKdfHash
+    || (hash.length === hashcatMode.digits && /^[a-fA-F0-9]+$/.test(hash));
   useEffect(() => {
     // Length is a suggestion, never an identity claim: preserve an operator's
     // explicit MD5/NTLM choice when both share 32-digit digest shapes.
@@ -85,7 +92,9 @@ function useRecoveryController(targetHash: string, onCaseCreated?: (caseId: stri
   const running = status?.phase === "running" || status?.phase === "cancelling";
   // GPU route is currently SHA-256-only. In Auto, other raw modes must run
   // on the available Rust CPU, even if a GPU later passes independent KAT.
-  const selection: RecoveryBackendV1 = chooseRecoveryBackend(backend, inventory, batchSize, hashcatAlgorithm);
+  const selection: RecoveryBackendV1 = isKdfHash
+    ? { backend: "cpu" }
+    : chooseRecoveryBackend(backend, inventory, batchSize, hashcatAlgorithm);
   const selectedDevice = selection.backend === "open_cl" ? selection.device_index : null;
   const deviceAvailable = selectedDevice === null ||
     !!inventory?.devices.some((item) => item.device_index === selectedDevice);
@@ -193,22 +202,106 @@ function useRecoveryController(targetHash: string, onCaseCreated?: (caseId: stri
     }
   };
 
+  // --- library (wordlists + rule sets) -------------------------------------
+  const [libraryOpen, setLibraryOpen] = useState(false);
+  const [libraryEntries, setLibraryEntries] = useState<WordlistLibraryEntryV1[] | null>(null);
+  const [libraryBusy, setLibraryBusy] = useState<string | null>(null);
+  const [libraryProgress, setLibraryProgress] = useState<WordlistFetchProgressV1 | null>(null);
+  const [ruleSets, setRuleSets] = useState<RuleSetEntryV1[] | null>(null);
+  const [ruleSetId, setRuleSetId] = useState<string | null>(null);
+  const [ruleSetNote, setRuleSetNote] = useState<string | null>(null);
+  const refreshLibrary = useCallback(async () => {
+    try {
+      const entries = await wordlistLibraryListV1();
+      setLibraryEntries(entries);
+      setRuleSets(await rulesLibraryListV1());
+    } catch {
+      setLibraryEntries([]);
+    }
+  }, []);
+  useEffect(() => {
+    if (!desktop) return;
+    void refreshLibrary();
+  }, [desktop, refreshLibrary]);
+  const useLibraryWordlist = async (id: string) => {
+    if (!scope || libraryBusy || jobId !== null) return;
+    const requestedScope = scope;
+    setLibraryBusy(id);
+    setWordlistError(null);
+    try {
+      const info = await wordlistLibraryUseV1(id);
+      if (scopeRef.current === requestedScope) setWordlist({ scope: requestedScope, info });
+      void refreshLibrary();
+    } catch (reason) {
+      if (scopeRef.current === requestedScope) setWordlistError(String(reason));
+    } finally {
+      if (scopeRef.current === requestedScope) setLibraryBusy(null);
+    }
+  };
+  const downloadLibraryWordlist = async (id: string) => {
+    if (libraryBusy) return;
+    setLibraryBusy(id);
+    setLibraryProgress(null);
+    try {
+      await wordlistLibraryFetchV1(id, setLibraryProgress);
+      void refreshLibrary();
+    } catch (reason) {
+      setWordlistError(String(reason));
+    } finally {
+      setLibraryProgress(null);
+      setLibraryBusy(null);
+    }
+  };
+  const deleteLibraryWordlist = async (id: string) => {
+    if (libraryBusy) return;
+    setLibraryBusy(id);
+    try {
+      await wordlistLibraryDeleteV1(id);
+      void refreshLibrary();
+    } catch (reason) {
+      setWordlistError(String(reason));
+    } finally {
+      setLibraryBusy(null);
+    }
+  };
+  const pickRuleSet = async (id: string | null) => {
+    if (jobId !== null || busy) return;
+    setRuleSetId(id);
+    setRuleSetNote(null);
+    if (id) {
+      setRuleText("");
+      try {
+        const summary = await rulesLibraryInspectV1(id);
+        setRuleSetNote(summary.skipped > 0
+          ? `${summary.rule_count.toLocaleString()} rules active, ${summary.skipped.toLocaleString()} skipped by the bounded engine`
+          : `${summary.rule_count.toLocaleString()} rules active`);
+      } catch (reason) {
+        setRuleSetNote(String(reason));
+      }
+    }
+    clearReveal();
+  };
+
   const start = async () => {
     if (!scope || !validHash || !selectedWordlist || busy ||
       (engineChoice === "hashcat" ? !hashcatCapability?.available : !deviceAvailable) ||
       jobId !== null) return;
-    if (ruleText.trim() && (engineChoice !== "rust" || selection.backend !== "cpu")) {
+    if (!isKdfHash && ruleText.trim() && (engineChoice !== "rust" || selection.backend !== "cpu")) {
       setError("Wordlist rules require the native Rust CPU backend. Select CPU first.");
+      return;
+    }
+    if (isKdfHash && (engineChoice !== "rust" || selection.backend !== "cpu")) {
+      setError("KDF hashes run on the native Rust CPU backend only.");
       return;
     }
     clearReveal(); setError(null); setBusy(true); setStatus(null); setJobId(null);
     setDiscarded(false);
     const requestScope = scope;
-    const selected: RecoveryBackendV1 = engineChoice === "hashcat"
+    const selected: RecoveryBackendV1 = engineChoice === "hashcat" && !isKdfHash
       ? { backend: "hashcat_managed" }
       : selection;
     const request: RecoveryRequestV1 = {
-      algorithm: hashcatAlgorithm,
+      algorithm: isKdfHash ? "kdf" : hashcatAlgorithm,
       target_hash: hash.toLowerCase(), backend: selected,
       max_candidates: maxCandidates, max_matches: maxMatches,
     };
@@ -218,9 +311,26 @@ function useRecoveryController(targetHash: string, onCaseCreated?: (caseId: stri
       const onEvent = () => {
         // Poll authoritative Rust state; events never contain recovered plaintext.
       };
-      const id = engineChoice === "hashcat"
+      const id = engineChoice === "hashcat" && !isKdfHash
         ? await recoveryStartHashcatV1(request, onEvent, hashcatPreset)
-        : await recoveryStartV1(request, onEvent, ruleText);
+        : await recoveryStartV1(request, onEvent, isKdfHash ? undefined : ruleText, ruleSetId);
+      if (scopeRef.current !== requestScope) return;
+      currentJob = { scope: requestScope, id };
+      setJobId(id);
+    } catch (reason) {
+      if (scopeRef.current === requestScope && !/cancelled/i.test(String(reason)))
+        setError(String(reason));
+    } finally { if (scopeRef.current === requestScope) setBusy(false); }
+  };
+
+  const autoStart = async () => {
+    if (!scope || !validHash || busy || jobId !== null) return;
+    clearReveal(); setError(null); setBusy(true); setStatus(null); setJobId(null);
+    setDiscarded(false);
+    const requestScope = scope;
+    try {
+      const onEvent = () => {};
+      const id = await recoveryAutopilotV1(hash, maxCandidates, maxMatches, onEvent);
       if (scopeRef.current !== requestScope) return;
       currentJob = { scope: requestScope, id };
       setJobId(id);
@@ -269,16 +379,24 @@ function useRecoveryController(targetHash: string, onCaseCreated?: (caseId: stri
   const disabledReason = !desktop ? "Requires the native desktop runtime"
     : !scope ? (caseId === "scratchpad" ? "Select a saved case to authorize recovery"
       : caseSession.error ?? "Waiting for native case selection")
-    : !validHash ? "Enter a " + hashcatMode.label + " digest (" + hashcatMode.digits + " hexadecimal characters)"
-    : !selectedWordlist ? "Choose a local wordlist before starting"
+    : !validHash ? (isKdfHash ? "This modular hash is not a supported KDF format"
+      : "Enter a " + hashcatMode.label + " digest (" + hashcatMode.digits + " hexadecimal characters)")
+    : !selectedWordlist ? "Choose a wordlist from the library or file picker before starting"
     : ruleText.trim().length > 4096 ? "Rule text exceeds the 4 KiB limit"
     : ruleText.trim() && (engineChoice !== "rust" || selection.backend !== "cpu")
       ? "Wordlist rules require native Rust CPU mode"
+    : engineChoice === "hashcat" && isKdfHash ? "KDF hashes are not available in embedded Hashcat; use the native engine"
     : engineChoice === "hashcat" && !hashcatCapability?.available
       ? hashcatCapability?.detail ?? "Embedded Hashcat capability unavailable"
     : engineChoice === "hashcat" && !hashcatCapability?.modes.some((mode) => mode.algorithm === hashcatAlgorithm)
       ? "Selected Hashcat mode has not passed its native known-answer recovery test"
     : engineChoice === "rust" && !deviceAvailable ? "Selected OpenCL device unavailable" : null;
+  const autoDisabledReason = !desktop ? "Requires the native desktop runtime"
+    : !scope ? (caseId === "scratchpad" ? "Select a saved case to authorize recovery"
+      : caseSession.error ?? "Waiting for native case selection")
+    : !validHash ? "Enter a supported digest or modular KDF hash first"
+    : libraryEntries !== null && !libraryEntries.some((entry) => entry.present)
+      ? "Download a wordlist in the library first" : null;
   const progress = status?.progress;
   const percent = progress && progress.budget > 0
     ? Math.min(100, Math.round(progress.tried / progress.budget * 100)) : 0;
@@ -287,9 +405,11 @@ function useRecoveryController(targetHash: string, onCaseCreated?: (caseId: stri
 
   return {
     desktop, scope, onCaseCreated, backend, setBackend, inventory, deviceError, batchSize, setBatchSize,
-    ruleText, setRuleText,
+    ruleText, setRuleText, ruleSetId, pickRuleSet, ruleSets, ruleSetNote,
+    libraryOpen, setLibraryOpen, libraryEntries, libraryBusy, libraryProgress,
+    useLibraryWordlist, downloadLibraryWordlist, deleteLibraryWordlist, refreshLibrary,
     engineChoice, setEngineChoice, hashcatCapability,
-    hashcatAlgorithm, setHashcatAlgorithm, hashcatMode,
+    hashcatAlgorithm, setHashcatAlgorithm, hashcatMode, isKdfHash,
     hashcatPreset, setHashcatPreset,
     maxCandidates, setMaxCandidates, maxMatches, setMaxMatches,
     jobId: scopedJob ? jobId : null,
@@ -298,7 +418,8 @@ function useRecoveryController(targetHash: string, onCaseCreated?: (caseId: stri
     secretHex: scopedJob ? secretHex : null,
     discarded, revealing, pendingCancel, clearReveal, validHash,
     selectedWordlist, choosingWordlist, wordlistError, chooseWordlist,
-    running: scopedJob && running, selectedDevice, deviceAvailable, start, cancel, discard, reveal,
+    running: scopedJob && running, selectedDevice, deviceAvailable,
+    start, autoStart, autoDisabledReason, cancel, discard, reveal,
     disabledReason, progress: scopedJob ? progress : null, percent, hash, caseId, selection,
   };
 }
@@ -373,6 +494,14 @@ export function NativeRecoveryControls() {
             <span className="min-w-0 flex-1 truncate font-mono text-[11px] text-fg-dim"
               title={fileLabel}>{r.choosingWordlist ? "Selecting…" : fileLabel}</span>
           </Button>
+          <Button size="icon" variant="outline" className="h-10 w-10 shrink-0 rounded-md"
+            aria-label={r.libraryOpen ? "Close wordlist library" : "Open wordlist library"}
+            title="Wordlist library: built-in and downloadable password lists"
+            disabled={!r.desktop || jobInProgress || r.jobId !== null}
+            aria-expanded={r.libraryOpen}
+            onClick={() => r.setLibraryOpen(!r.libraryOpen)}>
+            <Library size={15} aria-hidden="true" />
+          </Button>
           {r.busy || r.jobId === null ? (
             <Button size="icon" className="h-10 w-10 shrink-0 rounded-md"
               aria-label={r.busy ? "Starting recovery" : "Start recovery"}
@@ -403,6 +532,66 @@ export function NativeRecoveryControls() {
               <Trash2 size={15} aria-hidden="true" />
             </Button>
           )}
+        </div>
+        {r.libraryOpen ? (
+          <div role="region" aria-label="Wordlist library" className="space-y-1.5 rounded-md border border-line bg-app p-2">
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-[10px] font-semibold uppercase tracking-wider text-fg-muted">Library</span>
+              <Button size="sm" variant="ghost" className="h-6 px-2 text-[10px] text-fg-muted"
+                onClick={() => void r.refreshLibrary()} disabled={!!r.libraryBusy}>
+                Refresh
+              </Button>
+            </div>
+            {r.libraryEntries === null ? (
+              <p className="text-[11px] text-fg-muted">Loading library…</p>
+            ) : r.libraryEntries.map((entry) => (
+              <div key={entry.id} className="flex items-center justify-between gap-2 border-t border-line/60 pt-1.5 first:border-0 first:pt-0">
+                <div className="min-w-0">
+                  <p className="truncate text-[11px] text-fg" title={entry.name}>{entry.name}</p>
+                  <p className="text-[10px] text-fg-muted">
+                    {entry.present
+                      ? entry.size_bytes.toLocaleString() + " bytes · " + entry.license_note
+                      : "Not downloaded · " + entry.license_note}
+                  </p>
+                </div>
+                {entry.present ? (
+                  <div className="flex shrink-0 items-center gap-1">
+                    <Button size="sm" variant="outline" className="h-7 px-2 text-[10px]"
+                      disabled={!!r.libraryBusy || r.jobId !== null}
+                      onClick={() => void r.useLibraryWordlist(entry.id)}>
+                      Use
+                    </Button>
+                    {entry.origin === "downloaded" ? (
+                      <Button size="icon" variant="ghost" className="h-7 w-7"
+                        aria-label={"Delete " + entry.name}
+                        disabled={!!r.libraryBusy}
+                        onClick={() => void r.deleteLibraryWordlist(entry.id)}>
+                        <Trash2 size={12} aria-hidden="true" />
+                      </Button>
+                    ) : null}
+                  </div>
+                ) : (
+                  <Button size="sm" variant="outline" className="h-7 shrink-0 gap-1 px-2 text-[10px]"
+                    disabled={!!r.libraryBusy}
+                    onClick={() => void r.downloadLibraryWordlist(entry.id)}>
+                    <Download size={12} aria-hidden="true" />
+                    {r.libraryBusy === entry.id && r.libraryProgress
+                      ? Math.round(r.libraryProgress.downloaded_bytes / 1048576) + " MB"
+                      : "Download"}
+                  </Button>
+                )}
+              </div>
+            ))}
+          </div>
+        ) : null}
+        <div className="flex items-center gap-2">
+          <Button size="sm" variant="outline" className="h-8 flex-1 gap-1.5 rounded-md text-[11px]"
+            aria-label="Auto crack: detect and run the full attack ladder"
+            title={r.autoDisabledReason ?? "Detect the hash and run wordlist, then rule escalation, in one job"}
+            disabled={!!r.autoDisabledReason || r.busy || r.jobId !== null}
+            onClick={() => void r.autoStart()}>
+            <Wand2 size={13} aria-hidden="true" /> Auto crack
+          </Button>
         </div>
         {r.wordlistError ? <p role="alert" className="text-[11px] text-err">{r.wordlistError}</p> : null}
         {statusText && !r.wordlistError
@@ -446,7 +635,18 @@ export function NativeRecoveryControls() {
                     { value: "hashcat", label: "Hashcat embedded · 5 raw modes (experimental)" },
                   ] : []),
                 ]} className="w-full" />
-              {(
+              {r.isKdfHash ? (
+                <div className="space-y-1">
+                  <span className="text-[11px] text-fg-dim">Hash family</span>
+                  <p className="rounded-md border border-line bg-app px-2 py-1.5 text-[11px] text-fg">
+                    Modular KDF hash · detected backend-side · CPU wordlist attack with a bounded budget
+                  </p>
+                  <span className="text-[10px] leading-relaxed text-fg-muted">
+                    bcrypt, argon2, scrypt, pbkdf2 and yescrypt hashes carry their own cost parameters;
+                    verification speed follows those parameters. Rule escalation is not applied to KDF targets.
+                  </span>
+                </div>
+              ) : (
                 <label className="block space-y-1">
                   <span className="text-[11px] text-fg-dim">Hash algorithm</span>
                   <Select ariaLabel="Recovery wordlist hash algorithm"
@@ -520,7 +720,7 @@ export function NativeRecoveryControls() {
                   })),
                 ]} className="w-full" />}
             </div>
-            {r.engineChoice === "rust" && (
+            {r.engineChoice === "rust" && !r.isKdfHash && (
               <div className="space-y-1.5">
                 <label className="block text-[10px] font-semibold uppercase tracking-wider text-fg-muted"
                   htmlFor="recovery-native-rules">CPU wordlist rules · optional</label>
@@ -537,11 +737,30 @@ export function NativeRecoveryControls() {
                   rows={3} spellCheck={false}
                   placeholder={":\n$1\nu"}
                   className="w-full resize-y rounded-md border border-line bg-app p-2 font-mono text-xs text-fg outline-none focus-visible:ring-1 focus-visible:ring-orange disabled:opacity-50" />
+                <label className="block space-y-1">
+                  <span className="text-[11px] text-fg-dim">Bundled rule sets</span>
+                  <Select ariaLabel="Bundled rule set library"
+                    value={r.ruleSetId ?? "none"}
+                    onChange={(value) => {
+                      if (r.jobId !== null || r.busy) return;
+                      void r.pickRuleSet(value === "none" ? null : value);
+                      if (value !== "none") r.setBackend("cpu");
+                    }}
+                    options={[
+                      { value: "none", label: "No bundled rule set" },
+                      ...(r.ruleSets ?? []).map((set) => ({
+                        value: set.id,
+                        label: set.id + " · " + set.rule_count.toLocaleString() + " rules",
+                      })),
+                    ]} className="w-full" />
+                  {r.ruleSetNote ? (
+                    <span className="block text-[10px] text-fg-muted">{r.ruleSetNote}</span>
+                  ) : null}
+                </label>
                 <p className="text-[10px] leading-relaxed text-fg-muted">
                   One rule per line. Example: : (unchanged), $1 (append 1), u (uppercase).
-                  Supports a bounded native subset of Hashcat/John-style syntax.
-                  Each rule expands every word; global attempt limits and cancellation still apply.
-                  Leave blank for the original wordlist. Rules run only on CPU.
+                  The typed text and a bundled set are mutually exclusive; a set replaces the text.
+                  Rules run only on CPU with the global attempt limits applied.
                 </p>
               </div>
             )}
@@ -685,6 +904,9 @@ export function NativeRecoveryResults() {
       ) : <p className="text-[11px] leading-relaxed text-fg-muted">{view.detail}</p>}
       {r.status?.progress && (
         <div className="space-y-1.5">
+          {r.status.progress.stage ? (
+            <p className="text-[11px] text-fg-muted">Stage · {r.status.progress.stage}</p>
+          ) : null}
           <div className="flex justify-between gap-2 font-mono text-[11px] text-fg-dim">
             <span>{r.status.progress.tried.toLocaleString()} / {r.status.progress.budget.toLocaleString()} candidates</span>
             <span>{r.percent}%</span>
@@ -701,6 +923,19 @@ export function NativeRecoveryResults() {
           {r.status.summary.limit_reached ? <span>Candidate limit reached</span> : null}
         </div>
       )}
+      {(r.status?.summary?.stages?.length ?? 0) > 0 ? (
+        <div role="list" aria-label="Autopilot stage results" className="space-y-1">
+          {r.status!.summary!.stages!.map((stage, index) => (
+            <div key={index} role="listitem" className="flex items-center justify-between gap-2 rounded-sm border border-line/70 bg-app/40 px-2.5 py-1.5 text-[11px]">
+              <span className="min-w-0 truncate text-fg-dim" title={stage.label}>{stage.label}</span>
+              <span className="flex shrink-0 items-center gap-2 text-fg-muted">
+                <span className="font-mono">{stage.tried.toLocaleString()} tried</span>
+                {stage.matched ? <Chip tone="ok">Match</Chip> : <Chip tone="muted">No match</Chip>}
+              </span>
+            </div>
+          ))}
+        </div>
+      ) : null}
       {matches.length > 0 && (
         <div className="space-y-2" aria-label="Masked recovered candidates">
           {matches.slice(0, visibleMatches).map((match, ordinal) => (
