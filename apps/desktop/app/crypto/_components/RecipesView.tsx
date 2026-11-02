@@ -28,6 +28,7 @@ import { b64, fileImportDerived, isDesktop, recipeRun, type RecipeRunWire } from
 import { useWorkbench } from "@state/workbench";
 import { useWorkspaceDraft } from "@state/workspace-sessions";
 import { outputCapabilities, recipeResultIdentity } from "./recipe-output-policy";
+import { canUseNativeRecipe } from "./native-recipe-policy";
 import { downloadContent } from "@lib/download";
 
 /** Recipes: four-column pipeline with drag-and-drop, params, image preview. */
@@ -100,7 +101,7 @@ export function RecipesView() {
   const [mounted, setMounted] = useState(false);
   useEffect(() => setMounted(true), []);
 
-  const eligibleForNative = isDesktop() && state.steps.every((step) => !step.enabled || NATIVE_RECIPE_OPS.has(step.opId));
+  const eligibleForNative = isDesktop() && canUseNativeRecipe(state.input, state.steps, NATIVE_RECIPE_OPS);
   const live = useMemo(() => eligibleForNative ? null : runRecipe(state.input, state.steps), [state.input, state.steps, eligibleForNative]);
   const recipeKey = useMemo(() => recipeResultIdentity(wb.caseId, state.input, state.steps), [wb.caseId, state.input, state.steps]);
   useEffect(() => {

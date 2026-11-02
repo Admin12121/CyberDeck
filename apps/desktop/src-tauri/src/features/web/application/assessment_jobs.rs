@@ -1,6 +1,7 @@
 //! Backend-owned bounded Web assessment jobs: no UI-owned cancellation truth.
 use super::{
-    active_body_application, active_injection_application, active_query_application,
+    active_body_application, active_injection_application, active_oast_application,
+    active_query_application,
     authorize_pinned_assessment,
     crawl_application, execute_case_scoped_assessment, passive_rules_application, scan_application,
     scan_domain, selected_history_grant, target_scope, webhistory, Finding, WebCtx,
@@ -60,6 +61,11 @@ impl ScanIntensity {
                 Self::Standard => 2,
                 Self::Thorough => 4,
             },
+            Kind::ActiveOast => match self {
+                Self::Quick => 1,
+                Self::Standard => 2,
+                Self::Thorough => 4,
+            },
             _ => 0,
         }
     }
@@ -76,6 +82,7 @@ enum Kind {
     ActiveSql,
     ActiveSqlBoolean,
     ActiveTraversal,
+    ActiveOast,
 }
 impl Kind {
     fn parse(text: &str) -> Result<Self, String> {
@@ -89,6 +96,7 @@ impl Kind {
             "active-sql" => Ok(Self::ActiveSql),
             "active-sql-boolean" => Ok(Self::ActiveSqlBoolean),
             "active-traversal" => Ok(Self::ActiveTraversal),
+            "active-oast" => Ok(Self::ActiveOast),
             _ => Err("unknown native Web job kind".into()),
         }
     }
@@ -103,6 +111,7 @@ impl Kind {
             Self::ActiveSql => "active-sql",
             Self::ActiveSqlBoolean => "active-sql-boolean",
             Self::ActiveTraversal => "active-traversal",
+            Self::ActiveOast => "active-oast",
         }
     }
 }
@@ -257,6 +266,7 @@ impl Job {
                     | "active-sql"
                     | "active-sql-boolean"
                     | "active-traversal"
+                    | "active-oast"
             )
         {
             return Err("only completed native Web findings may be saved".into());
@@ -328,6 +338,7 @@ impl Job {
             "active-sql" => "web.active.sql",
             "active-sql-boolean" => "web.active.sql.boolean",
             "active-traversal" => "web.active.traversal",
+            "active-oast" => "web.active.oast",
             _ => "web.native",
         };
         let written = store.add_findings(case_id, source, None, &records)?;
@@ -453,6 +464,20 @@ impl WebSessionWire {
     }
 }
 
+/// Volatile operator callback configuration for out-of-band checks.
+/// The collector binds locally; the base URL is what the target must reach.
+#[derive(serde::Deserialize)]
+pub struct WebOastWire {
+    bind: String,
+    base_url: String,
+}
+
+impl WebOastWire {
+    fn into_config(self) -> Result<active_oast_application::OastConfig, String> {
+        active_oast_application::OastConfig::new(&self.bind, &self.base_url)
+    }
+}
+
 /// Native confirmation and authoritative case selection happen BEFORE the job
 /// is inserted. It continues in the Tauri runtime even if the React view unmounts.
 #[tauri::command]
@@ -499,9 +524,7 @@ pub async fn web_assessment_start_v2(
     .await
 }
 
-/// Additive IPC: volatile operator session context for an authenticated
-/// target. Validated before the native dialog and attached only to the
-/// pinned client. Values never reach the job registry or a finding.
+/// Legacy authenticated entry point; out-of-band checks use v4.
 #[tauri::command]
 pub async fn web_assessment_start_v3(
     kind: String,
@@ -514,11 +537,45 @@ pub async fn web_assessment_start_v3(
     app: AppHandle,
     session: State<'_, CaseSessionCtx>,
 ) -> Result<u64, String> {
+    web_assessment_start_v4(
+        kind,
+        target_url,
+        max_depth,
+        authorized,
+        probe_body,
+        scan_intensity,
+        auth,
+        None,
+        app,
+        session,
+    )
+    .await
+}
+
+/// Additive IPC: optional out-of-band callback configuration for confirmed
+/// blind SSRF. The collector binds locally; the base URL is target-facing.
+#[tauri::command]
+pub async fn web_assessment_start_v4(
+    kind: String,
+    target_url: String,
+    max_depth: u8,
+    authorized: bool,
+    probe_body: Option<String>,
+    scan_intensity: Option<String>,
+    auth: Option<WebSessionWire>,
+    oast: Option<WebOastWire>,
+    app: AppHandle,
+    session: State<'_, CaseSessionCtx>,
+) -> Result<u64, String> {
     scan_domain::require_authorization(authorized)?;
     let auth = auth
         .map(WebSessionWire::into_context)
         .transpose()?
         .unwrap_or_default();
+    let oast = oast.map(WebOastWire::into_config).transpose()?;
+    if kind == "active-oast" && oast.is_none() {
+        return Err("out-of-band checks require a callback bind address and base URL".into());
+    }
     let kind = Kind::parse(&kind)?;
     if matches!(kind, Kind::Passive) {
         return Err("passive history scans require the protected offline entry point".into());
@@ -533,6 +590,7 @@ pub async fn web_assessment_start_v3(
                 | Kind::ActiveSql
                 | Kind::ActiveSqlBoolean
                 | Kind::ActiveTraversal
+                | Kind::ActiveOast
         )
     {
         return Err("scan intensity applies only to parameter probes".into());
@@ -568,6 +626,7 @@ pub async fn web_assessment_start_v3(
         Kind::ActiveSql => "at most nine read-only GET requests with bounded SQL syntax probes",
         Kind::ActiveSqlBoolean => "read-only paired GET comparisons for boolean SQL inference",
         Kind::ActiveTraversal => "bounded read-only GET requests with file-inclusion signatures",
+        Kind::ActiveOast => "read-only GET requests to URL-like parameters with a local out-of-band callback collector",
         Kind::Scanner => "a bounded native HTTP security review",
         Kind::Spider => "bounded same-origin GET discovery",
         Kind::Passive => return Err("passive mode does not send network requests".into()),
@@ -632,6 +691,25 @@ pub async fn web_assessment_start_v3(
                         pinned.url.clone(),
                         active_injection_application::Policy::Traversal,
                         intensity.request_budget(kind),
+                        &on_progress,
+                    )
+                    .await
+                    .map(Outcome::Findings)
+                }
+                Kind::ActiveOast => {
+                    let config = oast
+                        .as_ref()
+                        .ok_or("out-of-band callback configuration is not available")?;
+                    let collector = active_oast_application::OastCollector::bind(config.bind)
+                        .await?;
+                    active_oast_application::run_oast_with_budget(
+                        &pinned.client,
+                        pinned.url.clone(),
+                        &config.base,
+                        &collector,
+                        id,
+                        intensity.request_budget(kind),
+                        std::time::Duration::from_secs(3),
                         &on_progress,
                     )
                     .await

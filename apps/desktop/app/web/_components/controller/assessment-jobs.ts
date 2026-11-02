@@ -27,6 +27,11 @@ export interface WebSessionHeaderWire {
   value: string;
 }
 
+export interface WebOastWire {
+  bind: string;
+  base_url: string;
+}
+
 /** Volatile: validated by the backend and never persisted. */
 export interface WebSessionWire {
   cookies: string | null;
@@ -35,7 +40,7 @@ export interface WebSessionWire {
 
 export interface WebAssessmentJob {
   job_id: number;
-  kind: "scanner" | "spider" | "passive" | "active-query" | "active-form" | "active-json" | "active-sql" | "active-sql-boolean" | "active-traversal";
+  kind: "scanner" | "spider" | "passive" | "active-query" | "active-form" | "active-json" | "active-sql" | "active-sql-boolean" | "active-traversal" | "active-oast";
   state: "running" | "completed" | "failed" | "cancelled";
   processed: number;
   discovered: number;
@@ -60,10 +65,11 @@ export async function startWebPassiveScan(enabledRules: string[]): Promise<numbe
 }
 
 export async function startWebAssessment(
-  kind: "scanner" | "spider" | "active-query" | "active-form" | "active-json" | "active-sql" | "active-sql-boolean" | "active-traversal",
+  kind: "scanner" | "spider" | "active-query" | "active-form" | "active-json" | "active-sql" | "active-sql-boolean" | "active-traversal" | "active-oast",
   targetUrl: string, authorized: boolean, maxDepth = 2, probeBody?: string,
   scanIntensity?: "quick" | "standard" | "thorough",
   auth?: WebSessionWire,
+  oast?: WebOastWire,
 ): Promise<number> {
   if (!isDesktop()) throw new Error("Web assessments require the native desktop runtime");
   if ((kind === "active-form" || kind === "active-json") &&
@@ -71,6 +77,10 @@ export async function startWebAssessment(
     throw new Error("Provide a bounded manual POST template");
   }
   const args = { kind, targetUrl, maxDepth, authorized, probeBody: probeBody ?? null };
+  if (oast) {
+    // Additive v4 IPC: local callback collector for out-of-band confirmation.
+    return invoke<number>("web_assessment_start_v4", { ...args, scanIntensity, auth, oast });
+  }
   if (auth) {
     // Additive v3 IPC: volatile session context validated by the backend.
     return invoke<number>("web_assessment_start_v3", { ...args, scanIntensity, auth });

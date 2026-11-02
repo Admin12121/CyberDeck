@@ -44,17 +44,50 @@ pub(super) fn save_scan(
     })
 }
 
+/// Persist only short, backend-constructed, read-only probe evidence. Do
+/// not store arbitrary service banners: they may include cookies, credentials
+/// or attacker-supplied controls. STUN's network-reported endpoint is expressly
+/// unverified and retained only within the authorized case.
+fn bounded_protocol_evidence(observation: &ScanObservation) -> Option<&str> {
+    if observation.service_basis != "observed_response"
+        || !matches!(
+            observation.service.as_str(),
+            "stun" | "redis" | "postgresql" | "socks5" | "memcached"
+        )
+    {
+        return None;
+    }
+    let banner = observation.banner.as_str();
+    let recognized = match observation.service.as_str() {
+        "stun" => banner.starts_with("STUN Binding response, unverified mapped endpoint "),
+        "redis" => banner.starts_with("RESP PING confirmed "),
+        "postgresql" => banner.starts_with("PostgreSQL SSLRequest returned "),
+        "socks5" => banner.starts_with("SOCKS5 method negotiation "),
+        "memcached" => banner.starts_with("Memcached "),
+        _ => false,
+    };
+    if recognized
+        && banner.len() <= 160
+        && banner.bytes().all(|b| b.is_ascii_graphic() || b == b' ')
+    {
+        Some(banner)
+    } else {
+        None
+    }
+}
+
 fn build_observation_findings(observations: &[ScanObservation], scan_id: u64) -> Vec<NewFinding> {
     let mut findings = observations.iter().take(256).map(|observation| NewFinding {
         title: format!("{} {} {}:{}", observation.protocol.to_ascii_uppercase(), observation.state, observation.host, observation.port),
         severity: "info".into(),
         details: format!(
-            "Authorized {} scan #{scan_id}\nHost: {}\nPort: {}\nState: {}\nReason: {}\nMethod: {}\nService: {}\nService evidence: {}\nObserved unix ms: {}\nElapsed ms: {}\nAttempts: {}\nRetries: {}\nRemote-claimed identity (unverified): {}",
+            "Authorized {} scan #{scan_id}\nHost: {}\nPort: {}\nState: {}\nReason: {}\nMethod: {}\nService: {}\nService evidence: {}\nObserved unix ms: {}\nElapsed ms: {}\nAttempts: {}\nRetries: {}\nRemote-claimed identity (unverified): {}\nBounded protocol evidence (unverified remote claim): {}",
             observation.protocol.to_ascii_uppercase(), observation.host, observation.port, observation.state, observation.reason,
             observation.method, observation.service, observation.service_basis,
             observation.started_at_ms, observation.elapsed_ms,
             observation.attempts, observation.retries,
             observation.remote_software_claim.as_deref().unwrap_or("none"),
+            bounded_protocol_evidence(observation).unwrap_or("none"),
         ),
     }).collect::<Vec<_>>();
     if observations.len() > 256 {
@@ -105,6 +138,49 @@ mod tests {
             service: "http".to_string(),
             banner: "Server: sample".to_string(),
         }
+    }
+
+    #[test]
+    fn case_findings_store_only_bounded_safe_read_only_probe_evidence() {
+        let mut sample = ScanObservation {
+            host: "192.0.2.5".into(),
+            port: 3478,
+            protocol: "udp".into(),
+            state: "open".into(),
+            reason: "udp_correlated_response".into(),
+            method: "udp_connected_socket".into(),
+            service: "stun".into(),
+            service_basis: "observed_response".into(),
+            remote_software_claim: None,
+            banner: "STUN Binding response, unverified mapped endpoint 203.0.113.10:45678".into(),
+            started_at_ms: 1,
+            elapsed_ms: 42,
+            attempts: 1,
+            retries: 0,
+            os_error_code: None,
+        };
+        let rendered = build_observation_findings(&[sample.clone()], 42);
+        assert!(rendered[0]
+            .details
+            .contains("unverified mapped endpoint 203.0.113.10:45678"));
+        sample.banner =
+            "STUN Binding response, unverified mapped endpoint X\r\nAuthorization: secret".into();
+        let rendered = build_observation_findings(&[sample.clone()], 42);
+        assert!(rendered[0]
+            .details
+            .contains("Bounded protocol evidence (unverified remote claim): none"));
+        assert!(!rendered[0].details.contains("Authorization: secret"));
+        sample.banner =
+            "STUN Binding response, unverified mapped endpoint ".to_string() + &"X".repeat(300);
+        assert_eq!(bounded_protocol_evidence(&sample), None);
+        sample.service_basis = "port_hint_only".into();
+        sample.banner =
+            "STUN Binding response, unverified mapped endpoint 203.0.113.10:45678".into();
+        assert_eq!(bounded_protocol_evidence(&sample), None);
+        sample.service_basis = "observed_response".into();
+        sample.service = "http".into();
+        sample.banner = "Server: imaginary_secret".into();
+        assert_eq!(bounded_protocol_evidence(&sample), None);
     }
 
     #[test]

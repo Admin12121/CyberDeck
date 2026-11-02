@@ -38,6 +38,10 @@ export function ScannerView() {
   const [sessionOpen, setSessionOpen] = useState(false);
   const [sessionCookie, setSessionCookie] = useState("");
   const [sessionHeaders, setSessionHeaders] = useState("");
+  // Local SSRF confirmation collector; operator infrastructure, not a secret.
+  const [oastOpen, setOastOpen] = useState(false);
+  const [oastBind, setOastBind] = useState("");
+  const [oastBase, setOastBase] = useState("");
   const [busy, setBusy] = useState(false);
   const [saving, setSaving] = useState(false);
   const [savedCount, setSavedCount] = useState(0);
@@ -79,7 +83,7 @@ export function ScannerView() {
     return () => { disposed = true; clearInterval(timer); };
   }, [desktop, jobId, caseId, caseSession.revision]);
 
-  const start = async (kind: "scanner" | "active-query" | "active-form" | "active-json" | "active-sql" | "active-sql-boolean" | "active-traversal" = "scanner") => {
+  const start = async (kind: "scanner" | "active-query" | "active-form" | "active-json" | "active-sql" | "active-sql-boolean" | "active-traversal" | "active-oast" = "scanner") => {
     if (!desktop || running || !normalized || !authorized) return;
     const post = kind === "active-form" || kind === "active-json";
     if (post && (!postRiskApproved || !postTemplate.trim())) return;
@@ -88,6 +92,10 @@ export function ScannerView() {
     const auth = sessionCookie.trim() || sessionHeaderPairs.length
       ? { cookies: sessionCookie.trim() || null, headers: sessionHeaderPairs }
       : undefined;
+    const oast = kind === "active-oast" && oastBind.trim() && oastBase.trim()
+      ? { bind: oastBind.trim(), base_url: oastBase.trim() }
+      : undefined;
+    if (kind === "active-oast" && !oast) return;
     const stamp = { ...context.current };
     setBusy(true); setSavedCount(0); setError(null); setJob(null);
     try {
@@ -98,9 +106,10 @@ export function ScannerView() {
         kind === "active-sql" ? "Web SQL injection probe" :
         kind === "active-sql-boolean" ? "Web boolean SQL probe" :
         kind === "active-traversal" ? "Web file inclusion probe" :
+        kind === "active-oast" ? "Web SSRF callback probe" :
         post ? "Web approved POST probe" : "Web scanner", async () => {
         const id = await startWebAssessment(kind, stamp.target, true, 2, template,
-          kind === "scanner" ? undefined : scanIntensity, auth);
+          kind === "scanner" ? undefined : scanIntensity, auth, oast);
         if (context.current.revision === stamp.revision) setJobId(id);
         return waitForWebAssessment(id, (current) => {
           if (context.current.revision === stamp.revision &&
@@ -180,6 +189,12 @@ export function ScannerView() {
         onClick={() => void start("active-traversal")}>
         <Play size={12} /> Test file inclusion
       </ToolButton>
+      <ToolButton disabled={!desktop || !normalized || !authorized || running || !hasQuery ||
+        !oastBind.trim() || !oastBase.trim()}
+        title="Send a URL-like parameter a local callback address and confirm only an actual out-of-band connection; read-only"
+        onClick={() => void start("active-oast")}>
+        <Play size={12} /> Test SSRF (OAST)
+      </ToolButton>
       <span className="ml-auto font-mono text-[10px] text-fg-muted">
         {job ? `${job.kind} · ${job.state} · ${job.processed} requests · ${job.discovered} findings` : "Native review"}
       </span>
@@ -190,6 +205,33 @@ export function ScannerView() {
     </label>
     <div className="border-b border-line px-2 py-1 text-[10px] text-fg-muted">
       Query probes send a baseline plus a bounded number of GET mutations according to intensity, skip credential/CSRF-like parameters, and report potential markup reflection—not confirmed executable XSS. The URL must contain query parameters; native approval and private-address scope are mandatory.
+    </div>
+    <div className="border-b border-line bg-panel px-2 py-1 text-[11px]">
+      <div className="flex flex-wrap items-center gap-2">
+        <ToolButton onClick={() => setOastOpen((value) => !value)}>
+          {oastOpen ? "Hide out-of-band callback" : "Out-of-band callback"}
+        </ToolButton>
+        <span className="text-fg-muted">
+          {oastBind.trim() && oastBase.trim() ? "Collector configured" : "Optional SSRF confirmation"}
+        </span>
+      </div>
+      {oastOpen && <div className="mt-2 space-y-1">
+        <input value={oastBind} disabled={running}
+          onChange={(e) => setOastBind(e.target.value.slice(0, 64))}
+          aria-label="Callback bind address"
+          placeholder="Collector bind, for example 127.0.0.1:9099"
+          className="w-full rounded border border-line bg-panel px-2 py-1 font-mono text-[11px] text-fg" />
+        <input value={oastBase} disabled={running}
+          onChange={(e) => setOastBase(e.target.value.slice(0, 2048))}
+          aria-label="Callback base URL"
+          placeholder="Base URL the target can reach, for example http://10.0.0.5:9099"
+          className="w-full rounded border border-line bg-panel px-2 py-1 font-mono text-[11px] text-fg" />
+        <div className="text-[10px] text-fg-muted">
+          The collector binds only to a loopback or private address. The base URL must be
+          reachable from the target. A finding is reported only if the target actually calls
+          back; the collector keeps only the single-use path token.
+        </div>
+      </div>}
     </div>
     <div className="border-b border-line bg-panel px-2 py-1 text-[11px]">
       <div className="flex flex-wrap items-center gap-2">

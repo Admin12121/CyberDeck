@@ -8,7 +8,10 @@ fn text(bytes: &[u8]) -> std::borrow::Cow<'_, str> {
 }
 
 pub(crate) fn supports(op: &str) -> bool {
-    matches!(op, "normalize_unicode" | "unix_to_datetime" | "datetime_to_unix")
+    matches!(
+        op,
+        "normalize_unicode" | "unix_to_datetime" | "datetime_to_unix"
+    )
 }
 
 pub(crate) fn apply(op: &str, input: &[u8], param: Option<&str>) -> Result<Vec<u8>, String> {
@@ -21,8 +24,8 @@ pub(crate) fn apply(op: &str, input: &[u8], param: Option<&str>) -> Result<Vec<u
             // Stream normalized scalars instead of materializing potentially
             // large compatibility expansions before enforcing the output cap.
             let mut result = String::with_capacity(value.len().min(MAX));
-            for scalar in icu_normalizer::ComposingNormalizer::new_nfkc()
-                .normalize_iter(value.chars())
+            for scalar in
+                icu_normalizer::ComposingNormalizer::new_nfkc().normalize_iter(value.chars())
             {
                 if result
                     .len()
@@ -41,12 +44,15 @@ pub(crate) fn apply(op: &str, input: &[u8], param: Option<&str>) -> Result<Vec<u
     }
 }
 
-
 /// Gregorian civil date of Unix-day index, valid through both JS TimeClip
 /// extrema (proleptic Gregorian, astronomical year numbering).
 fn civil_from_days(days: i64) -> (i64, i64, i64) {
     let z = days + 719_468;
-    let era = if z >= 0 { z / 146_097 } else { (z - 146_096) / 146_097 };
+    let era = if z >= 0 {
+        z / 146_097
+    } else {
+        (z - 146_096) / 146_097
+    };
     let doe = z - era * 146_097;
     let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
     let mut year = yoe + era * 400;
@@ -71,9 +77,7 @@ fn unix_to_datetime(raw: &str) -> Result<Vec<u8>, String> {
     {
         return Err("input must be an integer Unix timestamp".into());
     }
-    let value = raw
-        .parse::<i128>()
-        .map_err(|_| "timestamp out of range")?;
+    let value = raw.parse::<i128>().map_err(|_| "timestamp out of range")?;
     let milliseconds = if raw.len() >= 13 {
         value
     } else {
@@ -87,8 +91,8 @@ fn unix_to_datetime(raw: &str) -> Result<Vec<u8>, String> {
     // ordinary calendar supports a narrower year interval, so calculate the
     // entire JS interval without narrowing through a timestamp/date library.
     const DAY_MS: i128 = 86_400_000;
-    let days = i64::try_from(milliseconds.div_euclid(DAY_MS))
-        .map_err(|_| "timestamp out of range")?;
+    let days =
+        i64::try_from(milliseconds.div_euclid(DAY_MS)).map_err(|_| "timestamp out of range")?;
     let within_day = milliseconds.rem_euclid(DAY_MS);
     let (year, month, day) = civil_from_days(days);
     let display_year = if (0..=9999).contains(&year) {
@@ -110,12 +114,15 @@ fn unix_to_datetime(raw: &str) -> Result<Vec<u8>, String> {
 }
 
 fn datetime_to_unix(raw: &str, param: Option<&str>) -> Result<Vec<u8>, String> {
-    use time::{format_description::well_known::Rfc3339, Date, PrimitiveDateTime, Time};
+    use time::{Date, PrimitiveDateTime, Time, format_description::well_known::Rfc3339};
     if raw.is_empty() {
         return Err("unrecognized date; use ISO 8601 like 2026-10-31T12:00:00Z".into());
     }
     // Date-only ISO-8601 dates are UTC per ECMAScript Date.parse.
-    let date = if raw.len() == 10 && raw.as_bytes().get(4) == Some(&b'-') && raw.as_bytes().get(7) == Some(&b'-') {
+    let date = if raw.len() == 10
+        && raw.as_bytes().get(4) == Some(&b'-')
+        && raw.as_bytes().get(7) == Some(&b'-')
+    {
         let mut chunks = raw.split('-');
         let year = chunks.next().and_then(|s| s.parse::<i32>().ok());
         let month = chunks.next().and_then(|s| s.parse::<u8>().ok());
@@ -123,7 +130,9 @@ fn datetime_to_unix(raw: &str, param: Option<&str>) -> Result<Vec<u8>, String> {
         // Date.parse normalizes 29..31 across short months for date-only
         // strings, but does not accept days 0 or 32.
         let checked = year.zip(month).zip(day).and_then(|((y, m), d)| {
-            if !(1..=31).contains(&d) { return None; }
+            if !(1..=31).contains(&d) {
+                return None;
+            }
             let month = time::Month::try_from(m).ok()?;
             Date::from_calendar_date(y, month, 1)
                 .ok()?
@@ -161,14 +170,27 @@ mod tests {
             ("e\u{301}", "é"),
             ("𝔄", "A"),
         ] {
-            assert_eq!(apply("normalize_unicode", source.as_bytes(), None).unwrap(), expected.as_bytes());
+            assert_eq!(
+                apply("normalize_unicode", source.as_bytes(), None).unwrap(),
+                expected.as_bytes()
+            );
         }
         assert!(apply("normalize_unicode", &vec![b'A'; MAX + 1], None).is_err());
-        let result = crate::recipes::execute_recipe("ＡＢＣ", &[crate::recipes::RecipeStep {
-            op_id: "normalize_unicode".into(), enabled: true, param: None,
-        }]);
+        let result = crate::recipes::execute_recipe(
+            "ＡＢＣ",
+            &[crate::recipes::RecipeStep {
+                op_id: "normalize_unicode".into(),
+                enabled: true,
+                param: None,
+            }],
+        );
         assert!(result.error.is_none(), "{:?}", result.error);
-        assert_eq!(base64::engine::general_purpose::STANDARD.decode(result.output_b64).unwrap(), b"ABC");
+        assert_eq!(
+            base64::engine::general_purpose::STANDARD
+                .decode(result.output_b64)
+                .unwrap(),
+            b"ABC"
+        );
     }
     #[test]
     fn unix_timestamp_matches_js_seconds_milliseconds_and_negative() {
@@ -179,11 +201,14 @@ mod tests {
             ("1700000000123", "2023-11-14T22:13:20.123Z (ms input)"),
             ("0000000000000", "1970-01-01T00:00:00.000Z (ms input)"),
             ("8640000000000000", "+275760-09-13T00:00:00.000Z (ms input)"),
-            ("-8640000000000000", "-271821-04-20T00:00:00.000Z (ms input)"),
+            (
+                "-8640000000000000",
+                "-271821-04-20T00:00:00.000Z (ms input)",
+            ),
         ] {
             assert_eq!(unix_to_datetime(raw).unwrap(), expected.as_bytes(), "{raw}");
         }
-        for bad in ["", "-","1.5", " 5", "++1", "8640000000000001"] {
+        for bad in ["", "-", "1.5", " 5", "++1", "8640000000000001"] {
             assert!(unix_to_datetime(bad).is_err(), "{bad}");
         }
     }
@@ -198,9 +223,19 @@ mod tests {
             ("2026-11-02T12:00:00.123+05:45", Some("ms"), "1793600100123"),
             ("2026-11-02T06:15:00Z", None, "1793600100"),
         ] {
-            assert_eq!(datetime_to_unix(raw, param).unwrap(), expected.as_bytes(), "{raw}");
+            assert_eq!(
+                datetime_to_unix(raw, param).unwrap(),
+                expected.as_bytes(),
+                "{raw}"
+            );
         }
-        for bad in ["", "not a date", "2026-02-32", "2026-11-02T12:00:00", "2026-13-01"] {
+        for bad in [
+            "",
+            "not a date",
+            "2026-02-32",
+            "2026-11-02T12:00:00",
+            "2026-13-01",
+        ] {
             assert!(datetime_to_unix(bad, None).is_err(), "{bad}");
         }
     }
