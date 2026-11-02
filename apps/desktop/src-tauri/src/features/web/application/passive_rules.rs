@@ -15,7 +15,7 @@ pub struct RuleInfo {
     pub severity: &'static str,
 }
 
-pub(super) const RULES: [RuleInfo; 6] = [
+pub(super) const RULES: [RuleInfo; 8] = [
     RuleInfo {
         id: "cd.pscan.csp-missing.v1",
         title: "Missing enforced Content-Security-Policy",
@@ -44,6 +44,16 @@ pub(super) const RULES: [RuleInfo; 6] = [
     RuleInfo {
         id: "cd.pscan.cookie-httponly.v1",
         title: "Session cookie missing HttpOnly",
+        severity: "low",
+    },
+    RuleInfo {
+        id: "cd.pscan.frame-protection.v1",
+        title: "HTML framing protection",
+        severity: "low",
+    },
+    RuleInfo {
+        id: "cd.pscan.cookie-loose-domain.v1",
+        title: "Cookie explicitly scoped to a parent domain",
         severity: "low",
     },
 ];
@@ -81,6 +91,7 @@ pub(super) struct Observation {
     pub enforced_csp: bool,
     pub nosniff: bool,
     pub hsts: bool,
+    pub framing_restricted: bool,
     pub cookies: Vec<CookieFacts>,
 }
 
@@ -90,6 +101,7 @@ pub(super) struct CookieFacts {
     pub secure: bool,
     pub http_only: bool,
     pub session_named: bool,
+    pub parent_domain: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -101,13 +113,43 @@ pub(super) enum SameSite {
     Invalid,
 }
 
+/// Conservative scope heuristic, evaluated only under protected History.
+/// This deliberately does not claim public-suffix or cookie-browser parity.
+fn parent_cookie_domain(host: Option<&str>, domain: &str) -> bool {
+    let Some(host) = host else { return false };
+    let domain = domain.trim().trim_start_matches('.').trim_end_matches('.');
+    if domain.len() < 3
+        || domain.len() > 253
+        || !domain.contains('.')
+        || !domain.is_ascii()
+        || !host.is_ascii()
+        || domain
+            .bytes()
+            .any(|c| !(c.is_ascii_alphanumeric() || c == b'-' || c == b'.'))
+        || host.parse::<std::net::IpAddr>().is_ok()
+    {
+        return false;
+    }
+    let host = host.trim_end_matches('.').to_ascii_lowercase();
+    let domain = domain.to_ascii_lowercase();
+    host.len() > domain.len() + 1 && host.ends_with(&format!(".{domain}"))
+}
+
 pub(super) fn observe(
     id: u64,
     url: &str,
     status: u16,
     headers: &[(String, String)],
 ) -> Observation {
-    let https = reqwest::Url::parse(url).is_ok_and(|url| url.scheme() == "https");
+    let parsed_url = reqwest::Url::parse(url).ok();
+    let https = parsed_url
+        .as_ref()
+        .is_some_and(|url| url.scheme() == "https");
+    let origin_host = parsed_url.as_ref().and_then(|url| url.host_str());
+    let mut xfo_count = 0u8;
+    let mut xfo_strict = false;
+    let mut csp_frame_restricted = false;
+    let mut csp_frame_seen = false;
     let mut result = Observation {
         history_id: id,
         status,
@@ -116,6 +158,7 @@ pub(super) fn observe(
         enforced_csp: false,
         nosniff: false,
         hsts: false,
+        framing_restricted: false,
         cookies: Vec::new(),
     };
     for (name, value) in headers.iter().take(128) {
@@ -127,6 +170,22 @@ pub(super) fn observe(
         } else if name.eq_ignore_ascii_case("content-security-policy") {
             // Report-Only and obsolete CSP headers do NOT enforce restrictions.
             result.enforced_csp |= !value.trim().is_empty();
+            for directive in value.split(';') {
+                let mut words = directive.split_ascii_whitespace();
+                if words
+                    .next()
+                    .is_some_and(|key| key.eq_ignore_ascii_case("frame-ancestors"))
+                {
+                    csp_frame_seen = true;
+                    let sources: Vec<_> = words.take(4).collect();
+                    if sources.len() == 1
+                        && (sources[0].eq_ignore_ascii_case("'none'")
+                            || sources[0].eq_ignore_ascii_case("'self'"))
+                    {
+                        csp_frame_restricted = true;
+                    }
+                }
+            }
         } else if name.eq_ignore_ascii_case("x-content-type-options") {
             result.nosniff |= value.trim().eq_ignore_ascii_case("nosniff");
         } else if name.eq_ignore_ascii_case("strict-transport-security") {
@@ -134,6 +193,10 @@ pub(super) fn observe(
                 v.trim().to_ascii_lowercase().starts_with("max-age=")
                     && v.trim()[8..].parse::<u64>().is_ok_and(|age| age > 0)
             });
+        } else if name.eq_ignore_ascii_case("x-frame-options") {
+            xfo_count = xfo_count.saturating_add(1);
+            xfo_strict |= value.trim().eq_ignore_ascii_case("deny")
+                || value.trim().eq_ignore_ascii_case("sameorigin");
         } else if name.eq_ignore_ascii_case("set-cookie") && result.cookies.len() < 16 {
             let mut components = value.split(';');
             let name = components
@@ -155,6 +218,7 @@ pub(super) fn observe(
                 secure: false,
                 http_only: false,
                 session_named,
+                parent_domain: false,
             };
             for attr in components.take(32) {
                 let (key, value) = attr.trim().split_once('=').unwrap_or((attr.trim(), ""));
@@ -162,6 +226,8 @@ pub(super) fn observe(
                     fact.secure = true;
                 } else if key.eq_ignore_ascii_case("httponly") {
                     fact.http_only = true;
+                } else if key.eq_ignore_ascii_case("domain") {
+                    fact.parent_domain |= parent_cookie_domain(origin_host, value);
                 } else if key.eq_ignore_ascii_case("samesite") {
                     fact.same_site = match value.trim().to_ascii_lowercase().as_str() {
                         "strict" => SameSite::Strict,
@@ -174,6 +240,11 @@ pub(super) fn observe(
             result.cookies.push(fact);
         }
     }
+    result.framing_restricted = if csp_frame_seen {
+        csp_frame_restricted
+    } else {
+        xfo_count == 1 && xfo_strict
+    };
     result
 }
 
@@ -220,6 +291,10 @@ pub(super) fn analyze(o: &Observation, rules: &[&str]) -> Vec<PassiveFinding> {
             out.push(finding(o, RULES[1].id, RULES[1].title, "low",
                 "The HTML response lacks X-Content-Type-Options: nosniff; confirm relevant browser MIME-handling behavior."));
         }
+        if !o.framing_restricted && enabled(RULES[6].id) {
+            out.push(finding(o, RULES[6].id, RULES[6].title, "low",
+                "No effective DENY/SAMEORIGIN X-Frame-Options or restrictive CSP frame-ancestors policy was observed in the HTML response. Check whether this page is intended to be embedded."));
+        }
         if o.https && !o.hsts && enabled(RULES[2].id) {
             out.push(finding(o, RULES[2].id, RULES[2].title, "low",
                 "HTTPS HTML response lacks a positive max-age Strict-Transport-Security policy; verify deployment-wide HTTPS before enabling."));
@@ -256,6 +331,10 @@ pub(super) fn analyze(o: &Observation, rules: &[&str]) -> Vec<PassiveFinding> {
     if o.https && enabled(RULES[4].id) && o.cookies.iter().any(|cookie| !cookie.secure) {
         out.push(finding(o, RULES[4].id, RULES[4].title, "low",
             "An HTTPS response sets a cookie without Secure; browser transport behavior and the cookie's purpose require verification."));
+    }
+    if enabled(RULES[7].id) && o.cookies.iter().any(|c| c.parent_domain) {
+        out.push(finding(o, RULES[7].id, RULES[7].title, "low",
+            "A Set-Cookie Domain attribute is broader than the origin hostname. This scope heuristic needs browser and public-suffix validation; cookie names, values and domain strings are withheld."));
     }
     if enabled(RULES[5].id)
         && o.cookies
@@ -310,6 +389,164 @@ mod tests {
         assert!(!serialized.contains("private.invalid"));
     }
     #[test]
+    fn clickjacking_policy_is_bounded_header_only_and_redacted() {
+        let enabled = vec![RULES[6].id];
+        let html = ("Content-Type".to_string(), "text/html".to_string());
+        let leaked = ("X-Custom".to_string(), "SECRET_MARKER".to_string());
+        let absent = observe(
+            9,
+            "https://private.invalid/secret?token=SECRET_MARKER",
+            200,
+            &[html.clone(), leaked],
+        );
+        let findings = analyze(&absent, &enabled);
+        assert_eq!(findings.len(), 1);
+        let rendered = serde_json::to_string(&findings).unwrap();
+        assert!(!rendered.contains("SECRET_MARKER"));
+        assert!(!rendered.contains("private.invalid"));
+        assert!(!rendered.contains("token"));
+        for protected in [
+            vec![html.clone(), ("X-Frame-Options".into(), "DENY".into())],
+            vec![
+                html.clone(),
+                ("X-Frame-Options".into(), "sameorigin".into()),
+            ],
+            vec![
+                html.clone(),
+                (
+                    "Content-Security-Policy".into(),
+                    "default-src 'self'; frame-ancestors 'none'".into(),
+                ),
+            ],
+            vec![
+                html.clone(),
+                (
+                    "Content-Security-Policy".into(),
+                    "frame-ancestors 'self'".into(),
+                ),
+            ],
+        ] {
+            assert!(analyze(
+                &observe(10, "https://private.invalid/", 200, &protected),
+                &enabled
+            )
+            .is_empty());
+        }
+        for not_protected in [
+            vec![
+                html.clone(),
+                (
+                    "Content-Security-Policy-Report-Only".into(),
+                    "frame-ancestors 'none'".into(),
+                ),
+            ],
+            vec![html.clone(), ("X-Frame-Options".into(), "ALLOWALL".into())],
+            vec![
+                html.clone(),
+                ("X-Frame-Options".into(), "DENY".into()),
+                ("X-Frame-Options".into(), "SAMEORIGIN".into()),
+            ],
+            vec![
+                html.clone(),
+                ("Content-Security-Policy".into(), "frame-ancestors *".into()),
+                ("X-Frame-Options".into(), "DENY".into()),
+            ],
+        ] {
+            assert_eq!(
+                analyze(
+                    &observe(11, "https://private.invalid/", 200, &not_protected),
+                    &enabled
+                )
+                .len(),
+                1
+            );
+        }
+        assert!(analyze(
+            &observe(12, "https://private.invalid/", 204, &[html.clone()]),
+            &enabled
+        )
+        .is_empty());
+        assert!(analyze(
+            &observe(
+                13,
+                "https://private.invalid/",
+                200,
+                &[("Content-Type".into(), "application/json".into())]
+            ),
+            &enabled
+        )
+        .is_empty());
+    }
+
+    #[test]
+    fn parent_domain_cookie_rule_never_reports_secret_domain_or_values() {
+        let enabled = vec![RULES[7].id];
+        let headers = vec![
+            (
+                "Set-Cookie".into(),
+                "session=VERY_SECRET; Domain=.example.test; Path=/; HttpOnly; Secure".into(),
+            ),
+            ("Other".into(), "PRIVATE_INTERNAL_TOKEN".into()),
+        ];
+        let o = observe(
+            28,
+            "https://app.example.test/private?auth=PRIVATE_INTERNAL_TOKEN",
+            200,
+            &headers,
+        );
+        assert!(o.cookies[0].parent_domain);
+        let alerts = analyze(&o, &enabled);
+        assert_eq!(alerts.len(), 1);
+        assert_eq!(alerts[0].rule_id, RULES[7].id);
+        let serialized = serde_json::to_string(&alerts).unwrap();
+        for secret in [
+            "VERY_SECRET",
+            "PRIVATE_INTERNAL_TOKEN",
+            "example.test",
+            "session=",
+        ] {
+            assert!(
+                !serialized.contains(secret),
+                "leaked confidential domain or cookie"
+            );
+        }
+        for (url, domain) in [
+            ("https://example.test", ".example.test"),
+            ("https://other.test", "example.test"),
+            ("https://127.0.0.1", "example.test"),
+            ("https://subexample.test", "example.test"),
+            ("https://sub.example.test", "test"),
+            ("https://sub.example.test", "bad/domain"),
+        ] {
+            let observed = observe(
+                30,
+                url,
+                200,
+                &[(
+                    "Set-Cookie".into(),
+                    format!("session=secret; Domain={domain}"),
+                )],
+            );
+            assert!(analyze(&observed, &enabled).is_empty(), "{url} {domain}");
+        }
+        let restricted = observe(
+            32,
+            "https://app.example.test/",
+            200,
+            &[(
+                "Set-Cookie".into(),
+                "session=SECRET; Domain=app.example.test; Secure".into(),
+            )],
+        );
+        assert!(analyze(&restricted, &enabled).is_empty());
+        assert!(analyze(
+            &observe(33, "https://app.example.test/", 404, &headers),
+            &enabled
+        )
+        .is_empty());
+    }
+
+    #[test]
     fn negative_non_html_report_only_and_secure_cookie_cases() {
         let enabled = RULES.iter().map(|x| x.id).collect::<Vec<_>>();
         let headers = vec![
@@ -331,6 +568,7 @@ mod tests {
                 "strict-transport-security".into(),
                 "max-age=31536000".into(),
             ),
+            ("x-frame-options".into(), "DENY".into()),
         ];
         assert!(analyze(&observe(1, "https://private.test", 200, &headers), &enabled).is_empty());
         assert!(analyze(&observe(1, "https://private.test", 404, &[]), &enabled).is_empty());

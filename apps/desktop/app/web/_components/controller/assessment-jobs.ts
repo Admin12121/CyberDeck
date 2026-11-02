@@ -36,7 +36,7 @@ export async function listWebPassiveRules(): Promise<WebPassiveRule[]> {
 }
 export async function startWebPassiveScan(enabledRules: string[]): Promise<number> {
   if (!isDesktop()) throw new Error("Passive analysis requires CyberDeck desktop");
-  if (!enabledRules.length || enabledRules.length > 6 ||
+  if (!enabledRules.length || enabledRules.length > 8 ||
       enabledRules.some((x) => typeof x !== "string")) {
     throw new Error("Select at least one known passive rule");
   }
@@ -46,15 +46,19 @@ export async function startWebPassiveScan(enabledRules: string[]): Promise<numbe
 export async function startWebAssessment(
   kind: "scanner" | "spider" | "active-query" | "active-form" | "active-json",
   targetUrl: string, authorized: boolean, maxDepth = 2, probeBody?: string,
+  scanIntensity?: "quick" | "standard" | "thorough",
 ): Promise<number> {
   if (!isDesktop()) throw new Error("Web assessments require the native desktop runtime");
   if ((kind === "active-form" || kind === "active-json") &&
       (!probeBody || new TextEncoder().encode(probeBody).length > 2048)) {
     throw new Error("Provide a bounded manual POST template");
   }
-  return invoke<number>("web_assessment_start_v1", {
-    kind, targetUrl, maxDepth, authorized, probeBody: probeBody ?? null,
-  });
+  const args = { kind, targetUrl, maxDepth, authorized, probeBody: probeBody ?? null };
+  if (scanIntensity === undefined) {
+    // Keep existing clients on the unchanged v1 IPC contract.
+    return invoke<number>("web_assessment_start_v1", args);
+  }
+  return invoke<number>("web_assessment_start_v2", { ...args, scanIntensity });
 }
 
 export async function webAssessmentStatus(jobId: number): Promise<WebAssessmentJob> {

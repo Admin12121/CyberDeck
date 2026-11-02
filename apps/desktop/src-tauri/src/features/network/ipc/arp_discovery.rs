@@ -150,6 +150,9 @@ pub async fn netscan_arp_discover_v1(
         {
             return Err("the TCP/UDP scanner became active while confirming ARP discovery".into());
         }
+        let permit = app
+            .state::<Arc<super::operation_gate::NetworkOperationGate>>()
+            .acquire(super::operation_gate::ActiveOperation::LinkNeighbor)?;
         let state = Arc::clone(&*ctx);
         if state.running.swap(true, Ordering::AcqRel) {
             return Err("an ARP discovery operation is already active".into());
@@ -166,6 +169,7 @@ pub async fn netscan_arp_discover_v1(
         let native_iface = interface_name.clone();
         let native_ctx = Arc::clone(&state);
         let found = tokio::task::spawn_blocking(move || {
+            let _active_operation = permit;
             let _guard = RunGuard(Arc::clone(&native_ctx));
             discover_on_link_arp(&native_iface, &hosts, &native_ctx.stop, &|| {
                 run_app.state::<CaseSessionCtx>().ensure(&run_scope).is_ok()
@@ -338,6 +342,9 @@ pub async fn netscan_ndp_discover_v1(
         {
             return Err("another network scan became active during confirmation".into());
         }
+        let permit = app
+            .state::<Arc<super::operation_gate::NetworkOperationGate>>()
+            .acquire(super::operation_gate::ActiveOperation::LinkNeighbor)?;
         let shared = Arc::clone(&*ctx);
         if shared.running.swap(true, Ordering::AcqRel) {
             return Err("a native link discovery operation is already running".into());
@@ -354,6 +361,7 @@ pub async fn netscan_ndp_discover_v1(
         let worker_device = interface_name.clone();
         let worker = Arc::clone(&shared);
         let found = tokio::task::spawn_blocking(move || {
+            let _active_operation = permit;
             let _guard = RunGuard(Arc::clone(&worker));
             discover_ndp(&worker_device, &hosts, &worker.stop, &|| {
                 worker_app

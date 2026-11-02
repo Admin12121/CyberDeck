@@ -170,13 +170,16 @@ fn start_for_transport(
         return Err("scan cancelled by operator".into());
     }
     selected.ensure(&scope)?;
+    let permit = app
+        .state::<Arc<crate::features::network::ipc::operation_gate::NetworkOperationGate>>()
+        .acquire(crate::features::network::ipc::operation_gate::ActiveOperation::TcpUdp)?;
     let worker_app = app.clone();
     let worker_scope = scope.clone();
     let probe_app = app.clone();
     let probe_scope = scope.clone();
     let stop_on_revoke = Arc::clone(&ctx.stop);
     let save_scope = scope.clone();
-    let id = session::start_with_transport(
+    let id = session::start_with_transport_guarded(
         &ctx,
         transport,
         scope,
@@ -204,6 +207,7 @@ fn start_for_transport(
         move |scan_id, entries, observations| {
             case_findings::save_scan(&app, &case_id, &save_scope, scan_id, entries, observations)
         },
+        Some(permit),
     )?;
     Ok(ScanSummaryWire {
         id,
@@ -366,6 +370,9 @@ pub(super) fn discover_hosts(
         return Err("host discovery cancelled by operator".into());
     }
     selected.ensure(&scope)?;
+    let _permit = app
+        .state::<Arc<crate::features::network::ipc::operation_gate::NetworkOperationGate>>()
+        .acquire(crate::features::network::ipc::operation_gate::ActiveOperation::TcpDiscovery)?;
     let found =
         host_discovery::responding_hosts_scoped(hosts, &|| selected.ensure(&scope).is_ok())?;
     selected.ensure(&scope)?;

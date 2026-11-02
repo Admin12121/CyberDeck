@@ -11,6 +11,8 @@ import {
   netscanNdpDiscoverV1,
   netscanNdpStopV1,
   netscanIcmpDiscoverV1,
+  netscanIcmp6DiscoverV1,
+  netscanTraceIpv4V1,
   netscanIcmpStopV1,
   netscanSynStartV1,
   netscanSynStopV1,
@@ -26,6 +28,7 @@ import {
   type ArpNeighborWire,
   type SynFindingWire,
   type IcmpObservationWire,
+  type TraceHopWire,
   type CaptureInterfaceV1,
   type ScanObservationPageWire,
   type ScanProgressWire,
@@ -68,6 +71,9 @@ export function ScanView() {
   const [arpBusy, setArpBusy] = useState(false);
   const [ndpBusy, setNdpBusy] = useState(false);
   const [icmpBusy, setIcmpBusy] = useState(false);
+  const [icmpFamily, setIcmpFamily] = useState<"IPv4" | "IPv6">("IPv4");
+  const [traceBusy, setTraceBusy] = useState(false);
+  const [traceRows, setTraceRows] = useState<TraceHopWire[] | null>(null);
   const [icmpRows, setIcmpRows] = useState<IcmpObservationWire[] | null>(null);
   const [ndpNeighbors, setNdpNeighbors] = useState<ArpNeighborWire[] | null>(null);
   const [synBusy, setSynBusy] = useState(false);
@@ -98,7 +104,10 @@ export function ScanView() {
     setArpBusy(false);
     setNdpBusy(false);
     setIcmpBusy(false);
+    setIcmpFamily("IPv4");
     setIcmpRows(null);
+    setTraceRows(null);
+    setTraceBusy(false);
     setSynBusy(false);
     setSynFindings(null);
     setSynProgress(null);
@@ -223,7 +232,7 @@ export function ScanView() {
 
   const discoverArp = async () => {
     if (!desktop || revision === null || !authorized || !arpInterface
-        || running || status.running || arpBusy || ndpBusy || synBusy || icmpBusy) return;
+        || running || status.running || arpBusy || ndpBusy || synBusy || icmpBusy || traceBusy) return;
     const key = identity;
     setError(null);
     setArpNeighbors(null);
@@ -246,6 +255,7 @@ export function ScanView() {
     const key = identity;
     setError(null);
     setIcmpRows(null);
+    setIcmpFamily("IPv4");
     setIcmpBusy(true);
     try {
       const rows = await netscanIcmpDiscoverV1(target, arpInterface, true);
@@ -256,6 +266,45 @@ export function ScanView() {
       if (activeCase.current === key) setIcmpBusy(false);
     }
   };
+  const runTrace = async () => {
+    if (!desktop || revision === null || !authorized || !arpInterface ||
+      running || status.running || arpBusy || ndpBusy || synBusy || icmpBusy || traceBusy) return;
+    const key = identity;
+    setError(null);
+    setTraceRows(null);
+    setTraceBusy(true);
+    try {
+      const rows = await netscanTraceIpv4V1(target, arpInterface, 12, true);
+      if (activeCase.current === key) setTraceRows(rows);
+    } catch (err) {
+      if (activeCase.current === key) setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      if (activeCase.current === key) setTraceBusy(false);
+    }
+  };
+  const stopTrace = async () => {
+    try { await netscanIcmpStopV1(); }
+    catch (err) { setError(err instanceof Error ? err.message : String(err)); }
+  };
+
+  const discoverIcmp6 = async () => {
+    if (!desktop || revision === null || !authorized || !arpInterface ||
+      running || status.running || arpBusy || ndpBusy || synBusy || icmpBusy || traceBusy) return;
+    const key = identity;
+    setError(null);
+    setIcmpRows(null);
+    setIcmpFamily("IPv6");
+    setIcmpBusy(true);
+    try {
+      const rows = await netscanIcmp6DiscoverV1(target, arpInterface, true);
+      if (activeCase.current === key) setIcmpRows(rows);
+    } catch (err) {
+      if (activeCase.current === key) setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      if (activeCase.current === key) setIcmpBusy(false);
+    }
+  };
+
   const stopIcmp = async () => {
     try { await netscanIcmpStopV1(); }
     catch (err) { setError(err instanceof Error ? err.message : String(err)); }
@@ -433,6 +482,19 @@ export function ScanView() {
               <span className="font-mono text-[10px] text-fg-muted">
                 NDP: 16 link-local IPv6 hosts · silence ≠ down
               </span>
+              {traceBusy ? (
+                <ToolButton tone="danger" onClick={() => void stopTrace()}
+                  title="Cancel the current case-scoped ICMP route trace">
+                  <Square size={11} /> Stop trace
+                </ToolButton>
+              ) : (
+                <ToolButton onClick={() => void runTrace()}
+                  disabled={!desktop || !authorized || revision === null || !arpInterface ||
+                    !target.trim() || running || status.running || arpBusy || ndpBusy || synBusy || icmpBusy}
+                  title="Linux: up to 12 TTL-limited IPv4 ICMP probes, native confirmation and CAP_NET_RAW required">
+                  Trace IPv4
+                </ToolButton>
+              )}
               {icmpBusy ? (
                 <ToolButton tone="danger" onClick={() => void stopIcmp()}>
                   <Square size={11} /> Stop ICMP
@@ -448,6 +510,12 @@ export function ScanView() {
               <span className="font-mono text-[10px] text-fg-muted">
                 ICMPv4: up to 32 hosts
               </span>
+              <ToolButton onClick={() => void discoverIcmp6()}
+                disabled={!desktop || !authorized || revision === null || !arpInterface ||
+                  !target.trim() || running || status.running || arpBusy || ndpBusy || synBusy || icmpBusy || traceBusy}
+                title="Linux native ICMPv6 Echo: 32 distinct fe80::/10 targets on the selected Ethernet interface, native confirmation, CAP_NET_RAW">
+                IPv6 Echo
+              </ToolButton>
               {synBusy ? (
                 <ToolButton tone="danger" onClick={() => void stopSyn()} title="Stop case-authorized raw SYN scan">
                   <Square size={11} /> Stop SYN
@@ -564,10 +632,26 @@ export function ScanView() {
               </div>
             </div>
           ) : null}
+          {traceRows !== null ? (
+            <div className="border-t border-line p-2 text-[10px] text-fg-muted">
+              <div className="mb-1 font-semibold text-fg">
+                Native IPv4 ICMP route trace: {traceRows.length} observed TTL steps
+              </div>
+              <div className="max-h-36 overflow-y-auto font-mono">
+                {traceRows.map((hop) => (
+                  <div key={hop.ttl}>
+                    TTL {hop.ttl} · {hop.responder ?? "no response"} · {hop.reason}
+                    {" · "}{hop.elapsed_ms} ms{hop.reached ? " · reached" : ""}
+                  </div>
+                ))}
+              </div>
+              <div className="text-fg-muted">Router identities are not authenticated; missing responses do not prove missing hops.</div>
+            </div>
+          ) : null}
           {icmpRows !== null ? (
             <div className="border-t border-line p-2 text-[10px] text-fg-muted">
               <div className="mb-1 font-semibold text-fg">
-                IPv4 ICMP echo: {icmpRows.filter((r) => r.state === "responded").length} responding / {icmpRows.length} checked
+                {icmpFamily} ICMP echo: {icmpRows.filter((r) => r.state === "responded").length} responding / {icmpRows.length} checked
               </div>
               <div className="max-h-28 overflow-y-auto font-mono">
                 {icmpRows.map((row) => (

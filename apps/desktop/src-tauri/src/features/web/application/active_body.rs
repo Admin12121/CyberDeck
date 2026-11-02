@@ -211,6 +211,22 @@ pub(super) async fn run_with_progress(
     plan: BodyPlan,
     on_progress: &impl Fn(usize, usize),
 ) -> Result<Vec<Finding>, String> {
+    run_with_budget(client, target, job_id, plan, MAX_FIELDS, on_progress).await
+}
+
+/// Execute at most an explicitly bounded number of POST mutations.
+/// Baseline always runs once; the strict backend budget excludes the baseline.
+pub(super) async fn run_with_budget(
+    client: &Client,
+    target: Url,
+    job_id: u64,
+    plan: BodyPlan,
+    max_mutations: usize,
+    on_progress: &impl Fn(usize, usize),
+) -> Result<Vec<Finding>, String> {
+    if max_mutations == 0 || max_mutations > MAX_FIELDS {
+        return Err("POST mutation budget must be 1–4".into());
+    }
     if target.as_str().len() > 4096
         || !matches!(target.scheme(), "http" | "https")
         || target.host_str().is_none()
@@ -220,7 +236,7 @@ pub(super) async fn run_with_progress(
     {
         return Err("invalid scoped POST target".into());
     }
-    let total = plan.count() + 1;
+    let total = plan.count().min(max_mutations) + 1;
     debug_assert!(total <= MAX_REQUESTS);
     on_progress(0, 0);
     let baseline = bounded_post_html(client, &target, &plan, plan.encoded(None)?)
@@ -228,7 +244,7 @@ pub(super) async fn run_with_progress(
         .ok_or("POST baseline must return HTTP 200 text/html")?;
     on_progress(1, 0);
     let mut findings = Vec::new();
-    for position in 0..plan.count() {
+    for position in 0..plan.count().min(max_mutations) {
         let marker = format!("<cyberdeck-post-probe-{job_id:x}-{position:x}>");
         let payload = plan.encoded(Some((position, &marker)))?;
         let candidate = bounded_post_html(client, &target, &plan, payload).await?;
@@ -293,13 +309,13 @@ mod tests {
         assert!(BodyPlan::new(BodyKind::Json, "[\"x\"]").is_err());
     }
 
-    async fn fixture(kind: BodyKind, escape: bool) {
+    async fn fixture(kind: BodyKind, escape: bool, mutation_budget: usize) {
         tokio::time::timeout(Duration::from_secs(10),async {
             let server=TcpListener::bind("127.0.0.1:0").await.unwrap();
             let addr=server.local_addr().unwrap();
             let url=Url::parse(&format!("http://{addr}/submit")).unwrap();
             let handler=tokio::spawn(async move {
-                for _ in 0..3 {
+                for _ in 0..(mutation_budget.min(2) + 1) {
                     let (mut stream,_)=server.accept().await.unwrap();
                     let mut request=Vec::new();
                     let header_end=loop {
@@ -348,11 +364,11 @@ mod tests {
             let client=Client::builder().timeout(Duration::from_secs(3))
                 .redirect(reqwest::redirect::Policy::none()).no_proxy().build().unwrap();
             let progress=std::sync::atomic::AtomicUsize::new(0);
-            let findings=run_with_progress(&client,url,12,plan,&|p,_| {
+            let findings=run_with_budget(&client,url,12,plan,mutation_budget,&|p,_| {
                 progress.store(p,std::sync::atomic::Ordering::Release);
             }).await.unwrap();
             handler.await.unwrap();
-            assert_eq!(progress.load(std::sync::atomic::Ordering::Acquire),3);
+            assert_eq!(progress.load(std::sync::atomic::Ordering::Acquire),mutation_budget.min(2)+1);
             assert_eq!(findings.len(),if escape {0} else {1});
             if !escape {
                 assert!(findings[0].evidence.contains(if kind == BodyKind::Form {
@@ -365,12 +381,14 @@ mod tests {
     }
     #[tokio::test]
     async fn localhost_form_post_reports_only_raw_reflection() {
-        fixture(BodyKind::Form, false).await;
-        fixture(BodyKind::Form, true).await;
+        fixture(BodyKind::Form, false, 2).await;
+        fixture(BodyKind::Form, true, 2).await;
+        fixture(BodyKind::Form, false, 1).await;
     }
     #[tokio::test]
     async fn localhost_json_post_reports_only_raw_reflection() {
-        fixture(BodyKind::Json, false).await;
-        fixture(BodyKind::Json, true).await;
+        fixture(BodyKind::Json, false, 2).await;
+        fixture(BodyKind::Json, true, 2).await;
+        fixture(BodyKind::Json, false, 1).await;
     }
 }

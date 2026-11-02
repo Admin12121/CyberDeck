@@ -154,6 +154,9 @@ pub async fn netscan_syn_start_v1(
         {
             return Err("another scan became active during native confirmation".into());
         }
+        let permit = app
+            .state::<Arc<super::operation_gate::NetworkOperationGate>>()
+            .acquire(super::operation_gate::ActiveOperation::RawSyn)?;
         let shared = Arc::clone(&*ctx);
         if shared.running.swap(true, Ordering::AcqRel) {
             return Err("native raw SYN scan is already running".into());
@@ -174,6 +177,7 @@ pub async fn netscan_syn_start_v1(
         let worker_device = interface_name.clone();
         let worker = Arc::clone(&shared);
         let matches = tokio::task::spawn_blocking(move || {
+            let _active_operation = permit;
             let _guard = SynRunGuard(Arc::clone(&worker));
             scan_ipv4_syn(
                 &worker_device,

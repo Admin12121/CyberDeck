@@ -56,6 +56,7 @@ export type RecoveryBackendV1 =
   | { backend: "hashcat_managed" };
 
 export type HashcatRawAlgorithmV1 = "md5" | "sha1" | "sha256" | "sha512";
+export type HashcatWordlistPresetV1 = "plain" | "uppercase" | "append_one";
 export interface RecoveryRequestV1 {
   algorithm: HashcatRawAlgorithmV1;
   target_hash: string;
@@ -162,11 +163,12 @@ export async function recoveryHashcatCapabilitiesV1(): Promise<EmbeddedHashcatCa
  */
 export async function recoveryStartHashcatV1(
   request: RecoveryRequestV1, onEvent: (event: RecoveryEventV1) => void,
+  preset: HashcatWordlistPresetV1 = "plain",
 ): Promise<number> {
   if (!inTauri) throw new Error("Embedded Hashcat requires native CyberDeck");
   const channel = new Channel<RecoveryEventV1>();
   channel.onmessage = onEvent;
-  return invoke<number>("recovery_start_hashcat_v1", { request, onEvent: channel });
+  return invoke<number>("recovery_start_hashcat_v1", { request, preset, onEvent: channel });
 }
 
 export async function recoveryCancelV1(jobId: number): Promise<boolean> {
@@ -1445,12 +1447,34 @@ export interface ArpNeighborWire {
   mac: string;
   elapsed_ms: number;
 }
+export interface TraceHopWire {
+  ttl: number;
+  responder: string | null;
+  reached: boolean;
+  reason: string;
+  elapsed_ms: number;
+}
+export async function netscanTraceIpv4V1(
+  target: string, interfaceName: string, maxHops: number, authorized: boolean,
+): Promise<TraceHopWire[]> {
+  if (!inTauri) throw new Error("Native IPv4 route tracing requires the desktop runtime");
+  return invoke<TraceHopWire[]>("netscan_trace_ipv4_v1", { target, interfaceName, maxHops, authorized });
+}
+
 export interface IcmpObservationWire {
   host: string;
   state: "responded" | "unreachable" | "inconclusive";
   reason: string;
   elapsed_ms: number;
 }
+/** Linux native link-local IPv6 Echo, actual selected Ethernet source and case. */
+export async function netscanIcmp6DiscoverV1(
+  targets: string, interfaceName: string, authorized: boolean,
+): Promise<IcmpObservationWire[]> {
+  if (!inTauri) throw new Error("Native IPv6 Echo requires the desktop runtime");
+  return invoke<IcmpObservationWire[]>("netscan_icmp6_discover_v1", { targets, interfaceName, authorized });
+}
+
 export async function netscanIcmpDiscoverV1(
   targets: string, interfaceName: string, authorized: boolean,
 ): Promise<IcmpObservationWire[]> {

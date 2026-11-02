@@ -19,6 +19,40 @@ use tauri::{AppHandle, Manager, State};
 const MAX_TRACKED: usize = 16;
 const MAX_ACTIVE: usize = 2;
 
+/// Per-request native scan intensity. Never allows more than the existing
+/// hard-coded GET/POST bounds. Standard avoids unnecessary network activity.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ScanIntensity {
+    Quick,
+    Standard,
+    Thorough,
+}
+impl ScanIntensity {
+    fn parse(value: Option<&str>) -> Result<Self, String> {
+        match value.unwrap_or("thorough") {
+            "quick" => Ok(Self::Quick),
+            "standard" => Ok(Self::Standard),
+            "thorough" => Ok(Self::Thorough),
+            _ => Err("unknown Web scan intensity".into()),
+        }
+    }
+    fn request_budget(self, kind: Kind) -> usize {
+        match kind {
+            Kind::ActiveQuery => match self {
+                Self::Quick => 1,
+                Self::Standard => 4,
+                Self::Thorough => 8,
+            },
+            Kind::ActiveForm | Kind::ActiveJson => match self {
+                Self::Quick => 1,
+                Self::Standard => 2,
+                Self::Thorough => 4,
+            },
+            _ => 0,
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
 enum Kind {
     Scanner,
@@ -373,10 +407,39 @@ pub async fn web_assessment_start_v1(
     app: AppHandle,
     session: State<'_, CaseSessionCtx>,
 ) -> Result<u64, String> {
+    // Preserve the existing IPC and Rust call signature. Legacy clients
+    // receive the previous full hard caps; v2 is explicitly opt-in.
+    web_assessment_start_v2(
+        kind, target_url, max_depth, authorized, probe_body, None, app, session,
+    )
+    .await
+}
+
+/// Optional native scan-intensity request budgets; additive IPC only.
+#[tauri::command]
+pub async fn web_assessment_start_v2(
+    kind: String,
+    target_url: String,
+    max_depth: u8,
+    authorized: bool,
+    probe_body: Option<String>,
+    scan_intensity: Option<String>,
+    app: AppHandle,
+    session: State<'_, CaseSessionCtx>,
+) -> Result<u64, String> {
     scan_domain::require_authorization(authorized)?;
     let kind = Kind::parse(&kind)?;
     if matches!(kind, Kind::Passive) {
         return Err("passive history scans require the protected offline entry point".into());
+    }
+    let intensity = ScanIntensity::parse(scan_intensity.as_deref())?;
+    if scan_intensity.is_some()
+        && !matches!(
+            kind,
+            Kind::ActiveQuery | Kind::ActiveForm | Kind::ActiveJson
+        )
+    {
+        return Err("scan intensity applies only to parameter probes".into());
     }
     // The template is supplied intentionally; Spider never auto-submits forms.
     // Parse before OS confirmation and reject all credential/CSRF-like fields.
@@ -423,20 +486,22 @@ pub async fn web_assessment_start_v1(
         let on_progress = |processed, discovered| job.progress(processed, discovered);
         let operation = async {
             match kind {
-                Kind::ActiveForm | Kind::ActiveJson => active_body_application::run_with_progress(
+                Kind::ActiveForm | Kind::ActiveJson => active_body_application::run_with_budget(
                     &pinned.client,
                     pinned.url.clone(),
                     id,
                     body_plan.ok_or("POST template missing")?,
+                    intensity.request_budget(kind),
                     &on_progress,
                 )
                 .await
                 .map(Outcome::Findings),
-                Kind::ActiveQuery => active_query_application::run_active_query_with_progress(
+                Kind::ActiveQuery => active_query_application::run_active_query_with_budget(
                     &pinned.client,
                     pinned.url.clone(),
                     id,
                     active_query_application::Policy::InertHtmlElement,
+                    intensity.request_budget(kind),
                     &on_progress,
                 )
                 .await
@@ -649,6 +714,22 @@ pub fn web_assessment_save_findings_v1(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn scan_intensity_is_strictly_allowlisted_and_never_exceeds_hard_caps() {
+        assert_eq!(ScanIntensity::parse(None).unwrap(), ScanIntensity::Thorough);
+        assert!(ScanIntensity::parse(Some("unlimited")).is_err());
+        assert!(ScanIntensity::parse(Some("Thorough")).is_err());
+        assert!(ScanIntensity::parse(Some("0")).is_err());
+        for (text, query, post) in [("quick", 1, 1), ("standard", 4, 2), ("thorough", 8, 4)] {
+            let intensity = ScanIntensity::parse(Some(text)).unwrap();
+            assert_eq!(intensity.request_budget(Kind::ActiveQuery), query);
+            assert_eq!(intensity.request_budget(Kind::ActiveForm), post);
+            assert_eq!(intensity.request_budget(Kind::ActiveJson), post);
+            assert_eq!(intensity.request_budget(Kind::Scanner), 0);
+            assert_eq!(intensity.request_budget(Kind::Spider), 0);
+        }
+    }
 
     #[test]
     fn native_post_job_kinds_are_distinct_and_case_save_is_idempotent() {

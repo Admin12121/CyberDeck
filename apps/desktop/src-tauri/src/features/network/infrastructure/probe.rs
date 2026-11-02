@@ -308,6 +308,59 @@ pub(super) fn remote_software_claim(raw: &str) -> Option<String> {
     None
 }
 
+/// Strict, bounded first-read binary/text service identification. Each
+/// protocol is recognized from a full structural greeting, not its port or
+/// partially decoded text. No third-party Nmap signatures are copied.
+pub(super) fn observed_service_bytes(data: &[u8]) -> Option<&'static str> {
+    if data.is_empty() || data.len() > 512 {
+        return None;
+    }
+    // MySQL initial handshake: 3-byte little-endian payload length, server
+    // sequence 0, protocol 10 and a NUL-terminated printable version token.
+    if data.len() >= 12 && data[3] == 0 && data[4] == 10 {
+        let length =
+            usize::from(data[0]) | (usize::from(data[1]) << 8) | (usize::from(data[2]) << 16);
+        if length >= 8 && length + 4 <= data.len() {
+            let version = &data[5..(data.len().min(5 + 64))];
+            if let Some(end) = version.iter().position(|b| *b == 0) {
+                if (3..=63).contains(&end) && version[..end].iter().all(|b| b.is_ascii_graphic()) {
+                    return Some("mysql");
+                }
+            }
+        }
+    }
+    // RFB greeting has a fixed 12-byte printable version and trailing LF.
+    if data.len() >= 12
+        && &data[..4] == b"RFB "
+        && &data[4..7] == b"003"
+        && data[7] == b'.'
+        && data[8..11].iter().all(u8::is_ascii_digit)
+        && data[11] == b'\n'
+    {
+        return Some("vnc");
+    }
+    // The server-side rsync daemon's initial protocol message.
+    if data.starts_with(b"@RSYNCD: ") && data.contains(&b'\n') {
+        let first = data.split(|b| *b == b'\n').next()?;
+        if (10..=24).contains(&first.len())
+            && first[9..]
+                .iter()
+                .all(|b| b.is_ascii_digit() || *b == b'.' || *b == b'\r')
+        {
+            return Some("rsync");
+        }
+    }
+    // IMAP requires the server's explicitly marked initial OK greeting.
+    if data.starts_with(b"* OK ") && data.windows(2).any(|part| part == b"\r\n") {
+        return Some("imap");
+    }
+    // POP3 ready message must be framed by a complete CRLF-terminated line.
+    if data.starts_with(b"+OK ") && data.windows(2).any(|part| part == b"\r\n") {
+        return Some("pop3");
+    }
+    None
+}
+
 /// Return a protocol only when actual response bytes provide recognizable
 /// evidence, including services listening on unexpected TCP ports. Unlike the
 /// fallback port table, this is not a claim about the remote software version.
@@ -446,8 +499,10 @@ fn probe_observation_bounded(
                 let _ = std::io::Write::write_all(&mut stream, request.as_bytes());
             }
             let mut buffer = [0u8; 512];
+            let mut verified_initial_service = None;
             let received_greeting = match std::io::Read::read(&mut stream, &mut buffer) {
                 Ok(length) if length > 0 => {
+                    verified_initial_service = observed_service_bytes(&buffer[..length]);
                     let raw = String::from_utf8_lossy(&buffer[..length]);
                     obs.remote_software_claim = remote_software_claim(&raw);
                     obs.banner = summarize_banner(&raw);
@@ -500,7 +555,9 @@ fn probe_observation_bounded(
                 obs.service = "dns".into();
                 obs.service_basis = "observed_response".into();
                 obs.banner = format!("DNS/TCP response to root NS query (RCODE {rcode})");
-            } else if let Some(name) = observed_service(&obs.banner) {
+            } else if let Some(name) =
+                verified_initial_service.or_else(|| observed_service(&obs.banner))
+            {
                 obs.service = name.into();
                 obs.service_basis = "observed_response".into();
             } else {
@@ -541,6 +598,36 @@ pub(super) fn probe(host: IpAddr, port: u16) -> (String, String) {
 #[cfg(test)]
 mod evidence_tests {
     use super::*;
+
+    #[test]
+    fn passive_service_greeting_identification_requires_structural_evidence() {
+        let mysql: &[u8] = &[10, 0, 0, 0, 10, b'8', b'.', b'0', b'.', b'3', b'5', 0, 0, 0];
+        assert_eq!(observed_service_bytes(mysql), Some("mysql"));
+        assert_eq!(observed_service_bytes(&mysql[..11]), None);
+        let mut corrupt = mysql.to_vec();
+        corrupt[3] = 1;
+        assert_eq!(observed_service_bytes(&corrupt), None);
+        corrupt = mysql.to_vec();
+        corrupt[4] = 9;
+        assert_eq!(observed_service_bytes(&corrupt), None);
+        assert_eq!(observed_service_bytes(b"RFB 003.008\n"), Some("vnc"));
+        assert_eq!(observed_service_bytes(b"RFB 003.008"), None);
+        assert_eq!(observed_service_bytes(b"RFB 004.008\n"), None);
+        assert_eq!(observed_service_bytes(b"@RSYNCD: 31.0\n"), Some("rsync"));
+        assert_eq!(observed_service_bytes(b"@RSYNCD: invalid\n"), None);
+        assert_eq!(
+            observed_service_bytes(b"* OK IMAP service ready\r\n"),
+            Some("imap")
+        );
+        assert_eq!(observed_service_bytes(b"* OK incomplete greeting"), None);
+        assert_eq!(
+            observed_service_bytes(b"+OK POP3 service ready\r\n"),
+            Some("pop3")
+        );
+        assert_eq!(observed_service_bytes(b"+OK partial"), None);
+        assert_eq!(observed_service_bytes(&vec![b'x'; 513]), None);
+        assert_eq!(observed_service_bytes(&[]), None);
+    }
 
     #[test]
     fn tls_serverhello_parser_requires_complete_structural_record() {

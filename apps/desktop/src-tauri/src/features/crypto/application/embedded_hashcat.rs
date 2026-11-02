@@ -5,6 +5,10 @@ use super::recovery_backend::{
     self, RecoveryCancel, RecoveryProgressWire, RecoveryRequest, RecoveryRun,
 };
 use cyberdeck_crypto::recovery::RecoveryTarget;
+#[path = "embedded_hashcat_preset.rs"]
+mod preset;
+pub use preset::WordlistPreset;
+
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
@@ -271,6 +275,7 @@ pub fn execute_path<P: FnMut(RecoveryProgressWire)>(
     wordlist: &Path,
     runtime: &Path,
     cancel: &RecoveryCancel,
+    preset: WordlistPreset,
     _progress: P,
 ) -> Result<RecoveryRun, String> {
     let hash_mode = validate_embedded_request(request)?;
@@ -287,6 +292,37 @@ pub fn execute_path<P: FnMut(RecoveryProgressWire)>(
         .map_err(|_| "cannot create private Hashcat workspace")?;
     let hash = scratch.path().join("target.rawhash");
     let output = scratch.path().join("recovered.tmp");
+    // Bounded candidate transforms are prepared only in private job scratch.
+    // The packaged Hashcat worker still executes the same native wordlist
+    // attack, with no arbitrary rules/flags. Never mutate original evidence.
+    let generated_path = scratch.path().join("transformed.words");
+    let generated = match preset::generate(
+        wordlist,
+        &generated_path,
+        request.max_candidates,
+        preset,
+        || cancel.is_cancelled(),
+    ) {
+        Ok(value) => value,
+        Err(_error) if cancel.is_cancelled() => {
+            return Ok(recovery_backend::embedded_result(
+                request, Vec::new(), true, 0,
+            ));
+        }
+        Err(error) => return Err(error),
+    };
+    // A transformed empty wordlist is an exhausted operation, not a native
+    // runtime/device failure. No worker or secret output is created.
+    if generated == Some(0) {
+        return Ok(recovery_backend::embedded_result(
+            request, Vec::new(), false, 0,
+        ));
+    }
+    let active_wordlist = if generated.is_some() {
+        generated_path.as_path()
+    } else {
+        wordlist
+    };
     let mut file = File::create(&hash).map_err(|_| "cannot create private target file")?;
     file.write_all(request.target_hash.as_bytes())
         .and_then(|_| file.write_all(b"\n"))
@@ -296,7 +332,7 @@ pub fn execute_path<P: FnMut(RecoveryProgressWire)>(
     let bytes = frame_mode(
         runtime,
         &hash,
-        wordlist,
+        active_wordlist,
         &output,
         request.max_candidates,
         300,
@@ -380,17 +416,13 @@ pub fn execute_path<P: FnMut(RecoveryProgressWire)>(
             }
             // Find the real candidate ordinal in original wordlist where
             // possible, rather than fabricating work counters.
-            let file = File::open(wordlist).map_err(|_| "wordlist became unavailable")?;
+            let file = File::open(active_wordlist).map_err(|_| "wordlist became unavailable")?;
             let mut reader = BufReader::new(file);
             let mut line = Vec::new();
             let mut index = 0u64;
             let found_index = loop {
                 line.clear();
-                if reader
-                    .read_until(b'\n', &mut line)
-                    .map_err(|_| "cannot recheck wordlist")?
-                    == 0
-                {
+                if !preset::read_line_bounded(&mut reader, &mut line)? {
                     break None;
                 }
                 if line.len() > 4096 {

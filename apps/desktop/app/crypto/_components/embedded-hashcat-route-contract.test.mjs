@@ -71,8 +71,8 @@ test("Hashcat opt-in preserves native Rust as default and masked-result IPC", ()
   assert.ok(ipc.includes('"recovery_hashcat_capabilities_v1"'));
   assert.ok(ui.includes('useState<"rust" | "hashcat">("rust")'));
   assert.ok(ui.includes('recoveryStartHashcatV1'));
-  assert.match(ui, /engineChoice === "hashcat"\s*\? recoveryStartHashcatV1 : recoveryStartV1/);
-  assert.ok(ui.includes('await startCommand(request,'), "selected engine must execute, not just appear in UI");
+  assert.match(ui, /engineChoice === "hashcat"\s*\? await recoveryStartHashcatV1\(request, onEvent, hashcatPreset\)/);
+  assert.ok(ui.includes("await recoveryStartV1(request, onEvent)"), "native Rust must remain the distinct fallback");
   assert.ok(ui.includes('hashcatCapability?.available'));
   assert.ok(ui.includes("GPU detection,"));
   assert.ok(ui.includes('recoveryRevealV1'));
@@ -134,4 +134,24 @@ test("four bundled wordlist modes are explicitly validated and desktop-selectabl
     ui.includes("digest length alone is not proof of its algorithm"));
   assert.ok(core.includes("target.is_match(candidate)"));
   assert.ok(core.includes("Hashcat output is not a verified original wordlist candidate"));
+});
+
+test("Hashcat candidate presets are case-private, bounded and explicit across UI to native engine", () => {
+  const ipc = read("apps/desktop/lib/ipc.ts");
+  const ui = read("apps/desktop/app/crypto/_components/NativeRecoveryV1.tsx");
+  const command = read(root + "/src/features/crypto/ipc/recovery.rs");
+  const supervisor = read(root + "/src/features/crypto/application/embedded_hashcat.rs");
+  const preset = read(root + "/src/features/crypto/application/embedded_hashcat_preset.rs");
+  assert.ok(ipc.includes('HashcatWordlistPresetV1 = "plain" | "uppercase" | "append_one"'));
+  assert.ok(ipc.includes('{ request, preset, onEvent: channel }'));
+  assert.ok(ui.includes('Embedded Hashcat candidate preset'));
+  assert.ok(command.includes('preset.unwrap_or_default()'));
+  assert.ok(supervisor.includes("preset::generate("));
+  assert.ok(supervisor.includes("|| cancel.is_cancelled()"));
+  assert.ok(supervisor.includes("preset::read_line_bounded"));
+  assert.ok(supervisor.includes('File::open(active_wordlist)'));
+  assert.ok(preset.includes("MAX_DERIVED_BYTES: u64 = 64 * 1024 * 1024"));
+  assert.ok(preset.includes("create_new(true)"));
+  assert.ok(preset.includes("read_line_bounded"));
+  assert.ok(!preset.includes("write(source"));
 });

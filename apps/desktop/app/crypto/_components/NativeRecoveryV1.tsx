@@ -16,7 +16,7 @@ import {
   recoveryHashcatCapabilitiesV1, recoveryStartHashcatV1,
   type EmbeddedHashcatCapabilityV1,
   type RecoveryBackendV1, type RecoveryDeviceInventoryV1,
-  type RecoveryJobStatusV1, type RecoveryRequestV1, type HashcatRawAlgorithmV1,
+  type RecoveryJobStatusV1, type RecoveryRequestV1, type HashcatRawAlgorithmV1, type HashcatWordlistPresetV1,
 } from "@lib/ipc";
 
 const EMBEDDED_MODES: readonly { value: HashcatRawAlgorithmV1; label: string; digits: number }[] = [
@@ -27,6 +27,7 @@ const EMBEDDED_MODES: readonly { value: HashcatRawAlgorithmV1; label: string; di
 ];
 // Operator-selected mode is non-secret, safe to retain across navigation.
 let lastHashcatMode: HashcatRawAlgorithmV1 = "sha256";
+let lastHashcatPreset: HashcatWordlistPresetV1 = "plain";
 
 // Store only a backend-owned opaque job reference across route remounts.
 let currentJob: { scope: string; id: number } | null = null;
@@ -42,6 +43,7 @@ function useRecoveryController(targetHash: string) {
   const [backend, setBackend] = useState("auto");
   const [engineChoice, setEngineChoice] = useState<"rust" | "hashcat">("rust");
   const [hashcatAlgorithm, setHashcatAlgorithm] = useState<HashcatRawAlgorithmV1>(lastHashcatMode);
+  const [hashcatPreset, setHashcatPreset] = useState<HashcatWordlistPresetV1>(lastHashcatPreset);
   const [hashcatCapability, setHashcatCapability] = useState<EmbeddedHashcatCapabilityV1 | null>(null);
   const [inventory, setInventory] = useState<RecoveryDeviceInventoryV1 | null>(null);
   const [deviceError, setDeviceError] = useState<string | null>(null);
@@ -192,11 +194,12 @@ function useRecoveryController(targetHash: string) {
     try {
       // Both paths share the same backend-authorized job, cancellation and
       // confidential Reveal lifecycle; never silently substitute engines.
-      const startCommand = engineChoice === "hashcat"
-        ? recoveryStartHashcatV1 : recoveryStartV1;
-      const id = await startCommand(request, () => {
+      const onEvent = () => {
         // Poll authoritative Rust state; events never contain recovered plaintext.
-      });
+      };
+      const id = engineChoice === "hashcat"
+        ? await recoveryStartHashcatV1(request, onEvent, hashcatPreset)
+        : await recoveryStartV1(request, onEvent);
       if (scopeRef.current !== requestScope) return;
       currentJob = { scope: requestScope, id };
       setJobId(id);
@@ -262,6 +265,7 @@ function useRecoveryController(targetHash: string) {
     desktop, scope, backend, setBackend, inventory, deviceError, batchSize, setBatchSize,
     engineChoice, setEngineChoice, hashcatCapability,
     hashcatAlgorithm, setHashcatAlgorithm, hashcatMode,
+    hashcatPreset, setHashcatPreset,
     maxCandidates, setMaxCandidates, maxMatches, setMaxMatches,
     jobId: scopedJob ? jobId : null,
     status: scopedJob ? status : null,
@@ -428,6 +432,28 @@ export function NativeRecoveryControls() {
                   </span>
                 </label>
               )}
+              {r.engineChoice === "hashcat" && (
+                <label className="block space-y-1">
+                  <span className="text-[11px] text-fg-dim">Wordlist transformation</span>
+                  <Select ariaLabel="Embedded Hashcat candidate preset"
+                    value={r.hashcatPreset}
+                    onChange={(value) => {
+                      if (r.jobId !== null || r.busy) return;
+                      if (value !== "plain" && value !== "uppercase" && value !== "append_one") return;
+                      r.setHashcatPreset(value);
+                      lastHashcatPreset = value;
+                      r.clearReveal();
+                    }}
+                    options={[
+                      { value: "plain", label: "Original wordlist" },
+                      { value: "uppercase", label: "Uppercase candidates" },
+                      { value: "append_one", label: "Append 1 to candidates" },
+                    ]} className="w-full" />
+                  <span className="text-[10px] text-fg-muted">
+                    Prepared privately and bounded before native Hashcat; not arbitrary Hashcat rule scripts.
+                  </span>
+                </label>
+              )}
               <p className="text-[10px] leading-relaxed text-fg-muted">
                 {r.hashcatCapability?.detail ?? "Checking bundled Hashcat capability…"}
                 {r.engineChoice === "hashcat"
@@ -492,8 +518,9 @@ export function NativeRecoveryControls() {
               </label>
             ) : null}
             <p className="border-t border-line/50 pt-2 text-[11px] leading-relaxed text-fg-muted">
-              Wordlist only · Rules, masks and hybrid strategies are not available in Recovery V1.
-              Auto uses CPU until compatible OpenCL hardware passes verification.
+              {r.engineChoice === "hashcat"
+                ? "Wordlist with optional bounded uppercase/append-one transformation. Native Hashcat rule scripts, masks and hybrid attacks remain unavailable."
+                : "Native Rust V1 uses a straight wordlist; rules, masks and hybrid strategies are not available. Auto uses CPU until GPU hardware is verified."}
             </p>
           </AccordionPanel>
         </AccordionItem>

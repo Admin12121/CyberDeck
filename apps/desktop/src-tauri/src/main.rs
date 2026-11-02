@@ -27,6 +27,9 @@ fn main() {
         .manage(std::sync::Arc::new(
             features::network::ipc::icmp_echo::EchoCtx::default(),
         ))
+        .manage(std::sync::Arc::new(
+            features::network::ipc::operation_gate::NetworkOperationGate::default(),
+        ))
         .manage(features::network::ipc::pcap::PcapCtx {
             current: std::sync::Mutex::new(None),
         })
@@ -167,6 +170,7 @@ fn main() {
             // Legacy proxy_history_detail/capture_configure remain unregistered.
             features::web::ipc::web::web_history_access_v1,
             features::web::ipc::web::assessment_jobs::web_assessment_start_v1,
+            features::web::ipc::web::assessment_jobs::web_assessment_start_v2,
             features::web::ipc::web::assessment_jobs::web_assessment_status_v1,
             features::web::ipc::web::assessment_jobs::web_assessment_cancel_v1,
             // Backend-selected case/revision and completed native job only.
@@ -204,6 +208,8 @@ fn main() {
             features::network::ipc::icmp_echo::netscan_icmp_discover_v1,
             features::network::ipc::icmp_echo::netscan_icmp_stop_v1,
             features::network::ipc::icmp_echo::netscan_icmp_status_v1,
+            features::network::ipc::icmp_echo::netscan_trace_ipv4_v1,
+            features::network::ipc::icmp_echo::netscan_icmp6_discover_v1,
         ])
         .run(tauri::generate_context!())
         .expect("CyberDeck desktop runtime failed to start");

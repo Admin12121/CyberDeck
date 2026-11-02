@@ -249,6 +249,50 @@ pub fn correlate_ip_response(packet: &[u8], probe: &ProbeIdentity) -> Option<Rep
     }
 }
 
+/// Preserve the observed outer IP responder when correlating an exact
+/// Ethernet response. This supports honest hop-by-hop route observations:
+/// intermediate routers may legitimately send a matched ICMP Time Exceeded
+/// error while the quoted original probe still targets a different host.
+///
+/// A router IP is a network-reported claim, not authenticated identity.
+pub fn correlate_ethernet_response_with_origin(
+    frame: &[u8],
+    probe: &ProbeIdentity,
+) -> Option<(IpAddr, ReplyEvidence)> {
+    let evidence = correlate_ethernet_response(frame, probe)?;
+    if !matches!(
+        evidence,
+        ReplyEvidence::IcmpEcho
+            | ReplyEvidence::IcmpV4Error { .. }
+            | ReplyEvidence::IcmpV6Error { .. }
+            | ReplyEvidence::TcpSynAck
+            | ReplyEvidence::TcpReset
+            | ReplyEvidence::UdpResponse
+    ) {
+        return None;
+    }
+    if frame.len() < 14 {
+        return None;
+    }
+    let mut kind = be16(&frame[12..14])?;
+    let mut cursor = 14usize;
+    for _ in 0..2 {
+        if !matches!(kind, 0x8100 | 0x88a8) {
+            break;
+        }
+        kind = be16(frame.get(cursor + 2..cursor + 4)?)?;
+        cursor += 4;
+    }
+    if matches!(kind, 0x8100 | 0x88a8) || !matches!(kind, 0x0800 | 0x86dd) {
+        return None;
+    }
+    let ip = raw_ip_packet(frame.get(cursor..)?, false)?;
+    if ip.source.is_unspecified() || ip.source.is_multicast() {
+        return None;
+    }
+    Some((ip.source, evidence))
+}
+
 /// Exact Ethernet II frames with up to two VLAN tags. Refuses unsupported
 /// link types; callers must not pass loopback cooked or radiotap frames.
 pub fn correlate_ethernet_response(frame: &[u8], probe: &ProbeIdentity) -> Option<ReplyEvidence> {
@@ -400,6 +444,42 @@ mod tests {
         bytes[24..40].copy_from_slice(&dst.octets());
         bytes[40..].copy_from_slice(data);
         bytes
+    }
+
+    #[test]
+    fn traceroute_origin_preserves_matched_router_and_rejects_wrong_identity() {
+        let id = ProbeIdentity {
+            local: "192.0.2.1".parse().unwrap(),
+            target: "198.51.100.9".parse().unwrap(),
+            transport: ProbeTransport::IcmpEcho,
+            local_port: 0,
+            target_port: 0,
+            syn_sequence: None,
+            echo_key: Some((0x1234, 0xabcd)),
+        };
+        let quoted_echo = [8, 0, 0, 0, 0x12, 0x34, 0xab, 0xcd];
+        let original = v4(1, [192, 0, 2, 1], [198, 51, 100, 9], &quoted_echo);
+        let mut error = vec![11, 0, 0, 0, 0, 0, 0, 0];
+        error.extend_from_slice(&original);
+        let response = v4(1, [192, 0, 2, 254], [192, 0, 2, 1], &error);
+        let mut frame = vec![0u8; 14];
+        frame[12..14].copy_from_slice(&0x0800u16.to_be_bytes());
+        frame.extend_from_slice(&response);
+        assert_eq!(
+            correlate_ethernet_response_with_origin(&frame, &id),
+            Some((
+                "192.0.2.254".parse().unwrap(),
+                ReplyEvidence::IcmpV4Error { kind: 11, code: 0 },
+            ))
+        );
+        let mut wrong = id;
+        wrong.echo_key = Some((0x1234, 0xabce));
+        assert_eq!(
+            correlate_ethernet_response_with_origin(&frame, &wrong),
+            None
+        );
+        frame[12..14].copy_from_slice(&0x0806u16.to_be_bytes());
+        assert_eq!(correlate_ethernet_response_with_origin(&frame, &id), None);
     }
 
     #[test]

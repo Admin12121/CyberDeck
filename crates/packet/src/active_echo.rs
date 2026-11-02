@@ -93,6 +93,55 @@ pub fn discover_ipv4_echo(
     }
 }
 
+/// Result of one bounded IPv4 TTL-limited ICMP Echo probe.
+/// Router identities are observed claims and never authenticated.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TraceHop {
+    pub ttl: u8,
+    pub responder: Option<Ipv4Addr>,
+    pub reached: bool,
+    pub reason: &'static str,
+    pub elapsed_ms: u64,
+}
+pub const MAX_TRACE_HOPS: u8 = 16;
+
+/// Traces one explicitly approved IPv4 target without external tools.
+/// Each hop uses a backend-random echo identifier, 600ms deadline and
+/// <=50ms cancellation polling. A timeout does not prove a missing route.
+pub fn trace_ipv4_echo(
+    interface_name: &str,
+    target: Ipv4Addr,
+    max_hops: u8,
+    stop: &AtomicBool,
+    scope_active: &(impl Fn() -> bool + Sync),
+) -> Result<Vec<TraceHop>, EchoError> {
+    validate_hosts(&[target])?;
+    if max_hops == 0 || max_hops > MAX_TRACE_HOPS {
+        return Err(EchoError::new(
+            EchoErrorCode::InvalidScope,
+            "trace hop limit must be 1..=16",
+        ));
+    }
+    if stop.load(Ordering::Acquire) || !scope_active() {
+        return Err(EchoError::new(
+            EchoErrorCode::Cancelled,
+            "traceroute authorization revoked",
+        ));
+    }
+    #[cfg(target_os = "linux")]
+    {
+        linux::trace(interface_name, target, max_hops, stop, scope_active)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = interface_name;
+        Err(EchoError::new(
+            EchoErrorCode::Unsupported,
+            "native ICMP traceroute requires Linux CAP_NET_RAW",
+        ))
+    }
+}
+
 #[cfg(target_os = "linux")]
 mod linux {
     use super::*;
@@ -419,6 +468,200 @@ mod linux {
         }
         Ok(report)
     }
+
+    pub(super) fn trace(
+        interface: &str,
+        target: Ipv4Addr,
+        max_hops: u8,
+        stop: &AtomicBool,
+        scope: &(impl Fn() -> bool + Sync),
+    ) -> Result<Vec<TraceHop>, EchoError> {
+        let interfaces =
+            discover_interfaces().map_err(|e| EchoError::new(EchoErrorCode::Device, e.message))?;
+        let selected = select_interface(&interfaces, interface)
+            .map_err(|e| EchoError::new(EchoErrorCode::Device, e.message))?;
+        let source = source_ipv4(&selected.name)?;
+        if source == target {
+            return Err(EchoError::new(
+                EchoErrorCode::InvalidScope,
+                "traceroute target must differ from the selected source address",
+            ));
+        }
+        let tx = Fd(unsafe { socket(AF_INET, SOCK_RAW | SOCK_CLOEXEC, IPPROTO_RAW) });
+        if tx.0 < 0 {
+            return Err(io_err("open raw ICMP trace transmitter"));
+        }
+        let mut device = selected.name.as_bytes().to_vec();
+        device.push(0);
+        if unsafe {
+            setsockopt(
+                tx.0,
+                SOL_SOCKET,
+                SO_BINDTODEVICE,
+                device.as_ptr().cast(),
+                device.len() as u32,
+            )
+        } < 0
+        {
+            return Err(io_err("bind authorized trace transmitter to interface"));
+        }
+        let proto = ETH_P_IP.to_be();
+        let rx = Fd(unsafe { socket(AF_PACKET, SOCK_RAW | SOCK_CLOEXEC, c_int::from(proto)) });
+        if rx.0 < 0 {
+            return Err(io_err("open trace response receiver"));
+        }
+        let index = c_int::try_from(selected.index)
+            .map_err(|_| EchoError::new(EchoErrorCode::Device, "interface index overflow"))?;
+        let addr = SockAddrLl {
+            family: AF_PACKET as u16,
+            protocol: proto,
+            ifindex: index,
+            hatype: 0,
+            pkttype: 0,
+            halen: 0,
+            addr: [0; 8],
+        };
+        if unsafe {
+            bind(
+                rx.0,
+                (&raw const addr).cast(),
+                std::mem::size_of::<SockAddrLl>() as u32,
+            )
+        } < 0
+        {
+            return Err(io_err("bind selected IPv4 trace capture"));
+        }
+        let destination = SockAddrIn {
+            family: AF_INET as u16,
+            port: 0,
+            addr: target.octets(),
+            zero: [0; 8],
+        };
+        let mut hops = Vec::with_capacity(usize::from(max_hops));
+        for ttl in 1..=max_hops {
+            if cancelled(stop, scope) {
+                return Err(EchoError::new(
+                    EchoErrorCode::Cancelled,
+                    "traceroute scope revoked",
+                ));
+            }
+            let (id, sequence, ip_id) = random_echo_identity()?;
+            let packet =
+                crate::scan_packets::ipv4_icmp_echo(source, target, id, sequence, ip_id, ttl)
+                    .map_err(|_| {
+                        EchoError::new(EchoErrorCode::InvalidScope, "invalid scoped trace packet")
+                    })?;
+            let identity = ProbeIdentity {
+                local: IpAddr::V4(source),
+                target: IpAddr::V4(target),
+                transport: ProbeTransport::IcmpEcho,
+                local_port: 0,
+                target_port: 0,
+                syn_sequence: None,
+                echo_key: Some((id, sequence)),
+            };
+            let began = Instant::now();
+            let sent = unsafe {
+                sendto(
+                    tx.0,
+                    packet.as_ptr().cast(),
+                    packet.len(),
+                    0,
+                    (&raw const destination).cast(),
+                    std::mem::size_of::<SockAddrIn>() as u32,
+                )
+            };
+            if sent != packet.len() as isize {
+                return Err(io_err("send one bounded TTL-limited ICMP echo"));
+            }
+            let mut result = TraceHop {
+                ttl,
+                responder: None,
+                reached: false,
+                reason: "no_matching_response",
+                elapsed_ms: 0,
+            };
+            let mut buffer = [0u8; 4096];
+            while began.elapsed() < WAIT_PER_HOST {
+                if cancelled(stop, scope) {
+                    return Err(EchoError::new(
+                        EchoErrorCode::Cancelled,
+                        "traceroute scope revoked",
+                    ));
+                }
+                let remaining = WAIT_PER_HOST.saturating_sub(began.elapsed());
+                let mut fd = PollFd {
+                    fd: rx.0,
+                    events: POLLIN,
+                    revents: 0,
+                };
+                let ready = unsafe {
+                    poll(
+                        &raw mut fd,
+                        1,
+                        remaining.as_millis().min(50).max(1) as c_int,
+                    )
+                };
+                if ready < 0 {
+                    if io::Error::last_os_error().kind() == io::ErrorKind::Interrupted {
+                        continue;
+                    }
+                    return Err(io_err("receive matched ICMP trace response"));
+                }
+                if ready == 0 || fd.revents & POLLIN == 0 {
+                    continue;
+                }
+                let len = unsafe { recv(rx.0, buffer.as_mut_ptr().cast(), buffer.len(), 0) };
+                if len < 0 {
+                    if io::Error::last_os_error().kind() == io::ErrorKind::Interrupted {
+                        continue;
+                    }
+                    return Err(io_err("read native trace frame"));
+                }
+                let Some((origin, evidence)) =
+                    crate::scan_replies::correlate_ethernet_response_with_origin(
+                        &buffer[..len as usize],
+                        &identity,
+                    )
+                else {
+                    continue;
+                };
+                let IpAddr::V4(hop) = origin else { continue };
+                match evidence {
+                    ReplyEvidence::IcmpEcho if hop == target => {
+                        result.responder = Some(hop);
+                        result.reached = true;
+                        result.reason = "matching_echo_reply";
+                        break;
+                    }
+                    ReplyEvidence::IcmpV4Error { kind: 11, code: 0 } => {
+                        result.responder = Some(hop);
+                        result.reason = "matching_time_exceeded";
+                        break;
+                    }
+                    ReplyEvidence::IcmpV4Error { kind: 3, .. } => {
+                        result.responder = Some(hop);
+                        result.reason = "matching_destination_unreachable";
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+            if cancelled(stop, scope) {
+                return Err(EchoError::new(
+                    EchoErrorCode::Cancelled,
+                    "traceroute scope revoked",
+                ));
+            }
+            result.elapsed_ms = began.elapsed().as_millis().min(u64::MAX as u128) as u64;
+            let done = result.reached || result.reason == "matching_destination_unreachable";
+            hops.push(result);
+            if done {
+                break;
+            }
+        }
+        Ok(hops)
+    }
 }
 #[cfg(test)]
 mod tests {
@@ -432,6 +675,41 @@ mod tests {
         assert!(validate_hosts(&[Ipv4Addr::BROADCAST]).is_err());
         assert!(validate_hosts(&["224.0.0.1".parse().unwrap()]).is_err());
     }
+    #[test]
+    fn trace_enforces_exact_hop_cap_and_revocation_before_sockets() {
+        let target: Ipv4Addr = "192.0.2.5".parse().unwrap();
+        let active = AtomicBool::new(false);
+        for max in [0u8, 17u8, 255u8] {
+            assert_eq!(
+                trace_ipv4_echo("none", target, max, &active, &|| true)
+                    .unwrap_err()
+                    .code,
+                EchoErrorCode::InvalidScope
+            );
+        }
+        for invalid in [Ipv4Addr::BROADCAST, Ipv4Addr::UNSPECIFIED] {
+            assert_eq!(
+                trace_ipv4_echo("none", invalid, 3, &active, &|| true)
+                    .unwrap_err()
+                    .code,
+                EchoErrorCode::InvalidScope
+            );
+        }
+        let stopped = AtomicBool::new(true);
+        assert_eq!(
+            trace_ipv4_echo("none", target, 3, &stopped, &|| true)
+                .unwrap_err()
+                .code,
+            EchoErrorCode::Cancelled
+        );
+        assert_eq!(
+            trace_ipv4_echo("none", target, 3, &active, &|| false)
+                .unwrap_err()
+                .code,
+            EchoErrorCode::Cancelled
+        );
+    }
+
     #[test]
     fn cancelled_scope_rejects_before_raw_socket() {
         let stop = AtomicBool::new(true);

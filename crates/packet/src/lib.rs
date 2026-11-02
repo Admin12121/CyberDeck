@@ -3,6 +3,7 @@
 
 pub mod active_arp;
 pub mod active_echo;
+pub mod active_echo6;
 pub mod active_ndp;
 pub mod active_syn;
 pub mod application;

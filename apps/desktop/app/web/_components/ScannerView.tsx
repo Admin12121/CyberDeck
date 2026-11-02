@@ -20,6 +20,7 @@ export function ScannerView() {
   const [job, setJob] = useState<WebAssessmentJob | null>(null);
   const [authorized, setAuthorized] = useState(false);
   const [postFormat, setPostFormat] = useState<"form" | "json">("form");
+  const [scanIntensity, setScanIntensity] = useState<"quick" | "standard" | "thorough">("standard");
   // Volatile input, never written to workspace drafts or SQLite.
   const [postTemplate, setPostTemplate] = useState("");
   const [postRiskApproved, setPostRiskApproved] = useState(false);
@@ -76,7 +77,8 @@ export function ScannerView() {
       const completed = await wb.trackOperation(
         kind === "active-query" ? "Web active query" :
         post ? "Web approved POST probe" : "Web scanner", async () => {
-        const id = await startWebAssessment(kind, stamp.target, true, 2, template);
+        const id = await startWebAssessment(kind, stamp.target, true, 2, template,
+          kind === "scanner" ? undefined : scanIntensity);
         if (context.current.revision === stamp.revision) setJobId(id);
         return waitForWebAssessment(id, (current) => {
           if (context.current.revision === stamp.revision &&
@@ -125,8 +127,19 @@ export function ScannerView() {
         ? <ToolButton tone="danger" onClick={() => void stop()}><Square size={12} /> Stop</ToolButton>
         : <ToolButton tone="primary" disabled={!desktop || !normalized || !authorized || running}
             onClick={() => void start("scanner")}><Play size={12} /> Start review</ToolButton>}
+      <label className="flex items-center gap-1 text-[11px] text-fg-muted">
+        Intensity
+        <select value={scanIntensity} disabled={running}
+          aria-label="Active scan intensity"
+          onChange={(event) => setScanIntensity(event.target.value as "quick" | "standard" | "thorough")}
+          className="rounded border border-line bg-panel px-1 py-0.5 text-fg">
+          <option value="quick">Quick · 1 mutation</option>
+          <option value="standard">Standard · 4 GET / 2 POST</option>
+          <option value="thorough">Thorough · 8 GET / 4 POST</option>
+        </select>
+      </label>
       <ToolButton disabled={!desktop || !normalized || !authorized || running || !hasQuery}
-        title="Send a baseline and up to eight inert GET parameter probes, only to the approved private origin"
+        title="Send a baseline and bounded inert GET parameter probes, only to the approved private origin"
         onClick={() => void start("active-query")}>
         <Play size={12} /> Test query parameters
       </ToolButton>
@@ -139,7 +152,7 @@ export function ScannerView() {
       Authorized target · native approval required
     </label>
     <div className="border-b border-line px-2 py-1 text-[10px] text-fg-muted">
-      Query probes send a baseline plus up to eight GETs with inert HTML-element markers, skip credential/CSRF-like parameters, and report potential markup reflection—not confirmed executable XSS. The URL must contain query parameters; native approval and private-address scope are mandatory.
+      Query probes send a baseline plus a bounded number of GET mutations according to intensity, skip credential/CSRF-like parameters, and report potential markup reflection—not confirmed executable XSS. The URL must contain query parameters; native approval and private-address scope are mandatory.
     </div>
     <div className="border-b border-line bg-panel px-2 py-2 text-[11px]">
       <div className="flex flex-wrap items-center gap-2">
@@ -156,7 +169,7 @@ export function ScannerView() {
           onClick={() => void start(postFormat === "form" ? "active-form" : "active-json")}>
           <Play size={12} /> Test POST fields
         </ToolButton>
-        <span className="text-fg-muted">Baseline + up to 4 mutations; pinned private target</span>
+        <span className="text-fg-muted">Baseline + intensity-limited mutations; pinned private target</span>
       </div>
       <textarea value={postTemplate} disabled={running}
         onChange={(e) => { setPostTemplate(e.target.value.slice(0, 2048)); setPostRiskApproved(false); }}

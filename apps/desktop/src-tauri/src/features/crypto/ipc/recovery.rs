@@ -263,7 +263,15 @@ fn start_recovery_with_wordlist(
     wordlist: PathBuf,
     emit: impl Fn(RecoveryEvent) + Send + 'static,
 ) -> Result<u64, String> {
-    start_recovery_with_wordlist_engine(state, session, request, wordlist, None, emit)
+    start_recovery_with_wordlist_engine(
+        state,
+        session,
+        request,
+        wordlist,
+        None,
+        embedded_hashcat::WordlistPreset::Plain,
+        emit,
+    )
 }
 
 /// Both engines share the exact same authoritative case/job/reveal lifecycle.
@@ -274,6 +282,7 @@ fn start_recovery_with_wordlist_engine(
     request: RecoveryRequest,
     wordlist: PathBuf,
     embedded_runtime: Option<PathBuf>,
+    preset: embedded_hashcat::WordlistPreset,
     emit: impl Fn(RecoveryEvent) + Send + 'static,
 ) -> Result<u64, String> {
     if embedded_runtime.is_some() {
@@ -330,6 +339,7 @@ fn start_recovery_with_wordlist_engine(
                     &wordlist,
                     runtime,
                     &token,
+                    preset,
                     progress_callback,
                 )
             } else {
@@ -586,6 +596,7 @@ pub fn recovery_hashcat_capabilities_v1(app: AppHandle) -> EmbeddedHashcatCapabi
 pub fn recovery_start_hashcat_v1(
     app: AppHandle,
     request: RecoveryRequest,
+    preset: Option<embedded_hashcat::WordlistPreset>,
     on_event: Channel<RecoveryEvent>,
     state: State<'_, RecoveryCtx>,
     session: State<'_, CaseSessionCtx>,
@@ -616,6 +627,7 @@ pub fn recovery_start_hashcat_v1(
         request,
         selected.path,
         Some(runtime),
+        preset.unwrap_or_default(),
         move |event| {
             let _ = on_event.send(event);
         },

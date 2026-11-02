@@ -172,6 +172,22 @@ pub(super) async fn run_active_query_with_progress(
     policy: Policy,
     on_progress: &impl Fn(usize, usize),
 ) -> Result<Vec<Finding>, String> {
+    run_active_query_with_budget(client, url, job_id, policy, MAX_PARAM_COUNT, on_progress).await
+}
+
+/// Explicit backend cap; never processes more positional mutations than
+/// the operator-approved scan intensity. Existing full mode is preserved.
+pub(super) async fn run_active_query_with_budget(
+    client: &Client,
+    url: Url,
+    job_id: u64,
+    policy: Policy,
+    max_mutations: usize,
+    on_progress: &impl Fn(usize, usize),
+) -> Result<Vec<Finding>, String> {
+    if max_mutations == 0 || max_mutations > MAX_PARAM_COUNT {
+        return Err("active query mutation budget must be 1–8".into());
+    }
     if url.as_str().len() > MAX_URL_BYTES
         || !matches!(url.scheme(), "http" | "https")
         || url.host_str().is_none()
@@ -184,14 +200,14 @@ pub(super) async fn run_active_query_with_progress(
         return Err("unsupported active rule policy".into());
     }
     let vectors = parameter_vectors(&url)?;
-    let total = vectors.len() + 1;
+    let total = vectors.len().min(max_mutations) + 1;
     on_progress(0, 0);
     let baseline = bounded_html(client, url.clone())
         .await?
         .ok_or("baseline must return HTTP 200 text/html")?;
     on_progress(1, 0);
     let mut found = Vec::new();
-    for (offset, vector) in vectors.iter().enumerate() {
+    for (offset, vector) in vectors.iter().take(max_mutations).enumerate() {
         let marker = format!("<cyberdeck-probe-{job_id:x}-{:x}>", vector.index);
         let mutated = single_mutation(&url, vector.index, &marker)?;
         // Preserve the exact approved origin, not merely a similar hostname.

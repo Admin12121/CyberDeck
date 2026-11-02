@@ -47,7 +47,7 @@ where
     )
 }
 
-/// Additive transport selection. Existing callers keep start() TCP semantics.
+/// Backward-compatible service API for existing native callers and tests.
 pub(super) fn start_with_transport<P, G, F>(
     ctx: &ScanCtx,
     transport: ScanTransport,
@@ -59,6 +59,41 @@ pub(super) fn start_with_transport<P, G, F>(
     on_progress: P,
     scope_is_active: G,
     save_findings: F,
+) -> Result<u64, String>
+where
+    P: Fn(ScanProgress) + Sync + Send + 'static,
+    G: Fn() -> bool + Sync + Send + 'static,
+    F: FnOnce(u64, &[ScanEntry], &[ScanObservation]) -> Result<usize, String> + Send + 'static,
+{
+    start_with_transport_guarded(
+        ctx,
+        transport,
+        scope,
+        hosts,
+        port_list,
+        targets,
+        ports,
+        on_progress,
+        scope_is_active,
+        save_findings,
+        None,
+    )
+}
+
+/// Production IPC keeps an exclusive active-operation lease for the entire
+/// native worker lifetime, including cancellation and durable finding writes.
+pub(super) fn start_with_transport_guarded<P, G, F>(
+    ctx: &ScanCtx,
+    transport: ScanTransport,
+    scope: CaseSessionWire,
+    hosts: Vec<IpAddr>,
+    port_list: Vec<u16>,
+    targets: String,
+    ports: String,
+    on_progress: P,
+    scope_is_active: G,
+    save_findings: F,
+    permit: Option<crate::features::network::ipc::operation_gate::OperationPermit>,
 ) -> Result<u64, String>
 where
     P: Fn(ScanProgress) + Sync + Send + 'static,
@@ -108,6 +143,9 @@ where
     let saved_out = Arc::clone(&ctx.saved_findings);
 
     std::thread::spawn(move || {
+        // The permit remains alive through every worker exit path. Its Drop
+        // releases network exclusivity even if the worker panics or is revoked.
+        let _active_operation = permit;
         let entries = scan_service::run_scan_into_scoped_transport(
             transport,
             hosts,
