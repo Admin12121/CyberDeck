@@ -189,10 +189,22 @@ const PUBLIC_KATS: &[(u32, &str, &str)] = &[
     (1700, "abc", "ddaf35a193617abacc417349ae20413112e6fa4e89a97ea20a9eeee64b55d39a2192992a274fc1a836ba3c23a3feebbd454d4423643ce80e2a9ac94fa54ca49f"),
     // Batch-1 KDF modes: vectors verified independently by our native Rust
     // engines (pwhash / john / Openwall published bcrypt vectors).
-    (400, "openwall", "$P$900000000m6YEJzWtTmNBBL4jypbHv1"),
     (500, "password", "$1$5pZSV9va$azfrPr6af3Fc7dLblQXVa0"),
     (1800, "test", "$6$G/gkPn17kHYo0gTF$xhDFU0QYExdMH2ghOWKrrVtu1BuTpNMSJURCXk43.EYekmK8iwV6RNqftUUC8mqDel1J7m3JEbUkbu4YyqSyv/"),
     (3200, "U*U", "$2a$05$CCCCCCCCCCCCCCCCCCCCC.E5YPO9kmyuRGyh0XouQYb4YMJKvyOeW"),
+    // Batch-2: salted digests + HMAC (independent Node-crypto vectors),
+    // Windows auth (john the Ripper vectors) and sha256crypt (pwhash).
+    (10, "cyberdeck", "c51d5447beddf60e68604ca2dbf4e6ad:4242"),
+    (20, "cyberdeck", "a944dd5c9a02c5bed3a4b175ac565d7c:4242"),
+    (50, "cyberdeck", "dc5b5ad28f4dd280463a5319b976bd50:4242"),
+    (60, "cyberdeck", "3de2a5579621deb8357374953c6a520d4779fc8a:4242"),
+    (110, "cyberdeck", "047564e24f0e65d25618c3369b98d9602219c03d:4242"),
+    (120, "cyberdeck", "0c0ae97e6246815bb0426ba6cff3093561f069b3:4242"),
+    (1100, "test1", "64cd29e36a8431a2b111378564a10631:test1"),
+    (2100, "test1", "$DCC2$10240#test1#607bbe89611e37446e736f7856515bf8"),
+    (5500, "g3rg3g3rg3g3rg3", "a::b:1122334455667788:000000000000000000000000000000000000000000000000:BFCCAF26128EC95F9999C9792F49434267A1D9B0EF89BFFB"),
+    (5600, "password", "NTLMV2TEST::WORKGROUP:1122334455667788:07659A550D5E9D02996DFD95C87EC1D5:0101000000000000006CF6385B74CA01B3610B02D99732DD000000000200120057004F0052004B00470052004F00550050000100200044004100540041002E00420049004E0043002D0053004500430055005200490000000000"),
+    (7400, "cyberdeck-kat-2026", "$5$CyberDeckKAT$kGyqS./awuvI5h4KB95ES/o9w3pxHqKFF8aBBpvSGvD"),
 ];
 type Readiness = Result<Vec<u32>, String>;
 static READINESS_CACHE: OnceLock<Mutex<HashMap<PathBuf, Readiness>>> = OnceLock::new();
@@ -357,13 +369,23 @@ pub(super) fn validate_embedded_request(request: &RecoveryRequest) -> Result<u32
     let mode = match request.algorithm.as_str() {
         "md5" => 0,
         "sha1" => 100,
-        "phpass" => 400,
         "md5crypt" => 500,
         "ntlm" => 1000,
         "sha256" => 1400,
         "sha512" => 1700,
         "sha512crypt" => 1800,
         "bcrypt" => 3200,
+        "md5-pass-salt" => 10,
+        "md5-salt-pass" => 20,
+        "hmac-md5" => 50,
+        "hmac-sha1" => 60,
+        "sha1-pass-salt" => 110,
+        "sha1-salt-pass" => 120,
+        "mscash" => 1100,
+        "mscash2" => 2100,
+        "netntlm-v1" => 5500,
+        "netntlm-v2" => 5600,
+        "sha256crypt" => 7400,
         _ => return Err("hash mode not bundled for embedded Hashcat".into()),
     };
     match RecoveryTarget::parse(&request.algorithm, &request.target_hash)? {
@@ -627,7 +649,7 @@ mod tests {
     use super::*;
     #[test]
     fn every_public_native_mode_fixture_is_independently_verifiable_without_gpu() {
-        assert_eq!(PUBLIC_KATS.len(), 9);
+        assert_eq!(PUBLIC_KATS.len(), 19);
         for &(mode, word, hash) in PUBLIC_KATS {
             let algorithm = match mode {
                 0 => "md5",
@@ -637,7 +659,15 @@ mod tests {
                 1700 => "sha512",
                 // KDF fixtures are verified through the KDF verifier, which
                 // derives the family from the modular string itself.
-                400 | 500 | 1800 | 3200 => "kdf",
+                500 | 1800 | 3200 | 2100 | 5500 | 5600 | 7400 => "kdf",
+                // Hint-driven composed targets: the wire shape is ambiguous.
+                10 => "md5-pass-salt",
+                20 => "md5-salt-pass",
+                50 => "hmac-md5",
+                60 => "hmac-sha1",
+                110 => "sha1-pass-salt",
+                120 => "sha1-salt-pass",
+                1100 => "mscash",
                 _ => panic!("invalid pinned Hashcat self-test mode"),
             };
             let target = if algorithm == "kdf" {

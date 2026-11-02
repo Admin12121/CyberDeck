@@ -62,8 +62,13 @@ if (mode === "--import") {
   // The complete host EMU object family uses almost all common inc_ sources,
   // not only the kernel for hash mode 1400.
   dirFiles("OpenCL", (name) => /^inc_.*\.(?:h|cl)$/.test(name));
+  // Raw digest modules: one kernel triplet per bundled mode.
+  for (const mode of ["00000", "00100", "01000", "01400", "01700"]) {
+    for (const id of ["a0", "a1", "a3"]) {
+      add("OpenCL/m" + mode + "_" + id + "-optimized.cl");
+    }
+  }
   for (const id of ["a0", "a1", "a3"]) {
-    add("OpenCL/m01400_" + id + "-optimized.cl");
     add("OpenCL/amp_" + id + ".cl");
   }
   // Upstream source initialization requires this generic recipe kernel even
@@ -72,13 +77,24 @@ if (mode === "--import") {
   // Upstream initializes its default module 00000 before switching to 1400.
   // It is a native bootstrap dependency, not an exposed CyberDeck mode.
   add("src/modules/module_00000.c");
+  add("src/modules/module_00100.c");
+  add("src/modules/module_01000.c");
   add("src/modules/module_01400.c");
+  add("src/modules/module_01700.c");
   // Batch-1 KDF/raw modes: phpass, md5crypt, sha512crypt, bcrypt. Modules and
   // kernels are upstream MIT files used verbatim; inc_* dependencies are
   // already included wholesale above.
   for (const mode of ["00400", "00500", "01800", "03200"]) {
     add("src/modules/module_" + mode + ".c");
   }
+  // Batch-2 modes: salted digests (10/20/110/120), HMAC (50/60), Windows auth
+  // (1100/2100/5500/5600) and sha256crypt (7400).
+  for (const mode of ["00010", "00020", "00050", "00060", "00110", "00120",
+                      "01100", "02100", "05500", "05600", "07400"]) {
+    add("src/modules/module_" + mode + ".c");
+  }
+  dirFiles("OpenCL", (name) =>
+    /^m(00010|00020|00050|00060|00110|00120|01100|02100|05500|05600|07400)[-_a-z0-9]*\.cl$/.test(name));
   for (const kernel of [
     "OpenCL/m00400-optimized.cl",
     "OpenCL/m00500-optimized.cl",

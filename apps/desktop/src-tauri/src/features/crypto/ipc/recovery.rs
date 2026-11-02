@@ -779,13 +779,23 @@ fn bundled_hashcat_modes() -> Vec<EmbeddedHashcatMode> {
     [
         ("md5", 0, 32),
         ("sha1", 100, 40),
-        ("phpass", 400, 0),
         ("md5crypt", 500, 0),
         ("ntlm", 1000, 32),
         ("sha256", 1400, 64),
         ("sha512", 1700, 128),
         ("sha512crypt", 1800, 0),
         ("bcrypt", 3200, 0),
+        ("md5-pass-salt", 10, 0),
+        ("md5-salt-pass", 20, 0),
+        ("hmac-md5", 50, 0),
+        ("hmac-sha1", 60, 0),
+        ("sha1-pass-salt", 110, 0),
+        ("sha1-salt-pass", 120, 0),
+        ("mscash", 1100, 0),
+        ("mscash2", 2100, 0),
+        ("netntlm-v1", 5500, 0),
+        ("netntlm-v2", 5600, 0),
+        ("sha256crypt", 7400, 0),
     ]
     .into_iter()
     .map(|(algorithm, mode, digest_hex_length)| EmbeddedHashcatMode {

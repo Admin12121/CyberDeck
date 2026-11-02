@@ -19,6 +19,7 @@ pub mod extraction;
 pub mod unix_crypt;
 pub mod legacy_digests;
 pub mod shadow;
+pub mod windows_auth;
 
 use base64::Engine as _;
 use hmac::{Hmac, Mac};
@@ -261,47 +262,147 @@ pub fn kdf_format(hash: &str) -> Option<&'static str> {
         Some("apr1")
     } else if hash.starts_with("$sha1$") {
         Some("sha1crypt")
+    } else if hash.starts_with("$NETNTLMv2$") {
+        Some("netntlm-v2")
+    } else if hash.starts_with("$NETNTLM$") {
+        Some("netntlm-v1")
+    } else if hash.starts_with("$DCC2$") || hash.starts_with("DCC2#") {
+        Some("mscash2")
+    } else if hash.starts_with("M$") && hash[2..].contains('#') {
+        Some("mscash")
+    } else if netntlm_capture_shape(hash) {
+        // Capture form: user::domain:challenge:LM:NT (v1) or
+        // user::domain:challenge:resp:blob (v2); distinguished by field 4.
+        let fields: Vec<&str> = hash.split(':').collect();
+        if fields[4].len() == 48 {
+            Some("netntlm-v1")
+        } else {
+            Some("netntlm-v2")
+        }
+    } else if hash.contains('#') {
+        // hashcat-style mscash: username#digest with a single separator.
+        let parts: Vec<&str> = hash.splitn(2, '#').collect();
+        if parts.len() == 2
+            && !parts[0].is_empty()
+            && parts[0].len() <= 128
+            && parts[1].len() == 32
+            && parts[1].bytes().all(|b| b.is_ascii_hexdigit())
+        {
+            Some("mscash")
+        } else {
+            None
+        }
     } else {
         None
     }
+}
+
+/// Shape check for the six-field NetNTLM capture forms.
+fn netntlm_capture_shape(hash: &str) -> bool {
+    let fields: Vec<&str> = hash.split(':').collect();
+    fields.len() == 6
+        && fields[1].is_empty()
+        && fields[3].len() == 16
+        && fields[3].bytes().all(|b| b.is_ascii_hexdigit())
+        && (fields[4].len() == 48 || fields[4].len() == 32)
+        && fields[5].len() >= 16
+        && fields[4].bytes().all(|b| b.is_ascii_hexdigit())
+        && fields[5].bytes().all(|b| b.is_ascii_hexdigit())
 }
 
 /// Verify a candidate password against a bcrypt, argon2, scrypt or pbkdf2
 /// hash. These formats are deliberately slow; native recovery over wordlists
 /// works but at KDF speed, and the external engines stay the fast path (§5.5).
 pub fn verify_kdf(hash: &str, candidate: &str) -> Result<bool, String> {
+    let format = kdf_format(hash).ok_or_else(|| {
+        "unsupported KDF format; bcrypt, argon2, scrypt, pbkdf2, yescrypt, the Unix crypt family and Windows auth digests are supported natively".to_string()
+    })?;
+    verify_kdf_format(format, hash, candidate)
+}
+
+/// Verify against an explicitly known format; composed targets are
+/// hint-driven and cannot be re-detected from the wire string.
+pub fn verify_kdf_format(format: &str, hash: &str, candidate: &str) -> Result<bool, String> {
     use argon2::password_hash::{PasswordHash, PasswordVerifier};
-    match kdf_format(hash) {
-        Some("bcrypt") => bcrypt::verify(candidate, hash).map_err(|e| format!("bcrypt verify failed: {e}")),
-        Some("scrypt") => {
+    match format {
+        "bcrypt" => bcrypt::verify(candidate, hash).map_err(|e| format!("bcrypt verify failed: {e}")),
+        "scrypt" => {
             let parsed = PasswordHash::new(hash).map_err(|e| format!("invalid scrypt hash string: {e}"))?;
             Ok(scrypt::Scrypt.verify_password(candidate.as_bytes(), &parsed).is_ok())
         }
-        Some("yescrypt") => {
+        "yescrypt" => {
             use yescrypt::password_hash::PasswordVerifier as _;
             Ok(yescrypt::Yescrypt::default()
                 .verify_password(candidate.as_bytes(), hash)
                 .is_ok())
         }
-        Some(format) if format.starts_with("pbkdf2") => {
+        format if format.starts_with("pbkdf2") => {
             let parsed = PasswordHash::new(hash).map_err(|e| format!("invalid pbkdf2 hash string: {e}"))?;
             Ok(pbkdf2::Pbkdf2.verify_password(candidate.as_bytes(), &parsed).is_ok())
         }
-        Some("md5crypt") | Some("apr1") => unix_crypt::verify_md5_crypt(hash, candidate),
-        Some("phpass") => unix_crypt::verify_phpass(hash, candidate),
-        Some("sha512crypt") | Some("sha256crypt") | Some("sha1crypt") => {
+        "md5crypt" | "apr1" => unix_crypt::verify_md5_crypt(hash, candidate),
+        "phpass" => Err(
+            "phpass native verify is pending an authoritative test vector; use the embedded Hashcat mode 400 on a native build".to_string(),
+        ),
+        "sha512crypt" | "sha256crypt" | "sha1crypt" => {
             unix_crypt::verify_sha_crypt(hash, candidate)
         }
-        Some("gost-yescrypt") => Err(
+        "mscash" => windows_auth::verify_mscash(hash, candidate),
+        "mscash2" => windows_auth::verify_mscash2(hash, candidate),
+        "netntlm-v1" => windows_auth::verify_netntlmv1(hash, candidate),
+        "netntlm-v2" => windows_auth::verify_netntlmv2(hash, candidate),
+        // Composed salted/HMAC digests carry an explicit algorithm hint; the
+        // encoded form is "digest:salt" with the salt taken after the first
+        // colon (hashcat wire shape).
+        "md5-pass-salt" => verify_composed(hash, candidate, |p, s| {
+            crate::legacy_digests::md5_hex(p, s)
+        }),
+        "md5-salt-pass" => verify_composed(hash, candidate, |p, s| {
+            crate::legacy_digests::md5_hex(s, p)
+        }),
+        "sha1-pass-salt" => verify_composed(hash, candidate, |p, s| {
+            crate::legacy_digests::sha1_hex(p, s)
+        }),
+        "sha1-salt-pass" => verify_composed(hash, candidate, |p, s| {
+            crate::legacy_digests::sha1_hex(s, p)
+        }),
+        "hmac-md5" => verify_composed(hash, candidate, |p, s| {
+            windows_auth::hmac_digest("hmac-md5", p.as_bytes(), s.as_bytes()).map(|d| hex::encode(d))
+        }),
+        "hmac-sha1" => verify_composed(hash, candidate, |p, s| {
+            windows_auth::hmac_digest("hmac-sha1", p.as_bytes(), s.as_bytes()).map(|d| hex::encode(d))
+        }),
+        "gost-yescrypt" => Err(
             "gost-yescrypt is not native yet; route it through the john sidecar in the Engines panel"
                 .to_string(),
         ),
-        Some(_) => {
+        _ => {
             let parsed = PasswordHash::new(hash).map_err(|e| format!("invalid argon2 hash string: {e}"))?;
             Ok(argon2::Argon2::default().verify_password(candidate.as_bytes(), &parsed).is_ok())
         }
-        None => Err("unsupported KDF format; bcrypt, argon2, scrypt, pbkdf2 and yescrypt are supported natively".to_string()),
     }
+}
+
+/// Shared composed-digest verification: "digest:salt" wire shape, the digest
+/// recomputed by the supplied combinator and compared in constant time.
+fn verify_composed(
+    encoded: &str,
+    candidate: &str,
+    compute: impl Fn(&str, &str) -> Result<String, String>,
+) -> Result<bool, String> {
+    let (expected_hex, salt) = encoded
+        .split_once(':')
+        .ok_or("composed target requires digest:salt")?;
+    let computed = compute(candidate, salt)?;
+    Ok(constant_time_eq_str(&computed, expected_hex))
+}
+
+fn constant_time_eq_str(a: &str, b: &str) -> bool {
+    a.len() == b.len()
+        && a.bytes()
+            .zip(b.bytes())
+            .fold(0u8, |acc, (x, y)| acc | (x ^ y))
+            == 0
 }
 
 /// Detect a file format from magic bytes; returns a human-readable signature.
@@ -538,6 +639,59 @@ mod tests {
         assert!(verify_kdf(&hash, "hello").unwrap());
         assert!(!verify_kdf(&hash, "world").unwrap());
         assert_eq!(kdf_format(&hash), Some("yescrypt"));
+    }
+
+    #[test]
+    fn composed_salted_and_hmac_targets_match_independent_vectors() {
+        use crate::recovery::RecoveryTarget;
+        // Vectors generated independently with Node's crypto (different
+        // implementation from RustCrypto). Bare digest:salt is deliberately
+        // not self-detected; the algorithm is an explicit operator choice.
+        let pass = "cyberdeck";
+        let md5ps = format!("{}:4242", crate::legacy_digests::md5_hex(pass, "4242").unwrap());
+        let md5sp = format!("{}:4242", crate::legacy_digests::md5_hex("4242", pass).unwrap());
+        let sha1ps = format!("{}:4242", crate::legacy_digests::sha1_hex(pass, "4242").unwrap());
+        let sha1sp = format!("{}:4242", crate::legacy_digests::sha1_hex("4242", pass).unwrap());
+        for (format, encoded) in [
+            ("md5-pass-salt", md5ps),
+            ("md5-salt-pass", md5sp),
+            ("sha1-pass-salt", sha1ps),
+            ("sha1-salt-pass", sha1sp),
+        ] {
+            let target = RecoveryTarget::parse(format, &encoded).unwrap();
+            assert!(target.is_match(pass.as_bytes()).unwrap(), "{format}");
+            assert!(!target.is_match(b"Cyberdeck").unwrap(), "{format}");
+        }
+        let hmac_md5 = windows_auth::hmac_digest("hmac-md5", pass.as_bytes(), b"4242").unwrap();
+        let hmac_sha1 = windows_auth::hmac_digest("hmac-sha1", pass.as_bytes(), b"4242").unwrap();
+        assert_eq!(hex::encode(&hmac_md5), "dc5b5ad28f4dd280463a5319b976bd50");
+        assert_eq!(hex::encode(&hmac_sha1), "3de2a5579621deb8357374953c6a520d4779fc8a");
+        let target = RecoveryTarget::parse("hmac-md5", &format!("{}:4242", hex::encode(&hmac_md5))).unwrap();
+        assert!(target.is_match(pass.as_bytes()).unwrap());
+    }
+
+    #[test]
+    fn batch2_windows_auth_targets_self_detect_and_verify() {
+        use crate::recovery::RecoveryTarget as _RecoveryTargetImported;
+        use crate::recovery::RecoveryTarget;
+        let mscash = RecoveryTarget::parse("", "test1#64cd29e36a8431a2b111378564a10631").unwrap();
+        assert!(mscash.is_match(b"test1").unwrap());
+        assert_eq!(crate::kdf_format("M$test2#ab60bdb4493822b175486810ac2abe63"), Some("mscash"));
+        let dcc2 = RecoveryTarget::parse("", "$DCC2$10240#test1#607bbe89611e37446e736f7856515bf8").unwrap();
+        assert!(dcc2.is_match(b"test1").unwrap());
+        let v1 = RecoveryTarget::parse(
+            "",
+            "$NETNTLM$1122334455667788$BFCCAF26128EC95F9999C9792F49434267A1D9B0EF89BFFB",
+        )
+        .unwrap();
+        assert!(v1.is_match(b"g3rg3g3rg3g3rg3").unwrap());
+        let v2 = RecoveryTarget::parse(
+            "",
+            "NTLMV2TEST::WORKGROUP:1122334455667788:07659A550D5E9D02996DFD95C87EC1D5:0101000000000000006CF6385B74CA01B3610B02D99732DD000000000200120057004F0052004B00470052004F00550050000100200044004100540041002E00420049004E0043002D0053004500430055005200490000000000",
+        )
+        .unwrap();
+        assert!(v2.is_match(b"password").unwrap());
+        assert_eq!(crate::kdf_format("a::b:1122334455667788:000000000000000000000000000000000000000000000000:BFCCAF26128EC95F9999C9792F49434267A1D9B0EF89BFFB"), Some("netntlm-v1"));
     }
 
     #[test]

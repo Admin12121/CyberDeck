@@ -157,9 +157,14 @@ int cd_hashcat_prepare_mode (
   if (max_candidates == 0 || max_candidates > 1000000
       || runtime_seconds == 0 || runtime_seconds > 300
       || device_id > 128) return -2;
-  if (hash_mode != 0 && hash_mode != 100 && hash_mode != 400 && hash_mode != 500
-      && hash_mode != 1000 && hash_mode != 1400 && hash_mode != 1700
-      && hash_mode != 1800 && hash_mode != 3200) return -2;
+  switch (hash_mode) {
+    case 0: case 10: case 20: case 50: case 60: case 100: case 110: case 120:
+    case 500: case 1000: case 1400: case 1700: case 1800: case 3200: case 7400:
+    case 1100: case 2100: case 5500: case 5600:
+      break;
+    default:
+      return -2;
+  }
   snprintf (handle->hash_mode_option, sizeof (handle->hash_mode_option), "--hash-type=%u", hash_mode);
 
   snprintf (handle->candidate_limit, sizeof (handle->candidate_limit), "%llu",

@@ -1,5 +1,5 @@
 //! Native bounded offline recovery engine. No external tool execution or secret persistence.
-use crate::{apply_op, kdf_format, verify_kdf};
+use crate::{apply_op, kdf_format, verify_kdf, verify_kdf_format};
 use serde::Serialize;
 
 pub const MAX_FAST_CANDIDATES: u64 = 10_000_000;
@@ -160,7 +160,45 @@ impl RecoveryTarget {
         if text.is_empty() {
             return Err("target is empty".into());
         }
-        if let Some(format) = kdf_format(text) {
+        // Composed salted/HMAC digests are hint-driven: "digest:salt" wire shape.
+    const COMPOSED: &[(&str, usize)] = &[
+        ("md5-pass-salt", 32),
+        ("md5-salt-pass", 32),
+        ("sha1-pass-salt", 40),
+        ("sha1-salt-pass", 40),
+        ("hmac-md5", 32),
+        ("hmac-sha1", 40),
+    ];
+    if let Some((_, digest_len)) = COMPOSED.iter().find(|(name, _)| *name == algo) {
+        let (digest_hex, salt) = text
+            .split_once(':')
+            .ok_or("composed target requires digest:salt")?;
+        if digest_hex.len() != *digest_len || !digest_hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Err(format!(
+                "{algo} digest must be {} hex characters",
+                digest_len
+            ));
+        }
+        if salt.is_empty() || salt.len() > 256 {
+            return Err("composed salt must be 1..=256 characters".into());
+        }
+        return Ok(Self::Kdf {
+            format: Box::leak(algo.to_ascii_lowercase().into_boxed_str()),
+            encoded: text.to_string(),
+        });
+    }
+    // mscash is hint-driven when the wire shape is "digest:salt" (hashcat);
+    // the tagged "user#digest" and "M$user#digest" shapes self-detect.
+    if algo == "mscash" {
+        if !(text.contains('#') || text.contains(':')) {
+            return Err("mscash target requires user#digest or digest:salt".into());
+        }
+        return Ok(Self::Kdf {
+            format: "mscash",
+            encoded: text.to_string(),
+        });
+    }
+    if let Some(format) = kdf_format(text) {
             match format {
                 "bcrypt" => {
                     let cost: u32 = text
@@ -197,15 +235,30 @@ impl RecoveryTarget {
                 "md5crypt" | "apr1" => {
                     super::unix_crypt::validate_md5_crypt(text)?;
                 }
-                "phpass" => {
-                    // Shape validation only; verify_phpass enforces the rest.
-                    let body = &text[3..];
-                    if !(text.starts_with("$P$") || text.starts_with("$H$"))
-                        || body.len() != 31
-                        || !body.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'/')
-                    {
-                        return Err("invalid phpass encoding".into());
+                "mscash" => {
+                    if !text.contains('#') {
+                        return Err("invalid mscash encoding".into());
                     }
+                }
+                "mscash2" => {
+                    let iter = text
+                        .strip_prefix("$DCC2$")
+                        .and_then(|rest| rest.split('#').next())
+                        .and_then(|iter| iter.parse::<u32>().ok())
+                        .unwrap_or(10240);
+                    if !(1..=100_000).contains(&iter) {
+                        return Err("mscash2 iterations exceed the recovery policy cap".into());
+                    }
+                }
+                "netntlm-v1" | "netntlm-v2" => {
+                    // Field shapes are enforced by the verifiers on match;
+                    // nothing secret is computed at parse time.
+                }
+                "phpass" => {
+                    return Err(
+                        "phpass native recovery is pending an authoritative test vector"
+                            .into(),
+                    )
                 }
                 "sha512crypt" | "sha256crypt" | "sha1crypt" => {
                     super::unix_crypt::validate_sha_crypt(text)?;
@@ -313,10 +366,10 @@ impl RecoveryTarget {
                     .fold(0u8, |acc, (a, b)| acc | (a ^ b));
                 Ok((diff == 0).then_some(0))
             }
-            Self::Kdf { encoded, .. } => {
+            Self::Kdf { format, encoded } => {
                 let value =
                     std::str::from_utf8(candidate).map_err(|_| "KDF candidate is not UTF-8")?;
-                Ok(verify_kdf(encoded, value)?.then_some(0))
+                Ok(verify_kdf_format(format, encoded, value)?.then_some(0))
             }
             Self::Multi(targets) => {
                 for (ordinal, target) in targets.iter().enumerate() {

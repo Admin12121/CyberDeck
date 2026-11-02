@@ -28,13 +28,23 @@ import {
 const EMBEDDED_MODES: readonly { value: HashcatRawAlgorithmV1; label: string; digits: number }[] = [
   { value: "md5", label: "MD5 · mode 0", digits: 32 },
   { value: "sha1", label: "SHA-1 · mode 100", digits: 40 },
-  { value: "phpass", label: "phpass (WordPress/phpBB) · mode 400", digits: 0 },
   { value: "md5crypt", label: "md5crypt $1$/$apr1$ · mode 500", digits: 0 },
   { value: "ntlm", label: "NTLM · mode 1000", digits: 32 },
   { value: "sha256", label: "SHA-256 · mode 1400", digits: 64 },
   { value: "sha512", label: "SHA-512 · mode 1700", digits: 128 },
   { value: "sha512crypt", label: "sha512crypt $6$ · mode 1800", digits: 0 },
   { value: "bcrypt", label: "bcrypt $2*$ · mode 3200", digits: 0 },
+  { value: "sha256crypt", label: "sha256crypt $5$ · mode 7400", digits: 0 },
+  { value: "md5-pass-salt", label: "md5($pass.$salt) · mode 10", digits: 0 },
+  { value: "md5-salt-pass", label: "md5($salt.$pass) · mode 20", digits: 0 },
+  { value: "sha1-pass-salt", label: "sha1($pass.$salt) · mode 110", digits: 0 },
+  { value: "sha1-salt-pass", label: "sha1($salt.$pass) · mode 120", digits: 0 },
+  { value: "hmac-md5", label: "HMAC-MD5 (key = pass) · mode 50", digits: 0 },
+  { value: "hmac-sha1", label: "HMAC-SHA1 (key = pass) · mode 60", digits: 0 },
+  { value: "mscash", label: "mscash / DCC1 · mode 1100", digits: 0 },
+  { value: "mscash2", label: "mscash2 / DCC2 · mode 2100", digits: 0 },
+  { value: "netntlm-v1", label: "NetNTLMv1 · mode 5500", digits: 0 },
+  { value: "netntlm-v2", label: "NetNTLMv2 · mode 5600", digits: 0 },
 ];
 const RUST_MODES: readonly { value: RecoveryRawAlgorithmV1; label: string; digits: number }[] = [
   ...EMBEDDED_MODES,
@@ -105,7 +115,7 @@ function useRecoveryController(targetHash: string, onCaseCreated?: (caseId: stri
     if (engineChoice === "hashcat") {
       const kdfSuggestion: Partial<Record<string, HashcatRawAlgorithmV1>> = {
         "$6$": "sha512crypt", "$1$": "md5crypt", "$apr1$": "md5crypt",
-        "$P$": "phpass", "$H$": "phpass", "$2a$": "bcrypt", "$2b$": "bcrypt", "$2y$": "bcrypt",
+        "$2a$": "bcrypt", "$2b$": "bcrypt", "$2y$": "bcrypt",
       };
       const match = Object.entries(kdfSuggestion).find(([prefix]) => hash.startsWith(prefix));
       if (match && match[1]) {

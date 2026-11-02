@@ -29,7 +29,7 @@ const capabilities = JSON.parse(readFileSync(capabilityPath, "utf8"));
 if (capabilities.schema !== 1 ||
     capabilities.source_commit !== "1994b513b550edfe3e7fcaa1103759a9343e57a4" ||
     capabilities.abi_version !== 4 ||
-    capabilities.hash_modes.map(x => x.id).join(",") !== "0,100,400,500,1000,1400,1700,1800,3200") {
+    capabilities.hash_modes.map(x => x.id).join(",") !== "0,10,20,50,60,100,110,120,500,1000,1100,1400,1700,1800,2100,3200,5500,5600,7400") {
   throw new Error("embedded Hashcat capability manifest conflicts with pinned C/worker contract");
 }
 const argIndex = process.argv.indexOf("--out");
@@ -96,13 +96,23 @@ const library = process.platform === "win32" ? "hashcat.dll" :
 const supportedModes = [
   { id: 0, algorithm: "md5" },
   { id: 100, algorithm: "sha1" },
-  { id: 400, algorithm: "phpass" },
   { id: 500, algorithm: "md5crypt" },
   { id: 1000, algorithm: "ntlm" },
   { id: 1400, algorithm: "sha256" },
   { id: 1700, algorithm: "sha512" },
   { id: 1800, algorithm: "sha512crypt" },
   { id: 3200, algorithm: "bcrypt" },
+  { id: 10, algorithm: "md5-pass-salt" },
+  { id: 20, algorithm: "md5-salt-pass" },
+  { id: 50, algorithm: "hmac-md5" },
+  { id: 60, algorithm: "hmac-sha1" },
+  { id: 110, algorithm: "sha1-pass-salt" },
+  { id: 120, algorithm: "sha1-salt-pass" },
+  { id: 1100, algorithm: "mscash" },
+  { id: 2100, algorithm: "mscash2" },
+  { id: 5500, algorithm: "netntlm-v1" },
+  { id: 5600, algorithm: "netntlm-v2" },
+  { id: 7400, algorithm: "sha256crypt" },
 ];
 const moduleNames = supportedModes.map(({ id }) =>
   "module_" + String(id).padStart(5, "0") +

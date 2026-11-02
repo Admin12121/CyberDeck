@@ -15,7 +15,8 @@ test("Normal desktop build owns version-pinned C/shim/Rust-worker source graph",
   assert.ok(build.includes('tauri_build::build()'));
   assert.ok(build.includes('"--install"'));
   assert.equal(manifest.commit, "1994b513b550edfe3e7fcaa1103759a9343e57a4");
-  assert.equal(Object.keys(manifest.files).length, 577);
+  // Vendored set grows with each bundled-mode batch (batch-1 KDF modes added).
+  assert.equal(Object.keys(manifest.files).length, 636);
   assert.ok(manifest.files["src/modules/module_00000.c"], "upstream startup dependency must be pinned");
   assert.ok(manifest.files["src/modules/module_01400.c"], "SHA-256 selected mode must be pinned");
   assert.ok(manifest.files["src/modules/module_01000.c"], "NTLM module must be pinned to upstream");
@@ -26,7 +27,7 @@ test("Normal desktop build owns version-pinned C/shim/Rust-worker source graph",
 
   assert.ok(manifest.files["OpenCL/m04000-pure.cl"], "required upstream startup kernel must be pinned");
   const caps = JSON.parse(read(hc + "/capability-manifest.json"));
-  assert.deepEqual(caps.hash_modes.map(({id}) => id), [0,100,1000,1400,1700]);
+  assert.deepEqual(caps.hash_modes.map(({id}) => id), [0,10,20,50,60,100,110,120,500,1000,1100,1400,1700,1800,2100,3200,5500,5600,7400]);
   assert.ok(caps.hash_modes.every(({hardware_verified}) => hardware_verified === false));
   assert.ok(caps.attack_modes.every(({id}) => id === 0), "only wordlist currently worker-connected");
   assert.ok(native.includes('modulePaths'), "every selected module must be compiled");
@@ -77,7 +78,7 @@ test("Hashcat opt-in preserves native Rust as default and masked-result IPC", ()
   assert.ok(ipc.includes('"recovery_hashcat_capabilities_v1"'));
   assert.ok(ui.includes('useState<"rust" | "hashcat">("rust")'));
   assert.ok(ui.includes('recoveryStartHashcatV1'));
-  assert.match(ui, /engineChoice === "hashcat" && !isKdfHash\s*\? await recoveryStartHashcatV1\(request, onEvent, hashcatPreset\)/);
+  assert.match(ui, /engineChoice === "hashcat"\s*\? await recoveryStartHashcatV1\(request, onEvent, hashcatPreset\)/);
   assert.ok(ui.includes("await recoveryStartV1(request, onEvent, isKdfHash ? undefined : ruleText, ruleSetId)"), "native Rust must remain the distinct streamed wordlist/rules fallback");
   assert.ok(ui.includes('hashcatCapability?.available'));
   assert.ok(ui.includes("GPU detection,"));

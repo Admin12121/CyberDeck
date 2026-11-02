@@ -28,6 +28,42 @@
       "desktop_routed": true
     },
     {
+      "id": 10,
+      "algorithm": "md5-pass-salt",
+      "digest_hex_length": 0,
+      "source_build": true,
+      "desktop_available": false,
+      "hardware_verified": false,
+      "desktop_routed": true
+    },
+    {
+      "id": 20,
+      "algorithm": "md5-salt-pass",
+      "digest_hex_length": 0,
+      "source_build": true,
+      "desktop_available": false,
+      "hardware_verified": false,
+      "desktop_routed": true
+    },
+    {
+      "id": 50,
+      "algorithm": "hmac-md5",
+      "digest_hex_length": 0,
+      "source_build": true,
+      "desktop_available": false,
+      "hardware_verified": false,
+      "desktop_routed": true
+    },
+    {
+      "id": 60,
+      "algorithm": "hmac-sha1",
+      "digest_hex_length": 0,
+      "source_build": true,
+      "desktop_available": false,
+      "hardware_verified": false,
+      "desktop_routed": true
+    },
+    {
       "id": 100,
       "algorithm": "sha1",
       "digest_hex_length": 40,
@@ -37,8 +73,17 @@
       "desktop_routed": true
     },
     {
-      "id": 400,
-      "algorithm": "phpass",
+      "id": 110,
+      "algorithm": "sha1-pass-salt",
+      "digest_hex_length": 0,
+      "source_build": true,
+      "desktop_available": false,
+      "hardware_verified": false,
+      "desktop_routed": true
+    },
+    {
+      "id": 120,
+      "algorithm": "sha1-salt-pass",
       "digest_hex_length": 0,
       "source_build": true,
       "desktop_available": false,
@@ -58,6 +103,15 @@
       "id": 1000,
       "algorithm": "ntlm",
       "digest_hex_length": 32,
+      "source_build": true,
+      "desktop_available": false,
+      "hardware_verified": false,
+      "desktop_routed": true
+    },
+    {
+      "id": 1100,
+      "algorithm": "mscash",
+      "digest_hex_length": 0,
       "source_build": true,
       "desktop_available": false,
       "hardware_verified": false,
@@ -91,8 +145,44 @@
       "desktop_routed": true
     },
     {
+      "id": 2100,
+      "algorithm": "mscash2",
+      "digest_hex_length": 0,
+      "source_build": true,
+      "desktop_available": false,
+      "hardware_verified": false,
+      "desktop_routed": true
+    },
+    {
       "id": 3200,
       "algorithm": "bcrypt",
+      "digest_hex_length": 0,
+      "source_build": true,
+      "desktop_available": false,
+      "hardware_verified": false,
+      "desktop_routed": true
+    },
+    {
+      "id": 5500,
+      "algorithm": "netntlm-v1",
+      "digest_hex_length": 0,
+      "source_build": true,
+      "desktop_available": false,
+      "hardware_verified": false,
+      "desktop_routed": true
+    },
+    {
+      "id": 5600,
+      "algorithm": "netntlm-v2",
+      "digest_hex_length": 0,
+      "source_build": true,
+      "desktop_available": false,
+      "hardware_verified": false,
+      "desktop_routed": true
+    },
+    {
+      "id": 7400,
+      "algorithm": "sha256crypt",
       "digest_hex_length": 0,
       "source_build": true,
       "desktop_available": false,

@@ -58,13 +58,23 @@ export type RecoveryBackendV1 =
 export type HashcatRawAlgorithmV1 =
   | "md5"
   | "sha1"
-  | "phpass"
   | "md5crypt"
   | "ntlm"
   | "sha256"
   | "sha512"
   | "sha512crypt"
-  | "bcrypt";
+  | "bcrypt"
+  | "md5-pass-salt"
+  | "md5-salt-pass"
+  | "hmac-md5"
+  | "hmac-sha1"
+  | "sha1-pass-salt"
+  | "sha1-salt-pass"
+  | "mscash"
+  | "mscash2"
+  | "netntlm-v1"
+  | "netntlm-v2"
+  | "sha256crypt";
 /** Native Rust CPU digest coverage (embedded Hashcat is raw 5 modes only). */
 export type RecoveryRawAlgorithmV1 =
   | HashcatRawAlgorithmV1

@@ -64,6 +64,22 @@ pub fn mysql5_digest(password: &[u8]) -> [u8; 20] {
     Sha1::digest(inner).into()
 }
 
+/// md5 over the concatenation of two byte strings (salted digest family).
+pub fn md5_hex(a: &str, b: &str) -> Result<String, String> {
+    use md5::Digest as _;
+    Ok(hex::encode(<md5::Md5 as md5::Digest>::digest(
+        [a.as_bytes(), b.as_bytes()].concat(),
+    )))
+}
+
+/// sha1 over the concatenation of two byte strings (salted digest family).
+pub fn sha1_hex(a: &str, b: &str) -> Result<String, String> {
+    use sha2::Digest as _;
+    Ok(hex::encode(sha1::Sha1::digest(
+        [a.as_bytes(), b.as_bytes()].concat(),
+    )))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
