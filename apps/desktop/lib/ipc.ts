@@ -1497,6 +1497,19 @@ export interface SynFindingWire {
   reason: string;
   elapsed_ms: number;
 }
+/** Bounded native Linux IPv6 link-local TCP SYN scanner with 8 in-flight probes. */
+export async function netscanSyn6StartV1(
+  targets: string, ports: string, interfaceName: string, authorized: boolean,
+  onProgress?: (p: ScanProgressWire) => void,
+): Promise<SynFindingWire[]> {
+  if (!inTauri) throw new Error("Native IPv6 SYN scanning requires the desktop runtime");
+  const channel = new Channel<ScanProgressWire>();
+  if (onProgress) channel.onmessage = onProgress;
+  return invoke<SynFindingWire[]>("netscan_syn6_start_v1", {
+    targets, ports, interfaceName, authorized, onProgress: channel,
+  });
+}
+
 export async function netscanSynStartV1(
   targets: string, ports: string, interfaceName: string, authorized: boolean,
   onProgress?: (p: ScanProgressWire) => void,

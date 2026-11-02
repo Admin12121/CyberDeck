@@ -308,6 +308,62 @@ pub(super) fn remote_software_claim(raw: &str) -> Option<String> {
     None
 }
 
+/// Remote-controlled protocol/version claims from complete first-read
+/// greetings. These are untrusted self-identifications, not authenticated
+/// products or vulnerability findings. Never derive this field from port hints.
+pub(super) fn remote_protocol_claim_bytes(data: &[u8]) -> Option<String> {
+    if data.is_empty() || data.len() > 512 {
+        return None;
+    }
+    if data.len() >= 12 && data[3] == 0 && data[4] == 10 {
+        let payload_len =
+            usize::from(data[0]) | (usize::from(data[1]) << 8) | (usize::from(data[2]) << 16);
+        if payload_len >= 16 && payload_len + 4 <= data.len() {
+            let version = data.get(5..data.len().min(69))?;
+            if let Some(end) = version.iter().position(|byte| *byte == 0) {
+                if (3..=63).contains(&end)
+                    && version[..end].iter().all(|byte| byte.is_ascii_graphic())
+                {
+                    return Some(format!(
+                        "mysql-server/{}",
+                        String::from_utf8_lossy(&version[..end])
+                    ));
+                }
+            }
+        }
+    }
+    if data.len() >= 12
+        && &data[..4] == b"RFB "
+        && data[4..7].iter().all(u8::is_ascii_digit)
+        && data[7] == b'.'
+        && data[8..11].iter().all(u8::is_ascii_digit)
+        && data[11] == b'\n'
+    {
+        let protocol = &data[4..11];
+        return Some(format!(
+            "rfb-protocol/{}",
+            String::from_utf8_lossy(protocol)
+        ));
+    }
+    if data.starts_with(b"@RSYNCD: ") {
+        let first = data.split(|b| *b == b'\n').next()?;
+        let version = first.strip_prefix(b"@RSYNCD: ")?;
+        if (2..=16).contains(&version.len())
+            && version.iter().any(u8::is_ascii_digit)
+            && version
+                .iter()
+                .all(|byte| byte.is_ascii_digit() || *byte == b'.')
+            && data.contains(&b'\n')
+        {
+            return Some(format!(
+                "rsync-protocol/{}",
+                String::from_utf8_lossy(version)
+            ));
+        }
+    }
+    None
+}
+
 /// Strict, bounded first-read binary/text service identification. Each
 /// protocol is recognized from a full structural greeting, not its port or
 /// partially decoded text. No third-party Nmap signatures are copied.
@@ -503,8 +559,11 @@ fn probe_observation_bounded(
             let received_greeting = match std::io::Read::read(&mut stream, &mut buffer) {
                 Ok(length) if length > 0 => {
                     verified_initial_service = observed_service_bytes(&buffer[..length]);
+                    obs.remote_software_claim = remote_protocol_claim_bytes(&buffer[..length]);
                     let raw = String::from_utf8_lossy(&buffer[..length]);
-                    obs.remote_software_claim = remote_software_claim(&raw);
+                    if obs.remote_software_claim.is_none() {
+                        obs.remote_software_claim = remote_software_claim(&raw);
+                    }
                     obs.banner = summarize_banner(&raw);
                     true
                 }
@@ -598,6 +657,36 @@ pub(super) fn probe(host: IpAddr, port: u16) -> (String, String) {
 #[cfg(test)]
 mod evidence_tests {
     use super::*;
+
+    #[test]
+    fn binary_protocol_version_claims_are_evidence_based_and_bounded() {
+        let mut mysql = vec![20, 0, 0, 0, 10];
+        mysql.extend_from_slice(b"8.0.35\0");
+        mysql.extend_from_slice(&[0u8; 12]);
+        assert_eq!(mysql.len(), 24);
+        assert_eq!(
+            remote_protocol_claim_bytes(&mysql).as_deref(),
+            Some("mysql-server/8.0.35")
+        );
+        assert_eq!(remote_protocol_claim_bytes(&mysql[..23]), None);
+        let mut corrupted = mysql.clone();
+        corrupted[3] = 1;
+        assert_eq!(remote_protocol_claim_bytes(&corrupted), None);
+        corrupted = mysql.clone();
+        corrupted[5] = 0x1b;
+        assert_eq!(remote_protocol_claim_bytes(&corrupted), None);
+        assert_eq!(
+            remote_protocol_claim_bytes(b"RFB 003.008\n").as_deref(),
+            Some("rfb-protocol/003.008")
+        );
+        assert_eq!(remote_protocol_claim_bytes(b"RFB 003.008"), None);
+        assert_eq!(
+            remote_protocol_claim_bytes(b"@RSYNCD: 31.0\n").as_deref(),
+            Some("rsync-protocol/31.0")
+        );
+        assert_eq!(remote_protocol_claim_bytes(b"@RSYNCD: invalid\n"), None);
+        assert_eq!(remote_protocol_claim_bytes(&vec![b'A'; 513]), None);
+    }
 
     #[test]
     fn passive_service_greeting_identification_requires_structural_evidence() {

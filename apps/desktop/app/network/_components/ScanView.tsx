@@ -15,6 +15,7 @@ import {
   netscanTraceIpv4V1,
   netscanIcmpStopV1,
   netscanSynStartV1,
+  netscanSyn6StartV1,
   netscanSynStopV1,
   netscanArpStopV1,
   captureInterfacesV1,
@@ -77,6 +78,7 @@ export function ScanView() {
   const [icmpRows, setIcmpRows] = useState<IcmpObservationWire[] | null>(null);
   const [ndpNeighbors, setNdpNeighbors] = useState<ArpNeighborWire[] | null>(null);
   const [synBusy, setSynBusy] = useState(false);
+  const [synFamily, setSynFamily] = useState<"IPv4" | "IPv6">("IPv4");
   const [synProgress, setSynProgress] = useState<ScanProgressWire | null>(null);
   const [synFindings, setSynFindings] = useState<SynFindingWire[] | null>(null);
   const [arpNeighbors, setArpNeighbors] = useState<ArpNeighborWire[] | null>(null);
@@ -109,6 +111,7 @@ export function ScanView() {
     setTraceRows(null);
     setTraceBusy(false);
     setSynBusy(false);
+    setSynFamily("IPv4");
     setSynFindings(null);
     setSynProgress(null);
     setObservationPage(null);
@@ -209,6 +212,7 @@ export function ScanView() {
     const key = identity;
     setError(null);
     setSynBusy(true);
+    setSynFamily("IPv4");
     setSynFindings(null);
     setSynProgress({ tried: 0, total: 0, percent: 0 });
     try {
@@ -225,6 +229,30 @@ export function ScanView() {
       }
     }
   };
+  const runSyn6 = async () => {
+    if (!desktop || revision === null || !authorized || !arpInterface ||
+      synBusy || arpBusy || ndpBusy || icmpBusy || traceBusy || status.running || running) return;
+    const key = identity;
+    setError(null);
+    setSynBusy(true);
+    setSynFamily("IPv6");
+    setSynFindings(null);
+    setSynProgress({ tried: 0, total: 0, percent: 0 });
+    try {
+      const rows = await netscanSyn6StartV1(target, ports, arpInterface, true, (p) => {
+        if (activeCase.current === key) setSynProgress(p);
+      });
+      if (activeCase.current === key) setSynFindings(rows);
+    } catch (err) {
+      if (activeCase.current === key) setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      if (activeCase.current === key) {
+        setSynBusy(false);
+        setSynProgress(null);
+      }
+    }
+  };
+
   const stopSyn = async () => {
     try { await netscanSynStopV1(); }
     catch (err) { setError(err instanceof Error ? err.message : String(err)); }
@@ -528,6 +556,13 @@ export function ScanView() {
                   <Play size={11} /> Raw SYN
                 </ToolButton>
               )}
+              <ToolButton onClick={() => void runSyn6()}
+                disabled={!desktop || !authorized || revision === null || !arpInterface ||
+                  !target.trim() || !ports.trim() || running || status.running ||
+                  synBusy || arpBusy || ndpBusy || icmpBusy || traceBusy}
+                title="Linux: max 16 distinct fe80::/10 hosts, 64 ports, 512 SYN probes and 8 in flight; requires CAP_NET_RAW and native consent">
+                IPv6 SYN
+              </ToolButton>
               {synProgress ? (
                 <span className="font-mono text-[10px] text-fg-muted">
                   SYN {synProgress.tried}/{synProgress.total} · {synProgress.percent}%
@@ -621,7 +656,7 @@ export function ScanView() {
           {synFindings !== null ? (
             <div className="border-t border-line p-2 text-[10px] text-fg-muted">
               <div className="mb-1 font-semibold text-fg">
-                Correlated TCP SYN: {synFindings.length} observations · {synFindings.filter((r) => r.state === "open").length} open
+                Correlated {synFamily} TCP SYN: {synFindings.length} observations · {synFindings.filter((r) => r.state === "open").length} open
               </div>
               <div className="max-h-36 overflow-y-auto font-mono">
                 {synFindings.map((r) => (

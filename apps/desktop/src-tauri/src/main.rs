@@ -205,6 +205,7 @@ fn main() {
             features::network::ipc::syn_scan::netscan_syn_start_v1,
             features::network::ipc::syn_scan::netscan_syn_stop_v1,
             features::network::ipc::syn_scan::netscan_syn_status_v1,
+            features::network::ipc::syn_scan::netscan_syn6_start_v1,
             features::network::ipc::icmp_echo::netscan_icmp_discover_v1,
             features::network::ipc::icmp_echo::netscan_icmp_stop_v1,
             features::network::ipc::icmp_echo::netscan_icmp_status_v1,

@@ -6,6 +6,7 @@ pub mod active_echo;
 pub mod active_echo6;
 pub mod active_ndp;
 pub mod active_syn;
+pub mod active_syn6;
 pub mod application;
 pub mod dns;
 pub mod domain;

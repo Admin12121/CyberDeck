@@ -306,7 +306,10 @@ pub fn execute_path<P: FnMut(RecoveryProgressWire)>(
         Ok(value) => value,
         Err(_error) if cancel.is_cancelled() => {
             return Ok(recovery_backend::embedded_result(
-                request, Vec::new(), true, 0,
+                request,
+                Vec::new(),
+                true,
+                0,
             ));
         }
         Err(error) => return Err(error),
@@ -315,7 +318,10 @@ pub fn execute_path<P: FnMut(RecoveryProgressWire)>(
     // runtime/device failure. No worker or secret output is created.
     if generated == Some(0) {
         return Ok(recovery_backend::embedded_result(
-            request, Vec::new(), false, 0,
+            request,
+            Vec::new(),
+            false,
+            0,
         ));
     }
     let active_wordlist = if generated.is_some() {

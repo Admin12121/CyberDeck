@@ -271,3 +271,192 @@ pub fn netscan_syn_status_v1(
     let owner = ctx.owner.lock().map_err(|_| "SYN scan owner unavailable")?;
     Ok(owner.as_ref() == Some(&scope) && ctx.is_running())
 }
+
+#[tauri::command]
+pub async fn netscan_syn6_start_v1(
+    targets: String,
+    ports: String,
+    interface_name: String,
+    authorized: bool,
+    on_progress: Channel<ScanProgress>,
+    app: AppHandle,
+    session: State<'_, CaseSessionCtx>,
+    evidence: State<'_, EvidenceCtx>,
+    tcp: State<'_, ScanCtx>,
+    arp: State<'_, Arc<super::arp_discovery::ArpDiscoveryCtx>>,
+    ctx: State<'_, Arc<SynScanCtx>>,
+) -> Result<Vec<SynFindingWire>, String> {
+    if !authorized {
+        return Err("explicit native IPv6 SYN authorization required".into());
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (
+            targets,
+            ports,
+            interface_name,
+            on_progress,
+            app,
+            session,
+            evidence,
+            tcp,
+            arp,
+            ctx,
+        );
+        return Err("native IPv6 SYN requires Linux CAP_NET_RAW".into());
+    }
+    #[cfg(target_os = "linux")]
+    {
+        use cyberdeck_packet::active_syn6::{scan_ipv6_syn, validate_plan, Syn6State};
+        let (scope, case_id) = scoped_case(&session)?;
+        if tcp.running.load(Ordering::Acquire)
+            || arp.is_running()
+            || app.state::<Arc<super::icmp_echo::EchoCtx>>().is_running()
+        {
+            return Err("stop other Network scans before IPv6 SYN".into());
+        }
+        let target_list = super::netscan::parse_targets(&targets)?;
+        let port_list = super::netscan::parse_ports(&ports)?;
+        let hosts: Vec<std::net::Ipv6Addr> = target_list
+            .into_iter()
+            .map(|ip| match ip {
+                IpAddr::V6(v6) => Ok(v6),
+                IpAddr::V4(_) => {
+                    Err("native IPv6 SYN requires link-local fe80::/10 targets".to_string())
+                }
+            })
+            .collect::<Result<_, _>>()?;
+        validate_plan(&hosts, &port_list).map_err(|e| e.message)?;
+        if !evidence
+            .store
+            .lock()
+            .map_err(|_| "case store unavailable")?
+            .case_exists(&case_id)?
+        {
+            return Err("selected saved case does not exist".into());
+        }
+        let prompt=format!(
+            "Authorize raw IPv6 TCP SYN scanning on selected interface '{}' against {} link-local IPv6 hosts and {} ports (maximum 512 requests) in saved case '{}'? The backend sends up to 25 packets/s with at most 8 outstanding, checks matching TCP acknowledgments, and requires Linux CAP_NET_RAW. Only test systems you may assess.",
+            interface_name,hosts.len(),port_list.len(),case_id
+        );
+        let dialog = app.clone();
+        let agreed = tokio::task::spawn_blocking(move || {
+            dialog
+                .dialog()
+                .message(prompt)
+                .title("Authorize native IPv6 SYN")
+                .buttons(MessageDialogButtons::YesNo)
+                .blocking_show()
+        })
+        .await
+        .map_err(|_| "IPv6 SYN confirmation unavailable")?;
+        if !agreed {
+            return Err("IPv6 SYN operation cancelled by operator".into());
+        }
+        session.ensure(&scope)?;
+        if tcp.running.load(Ordering::Acquire)
+            || arp.is_running()
+            || app.state::<Arc<super::icmp_echo::EchoCtx>>().is_running()
+        {
+            return Err("another Network scan started during IPv6 SYN confirmation".into());
+        }
+        let permit = app
+            .state::<Arc<super::operation_gate::NetworkOperationGate>>()
+            .acquire(super::operation_gate::ActiveOperation::RawSyn)?;
+        let shared = Arc::clone(&*ctx);
+        if shared.running.swap(true, Ordering::AcqRel) {
+            return Err("a native IPv4/IPv6 SYN operation is already running".into());
+        }
+        shared.stop.store(false, Ordering::Release);
+        if let Ok(mut owner) = shared.owner.lock() {
+            *owner = Some(scope.clone());
+        } else {
+            shared.running.store(false, Ordering::Release);
+            return Err("SYN operation registry unavailable".into());
+        }
+        let worker_app = app.clone();
+        let worker_scope = scope.clone();
+        let worker_device = interface_name.clone();
+        let worker = Arc::clone(&shared);
+        let observed = tokio::task::spawn_blocking(move || {
+            let _active_operation = permit;
+            let _guard = SynRunGuard(Arc::clone(&worker));
+            scan_ipv6_syn(
+                &worker_device,
+                &hosts,
+                &port_list,
+                &worker.stop,
+                &|| {
+                    worker_app
+                        .state::<CaseSessionCtx>()
+                        .ensure(&worker_scope)
+                        .is_ok()
+                },
+                &|count, total| {
+                    if worker_app
+                        .state::<CaseSessionCtx>()
+                        .ensure(&worker_scope)
+                        .is_ok()
+                    {
+                        let _ = on_progress.send(ScanProgress {
+                            tried: count as u64,
+                            total: total as u64,
+                            percent: if total == 0 {
+                                0
+                            } else {
+                                ((count * 100) / total) as u32
+                            },
+                        });
+                    }
+                },
+            )
+            .map_err(|error| format!("{:?}: {}", error.code, error.message))
+        })
+        .await
+        .map_err(|_| "native IPv6 SYN worker unavailable")??;
+        session.ensure(&scope)?;
+        let rows: Vec<SynFindingWire> = observed
+            .into_iter()
+            .map(|result| SynFindingWire {
+                host: result.host.to_string(),
+                port: result.port,
+                state: match result.state {
+                    Syn6State::Open => "open",
+                    Syn6State::Closed => "closed",
+                    Syn6State::Unreachable => "unreachable",
+                    Syn6State::Inconclusive => "inconclusive",
+                },
+                reason: result.reason,
+                elapsed_ms: result.elapsed_ms,
+            })
+            .collect();
+        if !rows.is_empty() {
+            let mut findings:Vec<NewFinding>=rows.iter().take(256).map(|item|NewFinding{
+                title:format!("IPv6 SYN {} [{}]:{}",item.state,item.host,item.port),
+                severity:"info".into(),
+                details:format!(
+                    "Authorized native IPv6 TCP SYN\nInterface: {}\nHost: {}\nPort: {}\nState: {}\nReason: {}\nElapsed ms: {}\nEvidence: TCP SYN-ACK/RST acknowledged backend-random sequence or matched ICMPv6 error. Silence is inconclusive.",
+                    interface_name,item.host,item.port,item.state,item.reason,item.elapsed_ms,
+                ),
+            }).collect();
+            if rows.len() > 256 {
+                findings.push(NewFinding{
+                    title:"Additional native IPv6 SYN observations not indexed".into(),
+                    severity:"info".into(),
+                    details:format!(
+                        "{} further bounded scan observations remain in the explicit job result. Case finding indexing is capped at 256 observations to prevent excessive storage.",
+                        rows.len()-256),
+                });
+            }
+            let store = evidence
+                .store
+                .lock()
+                .map_err(|_| "case store unavailable")?;
+            session.with_current_publication(&scope, || {
+                store.add_findings(&case_id, "network.syn6", None, &findings)
+            })?;
+        }
+        session.ensure(&scope)?;
+        Ok(rows)
+    }
+}

@@ -28,6 +28,8 @@ tmp/
 docs/
 .web-bridge-targets/
 target-agent-*
+# obsolete agent-specific Hashcat native build cache (production uses src-tauri third_party)
+/target-agent2-hashcat-four-modes/
 
 # local Web Bridge recovery folders (purge only after reviewing recovery contents)
 .web-bridge-trash-*

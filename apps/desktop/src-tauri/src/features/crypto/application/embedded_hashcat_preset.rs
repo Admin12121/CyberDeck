@@ -22,7 +22,10 @@ pub enum WordlistPreset {
 
 /// Reads at most a single 4KiB candidate, even when an untrusted input
 /// contains an unterminated multi-gigabyte line.
-pub(super) fn read_line_bounded<R: BufRead>(reader: &mut R, line: &mut Vec<u8>) -> Result<bool, String> {
+pub(super) fn read_line_bounded<R: BufRead>(
+    reader: &mut R,
+    line: &mut Vec<u8>,
+) -> Result<bool, String> {
     line.fill(0);
     line.clear();
     loop {
@@ -134,7 +137,13 @@ mod tests {
         let source = dir.path().join("operator.words");
         std::fs::write(&source, b"admin\r\nPassword\ncyberDeck\n").unwrap();
         assert_eq!(
-            generate(&source, &dir.path().join("noop"), 2, WordlistPreset::Plain, || false),
+            generate(
+                &source,
+                &dir.path().join("noop"),
+                2,
+                WordlistPreset::Plain,
+                || false
+            ),
             Ok(None)
         );
         let upper = dir.path().join("upper.words");
@@ -163,14 +172,16 @@ mod tests {
             &source,
             &dir.path().join("long.words"),
             10,
-            WordlistPreset::Uppercase, || false
+            WordlistPreset::Uppercase,
+            || false
         )
         .is_err());
         assert!(generate(
             &source,
             &dir.path().join("budget.words"),
             1_000_001,
-            WordlistPreset::Uppercase, || false
+            WordlistPreset::Uppercase,
+            || false
         )
         .is_err());
         std::fs::write(&source, vec![b'a'; MAX_CANDIDATE_BYTES]).unwrap();
@@ -178,7 +189,8 @@ mod tests {
             &source,
             &dir.path().join("overflow.words"),
             1,
-            WordlistPreset::AppendOne, || false
+            WordlistPreset::AppendOne,
+            || false
         )
         .is_err());
     }

@@ -1,1 +1,0 @@
-SHARED=1 PLUGIN_ABI=800 PLUGINS=NATIVE INSTALL_FOLDER=/usr/local/bin SHARED_FOLDER=/usr/local/share/hashcat DOCUMENT_FOLDER=/usr/local/share/doc/hashcat LIBRARY_FOLDER=/usr/local/lib
