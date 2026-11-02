@@ -1,11 +1,12 @@
 //! Bounded concurrent connect scanner. This service accepts a progress sink
 //! rather than depending on Tauri Channels or application state.
 use std::net::IpAddr;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 
-use super::tcp_probe::probe_observation;
-use super::udp_probe::probe_udp_observation;
+use super::scan_timing::HostProbeBudget;
+use super::tcp_probe::probe_observation_timed;
+use super::udp_probe::probe_udp_observation_timed;
 
 /// Native scan protocol; the original seven netscan commands remain TCP-only.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -16,6 +17,28 @@ pub(super) enum ScanTransport {
 use super::{ScanEntry, ScanObservation, ScanProgress};
 
 const MAX_RESULTS: usize = 20_000;
+/// Avoid flooding a single target when many ports are queued.
+const MAX_HOST_INFLIGHT: usize = 4;
+
+struct HostSlot<'a>(&'a AtomicUsize);
+impl Drop for HostSlot<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::Release);
+    }
+}
+
+fn try_host_slot(active: &AtomicUsize) -> Option<HostSlot<'_>> {
+    let mut old = active.load(Ordering::Acquire);
+    loop {
+        if old >= MAX_HOST_INFLIGHT {
+            return None;
+        }
+        match active.compare_exchange_weak(old, old + 1, Ordering::AcqRel, Ordering::Acquire) {
+            Ok(_) => return Some(HostSlot(active)),
+            Err(updated) => old = updated,
+        }
+    }
+}
 
 /// Bound scan plans rather than allocating millions of pending host/port jobs.
 const MAX_SCAN_PROBES: u64 = 250_000;
@@ -122,6 +145,11 @@ pub(super) fn run_scan_into_scoped_transport(
         return Vec::new();
     }
 
+    // Per-host timing state is private to this authorized, bounded scan.
+    let timing: Vec<_> = (0..hosts.len())
+        .map(|_| StdMutex::new(HostProbeBudget::new(transport)))
+        .collect();
+    let host_slots: Vec<_> = (0..hosts.len()).map(|_| AtomicUsize::new(0)).collect();
     let next = AtomicU64::new(0);
     let completed = AtomicU64::new(0);
     let reported = StdMutex::new(0u64);
@@ -139,6 +167,8 @@ pub(super) fn run_scan_into_scoped_transport(
             let reported = &reported;
             let hosts = &hosts;
             let ports = &ports;
+            let timing = &timing;
+            let host_slots = &host_slots;
             scope.spawn(move || loop {
                 if stop.load(Ordering::Acquire) || !scope_is_active() {
                     stop.store(true, Ordering::Release);
@@ -149,19 +179,81 @@ pub(super) fn run_scan_into_scoped_transport(
                     break;
                 }
                 let offset = index as usize;
-                let host = hosts[offset / ports.len()];
-                let port = ports[offset % ports.len()];
+                // Spread adjacent work across hosts to avoid host bursts.
+                let host = hosts[offset % hosts.len()];
+                let port = ports[offset / hosts.len()];
                 if stop.load(Ordering::Acquire) || !scope_is_active() {
                     stop.store(true, Ordering::Release);
                     break;
                 }
-                let observation = match transport {
-                    ScanTransport::Tcp => probe_observation(host, port),
-                    ScanTransport::Udp => probe_udp_observation(host, port),
+                let host_index = offset % hosts.len();
+                // Held through any retry and released automatically on all
+                // break/return paths, including case revocation.
+                let slot = loop {
+                    if stop.load(Ordering::Acquire) || !scope_is_active() {
+                        stop.store(true, Ordering::Release);
+                        break None;
+                    }
+                    if let Some(slot) = try_host_slot(&host_slots[host_index]) {
+                        break Some(slot);
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(5));
                 };
-                if !scope_is_active() {
+                let Some(_slot) = slot else { break };
+                let timeout = timing[host_index]
+                    .lock()
+                    .expect("host timing poisoned")
+                    .timeout();
+                let mut observation = match transport {
+                    ScanTransport::Tcp => probe_observation_timed(host, port, timeout),
+                    ScanTransport::Udp => probe_udp_observation_timed(host, port, timeout),
+                };
+                if stop.load(Ordering::Acquire) || !scope_is_active() {
                     stop.store(true, Ordering::Release);
                     break;
+                }
+                if HostProbeBudget::should_retry(&observation) {
+                    let retry_timeout = {
+                        let mut stats = timing[host_index].lock().expect("host timing poisoned");
+                        stats.note_silence();
+                        stats.timeout()
+                    };
+                    let retry_pause = HostProbeBudget::retry_pause();
+                    std::thread::sleep(retry_pause);
+                    if stop.load(Ordering::Acquire) || !scope_is_active() {
+                        stop.store(true, Ordering::Release);
+                        break;
+                    }
+                    let mut retried = match transport {
+                        ScanTransport::Tcp => probe_observation_timed(host, port, retry_timeout),
+                        ScanTransport::Udp => {
+                            probe_udp_observation_timed(host, port, retry_timeout)
+                        }
+                    };
+                    if stop.load(Ordering::Acquire) || !scope_is_active() {
+                        stop.store(true, Ordering::Release);
+                        break;
+                    }
+                    let response_elapsed = retried.elapsed_ms;
+                    retried.elapsed_ms = retried
+                        .elapsed_ms
+                        .saturating_add(observation.elapsed_ms)
+                        .saturating_add(retry_pause.as_millis() as u64);
+                    retried.started_at_ms = observation.started_at_ms;
+                    retried.attempts = 2;
+                    retried.retries = 1;
+                    let mut stats = timing[host_index].lock().expect("host timing poisoned");
+                    if matches!(retried.state.as_str(), "open" | "closed") {
+                        stats.note_response(response_elapsed);
+                    } else if HostProbeBudget::should_retry(&retried) {
+                        stats.note_silence();
+                    }
+                    observation = retried;
+                } else {
+                    timing[host_index]
+                        .lock()
+                        .expect("host timing poisoned")
+                        .note_final(&observation);
                 }
                 // Callback owns the bounded case-scoped store. The underlying
                 // original status is never changed by service-name inference.
@@ -203,6 +295,67 @@ pub(super) fn run_scan_into_scoped_transport(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn concurrent_host_slot_is_bounded_and_released_after_drop() {
+        let slots = AtomicUsize::new(0);
+        let held: Vec<_> = (0..MAX_HOST_INFLIGHT)
+            .map(|_| try_host_slot(&slots).expect("slot available"))
+            .collect();
+        assert_eq!(slots.load(Ordering::Acquire), MAX_HOST_INFLIGHT);
+        assert!(try_host_slot(&slots).is_none());
+        drop(held);
+        assert_eq!(slots.load(Ordering::Acquire), 0);
+        assert!(try_host_slot(&slots).is_some());
+    }
+
+    #[test]
+    fn round_robin_work_plan_covers_every_host_port_pair() {
+        let hosts = ["192.0.2.1", "192.0.2.2", "192.0.2.3"];
+        let ports = [22, 80, 443];
+        let planned: Vec<_> = (0..(hosts.len() * ports.len()))
+            .map(|i| (hosts[i % hosts.len()], ports[i / hosts.len()]))
+            .collect();
+        assert_eq!(
+            &planned[..3],
+            &[("192.0.2.1", 22), ("192.0.2.2", 22), ("192.0.2.3", 22)]
+        );
+        for host in hosts {
+            for port in ports {
+                assert_eq!(
+                    planned
+                        .iter()
+                        .filter(|(h, p)| *h == host && *p == port)
+                        .count(),
+                    1
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn confirmed_loopback_connection_stays_a_single_attempt() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let observed = StdMutex::new(Vec::<ScanObservation>::new());
+        let stop = AtomicBool::new(false);
+        let results = Arc::new(StdMutex::new(Vec::new()));
+        run_scan_into_scoped_v1(
+            vec!["127.0.0.1".parse().unwrap()],
+            vec![port],
+            &stop,
+            &|_| {},
+            &results,
+            &|| true,
+            &|record| observed.lock().unwrap().push(record),
+        );
+        let rows = observed.lock().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].state, "open");
+        assert_eq!(rows[0].attempts, 1);
+        assert_eq!(rows[0].retries, 0);
+        assert_eq!(results.lock().unwrap().len(), 1);
+    }
 
     #[test]
     fn udp_worker_respects_revoked_case_without_sending_datagrams() {

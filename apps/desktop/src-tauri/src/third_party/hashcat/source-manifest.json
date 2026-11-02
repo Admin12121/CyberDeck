@@ -3,7 +3,7 @@
   "upstream": "https://github.com/hashcat/hashcat",
   "commit": "1994b513b550edfe3e7fcaa1103759a9343e57a4",
   "version": "v8.0.0-development",
-  "build": "SHARED=1 PRODUCTION=1 ENABLE_BRAIN=0 ENABLE_CUBIN=0; module_01400",
+  "build": "SHARED=1 PRODUCTION=1 ENABLE_BRAIN=0 ENABLE_CUBIN=0; module_00000 bootstrap + module_01400",
   "supportedModesPlanned": [
     1400
   ],
@@ -19,7 +19,7 @@
   ],
   "excludes": [
     "standalone hashcat CLI",
-    "other hash modules",
+    "other hash modules beyond required 00000 bootstrap and 01400",
     "other mode kernels",
     "Python",
     "FPGA",
@@ -890,6 +890,10 @@
     "OpenCL/m01400_a3-optimized.cl": {
       "sha256": "41b523d8173c121ee9aa485987fa69b8a55168a2c683630df8364120af2be243",
       "bytes": 25318
+    },
+    "OpenCL/m04000-pure.cl": {
+      "sha256": "c5e0f32ae90c8a063c50aacb857fe263e90c564e424b8ab0a457a12f662dd0d4",
+      "bytes": 14159
     },
     "deps/OpenCL-Headers/CL/cl.h": {
       "sha256": "3c51949c38bf9bca6dbe919a1f60727bad1ef4a7a321c6d530f7502ddc1fd706",
@@ -2078,6 +2082,10 @@
     "src/module_options_value.c": {
       "sha256": "63a2584cf73d406f23bd767fe51d4d3407662ae9f3941e4c62be06c4832233da",
       "bytes": 2381
+    },
+    "src/modules/module_00000.c": {
+      "sha256": "ce74fff65f2895727d816259f99a92db5b2930079d52242882cd592f82eadbd8",
+      "bytes": 12298
     },
     "src/modules/module_01400.c": {
       "sha256": "74c8bfac587d5c240ff94d101c8cc04f71c30518e93284d55bba3cbe7a5a13f4",

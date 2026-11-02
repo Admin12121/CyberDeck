@@ -144,7 +144,7 @@ fn start_for_transport(
     };
     // A frontend acknowledgment alone does not authorize active network probes.
     let approved = app.dialog().message(format!(
-        "Authorize {transport_name} probes of {host_count} parsed hosts and {} ports in this saved case? Only test systems you are permitted to assess.{uncertainty}",
+        "Authorize {transport_name} probes of {host_count} parsed hosts and {} ports in this saved case? An uncertain timeout may be retried once (maximum two attempts per host and port). Only test systems you are permitted to assess.{uncertainty}",
         port_list.len(),
     )).title("Confirm scoped network scan")
         .buttons(MessageDialogButtons::YesNo).blocking_show();

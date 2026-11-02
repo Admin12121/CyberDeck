@@ -19,7 +19,7 @@ export interface WebPassiveFinding {
 
 export interface WebAssessmentJob {
   job_id: number;
-  kind: "scanner" | "spider" | "passive";
+  kind: "scanner" | "spider" | "passive" | "active-query";
   state: "running" | "completed" | "failed" | "cancelled";
   processed: number;
   discovered: number;
@@ -44,7 +44,7 @@ export async function startWebPassiveScan(enabledRules: string[]): Promise<numbe
 }
 
 export async function startWebAssessment(
-  kind: "scanner" | "spider", targetUrl: string, authorized: boolean, maxDepth = 2,
+  kind: "scanner" | "spider" | "active-query", targetUrl: string, authorized: boolean, maxDepth = 2,
 ): Promise<number> {
   if (!isDesktop()) throw new Error("Web assessments require the native desktop runtime");
   return invoke<number>("web_assessment_start_v1", { kind, targetUrl, maxDepth, authorized });
@@ -55,7 +55,7 @@ export async function webAssessmentStatus(jobId: number): Promise<WebAssessmentJ
   return invoke<WebAssessmentJob>("web_assessment_status_v1", { jobId });
 }
 
-/** Save only completed backend-owned Scanner findings to the selected
+/** Save only completed backend-owned Scanner/Active/Passive findings to the selected
  * non-Scratchpad case. No client supplied case ID or findings are accepted. */
 export async function saveWebAssessmentFindings(jobId: number): Promise<number> {
   if (!isDesktop()) throw new Error("Web findings need the native desktop runtime");

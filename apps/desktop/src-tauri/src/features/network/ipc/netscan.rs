@@ -29,6 +29,8 @@ mod scan_models;
 mod scan_service;
 #[path = "../application/state.rs"]
 mod scan_state;
+#[path = "../application/timing.rs"]
+mod scan_timing;
 #[path = "scan_wire.rs"]
 mod scan_wire;
 #[path = "../application/session.rs"]

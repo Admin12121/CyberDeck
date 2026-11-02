@@ -15,11 +15,16 @@ test("Normal desktop build owns version-pinned C/shim/Rust-worker source graph",
   assert.ok(build.includes('tauri_build::build()'));
   assert.ok(build.includes('"--install"'));
   assert.equal(manifest.commit, "1994b513b550edfe3e7fcaa1103759a9343e57a4");
-  assert.equal(Object.keys(manifest.files).length, 560);
+  assert.equal(Object.keys(manifest.files).length, 562);
+  assert.ok(manifest.files["src/modules/module_00000.c"], "upstream startup dependency must be pinned");
+  assert.ok(manifest.files["src/modules/module_01400.c"], "SHA-256 selected mode must be pinned");
+  assert.ok(manifest.files["OpenCL/m04000-pure.cl"], "required upstream startup kernel must be pinned");
+  assert.deepEqual(manifest.supportedModesPlanned, [1400], "bootstrap MD5 mode is not a supported public recovery mode");
   assert.ok(native.includes('modules/' + '" + module')); // upstream real mode plugin
   assert.ok(native.includes('native/recovery_worker.rs'));
   assert.ok(native.includes('native/cyberdeck_hashcat.c'));
   assert.ok(native.includes('rustc'));
+  assert.ok(native.includes('bootstrapModule'), 'native bootstrap module must be compiled and packaged');
   assert.equal(tauri.bundle.resources["resources/hashcat/"], "hashcat/");
   assert.ok(!native.includes('Command::new("hashcat")'));
 });
@@ -35,6 +40,7 @@ test("Only private, bounded and supervised worker dispatch is exposed to Tauri",
     assert.ok(c.includes(option), option + " secret persistence/mode guard missing");
   }
   assert.ok(worker.includes('CDHC0001'));
+  assert.ok(c.includes('cd_hashcat_last_setup_stage'), 'C ABI must classify startup failures without raw logs');
   assert.ok(worker.includes('read_request('));
   assert.ok(supervisor.includes('Stdio::null()'));
   assert.ok(supervisor.includes('PrivateChild'));

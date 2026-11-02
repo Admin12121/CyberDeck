@@ -28,7 +28,11 @@ fn worker_failure(code: Option<i32>) -> &'static str {
         Some(31) => "Hashcat SHA-256 mode options initialization failed",
         Some(32) => "Hashcat native option parsing failed",
         Some(33) => "Hashcat native option validation failed",
-        Some(34) => "Hashcat native session unavailable; verify compute runtime and device drivers",
+        Some(34) => "Hashcat native session setup failed before compute initialization",
+        Some(36) => "Hashcat native bridge initialization failed",
+        Some(37) => "Hashcat native compute runtime loader failed",
+        Some(38) => "Hashcat native device initialization failed; check compatible OpenCL drivers",
+        Some(39) => "Hashcat native post-device setup failed",
         Some(35) => "Hashcat native session preparation failed",
         Some(40) => "Hashcat native kernel execution failed",
         _ => "embedded Hashcat worker crashed or exited unexpectedly",
@@ -82,10 +86,17 @@ pub fn runtime_available(root: &Path) -> Result<(), String> {
             "libhashcat.so.8"
         },
         if cfg!(windows) {
+            "modules/module_00000.dll"
+        } else {
+            "modules/module_00000.so"
+        },
+        if cfg!(windows) {
             "modules/module_01400.dll"
         } else {
             "modules/module_01400.so"
         },
+        // Upstream loads the generic recipe preflight kernel during startup.
+        "OpenCL/m04000-pure.cl",
         "OpenCL/m01400_a0-optimized.cl",
         "OpenCL/m01400_a1-optimized.cl",
         "OpenCL/m01400_a3-optimized.cl",
@@ -331,7 +342,9 @@ mod tests {
         assert!(worker_failure(Some(34)).contains("compute runtime"));
         assert!(worker_failure(Some(21)).contains("ABI"));
         assert!(worker_failure(None).contains("crashed"));
-        for code in [10, 11, 21, 22, 23, 24, 31, 32, 33, 34, 35, 40] {
+        for code in [
+            10, 11, 21, 22, 23, 24, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40,
+        ] {
             assert!(!worker_failure(Some(code)).contains("/tmp/"));
         }
     }

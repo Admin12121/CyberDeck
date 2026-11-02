@@ -5,13 +5,14 @@ use std::ffi::{c_char, c_int, c_void, CString};
 use std::path::Path;
 use std::ptr::NonNull;
 
-const ABI_VERSION: u32 = 1;
+const ABI_VERSION: u32 = 2;
 const MAX_CANDIDATES: u64 = 1_000_000;
 const MAX_RUNTIME_SECONDS: u32 = 300;
 
 #[link(name = "cyberdeck_hashcat_shim")]
 unsafe extern "C" {
     fn cd_hashcat_abi_version() -> u32;
+    fn cd_hashcat_last_setup_stage(context: *mut c_void) -> u32;
     fn cd_hashcat_create() -> *mut c_void;
     fn cd_hashcat_prepare_sha256(
         context: *mut c_void,
@@ -128,6 +129,18 @@ impl NativeHashcat {
         };
         if status == 0 {
             Ok(())
+        } else if status == -5 {
+            // Classify only fixed upstream initialization phase markers.
+            // Never retrieve native log text: it may contain sensitive hashes.
+            let stage = unsafe { cd_hashcat_last_setup_stage(self.handle.as_ptr()) };
+            let error = match stage {
+                0x121 | 0x120 => -51, // bridge initialization
+                0x131 | 0x130 => -52, // compute runtime loading
+                0x133 => -53,         // device enumeration/initialization
+                0x132 => -54,         // post-device pre-execution setup
+                _ => -5,
+            };
+            Err(NativeError::Native(error))
         } else {
             Err(NativeError::Native(status))
         }

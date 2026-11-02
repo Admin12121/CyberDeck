@@ -33,6 +33,8 @@ use proxy_rules_domain::replace_bytes_limited;
 pub use proxy_rules_domain::{MatchReplaceRule, MAX_PROXY_BODY};
 
 pub use request_domain::parse_raw_request;
+#[path = "../application/active_query.rs"]
+mod active_query_application;
 #[path = "../application/assessment_jobs.rs"]
 pub(crate) mod assessment_jobs;
 #[path = "../infrastructure/client.rs"]
@@ -566,6 +568,7 @@ async fn authorize_pinned_assessment(
     session: &crate::features::shared::session::CaseSessionCtx,
     selected: &crate::features::shared::session::CaseSessionWire,
     pinned: &target_scope::PinnedTarget,
+    purpose: &'static str,
 ) -> Result<(), String> {
     use tauri_plugin_dialog::{DialogExt, MessageDialogButtons};
     let origin = pinned.url.origin().ascii_serialization();
@@ -578,7 +581,7 @@ async fn authorize_pinned_assessment(
     let accepted = tauri::async_runtime::spawn_blocking(move || {
         app.dialog()
             .message(format!(
-                "Authorize this Web security assessment of {origin} through pinned address(es) {destinations}?                  Only approve hosts you own or are explicitly permitted to test."
+                "Authorize {purpose} on {origin} through pinned address(es) {destinations}? Only approve hosts you own or are explicitly permitted to test."
             ))
             .title("Authorize pinned Web target")
             .buttons(MessageDialogButtons::YesNo)
@@ -630,7 +633,14 @@ pub async fn web_scan(
     let selected = session.selected()?;
     let pinned = target_scope::prepare_private_target(&target_url).await?;
     session.ensure(&selected)?;
-    authorize_pinned_assessment(app, &session, &selected, &pinned).await?;
+    authorize_pinned_assessment(
+        app,
+        &session,
+        &selected,
+        &pinned,
+        "bounded native HTTP review",
+    )
+    .await?;
     execute_case_scoped_assessment(
         &session,
         &selected,
@@ -651,7 +661,14 @@ pub async fn spider_scan(
     let selected = session.selected()?;
     let pinned = target_scope::prepare_private_target(&target_url).await?;
     session.ensure(&selected)?;
-    authorize_pinned_assessment(app, &session, &selected, &pinned).await?;
+    authorize_pinned_assessment(
+        app,
+        &session,
+        &selected,
+        &pinned,
+        "bounded same-origin GET discovery",
+    )
+    .await?;
     execute_case_scoped_assessment(
         &session,
         &selected,
@@ -909,7 +926,14 @@ pub async fn engine_scan(
     let selected = session.selected()?;
     let pinned = target_scope::prepare_private_target(&target).await?;
     session.ensure(&selected)?;
-    authorize_pinned_assessment(app, &session, &selected, &pinned).await?;
+    authorize_pinned_assessment(
+        app,
+        &session,
+        &selected,
+        &pinned,
+        "native Web tool assessment",
+    )
+    .await?;
     let started = std::time::Instant::now();
     let findings = execute_case_scoped_assessment(
         &session,

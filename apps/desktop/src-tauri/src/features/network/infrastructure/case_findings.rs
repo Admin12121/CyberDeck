@@ -59,7 +59,7 @@ fn build_observation_findings(observations: &[ScanObservation], scan_id: u64) ->
     }).collect::<Vec<_>>();
     if observations.len() > 256 {
         findings.push(NewFinding {
-            title: "Additional TCP scan observations not indexed".into(),
+            title: format!("Additional {} scan observations not indexed", observations[0].protocol.to_ascii_uppercase()),
             severity: "info".into(),
             details: format!("Scan #{scan_id}: {} total observations; first 256 persisted in this case. The remaining volatile observations are accessible only during the selected scan session.", observations.len()),
         });
@@ -148,6 +148,40 @@ mod tests {
         let capped = build_observation_findings(&many, 77);
         assert_eq!(capped.len(), 257);
         assert!(capped[256].details.contains("300 total observations"));
+    }
+
+    #[test]
+    fn udp_observation_finding_preserves_transport_and_uncertainty() {
+        let entry = ScanObservation {
+            host: "127.0.0.1".into(),
+            port: 123,
+            protocol: "udp".into(),
+            state: "inconclusive".into(),
+            reason: "udp_no_response".into(),
+            method: "udp_connected_socket".into(),
+            service: "unknown".into(),
+            service_basis: "none".into(),
+            remote_software_claim: None,
+            banner: String::new(),
+            started_at_ms: 42,
+            elapsed_ms: 1200,
+            attempts: 2,
+            retries: 1,
+            os_error_code: None,
+        };
+        let records = build_observation_findings(&[entry.clone()], 11);
+        assert_eq!(records.len(), 1);
+        assert!(records[0].title.starts_with("UDP inconclusive"));
+        assert!(records[0].details.contains("Authorized UDP scan #11"));
+        assert!(records[0].details.contains("Reason: udp_no_response"));
+        assert!(records[0].details.contains("Attempts: 2"));
+        assert!(records[0].details.contains("Retries: 1"));
+        let capped = build_observation_findings(&vec![entry; 257], 11);
+        assert_eq!(capped.len(), 257);
+        assert_eq!(
+            capped[256].title,
+            "Additional UDP scan observations not indexed"
+        );
     }
 
     #[test]

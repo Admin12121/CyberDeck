@@ -21,6 +21,32 @@
 #include "user_options.h"
 #include "module_options.h"
 
+/* A private worker constructs exactly one Hashcat context per process.
+ * Hashcat's event callback has no user-data pointer, so the C owner records
+ * only whitelisted setup phase IDs with atomic operations. Never capture logs,
+ * candidate bytes, target hashes, device serials or paths.
+ */
+static unsigned int cd_setup_phase = 0;
+
+static void cd_setup_event (const u32 id, MAYBE_UNUSED hashcat_ctx_t *context,
+                            MAYBE_UNUSED const void *buffer,
+                            MAYBE_UNUSED const size_t length)
+{
+  switch (id)
+  {
+    case EVENT_BRIDGES_INIT_PRE:
+    case EVENT_BRIDGES_INIT_POST:
+    case EVENT_BACKEND_RUNTIMES_INIT_PRE:
+    case EVENT_BACKEND_RUNTIMES_INIT_POST:
+    case EVENT_BACKEND_DEVICES_INIT_PRE:
+    case EVENT_BACKEND_DEVICES_INIT_POST:
+      __atomic_store_n (&cd_setup_phase, id, __ATOMIC_RELAXED);
+      break;
+    default:
+      break;
+  }
+}
+
 struct cd_hashcat
 {
   hashcat_ctx_t *core;
@@ -35,7 +61,13 @@ struct cd_hashcat
 
 uint32_t cd_hashcat_abi_version (void)
 {
-  return 1;
+  return 2;
+}
+
+uint32_t cd_hashcat_last_setup_stage (cd_hashcat *handle)
+{
+  if (handle == NULL || handle->core == NULL) return 0;
+  return __atomic_load_n (&cd_setup_phase, __ATOMIC_RELAXED);
 }
 
 cd_hashcat *cd_hashcat_create (void)
@@ -46,7 +78,8 @@ cd_hashcat *cd_hashcat_create (void)
   handle->core = (hashcat_ctx_t *) calloc (1, sizeof (hashcat_ctx_t));
   if (handle->core == NULL) { free (handle); return NULL; }
 
-  if (hashcat_init (handle->core, NULL) != 0)
+  __atomic_store_n (&cd_setup_phase, 0, __ATOMIC_RELAXED);
+  if (hashcat_init (handle->core, cd_setup_event) != 0)
   {
     // Hashcat may have initialized some members before failing.
     hashcat_destroy (handle->core);

@@ -28,6 +28,10 @@ typedef struct cd_hashcat cd_hashcat;
 /* Fixed ABI version. Caller must reject any unexpected value. */
 CD_HC_API uint32_t cd_hashcat_abi_version(void);
 
+/* Returns the last recognized setup phase event, never raw event log text.
+ * Designed for one-session-per-private-worker diagnostics only. */
+CD_HC_API uint32_t cd_hashcat_last_setup_stage(cd_hashcat *context);
+
 /* Allocates an upstream context. No device or hash is loaded yet. */
 CD_HC_API cd_hashcat *cd_hashcat_create(void);
 

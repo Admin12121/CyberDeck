@@ -233,6 +233,16 @@
   }
 }
 
+/* Tailwind 4 preflight otherwise defaults uncolored borders to currentColor.
+   That makes every plain `border` white in dark mode and black in light mode.
+   Use the shared semantic border token for all coss/feature primitives; explicit
+   border-destructive, border-transparent, etc. retain their utility overrides. */
+@layer base {
+  *, ::before, ::after, ::backdrop, ::file-selector-button {
+    border-color: var(--border);
+  }
+}
+
 html, body {
   height: 100%;
   overflow: hidden;

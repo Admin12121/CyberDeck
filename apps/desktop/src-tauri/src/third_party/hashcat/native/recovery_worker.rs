@@ -129,7 +129,11 @@ fn native_failure(error: hashcat_ffi::NativeError) -> i32 {
         hashcat_ffi::NativeError::Native(-3) => 31, // mode-options initialization
         hashcat_ffi::NativeError::Native(-41) => 32, // upstream option parsing
         hashcat_ffi::NativeError::Native(-42) => 33, // upstream option validation
-        hashcat_ffi::NativeError::Native(-5) => 34, // native runtime/session init
+        hashcat_ffi::NativeError::Native(-5) => 34, // other native session init
+        hashcat_ffi::NativeError::Native(-51) => 36, // native bridge setup
+        hashcat_ffi::NativeError::Native(-52) => 37, // compute runtime loader
+        hashcat_ffi::NativeError::Native(-53) => 38, // compute device discovery/init
+        hashcat_ffi::NativeError::Native(-54) => 39, // after device init
         hashcat_ffi::NativeError::Native(_) => 35,
     }
 }
@@ -180,6 +184,16 @@ mod tests {
         }
         out
     }
+    #[test]
+    fn native_init_phase_codes_never_expose_untrusted_log_content() {
+        for (raw, expected) in [(-51, 36), (-52, 37), (-53, 38), (-54, 39), (-5, 34)] {
+            assert_eq!(
+                native_failure(hashcat_ffi::NativeError::Native(raw)),
+                expected
+            );
+        }
+    }
+
     #[test]
     fn protocol_accepts_only_versioned_bounded_frames() {
         let good = read_request(Cursor::new(frame())).unwrap();

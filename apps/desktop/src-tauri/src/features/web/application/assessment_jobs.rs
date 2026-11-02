@@ -1,8 +1,8 @@
 //! Backend-owned bounded Web assessment jobs: no UI-owned cancellation truth.
 use super::{
-    authorize_pinned_assessment, crawl_application, execute_case_scoped_assessment,
-    passive_rules_application, scan_application, scan_domain, selected_history_grant, target_scope,
-    webhistory, Finding, WebCtx,
+    active_query_application, authorize_pinned_assessment, crawl_application,
+    execute_case_scoped_assessment, passive_rules_application, scan_application, scan_domain,
+    selected_history_grant, target_scope, webhistory, Finding, WebCtx,
 };
 use crate::features::forensics::ipc::evidence::EvidenceCtx;
 use crate::features::shared::session::{CaseSessionCtx, CaseSessionWire};
@@ -24,6 +24,7 @@ enum Kind {
     Scanner,
     Spider,
     Passive,
+    ActiveQuery,
 }
 impl Kind {
     fn parse(text: &str) -> Result<Self, String> {
@@ -31,6 +32,7 @@ impl Kind {
             "scanner" => Ok(Self::Scanner),
             "spider" => Ok(Self::Spider),
             "passive" => Ok(Self::Passive),
+            "active-query" => Ok(Self::ActiveQuery),
             _ => Err("unknown native Web job kind".into()),
         }
     }
@@ -39,6 +41,7 @@ impl Kind {
             Self::Scanner => "scanner",
             Self::Spider => "spider",
             Self::Passive => "passive",
+            Self::ActiveQuery => "active-query",
         }
     }
 }
@@ -182,7 +185,9 @@ impl Job {
             .snapshot
             .lock()
             .map_err(|_| "Web job status unavailable")?;
-        if state.state != "completed" || !matches!(state.kind.as_str(), "scanner" | "passive") {
+        if state.state != "completed"
+            || !matches!(state.kind.as_str(), "scanner" | "passive" | "active-query")
+        {
             return Err("only completed native Web findings may be saved".into());
         }
         if self.cancel.load(Ordering::Acquire) {
@@ -244,10 +249,10 @@ impl Job {
         } else {
             records
         };
-        let source = if state.kind == "passive" {
-            "web.passive"
-        } else {
-            "web.native"
+        let source = match state.kind.as_str() {
+            "passive" => "web.passive",
+            "active-query" => "web.active.query",
+            _ => "web.native",
         };
         let written = store.add_findings(case_id, source, None, &records)?;
         *receipt = Some(written);
@@ -364,7 +369,13 @@ pub async fn web_assessment_start_v1(
     let selected = session.selected()?;
     let pinned = target_scope::prepare_private_target(&target_url).await?;
     session.ensure(&selected)?;
-    authorize_pinned_assessment(app.clone(), &session, &selected, &pinned).await?;
+    let purpose = match kind {
+        Kind::ActiveQuery => "at most nine GET requests with inert HTML markup query probes",
+        Kind::Scanner => "a bounded native HTTP security review",
+        Kind::Spider => "bounded same-origin GET discovery",
+        Kind::Passive => return Err("passive mode does not send network requests".into()),
+    };
+    authorize_pinned_assessment(app.clone(), &session, &selected, &pinned, purpose).await?;
     let job = session.with_current_publication(&selected, || {
         registry()
             .lock()
@@ -377,6 +388,15 @@ pub async fn web_assessment_start_v1(
         let on_progress = |processed, discovered| job.progress(processed, discovered);
         let operation = async {
             match kind {
+                Kind::ActiveQuery => active_query_application::run_active_query_with_progress(
+                    &pinned.client,
+                    pinned.url.clone(),
+                    id,
+                    active_query_application::Policy::InertHtmlElement,
+                    &on_progress,
+                )
+                .await
+                .map(Outcome::Findings),
                 Kind::Scanner => scan_application::run_scan_with_progress(
                     &pinned.client,
                     pinned.url.to_string(),
@@ -585,6 +605,37 @@ pub fn web_assessment_save_findings_v1(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn active_query_findings_save_exactly_once_with_distinct_case_source() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = ArtifactStore::open(&temp.path().join("case.db")).unwrap();
+        let case = store.create_case("Approved query probe", "").unwrap();
+        let session = CaseSessionCtx::default();
+        let selected = session.select(&store, &case.id).unwrap();
+        assert_eq!(Kind::parse("active-query").unwrap().name(), "active-query");
+        let job = Job::new(937, selected.clone(), Kind::ActiveQuery);
+        job.finish(Ok(Outcome::Findings(vec![Finding {
+            severity: "low".into(),
+            title: "potential unescaped HTML parameter reflection".into(),
+            detail: "Inert marker observed; browser-context confirmation required".into(),
+            evidence: "Rule cd.ascan.query-html-reflection.v1; approved origin http://127.0.0.1:9000; position 1".into(),
+        }])));
+        let written = session.with_current_publication(&selected, || {
+            job.save_completed(&store, &case.id)
+        }).unwrap();
+        assert_eq!(written, 1);
+        assert_eq!(job.save_completed(&store, &case.id).unwrap(), 1);
+        let findings = store.list_findings(&case.id).unwrap();
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].source, "web.active.query");
+        assert_eq!(findings[0].severity, "low");
+        assert!(!findings[0].details.contains("token="));
+        session.select(&store, &case.id).unwrap();
+        assert!(session.with_current_publication(&selected, || {
+            job.save_completed(&store, &case.id)
+        }).is_err());
+    }
 
     #[test]
     fn passive_job_consent_revocation_and_reconsent_prevent_stale_access() {

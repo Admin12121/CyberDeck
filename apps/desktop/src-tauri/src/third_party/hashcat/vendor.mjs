@@ -65,6 +65,12 @@ if (mode === "--import") {
     add("OpenCL/m01400_" + id + "-optimized.cl");
     add("OpenCL/amp_" + id + ".cl");
   }
+  // Upstream source initialization requires this generic recipe kernel even
+  // when the selected attack uses SHA-256 mode 1400.
+  add("OpenCL/m04000-pure.cl");
+  // Upstream initializes its default module 00000 before switching to 1400.
+  // It is a native bootstrap dependency, not an exposed CyberDeck mode.
+  add("src/modules/module_00000.c");
   add("src/modules/module_01400.c");
   // Modern hashcat's OpenCL function prototypes are loaded dynamically.
   dirFiles("deps/OpenCL-Headers/CL", (name) => name.endsWith(".h"));
@@ -106,10 +112,10 @@ if (mode === "--import") {
     upstream: "https://github.com/hashcat/hashcat",
     commit: pin,
     version: "v8.0.0-development",
-    build: "SHARED=1 PRODUCTION=1 ENABLE_BRAIN=0 ENABLE_CUBIN=0; module_01400",
+    build: "SHARED=1 PRODUCTION=1 ENABLE_BRAIN=0 ENABLE_CUBIN=0; module_00000 bootstrap + module_01400",
     supportedModesPlanned: [1400],
     includes: ["C core Makefile object closure", "all public and internal C headers", "host EMU kernel includes", "SHA-256 kernels and amplifiers", "OpenCL headers", "sse2neon compatibility", "runtime tunings", "licenses"],
-    excludes: ["standalone hashcat CLI", "other hash modules", "other mode kernels", "Python", "FPGA", "unused bridges and feeds", "docs/examples/test suites"],
+    excludes: ["standalone hashcat CLI", "other hash modules beyond required 00000 bootstrap and 01400", "other mode kernels", "Python", "FPGA", "unused bridges and feeds", "docs/examples/test suites"],
     files,
   }, null, 2) + "\n");
   console.log("Imported " + paths.length + " pinned source and license files (" + core.length + " C core objects).");

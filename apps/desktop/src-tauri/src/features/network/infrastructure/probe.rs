@@ -373,9 +373,28 @@ pub(super) fn probe_observation(host: IpAddr, port: u16) -> ScanObservation {
     probe_observation_inner(host, port, port == 53)
 }
 
+/// Adaptive per-host deadline applies to the OS TCP connect call. Existing
+/// public/internal probe signatures retain their previous fixed budget.
+pub(super) fn probe_observation_timed(
+    host: IpAddr,
+    port: u16,
+    connect_budget: Duration,
+) -> ScanObservation {
+    probe_observation_bounded(host, port, port == 53, connect_budget)
+}
+
 /// The injectable service-probe policy allows an unprivileged local DNS
 /// fixture on an ephemeral port without scanning the machine's TCP/53.
 fn probe_observation_inner(host: IpAddr, port: u16, dns_probe: bool) -> ScanObservation {
+    probe_observation_bounded(host, port, dns_probe, CONNECT_TIMEOUT)
+}
+
+fn probe_observation_bounded(
+    host: IpAddr,
+    port: u16,
+    dns_probe: bool,
+    connect_budget: Duration,
+) -> ScanObservation {
     let started_at_ms = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|time| time.as_millis().min(u64::MAX as u128) as u64)
@@ -399,7 +418,10 @@ fn probe_observation_inner(host: IpAddr, port: u16, dns_probe: bool) -> ScanObse
         retries: 0,
         os_error_code: None,
     };
-    match TcpStream::connect_timeout(&address, CONNECT_TIMEOUT) {
+    match TcpStream::connect_timeout(
+        &address,
+        connect_budget.clamp(Duration::from_millis(300), Duration::from_millis(1800)),
+    ) {
         Err(error) => {
             let (state, reason) = classify_observation_error(error.kind());
             obs.state = state.into();

@@ -68,15 +68,32 @@ fn observed_now_ms() -> u64 {
 /// ICMP-originated OS errors are not raw packet evidence; we report that
 /// provenance plainly and require a raw listener for future Nmap parity.
 pub(super) fn probe_udp_observation(host: IpAddr, port: u16) -> ScanObservation {
+    probe_udp_observation_timed(host, port, UDP_TIMEOUT)
+}
+
+pub(super) fn probe_udp_observation_timed(
+    host: IpAddr,
+    port: u16,
+    response_budget: Duration,
+) -> ScanObservation {
     let probe = match port {
         53 => UdpServiceProbe::Dns,
         123 => UdpServiceProbe::Ntp,
         _ => UdpServiceProbe::Generic,
     };
-    probe_udp_observation_inner(host, port, probe)
+    probe_udp_observation_bounded(host, port, probe, response_budget)
 }
 
 fn probe_udp_observation_inner(host: IpAddr, port: u16, probe: UdpServiceProbe) -> ScanObservation {
+    probe_udp_observation_bounded(host, port, probe, UDP_TIMEOUT)
+}
+
+fn probe_udp_observation_bounded(
+    host: IpAddr,
+    port: u16,
+    probe: UdpServiceProbe,
+    response_budget: Duration,
+) -> ScanObservation {
     let began = Instant::now();
     let mut observation = ScanObservation {
         host: host.to_string(),
@@ -102,8 +119,9 @@ fn probe_udp_observation_inner(host: IpAddr, port: u16, probe: UdpServiceProbe) 
             "[::]:0"
         };
         let socket = UdpSocket::bind(local)?;
-        socket.set_read_timeout(Some(UDP_TIMEOUT))?;
-        socket.set_write_timeout(Some(UDP_TIMEOUT))?;
+        let budget = response_budget.clamp(Duration::from_millis(300), Duration::from_millis(1200));
+        socket.set_read_timeout(Some(budget))?;
+        socket.set_write_timeout(Some(budget))?;
         socket.connect(SocketAddr::new(host, port))?;
 
         let id = (SystemTime::now()

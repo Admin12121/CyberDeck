@@ -27,6 +27,10 @@ export function ScannerView() {
   context.current.caseId = caseId;
   context.current.target = normalized;
   const running = busy || job?.state === "running";
+  const hasQuery = (() => {
+    try { return new URL(normalized).searchParams.size > 0; }
+    catch { return false; }
+  })();
   const findings = job?.state === "completed" ? job.findings : [];
 
   useEffect(() => {
@@ -54,15 +58,15 @@ export function ScannerView() {
     return () => { disposed = true; clearInterval(timer); };
   }, [desktop, jobId, caseId, caseSession.revision]);
 
-  const start = async () => {
+  const start = async (kind: "scanner" | "active-query" = "scanner") => {
     if (!desktop || running || !normalized || !authorized) return;
     const stamp = { ...context.current };
     setBusy(true); setSavedCount(0); setError(null); setJob(null);
     try {
       // The Jobs dock monitors the actual backend operation until it reaches
       // a terminal state. Navigation does not stop the native worker.
-      const completed = await wb.trackOperation("Web scanner", async () => {
-        const id = await startWebAssessment("scanner", stamp.target, true);
+      const completed = await wb.trackOperation(kind === "active-query" ? "Web active query" : "Web scanner", async () => {
+        const id = await startWebAssessment(kind, stamp.target, true);
         if (context.current.revision === stamp.revision) setJobId(id);
         return waitForWebAssessment(id, (current) => {
           if (context.current.revision === stamp.revision &&
@@ -110,15 +114,23 @@ export function ScannerView() {
       {running && jobId !== null
         ? <ToolButton tone="danger" onClick={() => void stop()}><Square size={12} /> Stop</ToolButton>
         : <ToolButton tone="primary" disabled={!desktop || !normalized || !authorized || running}
-            onClick={() => void start()}><Play size={12} /> Start</ToolButton>}
+            onClick={() => void start("scanner")}><Play size={12} /> Start review</ToolButton>}
+      <ToolButton disabled={!desktop || !normalized || !authorized || running || !hasQuery}
+        title="Send a baseline and up to eight inert GET parameter probes, only to the approved private origin"
+        onClick={() => void start("active-query")}>
+        <Play size={12} /> Test query parameters
+      </ToolButton>
       <span className="ml-auto font-mono text-[10px] text-fg-muted">
-        {job ? `${job.state} · ${job.processed} requests · ${job.discovered} findings` : "Native review"}
+        {job ? `${job.kind} · ${job.state} · ${job.processed} requests · ${job.discovered} findings` : "Native review"}
       </span>
     </div>
     <label className="flex items-center gap-2 border-b border-line px-2 py-1.5 text-[11px] text-fg-dim">
       <input type="checkbox" checked={authorized} onChange={(e) => setAuthorized(e.target.checked)} />
       Authorized target · native approval required
     </label>
+    <div className="border-b border-line px-2 py-1 text-[10px] text-fg-muted">
+      Query probes send a baseline plus up to eight GETs with inert HTML-element markers, skip credential/CSRF-like parameters, and report potential markup reflection—not confirmed executable XSS. The URL must contain query parameters; native approval and private-address scope are mandatory.
+    </div>
     {error ? <div role="alert" className="border-b border-line px-2 py-1 text-xs text-err">{error}</div> : null}
     <Pane title="Findings" className="min-h-0 flex-1"
       actions={job?.state === "completed" && findings.length > 0 && caseId !== "scratchpad"
@@ -135,7 +147,7 @@ export function ScannerView() {
         </tr>)}</tbody>
       </table></div> : <EmptyState title={running ? "Scanning" : job?.state === "completed" ? "No findings" : "Ready"}
         detail={running ? `Checked ${job?.processed ?? 0} HTTP requests` :
-          "Enter an authorized IP target and start the native review."} />}
+          "Enter an authorized private target; choose Start review or Test query parameters."} />}
     </Pane>
   </div>;
 }
