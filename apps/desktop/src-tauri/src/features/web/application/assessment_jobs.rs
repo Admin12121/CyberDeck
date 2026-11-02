@@ -1,8 +1,8 @@
 //! Backend-owned bounded Web assessment jobs: no UI-owned cancellation truth.
 use super::{
-    active_query_application, authorize_pinned_assessment, crawl_application,
-    execute_case_scoped_assessment, passive_rules_application, scan_application, scan_domain,
-    selected_history_grant, target_scope, webhistory, Finding, WebCtx,
+    active_body_application, active_query_application, authorize_pinned_assessment,
+    crawl_application, execute_case_scoped_assessment, passive_rules_application, scan_application,
+    scan_domain, selected_history_grant, target_scope, webhistory, Finding, WebCtx,
 };
 use crate::features::forensics::ipc::evidence::EvidenceCtx;
 use crate::features::shared::session::{CaseSessionCtx, CaseSessionWire};
@@ -25,6 +25,8 @@ enum Kind {
     Spider,
     Passive,
     ActiveQuery,
+    ActiveForm,
+    ActiveJson,
 }
 impl Kind {
     fn parse(text: &str) -> Result<Self, String> {
@@ -33,6 +35,8 @@ impl Kind {
             "spider" => Ok(Self::Spider),
             "passive" => Ok(Self::Passive),
             "active-query" => Ok(Self::ActiveQuery),
+            "active-form" => Ok(Self::ActiveForm),
+            "active-json" => Ok(Self::ActiveJson),
             _ => Err("unknown native Web job kind".into()),
         }
     }
@@ -42,6 +46,8 @@ impl Kind {
             Self::Spider => "spider",
             Self::Passive => "passive",
             Self::ActiveQuery => "active-query",
+            Self::ActiveForm => "active-form",
+            Self::ActiveJson => "active-json",
         }
     }
 }
@@ -186,7 +192,10 @@ impl Job {
             .lock()
             .map_err(|_| "Web job status unavailable")?;
         if state.state != "completed"
-            || !matches!(state.kind.as_str(), "scanner" | "passive" | "active-query")
+            || !matches!(
+                state.kind.as_str(),
+                "scanner" | "passive" | "active-query" | "active-form" | "active-json"
+            )
         {
             return Err("only completed native Web findings may be saved".into());
         }
@@ -252,6 +261,8 @@ impl Job {
         let source = match state.kind.as_str() {
             "passive" => "web.passive",
             "active-query" => "web.active.query",
+            "active-form" => "web.active.form",
+            "active-json" => "web.active.json",
             _ => "web.native",
         };
         let written = store.add_findings(case_id, source, None, &records)?;
@@ -358,6 +369,7 @@ pub async fn web_assessment_start_v1(
     target_url: String,
     max_depth: u8,
     authorized: bool,
+    probe_body: Option<String>,
     app: AppHandle,
     session: State<'_, CaseSessionCtx>,
 ) -> Result<u64, String> {
@@ -366,11 +378,34 @@ pub async fn web_assessment_start_v1(
     if matches!(kind, Kind::Passive) {
         return Err("passive history scans require the protected offline entry point".into());
     }
+    // The template is supplied intentionally; Spider never auto-submits forms.
+    // Parse before OS confirmation and reject all credential/CSRF-like fields.
+    let body_plan = match kind {
+        Kind::ActiveForm => Some(active_body_application::BodyPlan::new(
+            active_body_application::BodyKind::Form,
+            probe_body
+                .as_deref()
+                .ok_or("manual form POST template required")?,
+        )?),
+        Kind::ActiveJson => Some(active_body_application::BodyPlan::new(
+            active_body_application::BodyKind::Json,
+            probe_body
+                .as_deref()
+                .ok_or("manual JSON POST template required")?,
+        )?),
+        _ => {
+            if probe_body.as_deref().is_some_and(|body| !body.is_empty()) {
+                return Err("POST template is not valid for this Web job type".into());
+            }
+            None
+        }
+    };
     let selected = session.selected()?;
     let pinned = target_scope::prepare_private_target(&target_url).await?;
     session.ensure(&selected)?;
     let purpose = match kind {
         Kind::ActiveQuery => "at most nine GET requests with inert HTML markup query probes",
+        Kind::ActiveForm | Kind::ActiveJson => "an explicitly supplied POST template and up to four inert markup mutations; POST MAY CHANGE SERVER STATE even if probes are harmless HTML markers",
         Kind::Scanner => "a bounded native HTTP security review",
         Kind::Spider => "bounded same-origin GET discovery",
         Kind::Passive => return Err("passive mode does not send network requests".into()),
@@ -388,6 +423,15 @@ pub async fn web_assessment_start_v1(
         let on_progress = |processed, discovered| job.progress(processed, discovered);
         let operation = async {
             match kind {
+                Kind::ActiveForm | Kind::ActiveJson => active_body_application::run_with_progress(
+                    &pinned.client,
+                    pinned.url.clone(),
+                    id,
+                    body_plan.ok_or("POST template missing")?,
+                    &on_progress,
+                )
+                .await
+                .map(Outcome::Findings),
                 Kind::ActiveQuery => active_query_application::run_active_query_with_progress(
                     &pinned.client,
                     pinned.url.clone(),
@@ -607,6 +651,41 @@ mod tests {
     use super::*;
 
     #[test]
+    fn native_post_job_kinds_are_distinct_and_case_save_is_idempotent() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = ArtifactStore::open(&temp.path().join("case.db")).unwrap();
+        let case = store.create_case("Authorized POST lab", "").unwrap();
+        let session = CaseSessionCtx::default();
+        let selected = session.select(&store, &case.id).unwrap();
+        for (number, text, source) in [
+            (100, "active-form", "web.active.form"),
+            (101, "active-json", "web.active.json"),
+        ] {
+            let kind = Kind::parse(text).unwrap();
+            assert_eq!(kind.name(), text);
+            let job = Job::new(number, selected.clone(), kind);
+            job.finish(Ok(Outcome::Findings(vec![Finding {
+                severity: "low".into(),
+                title: "potential unescaped POST parameter reflection".into(),
+                detail: "Inert HTML marker; check browser context".into(),
+                evidence: "Rule cd.ascan.post-html-reflection.v1; field position 1".into(),
+            }])));
+            assert_eq!(job.save_completed(&store, &case.id).unwrap(), 1);
+            assert_eq!(job.save_completed(&store, &case.id).unwrap(), 1);
+            let found = store.list_findings(&case.id).unwrap();
+            assert!(
+                found.iter().any(|entry| entry.source == source),
+                "case must retain findings from each native POST job"
+            );
+        }
+        assert_eq!(store.list_findings(&case.id).unwrap().len(), 2);
+        session.select(&store, &case.id).unwrap();
+        assert!(session
+            .with_current_publication(&selected, || Ok(()))
+            .is_err());
+    }
+
+    #[test]
     fn active_query_findings_save_exactly_once_with_distinct_case_source() {
         let temp = tempfile::tempdir().unwrap();
         let store = ArtifactStore::open(&temp.path().join("case.db")).unwrap();
@@ -621,9 +700,9 @@ mod tests {
             detail: "Inert marker observed; browser-context confirmation required".into(),
             evidence: "Rule cd.ascan.query-html-reflection.v1; approved origin http://127.0.0.1:9000; position 1".into(),
         }])));
-        let written = session.with_current_publication(&selected, || {
-            job.save_completed(&store, &case.id)
-        }).unwrap();
+        let written = session
+            .with_current_publication(&selected, || job.save_completed(&store, &case.id))
+            .unwrap();
         assert_eq!(written, 1);
         assert_eq!(job.save_completed(&store, &case.id).unwrap(), 1);
         let findings = store.list_findings(&case.id).unwrap();
@@ -632,9 +711,9 @@ mod tests {
         assert_eq!(findings[0].severity, "low");
         assert!(!findings[0].details.contains("token="));
         session.select(&store, &case.id).unwrap();
-        assert!(session.with_current_publication(&selected, || {
-            job.save_completed(&store, &case.id)
-        }).is_err());
+        assert!(session
+            .with_current_publication(&selected, || { job.save_completed(&store, &case.id) })
+            .is_err());
     }
 
     #[test]

@@ -276,7 +276,11 @@ fn start_recovery_with_wordlist_engine(
     embedded_runtime: Option<PathBuf>,
     emit: impl Fn(RecoveryEvent) + Send + 'static,
 ) -> Result<u64, String> {
-    recovery_backend::validate_request(&request)?;
+    if embedded_runtime.is_some() {
+        embedded_hashcat::validate_embedded_request(&request)?;
+    } else {
+        recovery_backend::validate_request(&request)?;
+    }
     if embedded_runtime.is_some()
         != matches!(
             request.backend,
@@ -474,9 +478,33 @@ pub fn recovery_start_v1(
 #[derive(Serialize)]
 pub struct EmbeddedHashcatCapability {
     pub available: bool,
+    /// Legacy SHA-256 mode field retained for existing IPC consumers.
     pub mode: u32,
+    /// Compiled bundled algorithms; does NOT imply a working compute device.
+    pub modes: Vec<EmbeddedHashcatMode>,
     pub hardware_verified: bool,
     pub detail: String,
+}
+#[derive(Serialize)]
+pub struct EmbeddedHashcatMode {
+    pub algorithm: &'static str,
+    pub mode: u32,
+    pub digest_hex_length: usize,
+}
+fn bundled_hashcat_modes() -> Vec<EmbeddedHashcatMode> {
+    [
+        ("md5", 0, 32),
+        ("sha1", 100, 40),
+        ("sha256", 1400, 64),
+        ("sha512", 1700, 128),
+    ]
+    .into_iter()
+    .map(|(algorithm, mode, digest_hex_length)| EmbeddedHashcatMode {
+        algorithm,
+        mode,
+        digest_hex_length,
+    })
+    .collect()
 }
 
 fn hashcat_resource_root(app: &AppHandle) -> Result<PathBuf, String> {
@@ -498,26 +526,46 @@ fn hashcat_resource_root(app: &AppHandle) -> Result<PathBuf, String> {
     Err("embedded Hashcat native runtime not packaged".into())
 }
 
-/// Reports availability of packaged upstream mode 1400; hardware_verified
+/// Reports the four source-built wordlist modes; hardware_verified
 /// stays false until actual host device/kernel KAT, not merely library loading.
 #[tauri::command]
 pub fn recovery_hashcat_capabilities_v1(app: AppHandle) -> EmbeddedHashcatCapability {
     match hashcat_resource_root(&app) {
-        Ok(_) => {
+        Ok(runtime) => {
+            // Native loader probing runs through the exact packaged worker,
+            // not an unrelated Rust OpenCL backend or an executable on PATH.
+            match embedded_hashcat::probe_opencl_loader(&runtime) {
+                Ok(false) => return EmbeddedHashcatCapability {
+                    available: false,
+                    mode: 1400,
+                    modes: bundled_hashcat_modes(),
+                    hardware_verified: false,
+                    detail: "Hashcat is bundled, but the system OpenCL loader is unavailable; install a compatible GPU driver/runtime".into(),
+                },
+                Err(error) => return EmbeddedHashcatCapability {
+                    available: false,
+                    mode: 1400,
+                    modes: bundled_hashcat_modes(),
+                    hardware_verified: false,
+                    detail: error,
+                },
+                Ok(true) => {}
+            }
             // The Rust OpenCL probe is a diagnostic only. Its indices are NOT
             // Hashcat native device IDs, and enumeration is never a kernel KAT.
             let probe = recovery_backend::probe_recovery_devices();
             let detail = if probe.opencl_detected {
                 format!(
-                    "Bundled SHA-256 mode; {} OpenCL device(s) detected by Rust, Hashcat mapping and execution unverified",
+                    "Bundled MD5/SHA-1/SHA-256/SHA-512 modes; {} OpenCL device(s) detected by Rust, Hashcat mapping and execution unverified",
                     probe.devices.len()
                 )
             } else {
-                "Bundled SHA-256 mode, but no compatible OpenCL runtime was detected; native execution may fail".into()
+                "Bundled MD5/SHA-1/SHA-256/SHA-512 modes, but no compatible OpenCL runtime was detected; native execution may fail".into()
             };
             EmbeddedHashcatCapability {
                 available: true,
                 mode: 1400,
+                modes: bundled_hashcat_modes(),
                 hardware_verified: false,
                 detail,
             }
@@ -525,6 +573,7 @@ pub fn recovery_hashcat_capabilities_v1(app: AppHandle) -> EmbeddedHashcatCapabi
         Err(error) => EmbeddedHashcatCapability {
             available: false,
             mode: 1400,
+            modes: bundled_hashcat_modes(),
             hardware_verified: false,
             detail: error,
         },
@@ -541,7 +590,7 @@ pub fn recovery_start_hashcat_v1(
     state: State<'_, RecoveryCtx>,
     session: State<'_, CaseSessionCtx>,
 ) -> Result<u64, String> {
-    recovery_backend::validate_request(&request)?;
+    embedded_hashcat::validate_embedded_request(&request)?;
     if !matches!(
         request.backend,
         recovery_backend::BackendSelection::HashcatManaged
@@ -549,6 +598,11 @@ pub fn recovery_start_hashcat_v1(
         return Err("embedded Hashcat requires a Hashcat-managed backend selection".into());
     }
     let runtime = hashcat_resource_root(&app)?;
+    if !embedded_hashcat::probe_opencl_loader(&runtime)? {
+        return Err(
+            "Hashcat requires a compatible system OpenCL loader before recovery can start".into(),
+        );
+    }
     let selected = state.with_active(&session, |registry, _| {
         registry
             .selected_wordlist

@@ -117,6 +117,24 @@ fn start_for_transport(
     if !authorized {
         return Err("explicit scan authorization acknowledgment required".to_string());
     }
+    if app
+        .state::<Arc<crate::features::network::ipc::arp_discovery::ArpDiscoveryCtx>>()
+        .is_running()
+    {
+        return Err("an on-link ARP discovery is active; stop it before TCP/UDP scanning".into());
+    }
+    if app
+        .state::<Arc<crate::features::network::ipc::syn_scan::SynScanCtx>>()
+        .is_running()
+    {
+        return Err("a native SYN scan is running; stop it first".into());
+    }
+    if app
+        .state::<Arc<crate::features::network::ipc::icmp_echo::EchoCtx>>()
+        .is_running()
+    {
+        return Err("native ICMP discovery is active; stop it before TCP/UDP scanning".into());
+    }
     let scope = selected_scan_scope(&selected, &case_id)?;
     if !evidence
         .store

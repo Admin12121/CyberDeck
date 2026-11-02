@@ -1,0 +1,71 @@
+{
+  "schema": 1,
+  "source_commit": "1994b513b550edfe3e7fcaa1103759a9343e57a4",
+  "embedded_engine": "hashcat-shared-core",
+  "worker_protocols": [
+    "CDHC0001",
+    "CDHC0002"
+  ],
+  "abi_version": 4,
+  "attack_modes": [
+    {
+      "id": 0,
+      "name": "Straight wordlist",
+      "source_build": true,
+      "desktop_available": false,
+      "hardware_verified": false,
+      "desktop_routed": true
+    }
+  ],
+  "hash_modes": [
+    {
+      "id": 0,
+      "algorithm": "md5",
+      "digest_hex_length": 32,
+      "source_build": true,
+      "desktop_available": false,
+      "hardware_verified": false,
+      "desktop_routed": true
+    },
+    {
+      "id": 100,
+      "algorithm": "sha1",
+      "digest_hex_length": 40,
+      "source_build": true,
+      "desktop_available": false,
+      "hardware_verified": false,
+      "desktop_routed": true
+    },
+    {
+      "id": 1400,
+      "algorithm": "sha256",
+      "digest_hex_length": 64,
+      "source_build": true,
+      "desktop_available": false,
+      "hardware_verified": false,
+      "desktop_routed": true
+    },
+    {
+      "id": 1700,
+      "algorithm": "sha512",
+      "digest_hex_length": 128,
+      "source_build": true,
+      "desktop_available": false,
+      "hardware_verified": false,
+      "desktop_routed": true
+    }
+  ],
+  "privacy": {
+    "case_authorization": "backend owned",
+    "plaintext_reveal": "backend-authorized only",
+    "potfile_enabled": false,
+    "restore_files_enabled": false,
+    "secret_autosave": false
+  },
+  "limitations": [
+    "Linux source build verified; Windows/MSVC toolchain and GPU host acceptance pending",
+    "Mode source build does not imply successful native recovery",
+    "Only attack mode 0 has a native worker protocol",
+    "Four selected raw-digest modes are desktop-routed, but execution on compatible GPU hardware remains unverified"
+  ]
+}

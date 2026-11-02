@@ -1,6 +1,7 @@
 //! Offline packet-engine use cases and the stable passive protocol API facade.
 pub mod capture;
 pub mod live_session;
+pub mod scan_correlation;
 
 // Preserve the historical `cyberdeck_packet::application::*` API without
 // making the pure domain dissectors depend on application orchestration.

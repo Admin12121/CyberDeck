@@ -5,15 +5,28 @@ use std::ffi::{c_char, c_int, c_void, CString};
 use std::path::Path;
 use std::ptr::NonNull;
 
-const ABI_VERSION: u32 = 2;
+const ABI_VERSION: u32 = 4;
 const MAX_CANDIDATES: u64 = 1_000_000;
 const MAX_RUNTIME_SECONDS: u32 = 300;
 
 #[link(name = "cyberdeck_hashcat_shim")]
 unsafe extern "C" {
     fn cd_hashcat_abi_version() -> u32;
+    fn cd_hashcat_opencl_loader_available() -> u32;
     fn cd_hashcat_last_setup_stage(context: *mut c_void) -> u32;
     fn cd_hashcat_create() -> *mut c_void;
+    fn cd_hashcat_prepare_mode(
+        context: *mut c_void,
+        install_root: *const c_char,
+        shared_root: *const c_char,
+        hash_file: *const c_char,
+        wordlist_file: *const c_char,
+        temporary_outfile: *const c_char,
+        max_candidates: u64,
+        runtime_seconds: u32,
+        device_id: u32,
+        hash_mode: u32,
+    ) -> c_int;
     fn cd_hashcat_prepare_sha256(
         context: *mut c_void,
         install_root: *const c_char,
@@ -69,6 +82,11 @@ enum InitState {
 }
 
 impl NativeHashcat {
+    /// Loader check only; no device enumeration or GPU acceptance is implied.
+    pub fn opencl_loader_available() -> bool {
+        (unsafe { cd_hashcat_opencl_loader_available() }) == 1
+    }
+
     pub fn new() -> Result<Self, NativeError> {
         let version = unsafe { cd_hashcat_abi_version() };
         if version != ABI_VERSION {
@@ -94,21 +112,45 @@ impl NativeHashcat {
         runtime_seconds: u32,
         device_id: u32,
     ) -> Result<(), NativeError> {
+        self.prepare_mode(root, hash_file, wordlist_file, scratch_outfile,
+                          max_candidates, runtime_seconds, device_id, 1400)
+    }
+
+    /// Selected, bundled raw digest modes; no user-defined Hashcat flags.
+    pub fn prepare_mode(
+        &mut self,
+        root: &Path,
+        hash_file: &Path,
+        wordlist_file: &Path,
+        scratch_outfile: &Path,
+        max_candidates: u64,
+        runtime_seconds: u32,
+        device_id: u32,
+        hash_mode: u32,
+    ) -> Result<(), NativeError> {
         if self.state != InitState::Fresh
             || max_candidates == 0
             || max_candidates > MAX_CANDIDATES
             || runtime_seconds == 0
             || runtime_seconds > MAX_RUNTIME_SECONDS
             || device_id > 128
+            || !matches!(hash_mode, 0 | 100 | 1400 | 1700)
         {
             return Err(NativeError::InvalidBound);
         }
         let root = checked_path(root)?;
+        // Dynamic loader presence is a strict prerequisite to native OpenCL
+        // execution, not hardware acceptance. Fail before upstream session
+        // initialization when the system loader is unavailable.
+        if unsafe { cd_hashcat_opencl_loader_available() } == 0 {
+            self.state = InitState::Failed;
+            return Err(NativeError::Native(-52));
+        }
         let hash_file = checked_path(hash_file)?;
         let wordlist_file = checked_path(wordlist_file)?;
         let scratch_outfile = checked_path(scratch_outfile)?;
         let status = unsafe {
-            cd_hashcat_prepare_sha256(
+            cd_hashcat_prepare_mode(
                 self.handle.as_ptr(),
                 root.as_ptr(),
                 root.as_ptr(),
@@ -118,6 +160,7 @@ impl NativeHashcat {
                 max_candidates,
                 runtime_seconds,
                 device_id,
+                hash_mode,
             )
         };
         // Regardless of success, native initialization may have allocated
@@ -196,6 +239,40 @@ mod tests {
             ),
             Err(NativeError::InvalidBound)
         );
+    }
+
+    #[test]
+    fn selected_hash_modes_are_explicit_and_bounded() {
+        let mut engine = NativeHashcat::new().expect("real native ABI");
+        let failed = engine.prepare_mode(
+            Path::new("/tmp"), Path::new("/tmp/test.hash"),
+            Path::new("/tmp/test.words"), Path::new("/tmp/test.out"),
+            1, 1, 0, 99999,
+        );
+        assert_eq!(failed, Err(NativeError::InvalidBound));
+        // Rejected modes must not initialize any native session.
+        assert_eq!(engine.execute(), Err(NativeError::InvalidBound));
+    }
+
+    #[test]
+    fn loader_preflight_reports_only_boolean_availability() {
+        let state = unsafe { cd_hashcat_opencl_loader_available() };
+        assert!(state <= 1);
+        // There is no default software fallback or fabricated device index.
+        // A machine with no loader fails before upstream session creation.
+        if state == 0 {
+            let mut context = NativeHashcat::new().expect("valid native ABI");
+            let result = context.prepare_sha256(
+                Path::new("/tmp"),
+                Path::new("/tmp/fixture.hash"),
+                Path::new("/tmp/fixture.words"),
+                Path::new("/tmp/fixture.result"),
+                3,
+                30,
+                0,
+            );
+            assert_eq!(result, Err(NativeError::Native(-52)));
+        }
     }
 
     #[test]

@@ -193,6 +193,127 @@ fn get_form_action_discovery_never_turns_post_into_get() {
     assert_eq!(extract_hrefs(html), vec!["/search", "/lookup", "/home"]);
 }
 
+#[test]
+fn spider_sitemap_hints_are_bounded_and_xml_is_not_generic_html() {
+    use super::crawl_application::{sitemap_hints, sitemap_locations};
+    let robots = "User-agent: *\nDisallow: /admin\nSitemap: /sitemap.xml\nSITEMAP : https://elsewhere.invalid/evil.xml\nSitemap: /third.xml\n";
+    assert_eq!(
+        sitemap_hints(robots),
+        vec!["/sitemap.xml", "https://elsewhere.invalid/evil.xml"]
+    );
+    let xml = r#"<?xml version="1.0"?><urlset><url><loc>/home</loc></url><url><loc>https://elsewhere.invalid/out</loc></url><url><loc>/x?key=1&amp;value=2</loc></url></urlset>"#;
+    assert_eq!(
+        sitemap_locations(xml),
+        vec!["/home", "https://elsewhere.invalid/out"]
+    );
+    assert!(sitemap_locations("<html><loc>/surprise</loc></html>").is_empty());
+    assert!(sitemap_locations(
+        "<!DOCTYPE a [<!ENTITY x SYSTEM 'file:///etc/passwd'>]><urlset><loc>&x;</loc></urlset>"
+    )
+    .is_empty());
+}
+
+#[test]
+fn sitemap_index_uses_only_structural_xml_without_entity_expansion() {
+    use super::crawl_application::sitemap_index_locations;
+    let index = r#"<?xml version="1.0"?><sitemapindex><sitemap><loc>/child.xml</loc></sitemap><sitemap><loc>https://out.invalid/foreign.xml</loc></sitemap></sitemapindex>"#;
+    assert_eq!(
+        sitemap_index_locations(index),
+        vec!["/child.xml", "https://out.invalid/foreign.xml"]
+    );
+    assert!(sitemap_index_locations(
+        "<html><sitemapindex><loc>/unexpected</loc></sitemapindex></html>"
+    )
+    .is_empty());
+    assert!(sitemap_index_locations("<!DOCTYPE xml [<!ENTITY x SYSTEM 'file:///nope'>]><sitemapindex><loc>&x;</loc></sitemapindex>").is_empty());
+    assert!(sitemap_index_locations(
+        "<sitemapindex><loc>/x?first=1&amp;second=2</loc></sitemapindex>"
+    )
+    .is_empty());
+}
+
+#[tokio::test]
+async fn spider_follows_one_same_origin_sitemap_index_child_within_two_xml_requests() {
+    use tokio::io::AsyncWriteExt;
+    tokio::time::timeout(std::time::Duration::from_secs(9), async {
+        let server = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = server.local_addr().unwrap().port();
+        let handle = tokio::spawn(async move {
+            let mut visited = Vec::new();
+            for _ in 0..4 {
+                let (mut socket, _) = server.accept().await.unwrap();
+                let (head, _) = crate::features::web::webtls::read_http_message(&mut socket).await.unwrap();
+                assert!(head.starts_with("GET "));
+                let path = head.split_whitespace().nth(1).unwrap().to_string();
+                visited.push(path.clone());
+                let content = match path.as_str() {
+                    "/robots.txt" => String::new(),
+                    "/sitemap.xml" => format!(
+                        r#"<?xml version="1.0"?><sitemapindex><sitemap><loc>http://127.0.0.1:{port}/child.xml</loc></sitemap><sitemap><loc>https://out.invalid/other.xml</loc></sitemap></sitemapindex>"#
+                    ),
+                    "/child.xml" => format!(
+                        r#"<?xml version="1.0"?><urlset><url><loc>http://127.0.0.1:{port}/result</loc></url><url><loc>http://127.0.0.1:{port}/secret?token=x</loc></url><url><loc>https://out.invalid/other</loc></url></urlset>"#
+                    ),
+                    "/" => String::new(),
+                    other => panic!("unexpected request: {other}"),
+                };
+                socket.write_all(format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/xml\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    content.len(), content
+                ).as_bytes()).await.unwrap();
+            }
+            visited
+        });
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(3))
+            .redirect(reqwest::redirect::Policy::none()).no_proxy().build().unwrap();
+        let found = crawl_application::run_spider_with_progress(
+            &client, format!("http://127.0.0.1:{port}/"), 1, true, &|_, _| {}
+        ).await.unwrap();
+        assert_eq!(found.len(), 2, "{found:?}");
+        assert!(found.iter().any(|link| link.ends_with("/result")));
+        assert!(!found.iter().any(|link| link.contains("out.invalid") || link.contains("/secret")));
+        assert_eq!(handle.await.unwrap(), vec!["/robots.txt", "/sitemap.xml", "/child.xml", "/"]);
+    }).await.expect("single-level sitemap fixture timed out");
+}
+
+#[tokio::test]
+async fn spider_discovers_scoped_sitemap_urls_without_external_or_disallow_reads() {
+    use tokio::io::AsyncWriteExt;
+    tokio::time::timeout(std::time::Duration::from_secs(9),async {
+        let listener=tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port=listener.local_addr().unwrap().port();
+        let server=tokio::spawn(async move {
+            let mut visited=Vec::new();
+            for _ in 0..3 {
+                let (mut socket,_)=listener.accept().await.unwrap();
+                let (head,_)=crate::features::web::webtls::read_http_message(&mut socket).await.unwrap();
+                assert!(head.starts_with("GET "));
+                let path=head.split_whitespace().nth(1).unwrap_or("").to_string();
+                visited.push(path.clone());
+                let body=match path.as_str() {
+                    "/robots.txt" => format!("User-agent: *\nDisallow: /admin\nSitemap: http://127.0.0.1:{port}/sitemap.xml\nSitemap: https://outside.invalid/evil.xml"),
+                    "/sitemap.xml" => format!(r#"<?xml version="1.0"?><urlset><url><loc>http://127.0.0.1:{port}/public</loc></url><url><loc>https://outside.invalid/escape</loc></url><url><loc>http://127.0.0.1:{port}/danger?token=secret</loc></url></urlset>"#),
+                    "/" => "".to_string(),
+                    _ => panic!("out-of-scope discovery request {path}"),
+                };
+                let reply=format!("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",body.len(),body);
+                socket.write_all(reply.as_bytes()).await.unwrap();
+            }
+            visited
+        });
+        let client=reqwest::Client::builder().timeout(std::time::Duration::from_secs(3))
+            .redirect(reqwest::redirect::Policy::none()).no_proxy().build().unwrap();
+        let links=crawl_application::run_spider_with_progress(
+            &client,format!("http://127.0.0.1:{port}/"),1,true,&|_,_|{}
+        ).await.unwrap();
+        assert_eq!(links.len(),2,"{links:?}");
+        assert!(links.iter().any(|x|x.ends_with("/public")));
+        assert!(!links.iter().any(|x|x.contains("danger")||x.contains("outside.invalid")||x.contains("/admin")));
+        assert_eq!(server.await.unwrap(),vec!["/robots.txt","/sitemap.xml","/"]);
+    }).await.expect("sitemap crawler localhost fixture timed out");
+}
+
 #[tokio::test]
 async fn spider_get_forms_reach_only_same_origin_without_post_submission() {
     use tokio::io::AsyncWriteExt;
@@ -204,13 +325,16 @@ async fn spider_get_forms_reach_only_same_origin_without_post_submission() {
         ];
         let server = tokio::spawn(async move {
             let mut visited = Vec::new();
-            for _ in 0..pages.len() {
+            for _ in 0..pages.len()+2 {
                 let (mut stream, _) = listener.accept().await.unwrap();
                 let (head, _) =
                     crate::features::web::webtls::read_http_message(&mut stream).await.unwrap();
                 assert!(head.starts_with("GET "), "{head}");
                 let path = head.split_whitespace().nth(1).unwrap_or("").to_owned();
-                visited.push(path.clone());
+                // Metadata GETs are real authorized requests but not pages.
+                if path != "/robots.txt" && path != "/sitemap.xml" {
+                    visited.push(path.clone());
+                }
                 let body = if path == "/" {
                     "<form action='/safe' method='GET'></form>                     <form method='post' action='/submit'></form>                     <form action=/default></form>                     <form action='http://outside.invalid/escape'></form>"
                 } else { "" };

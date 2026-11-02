@@ -18,6 +18,15 @@ fn main() {
         .manage(features::crypto::ipc::recovery::RecoveryCtx::default())
         .manage(features::network::ipc::capture::CaptureCtx::default())
         .manage(features::network::ipc::netscan::ScanCtx::default())
+        .manage(std::sync::Arc::new(
+            features::network::ipc::arp_discovery::ArpDiscoveryCtx::default(),
+        ))
+        .manage(std::sync::Arc::new(
+            features::network::ipc::syn_scan::SynScanCtx::default(),
+        ))
+        .manage(std::sync::Arc::new(
+            features::network::ipc::icmp_echo::EchoCtx::default(),
+        ))
         .manage(features::network::ipc::pcap::PcapCtx {
             current: std::sync::Mutex::new(None),
         })
@@ -183,6 +192,18 @@ fn main() {
             features::network::ipc::netscan::netscan_history,
             features::network::ipc::netscan::netscan_export,
             features::network::ipc::netscan::netscan_discover_hosts,
+            features::network::ipc::arp_discovery::netscan_arp_discover_v1,
+            features::network::ipc::arp_discovery::netscan_arp_stop_v1,
+            features::network::ipc::arp_discovery::netscan_arp_status_v1,
+            features::network::ipc::arp_discovery::netscan_ndp_discover_v1,
+            features::network::ipc::arp_discovery::netscan_ndp_stop_v1,
+            features::network::ipc::arp_discovery::netscan_ndp_status_v1,
+            features::network::ipc::syn_scan::netscan_syn_start_v1,
+            features::network::ipc::syn_scan::netscan_syn_stop_v1,
+            features::network::ipc::syn_scan::netscan_syn_status_v1,
+            features::network::ipc::icmp_echo::netscan_icmp_discover_v1,
+            features::network::ipc::icmp_echo::netscan_icmp_stop_v1,
+            features::network::ipc::icmp_echo::netscan_icmp_status_v1,
         ])
         .run(tauri::generate_context!())
         .expect("CyberDeck desktop runtime failed to start");

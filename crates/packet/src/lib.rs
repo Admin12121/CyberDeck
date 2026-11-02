@@ -1,6 +1,10 @@
 //! Classic PCAP parsing + Ethernet/ARP/IPv4/IPv6/TCP/UDP/ICMP dissection.
 //! Guard rails: length fields validated, malformed tails flagged.
 
+pub mod active_arp;
+pub mod active_echo;
+pub mod active_ndp;
+pub mod active_syn;
 pub mod application;
 pub mod dns;
 pub mod domain;
@@ -8,6 +12,8 @@ pub mod fragments;
 pub mod infrastructure;
 pub mod inventory;
 pub mod live;
+pub mod scan_packets;
+pub mod scan_replies;
 pub mod streams;
 
 pub use application::capture::parse_capture;

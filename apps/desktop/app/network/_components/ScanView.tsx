@@ -7,6 +7,15 @@ import {
   isDesktop,
   netscanExport,
   netscanDiscoverHosts,
+  netscanArpDiscoverV1,
+  netscanNdpDiscoverV1,
+  netscanNdpStopV1,
+  netscanIcmpDiscoverV1,
+  netscanIcmpStopV1,
+  netscanSynStartV1,
+  netscanSynStopV1,
+  netscanArpStopV1,
+  captureInterfacesV1,
   netscanResults,
   netscanObservationsV1,
   netscanStart,
@@ -14,6 +23,10 @@ import {
   netscanStatus,
   netscanStop,
   type ScanEntryWire,
+  type ArpNeighborWire,
+  type SynFindingWire,
+  type IcmpObservationWire,
+  type CaptureInterfaceV1,
   type ScanObservationPageWire,
   type ScanProgressWire,
   type NetscanStatusWire,
@@ -48,6 +61,19 @@ export function ScanView() {
   const [progress, setProgress] = useState<ScanProgressWire | null>(null);
   const [results, setResults] = useState<ScanEntryWire[]>([]);
   const [discovered, setDiscovered] = useState<string[] | null>(null);
+  const [arpInterfaces, setArpInterfaces] = useState<CaptureInterfaceV1[]>([]);
+  const [arpInterface, setArpInterface] = useWorkspaceDraft(
+    wb.caseId, "network", "scan-arp-interface", "",
+  );
+  const [arpBusy, setArpBusy] = useState(false);
+  const [ndpBusy, setNdpBusy] = useState(false);
+  const [icmpBusy, setIcmpBusy] = useState(false);
+  const [icmpRows, setIcmpRows] = useState<IcmpObservationWire[] | null>(null);
+  const [ndpNeighbors, setNdpNeighbors] = useState<ArpNeighborWire[] | null>(null);
+  const [synBusy, setSynBusy] = useState(false);
+  const [synProgress, setSynProgress] = useState<ScanProgressWire | null>(null);
+  const [synFindings, setSynFindings] = useState<SynFindingWire[] | null>(null);
+  const [arpNeighbors, setArpNeighbors] = useState<ArpNeighborWire[] | null>(null);
   const [observationPage, setObservationPage] = useState<ScanObservationPageWire | null>(null);
   const [observationOffset, setObservationOffset] = useState(0);
   const [error, setError] = useState<string | null>(null);
@@ -67,12 +93,32 @@ export function ScanView() {
     pollTicket.current += 1;
     setResults([]);
     setDiscovered(null);
+    setArpNeighbors(null);
+    setNdpNeighbors(null);
+    setArpBusy(false);
+    setNdpBusy(false);
+    setIcmpBusy(false);
+    setIcmpRows(null);
+    setSynBusy(false);
+    setSynFindings(null);
+    setSynProgress(null);
     setObservationPage(null);
     setObservationOffset(0);
     setProgress(null);
     setError(null);
     setRunning(false);
   }, [identity]);
+
+  useEffect(() => {
+    if (!desktop) return;
+    let active = true;
+    void captureInterfacesV1().then((interfaces) => {
+      if (active) setArpInterfaces(interfaces.filter(
+        (iface) => iface.ethernet && iface.up && !iface.loopback,
+      ));
+    }).catch(() => { if (active) setArpInterfaces([]); });
+    return () => { active = false; };
+  }, [desktop]);
 
   const poll = useCallback(async () => {
     const caseId = wb.caseId;
@@ -146,6 +192,99 @@ export function ScanView() {
     } catch (err) {
       if (activeCase.current === key) setError(err instanceof Error ? err.message : String(err));
     }
+  };
+
+  const runSyn = async () => {
+    if (!desktop || revision === null || !authorized || !arpInterface
+      || synBusy || arpBusy || ndpBusy || icmpBusy || status.running || running) return;
+    const key = identity;
+    setError(null);
+    setSynBusy(true);
+    setSynFindings(null);
+    setSynProgress({ tried: 0, total: 0, percent: 0 });
+    try {
+      const rows = await netscanSynStartV1(target, ports, arpInterface, true, (p) => {
+        if (activeCase.current === key) setSynProgress(p);
+      });
+      if (activeCase.current === key) setSynFindings(rows);
+    } catch (err) {
+      if (activeCase.current === key) setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      if (activeCase.current === key) {
+        setSynBusy(false);
+        setSynProgress(null);
+      }
+    }
+  };
+  const stopSyn = async () => {
+    try { await netscanSynStopV1(); }
+    catch (err) { setError(err instanceof Error ? err.message : String(err)); }
+  };
+
+  const discoverArp = async () => {
+    if (!desktop || revision === null || !authorized || !arpInterface
+        || running || status.running || arpBusy || ndpBusy || synBusy || icmpBusy) return;
+    const key = identity;
+    setError(null);
+    setArpNeighbors(null);
+    setArpBusy(true);
+    try {
+      const neighbors = await netscanArpDiscoverV1(target, arpInterface, true);
+      if (activeCase.current === key) setArpNeighbors(neighbors);
+    } catch (err) {
+      if (activeCase.current === key) {
+        setError(err instanceof Error ? err.message : String(err));
+      }
+    } finally {
+      if (activeCase.current === key) setArpBusy(false);
+    }
+  };
+
+  const discoverIcmp = async () => {
+    if (!desktop || revision === null || !authorized || !arpInterface ||
+      running || status.running || arpBusy || ndpBusy || synBusy || icmpBusy) return;
+    const key = identity;
+    setError(null);
+    setIcmpRows(null);
+    setIcmpBusy(true);
+    try {
+      const rows = await netscanIcmpDiscoverV1(target, arpInterface, true);
+      if (activeCase.current === key) setIcmpRows(rows);
+    } catch (err) {
+      if (activeCase.current === key) setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      if (activeCase.current === key) setIcmpBusy(false);
+    }
+  };
+  const stopIcmp = async () => {
+    try { await netscanIcmpStopV1(); }
+    catch (err) { setError(err instanceof Error ? err.message : String(err)); }
+  };
+
+  const discoverNdp = async () => {
+    if (!desktop || revision === null || !authorized || !arpInterface ||
+      running || status.running || arpBusy || synBusy || ndpBusy) return;
+    const key = identity;
+    setError(null);
+    setNdpNeighbors(null);
+    setNdpBusy(true);
+    try {
+      const rows = await netscanNdpDiscoverV1(target, arpInterface, true);
+      if (activeCase.current === key) setNdpNeighbors(rows);
+    } catch (err) {
+      if (activeCase.current === key) setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      if (activeCase.current === key) setNdpBusy(false);
+    }
+  };
+  const stopNdp = async () => {
+    try { await netscanNdpStopV1(); }
+    catch (err) { setError(err instanceof Error ? err.message : String(err)); }
+  };
+
+  const stopArp = async () => {
+    try { await netscanArpStopV1(); }
+    catch (err) { setError(err instanceof Error ? err.message : String(err)); }
   };
 
   const stop = async () => {
@@ -248,6 +387,85 @@ export function ScanView() {
                 I confirm the target is mine or I have explicit authorization to assess it. The backend verifies the selected saved case and asks for native confirmation before starting.
               </span>
             </label>
+            <div className="flex flex-wrap items-center gap-2 border-t border-line p-2">
+              <span className="font-mono text-[10px] text-fg-muted">Linux on-link discovery</span>
+              <Select
+                value={arpInterface}
+                onChange={setArpInterface}
+                options={[
+                  { value: "", label: "Choose Ethernet NIC" },
+                  ...arpInterfaces.map((iface) => ({
+                    value: iface.name, label: iface.name,
+                  })),
+                ]}
+                ariaLabel="ARP discovery Ethernet interface"
+                className="w-44"
+              />
+              {arpBusy ? (
+                <ToolButton tone="danger" onClick={() => void stopArp()}
+                  title="Stop case-authorized native ARP discovery">
+                  <Square size={11} /> Stop ARP
+                </ToolButton>
+              ) : (
+                <ToolButton
+                  onClick={() => void discoverArp()}
+                  disabled={!desktop || !authorized || revision === null || !arpInterface
+                    || !target.trim() || running || status.running || ndpBusy || synBusy}
+                  title="Linux only: native confirmation, on-link scope, CAP_NET_RAW and case authorization required">
+                  Discover ARP
+                </ToolButton>
+              )}
+              <span className="font-mono text-[10px] text-fg-muted">
+                ARP: up to 32 on-link IPv4 hosts
+              </span>
+              {ndpBusy ? (
+                <ToolButton tone="danger" onClick={() => void stopNdp()}>
+                  <Square size={11} /> Stop NDP
+                </ToolButton>
+              ) : (
+                <ToolButton onClick={() => void discoverNdp()}
+                  disabled={!desktop || !authorized || revision === null || !arpInterface ||
+                    !target.trim() || running || status.running || arpBusy || synBusy}
+                  title="Linux only: native case confirmation, selected NIC, fe80::/10 IPv6 target and CAP_NET_RAW required">
+                  Discover NDP
+                </ToolButton>
+              )}
+              <span className="font-mono text-[10px] text-fg-muted">
+                NDP: 16 link-local IPv6 hosts · silence ≠ down
+              </span>
+              {icmpBusy ? (
+                <ToolButton tone="danger" onClick={() => void stopIcmp()}>
+                  <Square size={11} /> Stop ICMP
+                </ToolButton>
+              ) : (
+                <ToolButton onClick={() => void discoverIcmp()}
+                  disabled={!desktop || !authorized || revision === null || !arpInterface ||
+                    !target.trim() || running || status.running || arpBusy || ndpBusy || synBusy}
+                  title="Linux only: explicitly confirmed native ICMPv4 echo requests with CAP_NET_RAW">
+                  ICMP Echo
+                </ToolButton>
+              )}
+              <span className="font-mono text-[10px] text-fg-muted">
+                ICMPv4: up to 32 hosts
+              </span>
+              {synBusy ? (
+                <ToolButton tone="danger" onClick={() => void stopSyn()} title="Stop case-authorized raw SYN scan">
+                  <Square size={11} /> Stop SYN
+                </ToolButton>
+              ) : (
+                <ToolButton onClick={() => void runSyn()}
+                  disabled={!desktop || !authorized || revision === null || !arpInterface
+                    || !target.trim() || !ports.trim() || running || status.running || arpBusy}
+                  title="Linux only: CAP_NET_RAW, selected interface, backend saved-case authorization and native confirmation required">
+                  <Play size={11} /> Raw SYN
+                </ToolButton>
+              )}
+              {synProgress ? (
+                <span className="font-mono text-[10px] text-fg-muted">
+                  SYN {synProgress.tried}/{synProgress.total} · {synProgress.percent}%
+                </span>
+              ) : null}
+            </div>
           </Pane>
           {progress ? (
             <div className="shrink-0 border-b border-line bg-panel px-2 py-1.5">
@@ -332,6 +550,62 @@ export function ScanView() {
               : "Native scan status is global; results and findings withheld until a scan is started in this case"}
           </div>
           {status.save_error ? <div className="border-t border-line p-2 text-xs text-err">Case save failed: {status.save_error}</div> : null}
+          {synFindings !== null ? (
+            <div className="border-t border-line p-2 text-[10px] text-fg-muted">
+              <div className="mb-1 font-semibold text-fg">
+                Correlated TCP SYN: {synFindings.length} observations · {synFindings.filter((r) => r.state === "open").length} open
+              </div>
+              <div className="max-h-36 overflow-y-auto font-mono">
+                {synFindings.map((r) => (
+                  <div key={r.host + ":" + r.port}>
+                    {r.host}:{r.port} · {r.state} · {r.reason} · {r.elapsed_ms} ms
+                  </div>
+                ))}
+              </div>
+            </div>
+          ) : null}
+          {icmpRows !== null ? (
+            <div className="border-t border-line p-2 text-[10px] text-fg-muted">
+              <div className="mb-1 font-semibold text-fg">
+                IPv4 ICMP echo: {icmpRows.filter((r) => r.state === "responded").length} responding / {icmpRows.length} checked
+              </div>
+              <div className="max-h-28 overflow-y-auto font-mono">
+                {icmpRows.map((row) => (
+                  <div key={row.host}>
+                    {row.host} · {row.state} · {row.reason} · {row.elapsed_ms} ms
+                  </div>
+                ))}
+              </div>
+            </div>
+          ) : null}
+          {ndpNeighbors !== null ? (
+            <div className="border-t border-line p-2 text-[10px] text-fg-muted">
+              <div className="mb-1 font-semibold text-fg">
+                Correlated IPv6 Neighbor Advertisements: {ndpNeighbors.length}
+              </div>
+              <div className="max-h-28 overflow-y-auto font-mono">
+                {ndpNeighbors.length === 0
+                  ? "No matching IPv6 Neighbor Advertisements observed; silence is not proof a host is down."
+                  : ndpNeighbors.map((row) => (
+                    <div key={row.host}>{row.host} · {row.mac} · {row.elapsed_ms} ms</div>
+                  ))}
+              </div>
+            </div>
+          ) : null}
+          {arpNeighbors !== null ? (
+            <div className="border-t border-line p-2 text-[10px] text-fg-muted">
+              <div className="mb-1 font-semibold text-fg">
+                Correlated ARP neighbors: {arpNeighbors.length}
+              </div>
+              <div className="max-h-28 overflow-y-auto font-mono">
+                {arpNeighbors.length === 0
+                  ? "No matched ARP replies were observed. Silence does not prove hosts are down."
+                  : arpNeighbors.map((row) => (
+                    <div key={row.host}>{row.host} · {row.mac} · {row.elapsed_ms} ms</div>
+                  ))}
+              </div>
+            </div>
+          ) : null}
           {discovered !== null ? (
             <div className="border-t border-line p-2 text-[10px] text-fg-muted">
               <div className="mb-1 font-semibold text-fg">Responsive hosts: {discovered.length}</div>

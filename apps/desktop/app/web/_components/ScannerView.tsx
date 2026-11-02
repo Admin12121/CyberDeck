@@ -19,6 +19,10 @@ export function ScannerView() {
   const [jobId, setJobId] = useWorkspaceDraft<number | null>(caseId, "web", "scanner-job", null);
   const [job, setJob] = useState<WebAssessmentJob | null>(null);
   const [authorized, setAuthorized] = useState(false);
+  const [postFormat, setPostFormat] = useState<"form" | "json">("form");
+  // Volatile input, never written to workspace drafts or SQLite.
+  const [postTemplate, setPostTemplate] = useState("");
+  const [postRiskApproved, setPostRiskApproved] = useState(false);
   const [busy, setBusy] = useState(false);
   const [saving, setSaving] = useState(false);
   const [savedCount, setSavedCount] = useState(0);
@@ -36,6 +40,7 @@ export function ScannerView() {
   useEffect(() => {
     context.current.revision++;
     setJob(null); setAuthorized(false); setSavedCount(0);
+    setPostTemplate(""); setPostRiskApproved(false);
     setBusy(false); setError(null);
   }, [caseId, caseSession.revision, normalized]);
 
@@ -58,15 +63,20 @@ export function ScannerView() {
     return () => { disposed = true; clearInterval(timer); };
   }, [desktop, jobId, caseId, caseSession.revision]);
 
-  const start = async (kind: "scanner" | "active-query" = "scanner") => {
+  const start = async (kind: "scanner" | "active-query" | "active-form" | "active-json" = "scanner") => {
     if (!desktop || running || !normalized || !authorized) return;
+    const post = kind === "active-form" || kind === "active-json";
+    if (post && (!postRiskApproved || !postTemplate.trim())) return;
+    const template = post ? postTemplate : undefined;
     const stamp = { ...context.current };
     setBusy(true); setSavedCount(0); setError(null); setJob(null);
     try {
       // The Jobs dock monitors the actual backend operation until it reaches
       // a terminal state. Navigation does not stop the native worker.
-      const completed = await wb.trackOperation(kind === "active-query" ? "Web active query" : "Web scanner", async () => {
-        const id = await startWebAssessment(kind, stamp.target, true);
+      const completed = await wb.trackOperation(
+        kind === "active-query" ? "Web active query" :
+        post ? "Web approved POST probe" : "Web scanner", async () => {
+        const id = await startWebAssessment(kind, stamp.target, true, 2, template);
         if (context.current.revision === stamp.revision) setJobId(id);
         return waitForWebAssessment(id, (current) => {
           if (context.current.revision === stamp.revision &&
@@ -130,6 +140,36 @@ export function ScannerView() {
     </label>
     <div className="border-b border-line px-2 py-1 text-[10px] text-fg-muted">
       Query probes send a baseline plus up to eight GETs with inert HTML-element markers, skip credential/CSRF-like parameters, and report potential markup reflection—not confirmed executable XSS. The URL must contain query parameters; native approval and private-address scope are mandatory.
+    </div>
+    <div className="border-b border-line bg-panel px-2 py-2 text-[11px]">
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="font-semibold">Manual POST reflection probe</span>
+        <select className="rounded border border-line bg-panel px-2 py-1"
+          value={postFormat} disabled={running} aria-label="POST template type"
+          onChange={(e) => { setPostFormat(e.target.value as "form" | "json");
+            setPostRiskApproved(false); }}>
+          <option value="form">Form URL-encoded</option>
+          <option value="json">JSON object</option>
+        </select>
+        <ToolButton disabled={!desktop || !normalized || !authorized || running ||
+          !postRiskApproved || !postTemplate.trim()}
+          onClick={() => void start(postFormat === "form" ? "active-form" : "active-json")}>
+          <Play size={12} /> Test POST fields
+        </ToolButton>
+        <span className="text-fg-muted">Baseline + up to 4 mutations; pinned private target</span>
+      </div>
+      <textarea value={postTemplate} disabled={running}
+        onChange={(e) => { setPostTemplate(e.target.value.slice(0, 2048)); setPostRiskApproved(false); }}
+        aria-label="Manual POST body"
+        placeholder={postFormat === "form" ? "q=example&label=sample" : '{"q":"example","label":"sample"}'}
+        rows={2} spellCheck={false}
+        className="mt-2 w-full resize-y rounded border border-line bg-panel px-2 py-1 font-mono text-[11px] text-fg" />
+      <label className="mt-1 flex items-start gap-2 text-fg-dim">
+        <input type="checkbox" checked={postRiskApproved} disabled={running}
+          onChange={(e) => setPostRiskApproved(e.target.checked)} />
+        I authorize POST submissions to this private target and understand that they may change server state.
+        Do not enter passwords, session tokens or CSRF values. Native confirmation is also required.
+      </label>
     </div>
     {error ? <div role="alert" className="border-b border-line px-2 py-1 text-xs text-err">{error}</div> : null}
     <Pane title="Findings" className="min-h-0 flex-1"

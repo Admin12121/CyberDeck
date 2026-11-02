@@ -19,7 +19,7 @@ export interface WebPassiveFinding {
 
 export interface WebAssessmentJob {
   job_id: number;
-  kind: "scanner" | "spider" | "passive" | "active-query";
+  kind: "scanner" | "spider" | "passive" | "active-query" | "active-form" | "active-json";
   state: "running" | "completed" | "failed" | "cancelled";
   processed: number;
   discovered: number;
@@ -44,10 +44,17 @@ export async function startWebPassiveScan(enabledRules: string[]): Promise<numbe
 }
 
 export async function startWebAssessment(
-  kind: "scanner" | "spider" | "active-query", targetUrl: string, authorized: boolean, maxDepth = 2,
+  kind: "scanner" | "spider" | "active-query" | "active-form" | "active-json",
+  targetUrl: string, authorized: boolean, maxDepth = 2, probeBody?: string,
 ): Promise<number> {
   if (!isDesktop()) throw new Error("Web assessments require the native desktop runtime");
-  return invoke<number>("web_assessment_start_v1", { kind, targetUrl, maxDepth, authorized });
+  if ((kind === "active-form" || kind === "active-json") &&
+      (!probeBody || new TextEncoder().encode(probeBody).length > 2048)) {
+    throw new Error("Provide a bounded manual POST template");
+  }
+  return invoke<number>("web_assessment_start_v1", {
+    kind, targetUrl, maxDepth, authorized, probeBody: probeBody ?? null,
+  });
 }
 
 export async function webAssessmentStatus(jobId: number): Promise<WebAssessmentJob> {

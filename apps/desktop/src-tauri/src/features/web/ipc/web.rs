@@ -33,6 +33,8 @@ use proxy_rules_domain::replace_bytes_limited;
 pub use proxy_rules_domain::{MatchReplaceRule, MAX_PROXY_BODY};
 
 pub use request_domain::parse_raw_request;
+#[path = "../application/active_body.rs"]
+mod active_body_application;
 #[path = "../application/active_query.rs"]
 mod active_query_application;
 #[path = "../application/assessment_jobs.rs"]

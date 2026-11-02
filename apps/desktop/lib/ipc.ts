@@ -55,8 +55,9 @@ export type RecoveryBackendV1 =
   | { backend: "open_cl"; device_index: number; batch_size: number }
   | { backend: "hashcat_managed" };
 
+export type HashcatRawAlgorithmV1 = "md5" | "sha1" | "sha256" | "sha512";
 export interface RecoveryRequestV1 {
-  algorithm: "sha256";
+  algorithm: HashcatRawAlgorithmV1;
   target_hash: string;
   backend: RecoveryBackendV1;
   max_candidates: number;
@@ -139,21 +140,24 @@ export async function recoveryStartV1(
 }
 export interface EmbeddedHashcatCapabilityV1 {
   available: boolean;
+  /** Kept for older IPC callers; always the legacy SHA-256 mode. */
   mode: number;
+  /** Built-in modes, independent of physical hardware acceptance. */
+  modes: { algorithm: HashcatRawAlgorithmV1; mode: number; digest_hex_length: number }[];
   hardware_verified: boolean;
   detail: string;
 }
 
-/** Checks bundled native SHA-256 Hashcat availability; no hardware KAT implied. */
+/** Checks pinned bundled Hashcat modes; no hardware KAT implied. */
 export async function recoveryHashcatCapabilitiesV1(): Promise<EmbeddedHashcatCapabilityV1> {
   if (!inTauri) return {
-    available: false, mode: 1400, hardware_verified: false,
+    available: false, mode: 1400, modes: [], hardware_verified: false,
     detail: "Embedded Hashcat is available only in the native desktop runtime",
   };
   return invoke<EmbeddedHashcatCapabilityV1>("recovery_hashcat_capabilities_v1");
 }
 
-/** Explicit opt-in to bundled native Hashcat mode 1400.
+/** Explicit opt-in to the four pinned raw-digest Hashcat modes.
  * No system hashcat process, arbitrary flags or silent CPU fallback.
  */
 export async function recoveryStartHashcatV1(
@@ -1432,6 +1436,88 @@ export async function netscanHistory(): Promise<ScanHistoryItemWire[]> {
 export async function netscanExport(format: "json" | "csv"): Promise<string> {
   if (!inTauri) throw new Error("export requires the desktop runtime");
   return invoke<string>("netscan_export", { format });
+}
+
+/** Linux only. Backend validates the selected case, native confirmation, interface
+ * source identity and on-link scope before injecting any Ethernet ARP frame. */
+export interface ArpNeighborWire {
+  host: string;
+  mac: string;
+  elapsed_ms: number;
+}
+export interface IcmpObservationWire {
+  host: string;
+  state: "responded" | "unreachable" | "inconclusive";
+  reason: string;
+  elapsed_ms: number;
+}
+export async function netscanIcmpDiscoverV1(
+  targets: string, interfaceName: string, authorized: boolean,
+): Promise<IcmpObservationWire[]> {
+  if (!inTauri) throw new Error("Native ICMPv4 discovery requires the desktop runtime");
+  return invoke<IcmpObservationWire[]>("netscan_icmp_discover_v1", { targets, interfaceName, authorized });
+}
+export async function netscanIcmpStopV1(): Promise<boolean> {
+  if (!inTauri) throw new Error("ICMPv4 cancellation requires the desktop runtime");
+  return invoke<boolean>("netscan_icmp_stop_v1", {});
+}
+export async function netscanIcmpStatusV1(): Promise<boolean> {
+  if (!inTauri) return false;
+  return invoke<boolean>("netscan_icmp_status_v1", {});
+}
+
+export interface SynFindingWire {
+  host: string;
+  port: number;
+  state: "open" | "closed" | "unreachable" | "inconclusive";
+  reason: string;
+  elapsed_ms: number;
+}
+export async function netscanSynStartV1(
+  targets: string, ports: string, interfaceName: string, authorized: boolean,
+  onProgress?: (p: ScanProgressWire) => void,
+): Promise<SynFindingWire[]> {
+  if (!inTauri) throw new Error("Native raw SYN scans require the desktop runtime");
+  const channel = new Channel<ScanProgressWire>();
+  if (onProgress) channel.onmessage = onProgress;
+  return invoke<SynFindingWire[]>("netscan_syn_start_v1", {
+    targets, ports, interfaceName, authorized, onProgress: channel,
+  });
+}
+export async function netscanSynStopV1(): Promise<boolean> {
+  if (!inTauri) throw new Error("Native SYN cancellation requires the desktop runtime");
+  return invoke<boolean>("netscan_syn_stop_v1", {});
+}
+export async function netscanSynStatusV1(): Promise<boolean> {
+  if (!inTauri) return false;
+  return invoke<boolean>("netscan_syn_status_v1", {});
+}
+
+/** Native IPv6 Neighbor Discovery, link-local targets only. No fallback simulation. */
+export async function netscanNdpDiscoverV1(targets: string, interfaceName: string, authorized: boolean): Promise<ArpNeighborWire[]> {
+  if (!inTauri) throw new Error("Native IPv6 Neighbor Discovery requires the desktop runtime");
+  return invoke<ArpNeighborWire[]>("netscan_ndp_discover_v1", { targets, interfaceName, authorized });
+}
+export async function netscanNdpStopV1(): Promise<boolean> {
+  if (!inTauri) throw new Error("Native Neighbor Discovery cancellation requires the desktop runtime");
+  return invoke<boolean>("netscan_ndp_stop_v1", {});
+}
+export async function netscanNdpStatusV1(): Promise<boolean> {
+  if (!inTauri) return false;
+  return invoke<boolean>("netscan_ndp_status_v1", {});
+}
+
+export async function netscanArpDiscoverV1(targets: string, interfaceName: string, authorized: boolean): Promise<ArpNeighborWire[]> {
+  if (!inTauri) throw new Error("Native ARP discovery requires the desktop runtime");
+  return invoke<ArpNeighborWire[]>("netscan_arp_discover_v1", { targets, interfaceName, authorized });
+}
+export async function netscanArpStopV1(): Promise<boolean> {
+  if (!inTauri) throw new Error("Native ARP cancellation requires the desktop runtime");
+  return invoke<boolean>("netscan_arp_stop_v1", {});
+}
+export async function netscanArpStatusV1(): Promise<boolean> {
+  if (!inTauri) return false;
+  return invoke<boolean>("netscan_arp_status_v1", {});
 }
 
 export async function netscanDiscoverHosts(targets: string, authorized: boolean): Promise<string[]> {

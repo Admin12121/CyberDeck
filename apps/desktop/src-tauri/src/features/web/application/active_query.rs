@@ -32,7 +32,7 @@ struct Vector {
     index: usize,
 }
 
-fn sensitive_name(key: &str) -> bool {
+pub(super) fn sensitive_name(key: &str) -> bool {
     const PARTS: &[&str] = &[
         "csrf",
         "xsrf",
@@ -155,7 +155,7 @@ async fn bounded_html(client: &Client, url: Url) -> Result<Option<Vec<u8>>, Stri
     Ok(Some(body))
 }
 
-fn candidate_is_reflected(baseline: &[u8], candidate: &[u8], marker: &[u8]) -> bool {
+pub(super) fn candidate_is_reflected(baseline: &[u8], candidate: &[u8], marker: &[u8]) -> bool {
     // Exact inert custom-element text is sufficient to show unsanitized
     // HTML interpretation potential. Does NOT imply executable XSS.
     !baseline.windows(marker.len()).any(|span| span == marker)
@@ -288,14 +288,17 @@ mod tests {
                 let mut req = Vec::new();
                 loop {
                     let mut chunk = [0u8; 512];
-                    let size = tokio::time::timeout(Duration::from_secs(2), socket.read(&mut chunk))
-                        .await
-                        .expect("fixture request timeout")
-                        .expect("fixture read");
+                    let size =
+                        tokio::time::timeout(Duration::from_secs(2), socket.read(&mut chunk))
+                            .await
+                            .expect("fixture request timeout")
+                            .expect("fixture read");
                     assert!(size > 0, "fixture must receive complete request");
                     req.extend_from_slice(&chunk[..size]);
                     assert!(req.len() <= 4096, "fixture request exceeded bound");
-                    if req.windows(4).any(|bytes| bytes == b"\r\n\r\n") { break; }
+                    if req.windows(4).any(|bytes| bytes == b"\r\n\r\n") {
+                        break;
+                    }
                 }
                 let line = String::from_utf8_lossy(&req);
                 let target = line.split_whitespace().nth(1).unwrap_or("/");

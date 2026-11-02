@@ -24,6 +24,14 @@ import { createHash } from "node:crypto";
 const root = dirname(fileURLToPath(import.meta.url));
 const source = join(root, "upstream");
 const manifestPath = join(root, "source-manifest.json");
+const capabilityPath = join(root, "capability-manifest.json");
+const capabilities = JSON.parse(readFileSync(capabilityPath, "utf8"));
+if (capabilities.schema !== 1 ||
+    capabilities.source_commit !== "1994b513b550edfe3e7fcaa1103759a9343e57a4" ||
+    capabilities.abi_version !== 4 ||
+    capabilities.hash_modes.map(x => x.id).join(",") !== "0,100,1400,1700") {
+  throw new Error("embedded Hashcat capability manifest conflicts with pinned C/worker contract");
+}
 const argIndex = process.argv.indexOf("--out");
 if (argIndex < 0 || !process.argv[argIndex + 1] || !resolve(process.argv[argIndex + 1]).startsWith(sep)) {
   console.error("usage: node build-native.mjs --out /absolute/build-output");
@@ -84,8 +92,17 @@ for (const folder of ["obj", "modules", "feeds", "bridges"]) {
 }
 const library = process.platform === "win32" ? "hashcat.dll" :
   process.platform === "darwin" ? "libhashcat.8.dylib" : "libhashcat.so.8";
-const bootstrapModule = process.platform === "win32" ? "module_00000.dll" : "module_00000.so";
-const module = process.platform === "win32" ? "module_01400.dll" : "module_01400.so";
+// These are bundled native hash modes, not claims of validated GPU execution.
+const supportedModes = [
+  { id: 0, algorithm: "md5" },
+  { id: 100, algorithm: "sha1" },
+  { id: 1400, algorithm: "sha256" },
+  { id: 1700, algorithm: "sha512" },
+];
+const moduleNames = supportedModes.map(({ id }) =>
+  "module_" + String(id).padStart(5, "0") +
+  (process.platform === "win32" ? ".dll" : ".so"));
+const modulePaths = moduleNames.map((name) => "modules/" + name);
 const shim = process.platform === "win32" ? "cyberdeck_hashcat_shim.dll" :
   process.platform === "darwin" ? "libcyberdeck_hashcat_shim.dylib" : "libcyberdeck_hashcat_shim.so";
 function checked(executable, args, cwd) {
@@ -105,7 +122,7 @@ function checked(executable, args, cwd) {
 const c = process.env.CC || "cc";
 checked(process.env.MAKE || "make",
   ["-j2", "PRODUCTION=1", "SHARED=1", "ENABLE_BRAIN=0", "ENABLE_CUBIN=0",
-   "MAINTAINER_MODE=1", library, "modules/" + bootstrapModule, "modules/" + module], build);
+   "MAINTAINER_MODE=1", library, ...modulePaths], build);
 
 const includes = ["-I" + join(root, "native"), "-I" + join(build, "include"),
   "-I" + join(build, "OpenCL"), "-I" + join(build, "deps/OpenCL-Headers")];
@@ -144,8 +161,9 @@ checked(process.env.RUSTC || "rustc", workerFlags, build);
 
 const modeDir = join(runtime, "modules");
 mkdirSync(modeDir, { recursive: true });
-copyFileSync(join(build, "modules", bootstrapModule), join(modeDir, bootstrapModule));
-copyFileSync(join(build, "modules", module), join(modeDir, module));
+for (const name of moduleNames) {
+  copyFileSync(join(build, "modules", name), join(modeDir, name));
+}
 cpSync(join(build, "OpenCL"), join(runtime, "OpenCL"), { recursive: true });
 cpSync(join(build, "tunings"), join(runtime, "tunings"), { recursive: true });
 const licenses = join(runtime, "licenses");
@@ -156,16 +174,18 @@ copyFileSync(join(build, "deps/OpenCL-Headers/LICENSE"), join(licenses, "OPENCL_
 copyFileSync(join(build, "deps/sse2neon/LICENSE"), join(licenses, "SSE2NEON.txt"));
 cpSync(join(build, "docs/license_libs"), join(licenses, "upstream_notices"), { recursive: true });
 copyFileSync(manifestPath, join(runtime, "source-manifest.json"));
-for (const name of [library, shim, workerName, "modules/" + bootstrapModule, "modules/" + module, "source-manifest.json"]) {
+copyFileSync(capabilityPath, join(runtime, "capability-manifest.json"));
+for (const name of [library, shim, workerName, ...modulePaths, "source-manifest.json", "capability-manifest.json"]) {
   if (!statSync(join(runtime, name)).isFile()) throw new Error("package missing " + name);
 }
 if (install) {
   mkdirSync(install, { recursive: true });
   cpSync(runtime, install, { recursive: true, force: true });
-  for (const name of [library, shim, workerName, "modules/" + bootstrapModule, "modules/" + module, "source-manifest.json"]) {
+  for (const name of [library, shim, workerName, ...modulePaths, "source-manifest.json", "capability-manifest.json"]) {
     if (!statSync(join(install, name)).isFile()) throw new Error("installed package missing " + name);
   }
   console.log("CyberDeck managed Hashcat runtime staged for Tauri resources:", install);
 }
 console.log("Embedded Hashcat source-compiled runtime ready:", runtime);
-console.log("Mode: 1400 SHA-256 only. Module 00000 included as native startup dependency, not exposed for recovery. No device/algorithm execution implied.");
+console.log("Bundled selected modules:", supportedModes.map(x => x.id + ":" + x.algorithm).join(", "));
+console.log("Actual GPU/device execution remains unverified until a host known-answer test.");

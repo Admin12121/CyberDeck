@@ -20,6 +20,7 @@
 #include "hashcat.h"
 #include "user_options.h"
 #include "module_options.h"
+#include "dynloader.h"
 
 /* A private worker constructs exactly one Hashcat context per process.
  * Hashcat's event callback has no user-data pointer, so the C owner records
@@ -56,12 +57,35 @@ struct cd_hashcat
   char candidate_limit[32];
   char runtime_limit[16];
   char device_selector[16];
+  char hash_mode_option[32];
   char *fixed_options[25];
 };
 
 uint32_t cd_hashcat_abi_version (void)
 {
-  return 2;
+  return 4;
+}
+
+/* Deliberately mirror upstream ext_OpenCL.c loader names. This is only a
+ * no-credentials preflight; OpenCL platforms, devices and kernels may still
+ * be absent or unsupported. The installed GPU driver owns the loader. */
+uint32_t cd_hashcat_opencl_loader_available (void)
+{
+  hc_dynlib_t library = NULL;
+#if defined (_WIN)
+  library = hc_dlopen ("OpenCL");
+#elif defined (__APPLE__)
+  library = hc_dlopen ("/System/Library/Frameworks/OpenCL.framework/OpenCL");
+#elif defined (__CYGWIN__)
+  library = hc_dlopen ("opencl.dll");
+  if (library == NULL) library = hc_dlopen ("cygOpenCL-1.dll");
+#else
+  library = hc_dlopen ("libOpenCL.so");
+  if (library == NULL) library = hc_dlopen ("libOpenCL.so.1");
+#endif
+  if (library == NULL) return 0;
+  hc_dlclose (library);
+  return 1;
 }
 
 uint32_t cd_hashcat_last_setup_stage (cd_hashcat *handle)
@@ -113,7 +137,7 @@ static int validate_path (const char *value)
   return 1;
 }
 
-int cd_hashcat_prepare_sha256 (
+int cd_hashcat_prepare_mode (
     cd_hashcat *handle,
     const char *install_root,
     const char *shared_root,
@@ -122,7 +146,8 @@ int cd_hashcat_prepare_sha256 (
     const char *temporary_outfile,
     uint64_t max_candidates,
     uint32_t runtime_seconds,
-    uint32_t device_id)
+    uint32_t device_id,
+    uint32_t hash_mode)
 {
   if (handle == NULL || handle->core == NULL || handle->session_attempted) return -1;
   if (!handle->options_initialized) return -1;
@@ -132,6 +157,8 @@ int cd_hashcat_prepare_sha256 (
   if (max_candidates == 0 || max_candidates > 1000000
       || runtime_seconds == 0 || runtime_seconds > 300
       || device_id > 128) return -2;
+  if (hash_mode != 0 && hash_mode != 100 && hash_mode != 1400 && hash_mode != 1700) return -2;
+  snprintf (handle->hash_mode_option, sizeof (handle->hash_mode_option), "--hash-type=%u", hash_mode);
 
   snprintf (handle->candidate_limit, sizeof (handle->candidate_limit), "%llu",
             (unsigned long long) max_candidates);
@@ -143,7 +170,7 @@ int cd_hashcat_prepare_sha256 (
   size_t argc = 0;
 #define ARG(x) do { if (argc >= 24) return -2; handle->fixed_options[argc++] = (char *)(x); } while (0)
   ARG ("cyberdeck-private-recovery-worker");
-  ARG ("--hash-type=1400");
+  ARG (handle->hash_mode_option);
   ARG ("--attack-mode=0");
   ARG ("--potfile-disable");
   ARG ("--restore-disable");
@@ -198,6 +225,15 @@ int cd_hashcat_prepare_sha256 (
   }
 
   return 0;
+}
+
+int cd_hashcat_prepare_sha256 (
+    cd_hashcat *handle, const char *install_root, const char *shared_root,
+    const char *hash_file, const char *wordlist_file, const char *temporary_outfile,
+    uint64_t max_candidates, uint32_t runtime_seconds, uint32_t device_id)
+{
+  return cd_hashcat_prepare_mode (handle, install_root, shared_root, hash_file,
+      wordlist_file, temporary_outfile, max_candidates, runtime_seconds, device_id, 1400);
 }
 
 int cd_hashcat_execute (cd_hashcat *handle)

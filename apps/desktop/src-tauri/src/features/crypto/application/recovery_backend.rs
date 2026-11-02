@@ -220,9 +220,16 @@ pub(super) fn embedded_result(
         .unzip();
     RecoveryRun {
         summary: RecoverySummaryWire {
-            algorithm: "sha256".into(),
+            algorithm: request.algorithm.clone(),
             backend: request.backend,
-            engine: "embedded_hashcat_1400".into(),
+            engine: match request.algorithm.as_str() {
+                "md5" => "embedded_hashcat_00000",
+                "sha1" => "embedded_hashcat_00100",
+                "sha256" => "embedded_hashcat_01400",
+                "sha512" => "embedded_hashcat_01700",
+                _ => "embedded_hashcat_unsupported",
+            }
+            .into(),
             tried: 0, // ABI v1 lacks trusted per-candidate progress.
             cancelled,
             limit_reached: false,
@@ -318,6 +325,29 @@ mod tests {
             max_matches: 1,
         }
     }
+    #[test]
+    fn embedded_four_mode_summary_is_typed_masked_and_not_hardcoded_sha256() {
+        for (algorithm, digits, engine) in [
+            ("md5", 32, "embedded_hashcat_00000"),
+            ("sha1", 40, "embedded_hashcat_00100"),
+            ("sha256", 64, "embedded_hashcat_01400"),
+            ("sha512", 128, "embedded_hashcat_01700"),
+        ] {
+            let mut request = request(BackendSelection::HashcatManaged);
+            request.algorithm = algorithm.into();
+            request.target_hash = "a".repeat(digits);
+            let run = embedded_result(&request, vec![(0, b"private-fixture".to_vec())], false, 20);
+            assert_eq!(run.summary.algorithm, algorithm);
+            assert_eq!(run.summary.engine, engine);
+            assert_eq!(run.summary.backend, BackendSelection::HashcatManaged);
+            assert_eq!(run.summary.matches.len(), 1);
+            assert!(run.summary.matches[0].masked);
+            let public_wire = serde_json::to_string(&run.summary).unwrap();
+            assert!(!public_wire.contains("private-fixture"));
+            assert!(public_wire.contains(algorithm));
+        }
+    }
+
     #[test]
     fn cpu_vector_is_masked_until_authorized_reveal() {
         let mut events = Vec::new();

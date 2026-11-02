@@ -16,8 +16,17 @@ import {
   recoveryHashcatCapabilitiesV1, recoveryStartHashcatV1,
   type EmbeddedHashcatCapabilityV1,
   type RecoveryBackendV1, type RecoveryDeviceInventoryV1,
-  type RecoveryJobStatusV1, type RecoveryRequestV1,
+  type RecoveryJobStatusV1, type RecoveryRequestV1, type HashcatRawAlgorithmV1,
 } from "@lib/ipc";
+
+const EMBEDDED_MODES: readonly { value: HashcatRawAlgorithmV1; label: string; digits: number }[] = [
+  { value: "md5", label: "MD5 · mode 0", digits: 32 },
+  { value: "sha1", label: "SHA-1 · mode 100", digits: 40 },
+  { value: "sha256", label: "SHA-256 · mode 1400", digits: 64 },
+  { value: "sha512", label: "SHA-512 · mode 1700", digits: 128 },
+];
+// Operator-selected mode is non-secret, safe to retain across navigation.
+let lastHashcatMode: HashcatRawAlgorithmV1 = "sha256";
 
 // Store only a backend-owned opaque job reference across route remounts.
 let currentJob: { scope: string; id: number } | null = null;
@@ -32,6 +41,7 @@ function useRecoveryController(targetHash: string) {
   scopeRef.current = scope;
   const [backend, setBackend] = useState("auto");
   const [engineChoice, setEngineChoice] = useState<"rust" | "hashcat">("rust");
+  const [hashcatAlgorithm, setHashcatAlgorithm] = useState<HashcatRawAlgorithmV1>(lastHashcatMode);
   const [hashcatCapability, setHashcatCapability] = useState<EmbeddedHashcatCapabilityV1 | null>(null);
   const [inventory, setInventory] = useState<RecoveryDeviceInventoryV1 | null>(null);
   const [deviceError, setDeviceError] = useState<string | null>(null);
@@ -51,7 +61,10 @@ function useRecoveryController(targetHash: string) {
   const [discarded, setDiscarded] = useState(false);
   const clearReveal = useCallback(() => setSecretHex(null), []);
   const hash = targetHash.trim();
-  const validHash = isSha256WordlistTarget(hash);
+  const hashcatMode = EMBEDDED_MODES.find((item) => item.value === hashcatAlgorithm)!;
+  const validHash = engineChoice === "hashcat"
+    ? hash.length === hashcatMode.digits && /^[a-fA-F0-9]+$/.test(hash)
+    : isSha256WordlistTarget(hash);
   const running = status?.phase === "running" || status?.phase === "cancelling";
   const selection = chooseRecoveryBackend(backend, inventory, batchSize);
   const selectedDevice = selection.backend === "open_cl" ? selection.device_index : null;
@@ -95,7 +108,7 @@ function useRecoveryController(targetHash: string) {
       if (active) setHashcatCapability(capability);
     }).catch(() => {
       if (active) setHashcatCapability({
-        available: false, mode: 1400, hardware_verified: false,
+        available: false, mode: 1400, modes: [], hardware_verified: false,
         detail: "Bundled native Hashcat is unavailable",
       });
     });
@@ -172,7 +185,8 @@ function useRecoveryController(targetHash: string) {
       ? { backend: "hashcat_managed" }
       : selection;
     const request: RecoveryRequestV1 = {
-      algorithm: "sha256", target_hash: hash.toLowerCase(), backend: selected,
+      algorithm: engineChoice === "hashcat" ? hashcatAlgorithm : "sha256",
+      target_hash: hash.toLowerCase(), backend: selected,
       max_candidates: maxCandidates, max_matches: maxMatches,
     };
     try {
@@ -231,7 +245,9 @@ function useRecoveryController(targetHash: string) {
   const disabledReason = !desktop ? "Requires the native desktop runtime"
     : !scope ? (caseId === "scratchpad" ? "Select a saved case to authorize recovery"
       : caseSession.error ?? "Waiting for native case selection")
-    : !validHash ? "Enter a SHA-256 digest (64 hexadecimal characters)"
+    : !validHash ? engineChoice === "hashcat"
+      ? "Enter a " + hashcatMode.label + " raw digest (" + hashcatMode.digits + " hexadecimal characters)"
+      : "Enter a SHA-256 digest (64 hexadecimal characters)"
     : !selectedWordlist ? "Choose a local wordlist before starting"
     : engineChoice === "hashcat" && !hashcatCapability?.available
       ? hashcatCapability?.detail ?? "Embedded Hashcat capability unavailable"
@@ -245,6 +261,7 @@ function useRecoveryController(targetHash: string) {
   return {
     desktop, scope, backend, setBackend, inventory, deviceError, batchSize, setBatchSize,
     engineChoice, setEngineChoice, hashcatCapability,
+    hashcatAlgorithm, setHashcatAlgorithm, hashcatMode,
     maxCandidates, setMaxCandidates, maxMatches, setMaxMatches,
     jobId: scopedJob ? jobId : null,
     status: scopedJob ? status : null,
@@ -281,7 +298,7 @@ export function NativeRecoveryControls() {
     : !r.scope
       ? "Select a saved case to authorize recovery."
       : r.disabledReason && r.hash.length > 0 && !r.validHash
-        ? "Recovery V1 requires a 64-character SHA-256 digest."
+        ? r.disabledReason
         : r.wordlistError
           ? r.wordlistError
           : null;
@@ -293,7 +310,7 @@ export function NativeRecoveryControls() {
         <Chip tone={r.scope ? "ok" : "muted"}>{r.scope ? "Case ready" : "Case required"}</Chip>
       </div>
       <div className="mt-2 flex items-center justify-between gap-2 text-[11px]">
-        <span className="min-w-0 truncate text-fg-dim">SHA-256 · Wordlist · {r.engineChoice === "hashcat" ? "Hashcat embedded (GPU unverified)" : r.selection.backend === "cpu" ? "CPU" : "OpenCL"}</span>
+        <span className="min-w-0 truncate text-fg-dim">{r.engineChoice === "hashcat" ? r.hashcatMode.label : "SHA-256"} · Wordlist · {r.engineChoice === "hashcat" ? "Hashcat embedded (GPU unverified)" : r.selection.backend === "cpu" ? "CPU" : "OpenCL"}</span>
         <details className="shrink-0 text-fg-muted">
           <summary className="inline-flex cursor-pointer items-center gap-1 rounded px-1 outline-none focus-visible:ring-2 focus-visible:ring-orange"
             aria-label="Recovery security and limits information">
@@ -329,7 +346,7 @@ export function NativeRecoveryControls() {
           {r.busy || r.jobId === null ? (
             <Button size="icon" className="h-10 w-10 shrink-0 rounded-md"
               aria-label={r.busy ? "Starting recovery" : "Start recovery"}
-              title={r.disabledReason ?? "Start SHA-256 wordlist recovery"}
+              title={r.disabledReason ?? "Start selected wordlist recovery"}
               disabled={!!r.disabledReason || r.busy || r.choosingWordlist}
               onClick={() => void r.start()}>
               <Play size={16} aria-hidden="true" />
@@ -385,9 +402,32 @@ export function NativeRecoveryControls() {
                 options={[
                   { value: "rust", label: "CyberDeck native Rust" },
                   ...(r.hashcatCapability?.available ? [
-                    { value: "hashcat", label: "Hashcat embedded · SHA-256 (experimental)" },
+                    { value: "hashcat", label: "Hashcat embedded · 4 raw modes (experimental)" },
                   ] : []),
                 ]} className="w-full" />
+              {r.engineChoice === "hashcat" && (
+                <label className="block space-y-1">
+                  <span className="text-[11px] text-fg-dim">Hash algorithm</span>
+                  <Select ariaLabel="Embedded Hashcat raw digest mode"
+                    value={r.hashcatAlgorithm}
+                    onChange={(value) => {
+                      if (r.jobId !== null || r.busy) return;
+                      const match = EMBEDDED_MODES.find((mode) => mode.value === value);
+                      if (!match) return;
+                      r.setHashcatAlgorithm(match.value);
+                      lastHashcatMode = match.value;
+                      r.clearReveal();
+                    }}
+                    options={EMBEDDED_MODES.filter((entry) =>
+                      !r.hashcatCapability?.modes.length ||
+                      r.hashcatCapability.modes.some((mode) => mode.algorithm === entry.value)
+                    ).map(({value, label}) => ({value, label}))}
+                    className="w-full" />
+                  <span className="text-[10px] leading-relaxed text-fg-muted">
+                    Select the correct hash mode; digest length alone is not proof of its algorithm.
+                  </span>
+                </label>
+              )}
               <p className="text-[10px] leading-relaxed text-fg-muted">
                 {r.hashcatCapability?.detail ?? "Checking bundled Hashcat capability…"}
                 {r.engineChoice === "hashcat"

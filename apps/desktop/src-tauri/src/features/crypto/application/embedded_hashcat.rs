@@ -111,10 +111,65 @@ pub fn runtime_available(root: &Path) -> Result<(), String> {
             return Err("source-built Hashcat runtime is incomplete".into());
         }
     }
+    // A bundled mode needs its actual module plus the optimized kernel family.
+    for mode in [0u32, 100, 1400, 1700] {
+        let module = if cfg!(windows) {
+            format!("modules/module_{mode:05}.dll")
+        } else {
+            format!("modules/module_{mode:05}.so")
+        };
+        let path = root.join(module);
+        if !path.is_file() || path.metadata().map(|m| m.len() == 0).unwrap_or(true) {
+            return Err("source-built Hashcat runtime is incomplete".into());
+        }
+        for attack in [0, 1, 3] {
+            let kernel = root.join(format!("OpenCL/m{mode:05}_a{attack}-optimized.cl"));
+            if !kernel.is_file() || kernel.metadata().map(|m| m.len() == 0).unwrap_or(true) {
+                return Err("source-built Hashcat runtime is incomplete".into());
+            }
+        }
+    }
+    if !root.join("capability-manifest.json").is_file() {
+        return Err("source-built Hashcat runtime is incomplete".into());
+    }
     if !root.join("tunings").is_dir() {
         return Err("source-built Hashcat runtime is incomplete".into());
     }
     Ok(())
+}
+
+/// Execute a fixed no-evidence loader probe using the exact bundled private
+/// worker. This is not device enumeration or a kernel known-answer test.
+/// The worker emits no text; all diagnostics are static and redacted.
+pub fn probe_opencl_loader(root: &Path) -> Result<bool, String> {
+    runtime_available(root)?;
+    let child = Command::new(root.join(worker_name()))
+        .arg("--probe-opencl-loader")
+        .current_dir(root)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|_| "bundled Hashcat worker loader probe could not start")?;
+    let mut child = PrivateChild(child);
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        if let Some(status) = child
+            .0
+            .try_wait()
+            .map_err(|_| "bundled Hashcat loader probe failed")?
+        {
+            return match status.code() {
+                Some(0) => Ok(true),
+                Some(37) => Ok(false),
+                _ => Err("bundled Hashcat loader probe returned an unexpected result".into()),
+            };
+        }
+        if Instant::now() >= deadline {
+            return Err("bundled Hashcat loader probe timed out".into());
+        }
+        thread::sleep(Duration::from_millis(25));
+    }
 }
 
 fn push_path(buffer: &mut Vec<u8>, path: &Path) -> Result<(), String> {
@@ -130,6 +185,33 @@ fn push_path(buffer: &mut Vec<u8>, path: &Path) -> Result<(), String> {
     buffer.extend_from_slice(&length.to_le_bytes());
     buffer.extend_from_slice(text.as_bytes());
     Ok(())
+}
+
+pub(super) fn validate_embedded_request(request: &RecoveryRequest) -> Result<u32, String> {
+    if !matches!(
+        request.backend,
+        recovery_backend::BackendSelection::HashcatManaged
+    ) {
+        return Err("embedded Hashcat requires Hashcat-managed device selection".into());
+    }
+    if request.max_candidates == 0
+        || request.max_candidates > 1_000_000
+        || request.max_matches == 0
+        || request.max_matches > 4
+    {
+        return Err("embedded Hashcat candidate or result limit exceeded".into());
+    }
+    let mode = match request.algorithm.as_str() {
+        "md5" => 0,
+        "sha1" => 100,
+        "sha256" => 1400,
+        "sha512" => 1700,
+        _ => return Err("raw hash mode not bundled for embedded Hashcat".into()),
+    };
+    match RecoveryTarget::parse(&request.algorithm, &request.target_hash)? {
+        RecoveryTarget::Digest { .. } => Ok(mode),
+        _ => Err("embedded Hashcat requires a raw hexadecimal digest".into()),
+    }
 }
 
 fn frame(
@@ -154,7 +236,34 @@ fn frame(
     Ok(packet)
 }
 
-/// Runs only the upstream 1400/SHA-256 straight-wordlist mode. This function
+fn frame_mode(
+    root: &Path,
+    target: &Path,
+    wordlist: &Path,
+    outfile: &Path,
+    budget: u64,
+    runtime: u32,
+    device_id: u32,
+    hash_mode: u32,
+) -> Result<Vec<u8>, String> {
+    if budget == 0 || budget > 1_000_000 || runtime == 0 || runtime > 300 || device_id > 128 {
+        return Err("embedded Hashcat work limits invalid".into());
+    }
+    if !matches!(hash_mode, 0 | 100 | 1400 | 1700) {
+        return Err("embedded Hashcat mode unsupported".into());
+    }
+    let mut packet = b"CDHC0002".to_vec();
+    packet.extend_from_slice(&budget.to_le_bytes());
+    packet.extend_from_slice(&runtime.to_le_bytes());
+    packet.extend_from_slice(&device_id.to_le_bytes());
+    packet.extend_from_slice(&hash_mode.to_le_bytes());
+    for path in [root, target, wordlist, outfile] {
+        push_path(&mut packet, path)?;
+    }
+    Ok(packet)
+}
+
+/// Executes selected bundled MD5/SHA-1/SHA-256/SHA-512 wordlist mode. This function
 /// does not assume Hashcat's device identifiers match CyberDeck's Rust OpenCL
 /// inventory. Automatic GPU selection must not be certified without a KAT.
 pub fn execute_path<P: FnMut(RecoveryProgressWire)>(
@@ -164,13 +273,7 @@ pub fn execute_path<P: FnMut(RecoveryProgressWire)>(
     cancel: &RecoveryCancel,
     _progress: P,
 ) -> Result<RecoveryRun, String> {
-    recovery_backend::validate_request(request)?;
-    if !matches!(
-        request.backend,
-        recovery_backend::BackendSelection::HashcatManaged
-    ) {
-        return Err("embedded Hashcat requires Hashcat-managed device selection".into());
-    }
+    let hash_mode = validate_embedded_request(request)?;
     runtime_available(runtime)?;
     if !wordlist.is_file() {
         return Err("wordlist must be an accessible regular file".into());
@@ -182,7 +285,7 @@ pub fn execute_path<P: FnMut(RecoveryProgressWire)>(
         .prefix("cyberdeck-hc-")
         .tempdir()
         .map_err(|_| "cannot create private Hashcat workspace")?;
-    let hash = scratch.path().join("target.sha256");
+    let hash = scratch.path().join("target.rawhash");
     let output = scratch.path().join("recovered.tmp");
     let mut file = File::create(&hash).map_err(|_| "cannot create private target file")?;
     file.write_all(request.target_hash.as_bytes())
@@ -190,7 +293,7 @@ pub fn execute_path<P: FnMut(RecoveryProgressWire)>(
         .map_err(|_| "cannot write private target file")?;
     drop(file);
 
-    let bytes = frame(
+    let bytes = frame_mode(
         runtime,
         &hash,
         wordlist,
@@ -198,6 +301,7 @@ pub fn execute_path<P: FnMut(RecoveryProgressWire)>(
         request.max_candidates,
         300,
         device_id,
+        hash_mode,
     )?;
     let mut child = PrivateChild(
         Command::new(runtime.join(worker_name()))
@@ -263,7 +367,7 @@ pub fn execute_path<P: FnMut(RecoveryProgressWire)>(
         {
             return Err("Hashcat result output exceeded strict limit".into());
         }
-        let target = RecoveryTarget::parse("sha256", &request.target_hash)?;
+        let target = RecoveryTarget::parse(&request.algorithm, &request.target_hash)?;
         let content =
             SensitiveBytes(fs::read(&output).map_err(|_| "cannot read bounded private output")?);
         for candidate in content.0.split(|b| *b == b'\n') {
@@ -272,9 +376,7 @@ pub fn execute_path<P: FnMut(RecoveryProgressWire)>(
                 continue;
             }
             if !target.is_match(candidate)? {
-                return Err(
-                    "Hashcat candidate failed independent Rust SHA-256 verification".into(),
-                );
+                return Err("Hashcat candidate failed independent Rust digest verification".into());
             }
             // Find the real candidate ordinal in original wordlist where
             // possible, rather than fabricating work counters.
@@ -327,6 +429,34 @@ pub fn execute_path<P: FnMut(RecoveryProgressWire)>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn digest_modes_and_worker_v2_packet_are_bounded() {
+        for (algorithm, size, mode) in [
+            ("md5", 32, 0),
+            ("sha1", 40, 100),
+            ("sha256", 64, 1400),
+            ("sha512", 128, 1700),
+        ] {
+            let request = RecoveryRequest {
+                algorithm: algorithm.into(),
+                target_hash: "a".repeat(size),
+                backend: recovery_backend::BackendSelection::HashcatManaged,
+                max_candidates: 100,
+                max_matches: 1,
+            };
+            assert_eq!(validate_embedded_request(&request), Ok(mode));
+            let path = Path::new("/tmp/fixture");
+            let packet = frame_mode(path, path, path, path, 100, 30, 0, mode).unwrap();
+            assert_eq!(&packet[..8], b"CDHC0002");
+            assert_eq!(u32::from_le_bytes(packet[24..28].try_into().unwrap()), mode);
+            let mut bad = request.clone();
+            bad.target_hash.pop();
+            assert!(validate_embedded_request(&bad).is_err());
+        }
+        let path = Path::new("/tmp/fixture");
+        assert!(frame_mode(path, path, path, path, 1, 10, 0, 999).is_err());
+    }
+
     #[test]
     fn incomplete_bundle_must_not_claim_embedded_capability() {
         let scratch = tempfile::tempdir().unwrap();

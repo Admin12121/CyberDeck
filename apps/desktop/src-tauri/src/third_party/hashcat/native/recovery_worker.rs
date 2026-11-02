@@ -10,6 +10,7 @@ use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 
 const MAGIC: &[u8; 8] = b"CDHC0001";
+const MAGIC_MULTI_MODE: &[u8; 8] = b"CDHC0002";
 const MAX_PATH: usize = 4096;
 const MAX_CANDIDATES: u64 = 1_000_000;
 const MAX_SECONDS: u32 = 300;
@@ -18,6 +19,7 @@ struct Request {
     max_candidates: u64,
     max_seconds: u32,
     device_id: u32,
+    hash_mode: u32,
     root: PathBuf,
     hash_file: PathBuf,
     wordlist_file: PathBuf,
@@ -56,7 +58,8 @@ fn checked_path(reader: &mut impl Read) -> io::Result<PathBuf> {
 }
 
 fn read_request(mut reader: impl Read) -> io::Result<Request> {
-    if &read_exact::<8>(&mut reader)? != MAGIC {
+    let version = read_exact::<8>(&mut reader)?;
+    if &version != MAGIC && &version != MAGIC_MULTI_MODE {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             "unsupported worker protocol",
@@ -65,6 +68,14 @@ fn read_request(mut reader: impl Read) -> io::Result<Request> {
     let max_candidates = u64::from_le_bytes(read_exact::<8>(&mut reader)?);
     let max_seconds = u32::from_le_bytes(read_exact::<4>(&mut reader)?);
     let device_id = u32::from_le_bytes(read_exact::<4>(&mut reader)?);
+    let hash_mode = if &version == MAGIC_MULTI_MODE {
+        u32::from_le_bytes(read_exact::<4>(&mut reader)?)
+    } else {
+        1400
+    };
+    if !matches!(hash_mode, 0 | 100 | 1400 | 1700) {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "unsupported hash mode"));
+    }
     if !(1..=MAX_CANDIDATES).contains(&max_candidates)
         || !(1..=MAX_SECONDS).contains(&max_seconds)
         || device_id > 128
@@ -78,6 +89,7 @@ fn read_request(mut reader: impl Read) -> io::Result<Request> {
         max_candidates,
         max_seconds,
         device_id,
+        hash_mode,
         root: checked_path(&mut reader)?,
         hash_file: checked_path(&mut reader)?,
         wordlist_file: checked_path(&mut reader)?,
@@ -143,7 +155,7 @@ fn run() -> Result<(), i32> {
     validate_paths(&request).map_err(|_| 11)?;
     let mut engine = hashcat_ffi::NativeHashcat::new().map_err(native_failure)?;
     engine
-        .prepare_sha256(
+        .prepare_mode(
             &request.root,
             &request.hash_file,
             &request.wordlist_file,
@@ -151,6 +163,7 @@ fn run() -> Result<(), i32> {
             request.max_candidates,
             request.max_seconds,
             request.device_id,
+            request.hash_mode,
         )
         .map_err(native_failure)?;
     match engine.execute() {
@@ -161,6 +174,20 @@ fn run() -> Result<(), i32> {
 }
 
 fn main() {
+    // The only accepted control argument is a fixed, non-secret loader probe.
+    // This does not initialize a cracking session, read evidence or print
+    // arbitrary driver messages. All other CLI arguments are prohibited.
+    let mut args = std::env::args_os().skip(1);
+    if let Some(flag) = args.next() {
+        if flag == "--probe-opencl-loader" && args.next().is_none() {
+            std::process::exit(if hashcat_ffi::NativeHashcat::opencl_loader_available() {
+                0
+            } else {
+                37
+            });
+        }
+        std::process::exit(10);
+    }
     // A supervising Tauri process redirects stdout/stderr to null. Only
     // bounded numeric status is returned, never raw candidates or target data.
     if let Err(status) = run() {
@@ -199,6 +226,18 @@ mod tests {
         let good = read_request(Cursor::new(frame())).unwrap();
         assert_eq!(good.max_candidates, 123);
         assert_eq!(good.device_id, 0);
+        assert_eq!(good.hash_mode, 1400);
+        for mode in [0_u32, 100, 1400, 1700] {
+            let mut frame2 = frame();
+            frame2[..8].copy_from_slice(MAGIC_MULTI_MODE);
+            frame2.splice(24..24, mode.to_le_bytes());
+            let parsed = read_request(Cursor::new(frame2)).unwrap();
+            assert_eq!(parsed.hash_mode, mode);
+        }
+        let mut unknown = frame();
+        unknown[..8].copy_from_slice(MAGIC_MULTI_MODE);
+        unknown.splice(24..24, 99999_u32.to_le_bytes());
+        assert!(read_request(Cursor::new(unknown)).is_err());
         let mut broken = frame();
         broken[0] = b'X';
         assert!(read_request(Cursor::new(broken)).is_err());
