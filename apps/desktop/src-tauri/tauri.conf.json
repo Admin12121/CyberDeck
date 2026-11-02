@@ -29,7 +29,9 @@
     "active": true,
     "targets": "all",
     "resources": {
-      "resources/hashcat/": "hashcat/"
+      "resources/hashcat/": "hashcat/",
+      "resources/rules/": "rules/",
+      "resources/wordlists/": "wordlists/"
     },
     "icon": [
       "icons/32x32.png",

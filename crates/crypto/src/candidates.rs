@@ -234,7 +234,10 @@ pub struct RuleCandidates<I: Iterator<Item = Result<Vec<u8>, String>>> {
 impl<I: Iterator<Item = Result<Vec<u8>, String>>> RuleCandidates<I> {
     pub fn new(input: I, rules: Vec<crate::recovery::CompiledRule>) -> Result<Self, String> {
         if rules.is_empty() || rules.len() > crate::recovery::MAX_RULES_PER_STREAM {
-            return Err("rule count must be 1..=256".into());
+            return Err(format!(
+                "rule count must be 1..={}",
+                crate::recovery::MAX_RULES_PER_STREAM
+            ));
         }
         Ok(Self {
             input,
@@ -255,11 +258,16 @@ impl<I: Iterator<Item = Result<Vec<u8>, String>>> Iterator for RuleCandidates<I>
             if let Some(word) = &self.word {
                 if let Some(rule) = self.rules.get(self.next_rule) {
                     self.next_rule += 1;
-                    let result = rule.apply(word);
-                    if result.is_err() {
-                        self.finished = true;
+                    // Rejection opcodes yield no variant for this word; try the
+                    // next rule against the same word instead of emitting.
+                    match rule.apply(word) {
+                        Ok(Some(variant)) => return Some(Ok(variant)),
+                        Ok(None) => continue,
+                        Err(error) => {
+                            self.finished = true;
+                            return Some(Err(error));
+                        }
                     }
-                    return Some(result);
                 }
             }
             self.word = None;
@@ -384,7 +392,7 @@ mod tests {
         );
         assert!(RuleCandidates::new(
             std::iter::empty::<Result<Vec<u8>, String>>(),
-            vec![CompiledRule::parse(":").unwrap(); 257],
+            vec![CompiledRule::parse(":").unwrap(); 65_537],
         )
         .is_err());
     }

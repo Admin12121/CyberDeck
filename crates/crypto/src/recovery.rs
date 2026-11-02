@@ -507,7 +507,8 @@ where
 #[path = "recovery_rules.rs"]
 mod rule_engine;
 pub use rule_engine::{
-    apply_rule, parse_rule_lines, CompiledRule, Rule, MAX_RULES_PER_STREAM, MAX_RULE_INSTRUCTIONS,
+    apply_rule, parse_rule_file_tolerant, parse_rule_lines, CompiledRule, ParsedRuleFile, Rule,
+    MAX_RULES_PER_STREAM, MAX_RULE_INSTRUCTIONS,
 };
 #[path = "recovery_mask.rs"]
 mod mask_engine;

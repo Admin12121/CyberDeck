@@ -239,10 +239,15 @@ pub(super) fn validate_request(request: &RecoveryRequest) -> Result<(), String> 
         return Err("max_matches exceeds global recovery limit".into());
     }
     let parsed = RecoveryTarget::parse(&request.algorithm, &request.target_hash)?;
-    if !matches!(parsed, RecoveryTarget::Digest { .. }) {
-        return Err("wordlist recovery requires a raw hexadecimal digest".into());
+    match parsed {
+        RecoveryTarget::Digest { .. } => Ok(()),
+        // KDF targets (bcrypt/argon2/scrypt/pbkdf2/yescrypt) share the same
+        // lifecycle but only the bounded CPU engine verifies them.
+        RecoveryTarget::Kdf { .. } if matches!(request.backend, BackendSelection::Cpu) => Ok(()),
+        RecoveryTarget::Kdf { .. } => {
+            Err("KDF targets run on the native CPU backend only; select CPU".into())
+        }
     }
-    Ok(())
 }
 
 /// Construct confidential results from a supervised embedded worker only

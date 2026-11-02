@@ -1,0 +1,67 @@
+{
+  "schema": 1,
+  "source": {
+    "upstream": "https://github.com/hashcat/hashcat",
+    "commit": "1994b513b550edfe3e7fcaa1103759a9343e57a4",
+    "license": "MIT",
+    "note": "Rule files are redistributed unmodified from the MIT-licensed hashcat repository at the pinned commit."
+  },
+  "rules": [
+    {
+      "id": "best66",
+      "file": "best66.rule",
+      "sha256": "dc23b16ab3403a029cbbb4289ff6dfba8d4c31c34d2470e4f6690821b1172cd5",
+      "size_bytes": 766,
+      "rule_count": 66
+    },
+    {
+      "id": "d3ad0ne",
+      "file": "d3ad0ne.rule",
+      "sha256": "3a4170e74012aab36a35f88627eb83556ce1a56e60f3fff0c8e282c994861559",
+      "size_bytes": 239623,
+      "rule_count": 34109
+    },
+    {
+      "id": "rockyou-30000",
+      "file": "rockyou-30000.rule",
+      "sha256": "22c6909f1b42414a2f8dcf43360544d4616dc47376e368e456adfc7f6288fa5d",
+      "size_bytes": 301161,
+      "rule_count": 30000
+    },
+    {
+      "id": "Incisive-leetspeak",
+      "file": "Incisive-leetspeak.rule",
+      "sha256": "996c8482d1011a249867b0a03f28bd790195e828231cf8579cee75fc337f55fd",
+      "size_bytes": 391936,
+      "rule_count": 15487
+    },
+    {
+      "id": "leetspeak",
+      "file": "leetspeak.rule",
+      "sha256": "8fb9654de6a937e3aef40d2454b1de26bf3a0c6498d91a496ec97cc52a3f9f6e",
+      "size_bytes": 298,
+      "rule_count": 17
+    },
+    {
+      "id": "toggles1",
+      "file": "toggles1.rule",
+      "sha256": "710b8a5ac1e228d7e28eb28ee25a5bc8ed2c626fd6710d2c1efb86e82632a45e",
+      "size_bytes": 45,
+      "rule_count": 15
+    },
+    {
+      "id": "toggles2",
+      "file": "toggles2.rule",
+      "sha256": "478112f4e9c767ea37261b542668c53926f4e231e414539186c26857b9dbe30b",
+      "size_bytes": 570,
+      "rule_count": 120
+    },
+    {
+      "id": "toggles3",
+      "file": "toggles3.rule",
+      "sha256": "41acd7fdd579e3bd8b2ac2675ee39cfdadec75cf4de4f655a43a29f1fe6267d0",
+      "size_bytes": 3755,
+      "rule_count": 575
+    }
+  ]
+}

@@ -226,8 +226,11 @@ fn parse_compiled_rules_from_bounded_source_file() {
     use std::io::Cursor;
     let rules = parse_rule_lines(Cursor::new(b"# comment\r\n\r\nc$1\nl\n".as_slice())).unwrap();
     assert_eq!(rules.len(), 2);
-    assert_eq!(rules[0].apply(b"pASSWORD").unwrap(), b"Password1");
-    assert_eq!(rules[1].apply(b"ABC").unwrap(), b"abc");
+    assert_eq!(
+        rules[0].apply(b"pASSWORD").unwrap(),
+        Some(b"Password1".to_vec())
+    );
+    assert_eq!(rules[1].apply(b"ABC").unwrap(), Some(b"abc".to_vec()));
     assert!(parse_rule_lines(Cursor::new(b"# only comments\n".as_slice())).is_err());
     let huge = [vec![b'l'; MAX_CANDIDATE_BYTES + 8], b"\n".to_vec()].concat();
     assert!(parse_rule_lines(Cursor::new(huge)).is_err());
@@ -242,26 +245,26 @@ fn compiled_rule_subset_is_bounded_and_byte_preserving() {
             .unwrap()
             .apply(b"pASSWORD")
             .unwrap(),
-        b"Password1"
+        Some(b"Password1".to_vec())
     );
     assert_eq!(
         CompiledRule::parse("uT0").unwrap().apply(b"test").unwrap(),
-        b"tEST"
+        Some(b"tEST".to_vec())
     );
     assert_eq!(
         CompiledRule::parse("saz^!")
             .unwrap()
             .apply(b"banana")
             .unwrap(),
-        b"!bznznz"
+        Some(b"!bznznz".to_vec())
     );
     assert_eq!(
         CompiledRule::parse("r[]").unwrap().apply(b"abcd").unwrap(),
-        b"cb"
+        Some(b"cb".to_vec())
     );
     assert_eq!(
         CompiledRule::parse(":").unwrap().apply(&[255, 0]).unwrap(),
-        vec![255, 0]
+        Some(vec![255, 0])
     );
     assert!(CompiledRule::parse("d")
         .unwrap()
