@@ -1,6 +1,6 @@
 "use client";
 import { createContext, useCallback, useContext, useEffect, useRef, useState, type ReactNode } from "react";
-import { Play, Square, Trash2, Eye, EyeOff, Info, FileUp, SlidersHorizontal, FileText, Library, Download, Wand2, Hash, UserSquare2 } from "lucide-react";
+import { Play, Square, Trash2, Eye, EyeOff, FileUp, SlidersHorizontal, FileText, Library, Download, Hash } from "lucide-react";
 import { Phosphor } from "@lucasmarkes/hairline/react";
 import { Accordion, AccordionItem, AccordionTrigger, AccordionPanel } from "@/components/ui/accordion";
 import { Chip } from "@ds/panes";
@@ -9,7 +9,6 @@ import { chooseRecoveryBackend, DEFAULT_CANDIDATES, DEFAULT_MATCHES, DEFAULT_OPE
 import { Button } from "@/components/ui/button";
 import { Select } from "@ds/panes";
 import { useWorkbenchCase } from "@state/workbench";
-import { AuthorizedCaseAction } from "@/app/_components/AuthorizedCaseAction";
 import {
   isDesktop, recoveryCancelV1, recoveryDevicesV1, recoveryDiscardV1,
   recoverySelectWordlistV1, recoveryWordlistStatusV1, type RecoveryWordlistV1,
@@ -37,6 +36,7 @@ const EMBEDDED_MODES: readonly { value: HashcatRawAlgorithmV1; label: string; di
   { value: "sha256crypt", label: "sha256crypt $5$ · mode 7400", digits: 0 },
   { value: "descrypt", label: "descrypt (classic crypt(3)) · mode 1500", digits: 0 },
   { value: "mssql-2005", label: "MSSQL 2005 · mode 132", digits: 0 },
+  { value: "mssql-2012", label: "MSSQL 2012/2014 · mode 1731", digits: 0 },
   { value: "phpass", label: "phpass (WordPress/phpBB) · mode 400", digits: 0 },
   { value: "md5-pass-salt", label: "md5($pass.$salt) · mode 10", digits: 0 },
   { value: "md5-salt-pass", label: "md5($salt.$pass) · mode 20", digits: 0 },
@@ -100,6 +100,9 @@ function useRecoveryController(targetHash: string, onCaseCreated?: (caseId: stri
   const [choosingWordlist, setChoosingWordlist] = useState(false);
   const [wordlistError, setWordlistError] = useState<string | null>(null);
   const [discarded, setDiscarded] = useState(false);
+  // Auto-resume: after a cancelled/capped CPU run, Start continues from the
+  // remembered ordinal instead of replaying the wordlist from zero.
+  const lastResume = useRef(0);
   const clearReveal = useCallback(() => setSecretHex(null), []);
   const hash = targetHash.trim();
   const hashcatMode = RUST_MODES.find((item) => item.value === hashcatAlgorithm)!;
@@ -213,6 +216,10 @@ function useRecoveryController(targetHash: string, onCaseCreated?: (caseId: stri
         const next = await recoveryStatusV1(jobId);
         if (!active || scopeRef.current !== scope || currentJob?.id !== jobId) return;
         setStatus(next);
+        if (next.summary?.resume_index && (next.phase === "cancelled" || next.phase === "failed")) {
+          lastResume.current = next.summary.resume_index;
+        }
+        if (next.phase === "completed") lastResume.current = 0;
         if (next.error) setError(next.error);
       } catch (reason) {
         if (!active || scopeRef.current !== scope) return;
@@ -384,7 +391,8 @@ function useRecoveryController(targetHash: string, onCaseCreated?: (caseId: stri
       };
       const id = engineChoice === "hashcat"
         ? await recoveryStartHashcatV1(request, onEvent, hashcatPreset)
-        : await recoveryStartV1(request, onEvent, isKdfHash ? undefined : ruleText, ruleSetId);
+        : await recoveryStartV1(request, onEvent, isKdfHash ? undefined : ruleText, ruleSetId,
+            lastResume.current || undefined);
       if (scopeRef.current !== requestScope) return;
       currentJob = { scope: requestScope, id };
       setJobId(id);
@@ -545,38 +553,36 @@ export function NativeRecoveryControls() {
   const r = useRecovery();
   const jobInProgress = r.busy || r.running || (r.jobId !== null && r.status === null);
   const fileLabel = r.selectedWordlist?.name ?? "No wordlist selected";
-  const statusText = !r.desktop
-    ? "Open the desktop app to run recovery."
-    : !r.scope
-      ? "Select a saved case to authorize recovery."
-      : r.disabledReason && r.hash.length > 0 && !r.validHash
-        ? r.disabledReason
-        : r.wordlistError
-          ? r.wordlistError
-          : null;
+
+  // Progressive disclosure: before there is something to act on, the panel is
+  // a single quiet line — no chips, no state telemetry, no empty controls.
+  if (!r.desktop) {
+    return (
+      <section aria-label="Recovery controls" className="border-b border-line px-3 pb-3 pt-3">
+        <h3 className="text-xs font-semibold text-fg">Recovery</h3>
+        <p className="pt-1 text-[11px] text-fg-muted">Runs in the CyberDeck desktop app.</p>
+      </section>
+    );
+  }
+  if (!r.validHash && r.jobId === null) {
+    return (
+      <section aria-label="Recovery controls" className="border-b border-line px-3 pb-3 pt-3">
+        <h3 className="text-xs font-semibold text-fg">Recovery</h3>
+        <p className="pt-1 text-[11px] text-fg-muted">
+          {r.hash.length > 0 ? "Unsupported hash format." : "Paste a hash to start recovery."}
+        </p>
+      </section>
+    );
+  }
+  const statusText = !r.scope
+    ? "Select a case in the status bar."
+    : r.wordlistError
+      ? r.wordlistError
+      : null;
 
   return (
     <section aria-label="Recovery controls" className="border-b border-line px-3 pb-3 pt-3">
-      <div className="flex items-center justify-between gap-2">
-        <h3 className="text-xs font-semibold text-fg">Recovery</h3>
-        <Chip tone={r.scope ? "ok" : "muted"}>{r.scope ? "Case ready" : "Case required"}</Chip>
-      </div>
-      <div className="mt-2 flex items-center justify-between gap-2 text-[11px]">
-        <span className="min-w-0 truncate text-fg-dim">{r.hashcatMode.label} · Wordlist · {r.engineChoice === "hashcat" ? "Hashcat embedded (GPU unverified)" : r.selection.backend === "cpu" ? "CPU" : "OpenCL"}</span>
-        <details className="shrink-0 text-fg-muted">
-          <summary className="inline-flex cursor-pointer items-center gap-1 rounded px-1 outline-none focus-visible:ring-2 focus-visible:ring-orange"
-            aria-label="Recovery security and limits information">
-            <Info size={13} aria-hidden="true" /> Info
-          </summary>
-          <p className="mt-2 max-w-sm rounded-md border border-line bg-app px-3 py-2 text-[11px] leading-relaxed">
-            Native recovery needs an authorized case. Results remain masked until
-            explicit OS confirmation, expire, and are not saved automatically.
-            Auto uses CPU until OpenCL hardware is independently verified.
-          </p>
-        </details>
-      </div>
-
-      {!r.scope && <AuthorizedCaseAction activity="Password recovery" onCaseCreated={r.onCaseCreated} />}
+      <h3 className="text-xs font-semibold text-fg">Recovery</h3>
       <div className="mt-4 space-y-1.5">
         <div className="flex items-center gap-2">
           <label className="min-w-0 flex-1 space-y-1">
@@ -617,10 +623,6 @@ export function NativeRecoveryControls() {
                 placeholder="?u?l?l?o?d?d?d?d"
                 className="h-8 w-full rounded-md border border-line bg-app px-2 font-mono text-xs text-fg outline-none focus-visible:ring-1 focus-visible:ring-orange disabled:opacity-50" />
             </label>
-            <p className="text-[10px] leading-relaxed text-fg-muted">
-              ?l lowercase ?u uppercase ?d digit ?s symbol ?a printable, ?? for a literal question mark. Keyspace is bounded;
-              the attempt budget still applies. Works with a single hash or an imported hash file.
-            </p>
           </div>
         ) : null}
         <div className="flex items-center justify-between gap-2">
@@ -655,10 +657,10 @@ export function NativeRecoveryControls() {
           ) : null}
           {r.busy || r.jobId === null ? (
             <Button size="icon" className="h-10 w-10 shrink-0 rounded-md"
-              aria-label={r.busy ? "Starting recovery" : "Start recovery"}
-              title={r.disabledReason ?? "Start selected wordlist recovery"}
-              disabled={!!r.disabledReason || r.busy || r.choosingWordlist}
-              onClick={() => void r.start()}>
+              aria-label={r.busy ? "Starting recovery" : "Start"}
+              title={r.disabledReason ?? (r.selectedWordlist ? "Start recovery" : "Auto crack: detect and run the full attack ladder")}
+              disabled={!!(r.selectedWordlist ? r.disabledReason : r.autoDisabledReason) || r.busy || r.choosingWordlist}
+              onClick={() => void (r.selectedWordlist || r.attackMode === "mask" ? r.start() : r.autoStart())}>
               <Play size={16} aria-hidden="true" />
             </Button>
           ) : r.status === null ? (
@@ -735,22 +737,9 @@ export function NativeRecoveryControls() {
             ))}
           </div>
         ) : null}
-        <div className="flex items-center gap-2">
-          <Button size="sm" variant="outline" className="h-8 flex-1 gap-1.5 rounded-md text-[11px]"
-            aria-label="Auto crack: detect and run the full attack ladder"
-            style={r.attackMode === "mask" ? { display: "none" } : undefined}
-            title={r.autoDisabledReason ?? "Detect the hash and run wordlist, then rule escalation, in one job"}
-            disabled={!!r.autoDisabledReason || r.busy || r.jobId !== null}
-            onClick={() => void r.autoStart()}>
-            <Wand2 size={13} aria-hidden="true" /> Auto crack
-          </Button>
-        </div>
         {r.wordlistError ? <p role="alert" className="text-[11px] text-err">{r.wordlistError}</p> : null}
-        {statusText && !r.wordlistError
+        {statusText
           ? <p role="status" className="pt-1 text-[11px] text-fg-muted">{statusText}</p>
-          : null}
-        {r.desktop && r.scope && !r.selectedWordlist && !r.wordlistError
-          ? <p className="pt-1 text-[11px] text-fg-muted">Choose a wordlist to enable Start.</p>
           : null}
       </div>
 
@@ -793,10 +782,7 @@ export function NativeRecoveryControls() {
                   <p className="rounded-md border border-line bg-app px-2 py-1.5 text-[11px] text-fg">
                     Modular KDF hash · detected backend-side · CPU wordlist attack with a bounded budget
                   </p>
-                  <span className="text-[10px] leading-relaxed text-fg-muted">
-                    bcrypt, argon2, scrypt, pbkdf2 and yescrypt hashes carry their own cost parameters;
-                    verification speed follows those parameters. Rule escalation is not applied to KDF targets.
-                  </span>
+                  <span className="text-[10px] text-fg-muted">Cost parameters come from the hash itself.</span>
                 </div>
               ) : (
                 <label className="block space-y-1">
@@ -817,9 +803,7 @@ export function NativeRecoveryControls() {
                       r.hashcatCapability.modes.some((mode) => mode.algorithm === entry.value)
                     ).map(({value, label}) => ({value, label}))}
                     className="w-full" />
-                  <span className="text-[10px] leading-relaxed text-fg-muted">
-                    MD5, NTLM and MD4 all use 32 hex digits. Select the actual algorithm; digest length alone cannot identify it.
-                  </span>
+                  <span className="text-[10px] text-fg-muted">MD5, NTLM and MD4 share 32 hex digits.</span>
                 </label>
               )}
               {r.engineChoice === "hashcat" && (
@@ -844,20 +828,14 @@ export function NativeRecoveryControls() {
                   </span>
                 </label>
               )}
-              <p className="text-[10px] leading-relaxed text-fg-muted">
-                {r.hashcatCapability?.detail ?? "Checking bundled Hashcat capability…"}
-                {r.engineChoice === "hashcat"
-                  ? " Hashcat uses its own device enumeration; no CPU/GPU speed or hardware guarantee."
-                  : ""}
-              </p>
+              {r.hashcatCapability && !r.hashcatCapability.available ? (
+                <p className="text-[10px] text-fg-muted">{r.hashcatCapability.detail}</p>
+              ) : null}
             </div>
             <div className="space-y-1.5">
               <span className="text-[10px] font-semibold uppercase tracking-wider text-fg-muted">Compute</span>
               {r.engineChoice === "hashcat" ? (
-                <p className="text-[11px] leading-relaxed text-fg-muted">
-                  Embedded Hashcat uses its own device selection. GPU detection,
-                  kernel execution and performance remain unverified; no silent fallback.
-                </p>
+                <p className="text-[10px] text-fg-muted">Device selection is handled by Hashcat.</p>
               ) : <Select ariaLabel="Recovery V1 backend" value={r.backend}
                 onChange={(value) => {
                   if (r.jobId === null && !r.busy) { r.setBackend(value); r.clearReveal(); }
@@ -909,11 +887,6 @@ export function NativeRecoveryControls() {
                     <span className="block text-[10px] text-fg-muted">{r.ruleSetNote}</span>
                   ) : null}
                 </label>
-                <p className="text-[10px] leading-relaxed text-fg-muted">
-                  One rule per line. Example: : (unchanged), $1 (append 1), u (uppercase).
-                  The typed text and a bundled set are mutually exclusive; a set replaces the text.
-                  Rules run only on CPU with the global attempt limits applied.
-                </p>
               </div>
             )}
             <div className="space-y-1.5">
@@ -938,7 +911,6 @@ export function NativeRecoveryControls() {
                     }} className="h-8 w-full min-w-0 rounded-md border border-line bg-app px-2 font-mono text-xs text-fg outline-none focus-visible:ring-1 focus-visible:ring-orange disabled:opacity-50" />
                 </label>
               </div>
-              <p className="text-[10px] text-fg-muted">These numbers are safety limits: maximum wordlist entries checked and matching results retained. They are not password inputs.</p>
             </div>
             {r.selectedDevice !== null ? (
               <label className="block space-y-1">
@@ -951,11 +923,6 @@ export function NativeRecoveryControls() {
                   }} className="h-8 w-full rounded-md border border-line bg-app px-2 font-mono text-xs text-fg outline-none focus-visible:ring-1 focus-visible:ring-orange disabled:opacity-50" />
               </label>
             ) : null}
-            <p className="border-t border-line/50 pt-2 text-[11px] leading-relaxed text-fg-muted">
-              {r.engineChoice === "hashcat"
-                ? "Wordlist with optional bounded uppercase/append-one transformation. Native Hashcat rule scripts, masks and hybrid attacks remain unavailable."
-                : "Native Rust CPU recovery supports all six fast hashes and bounded streamed wordlist rules. Mask and hybrid attacks remain unavailable in this Recovery V1 screen; OpenCL is SHA-256-only and must be hardware verified."}
-            </p>
           </AccordionPanel>
         </AccordionItem>
       </Accordion>
@@ -1020,6 +987,8 @@ function printableRevealedCandidate(hex: string): string | null {
 
 export function NativeRecoveryResults() {
   const r = useRecovery();
+  // Before a hash or a job exists there is nothing to show.
+  if (!r.hash && r.jobId === null) return null;
   const view = recoveryDisplay(r.scope, r.jobId, r.status, r.error, r.discarded);
   const matches = r.status?.summary?.matches ?? [];
   const revealedText = r.secretHex === null ? null : printableRevealedCandidate(r.secretHex);

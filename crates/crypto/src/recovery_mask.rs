@@ -1,7 +1,8 @@
 //! Deterministic bounded ASCII mask enumeration and resume offsets.
 use super::MAX_MASK_KEYSPACE;
 
-/// Bounded byte-oriented mask enumeration. Supports ?l ?u ?d ?s ?a ??.
+/// Bounded byte-oriented mask enumeration. Supports ?l ?u ?d ?s ?a ?? plus
+/// up to nine operator-defined custom charsets (?1..?9, hashcat-style).
 pub struct MaskCandidates {
     alphabet: Vec<Vec<u8>>,
     cursor: Vec<usize>,
@@ -10,6 +11,22 @@ pub struct MaskCandidates {
 }
 impl MaskCandidates {
     pub fn parse(mask: &str) -> Result<Self, String> {
+        Self::parse_with_custom(mask, &[])
+    }
+
+    /// `custom` maps slot digits b'1'..=b'9' to bounded byte sets.
+    pub fn parse_with_custom(mask: &str, custom: &[(u8, Vec<u8>)]) -> Result<Self, String> {
+        if custom.len() > 9 {
+            return Err("at most nine custom charsets".into());
+        }
+        for (slot, set) in custom {
+            if !(b'1'..=b'9').contains(slot) {
+                return Err("custom charset slots must be 1-9".into());
+            }
+            if set.is_empty() || set.len() > 256 || set.iter().any(|b| !b.is_ascii()) {
+                return Err("custom charsets must be 1..=256 ASCII bytes".into());
+            }
+        }
         let bytes = mask.as_bytes();
         let mut alphabet = Vec::new();
         let mut i = 0;
@@ -23,6 +40,11 @@ impl MaskCandidates {
                     b's' => b"!@#$%^&*()-_=+[]{};:,.<>/".to_vec(),
                     b'a' => (b' '..=b'~').collect(),
                     b'?' => vec![b'?'],
+                    slot @ b'1'..=b'9' => custom
+                        .iter()
+                        .find(|(s, _)| *s == slot)
+                        .map(|(_, set)| set.clone())
+                        .ok_or("mask references an undefined custom charset")?,
                     _ => return Err("unsupported mask token".into()),
                 }
             } else {

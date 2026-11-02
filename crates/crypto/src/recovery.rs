@@ -187,12 +187,9 @@ impl RecoveryTarget {
             encoded: text.to_string(),
         });
     }
-    // descrypt and mssql-2005 are hint-driven (no self-detecting marker).
+    // descrypt is hint-driven (no self-detecting marker).
     if algo == "descrypt" {
         return Ok(Self::Kdf { format: "descrypt", encoded: text.to_string() });
-    }
-    if algo == "mssql-2005" {
-        return Ok(Self::Kdf { format: "mssql-2005", encoded: text.to_string() });
     }
     // mscash is hint-driven when the wire shape is "digest:salt" (hashcat);
     // the tagged "user#digest" and "M$user#digest" shapes self-detect.
@@ -241,6 +238,10 @@ impl RecoveryTarget {
                 }
                 "md5crypt" | "apr1" => {
                     super::unix_crypt::validate_md5_crypt(text)?;
+                }
+                "mssql-2005" | "mssql-2012" => {
+                    // Prefix and length checks happen in kdf_format; the
+                    // verifier enforces the rest.
                 }
                 "mscash" => {
                     if !text.contains('#') {
@@ -498,6 +499,223 @@ where
         cancel,
         on_progress,
     )
+}
+
+/// Resume a wordlist run at a previous candidate ordinal: the first `skip`
+/// candidates are streamed past (never verified) and the attempt budget
+/// applies to the new candidates only. The returned result carries the next
+/// resume position so a cancelled or capped run can continue later.
+pub fn recover_wordlist_resumable<R, F, P>(
+    target: &RecoveryTarget,
+    reader: R,
+    skip: u64,
+    limits: RecoveryLimits,
+    mut cancel: F,
+    mut on_progress: P,
+) -> Result<RecoveryResult, String>
+where
+    R: std::io::BufRead,
+    F: FnMut() -> bool,
+    P: FnMut(RecoveryProgress),
+{
+    let mut candidates = crate::candidates::WordlistCandidates::new(reader);
+    for index in 0..skip {
+        if cancel() {
+            return Ok(RecoveryResult {
+                engine: "cyberdeck-crypto-cpu",
+                tried: 0,
+                hits: Vec::new(),
+                cancelled: true,
+                limit_reached: false,
+            });
+        }
+        if candidates.next().is_none() {
+            // The stream is shorter than the remembered position: start over.
+            let _ = index;
+            break;
+        }
+    }
+    recover_checked(
+        target,
+        candidates,
+        limits,
+        cancel,
+        on_progress,
+    )
+}
+
+/// Multi-core wordlist recovery. The file is partitioned into contiguous
+/// line-aligned ranges, one worker each; a shared atomic hands out the
+/// global candidate ordinal so the attempt budget, match cap and cancellation
+/// stay exact regardless of worker count. Same engine, N cores.
+pub fn recover_wordlist_parallel(
+    target: &RecoveryTarget,
+    path: &std::path::Path,
+    limits: RecoveryLimits,
+    is_cancelled: &(dyn Fn() -> bool + Send + Sync),
+    progress: &(dyn Fn(RecoveryProgress) + Send + Sync),
+) -> Result<RecoveryResult, String> {
+    use std::io::{BufRead, BufReader, Seek, SeekFrom};
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    use std::sync::Arc;
+
+    if target.is_kdf() && limits.max_candidates > MAX_KDF_CANDIDATES {
+        return Err("KDF candidate budget exceeds the engine cap".into());
+    }
+    let file_size = std::fs::metadata(path)
+        .map_err(|e| format!("cannot open wordlist: {e}"))?
+        .len();
+    if file_size == 0 {
+        return Ok(RecoveryResult {
+            engine: "cyberdeck-crypto-cpu",
+            tried: 0,
+            hits: Vec::new(),
+            cancelled: false,
+            limit_reached: false,
+        });
+    }
+    let cap = limits.max_candidates.min(if target.is_kdf() {
+        MAX_KDF_CANDIDATES
+    } else {
+        MAX_FAST_CANDIDATES
+    });
+    let workers = std::thread::available_parallelism()
+        .map(std::num::NonZeroUsize::get)
+        .unwrap_or(1)
+        .min(8)
+        .min((file_size / 4096).max(1) as usize);
+    if workers <= 1 {
+        // Too small to partition: the sequential streaming path.
+        let file = std::fs::File::open(path).map_err(|e| format!("cannot open wordlist: {e}"))?;
+        return recover_wordlist_with_progress(target, BufReader::with_capacity(1 << 20, file), limits, is_cancelled, progress);
+    }
+
+    let tried = Arc::new(AtomicU64::new(0));
+    let stop = Arc::new(AtomicBool::new(false));
+    let hits: Arc<std::sync::Mutex<Vec<RecoveryHit>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let first_error: Arc<std::sync::Mutex<Option<String>>> = Arc::new(std::sync::Mutex::new(None));
+    let started = std::time::Instant::now();
+    std::thread::scope(|scope| {
+    for worker in 0..workers {
+        let target = target.clone();
+        let path = path.to_path_buf();
+        let is_cancelled = &*is_cancelled;
+        let progress = &*progress;
+        let tried = Arc::clone(&tried);
+        let stop = Arc::clone(&stop);
+        let hits = Arc::clone(&hits);
+        let first_error = Arc::clone(&first_error);
+        let range_start = file_size * worker as u64 / workers as u64;
+        let range_end = file_size * (worker as u64 + 1) / workers as u64;
+        scope.spawn(move || {
+            let file = match std::fs::File::open(path) {
+                Ok(file) => file,
+                Err(e) => {
+                    *first_error.lock().unwrap() = Some(format!("cannot open wordlist: {e}"));
+                    return;
+                }
+            };
+            let mut reader = BufReader::with_capacity(1 << 20, file);
+            if range_start > 0 {
+                // Align forward to the byte after the next newline: the
+                // partial line belongs to the previous worker.
+                if reader.seek(SeekFrom::Start(range_start - 1)).is_err() {
+                    return;
+                }
+                let mut skip = Vec::new();
+                if reader.read_until(b'\n', &mut skip).is_err() {
+                    return;
+                }
+            }
+            let mut local_line = Vec::new();
+            let mut bytes_seen: u64 = reader.stream_position().unwrap_or(range_start);
+            loop {
+                if stop.load(Ordering::Acquire) || is_cancelled() {
+                    return;
+                }
+                local_line.clear();
+                match reader.read_until(b'\n', &mut local_line) {
+                    Ok(0) => return,
+                    Ok(_) => {}
+                    Err(e) => {
+                        *first_error.lock().unwrap() = Some(format!("wordlist read error: {e}"));
+                        return;
+                    }
+                }
+                bytes_seen += local_line.len() as u64;
+                if bytes_seen > range_end && worker + 1 != workers {
+                    return; // handed our last full line to the next range
+                }
+                if local_line.last() == Some(&b'\n') || local_line.last() == Some(&b'\r') {
+                    while local_line
+                        .last()
+                        .is_some_and(|b| *b == b'\n' || *b == b'\r')
+                    {
+                        local_line.pop();
+                    }
+                }
+                if local_line.is_empty() {
+                    continue;
+                }
+                if local_line.len() > MAX_CANDIDATE_BYTES {
+                    *first_error.lock().unwrap() =
+                        Some("wordlist line exceeds the candidate byte limit".into());
+                    return;
+                }
+                let ordinal = tried.fetch_add(1, Ordering::AcqRel);
+                if ordinal >= cap {
+                    stop.store(true, Ordering::Release);
+                    return;
+                }
+                match target.match_target(&local_line) {
+                    Ok(Some(hit_index)) => {
+                        let mut all = hits.lock().unwrap();
+                        all.push(RecoveryHit {
+                            index: ordinal,
+                            candidate: local_line.clone(),
+                            target: (hit_index != 0).then_some(hit_index),
+                        });
+                        if all.len() >= limits.max_matches {
+                            stop.store(true, Ordering::Release);
+                        }
+                    }
+                    Ok(None) => {}
+                    Err(e) => {
+                        *first_error.lock().unwrap() = Some(e);
+                        return;
+                    }
+                }
+                if ordinal % 4096 == 0 {
+                    progress(RecoveryProgress {
+                        tried: tried.load(Ordering::Acquire),
+                        budget: cap,
+                        matches: hits.lock().unwrap().len(),
+                    });
+                }
+            }
+        });
+    }
+    });
+    if let Some(error) = first_error.lock().unwrap().take() {
+        return Err(error);
+    }
+    let all = Arc::try_unwrap(hits)
+        .map(|mutex| mutex.into_inner().unwrap())
+        .unwrap_or_default();
+    let tried_total = tried.load(Ordering::Acquire);
+    progress(RecoveryProgress {
+        tried: tried_total,
+        budget: cap,
+        matches: all.len(),
+    });
+    let cancelled = is_cancelled();
+    Ok(RecoveryResult {
+        engine: "cyberdeck-crypto-cpu",
+        tried: tried_total,
+        hits: all,
+        cancelled,
+        limit_reached: tried_total >= cap && !cancelled,
+    })
 }
 
 /// Recovery over any bounded candidate stream (masks, enumerators). Shares

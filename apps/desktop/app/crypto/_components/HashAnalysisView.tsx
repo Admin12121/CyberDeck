@@ -248,14 +248,10 @@ export function HashAnalysisView() {
                 {verdict === "match" ? <Chip tone="ok">Match</Chip> : null}
                 {verdict === "mismatch" ? <Chip tone="err">No match</Chip> : null}
                 {verifyError ? <p role="alert" className="text-[11px] text-err">{verifyError}</p> : null}
-                <p className="text-[11px] text-fg-muted">
-                  Verify a single password without creating a case. CPU wordlist recovery supports MD5, NTLM, SHA-1, SHA-256, SHA-512 and SHA3-256 after you select a saved case and wordlist. Structured bcrypt, Argon2, scrypt, yescrypt and PBKDF2 formats use native KDF verification.
-                </p>
               </AccordionPanel>
             </AccordionItem>
           </Accordion>
           <NativeRecoveryControls />
-          <NativeRecoveryDevices />
         </Pane>
       </div>
     </NativeRecoveryV1>

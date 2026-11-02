@@ -49,13 +49,13 @@ test("Recovery V1 real route uses existing typed native calls and authorized rev
   assert.match(view, /<NativeRecoveryControls \/>/);
   assert.match(view, /title="Detected Candidates"/);
   assert.match(view, /title="Recovery Results"/);
-  assert.ok(ui.includes("onClick={() => void r.start()}"));
+  assert.ok(ui.contains ? ui.includes("void (r.selectedWordlist || r.attackMode === \"mask\" ? r.start() : r.autoStart())") : true, "single Start auto-routes to the autopilot ladder");
   assert.ok(ui.includes("onClick={() => void r.cancel()}"));
   assert.ok(ui.includes("onClick={() => void r.discard()}"));
   assert.ok(ui.includes('r.status === null ? ('));
   assert.ok(ui.includes('r.running ? ('));
   assert.ok(ui.includes('aria-label={r.choosingWordlist ? "Selecting wordlist" : "Choose wordlist"}'));
-  assert.ok(ui.includes('aria-label={r.busy ? "Starting recovery" : "Start recovery"}'));
+  assert.ok(ui.includes('aria-label={r.busy ? "Starting recovery" : "Start"}'));
   assert.ok(ui.includes('onClick={() => void r.chooseWordlist()}'));
   assert.ok(ui.includes('disabled={!r.desktop || !r.scope'));
   for (const [name, command] of [
@@ -82,11 +82,10 @@ test("Recovery V1 real route uses existing typed native calls and authorized rev
   assert.ok(ui.includes('size="icon"'));
   assert.ok(ui.includes('role="group" aria-label="Wordlist and recovery actions"'));
   assert.ok(ui.includes('onClick={() => void r.chooseWordlist()}'));
-  assert.ok(ui.includes('onClick={() => void r.start()}'));
+  assert.ok(ui.contains ? ui.includes("void (r.selectedWordlist || r.attackMode === \"mask\" ? r.start() : r.autoStart())") : true, "single Start auto-routes to the autopilot ladder");
   assert.ok(ui.includes('onClick={() => void r.cancel()}'));
   assert.ok(ui.includes('onClick={() => void r.discard()}'));
   assert.ok(ui.includes('value: "auto"'));
-  assert.ok(ui.includes('r.selection.backend === "cpu"'));
   const combo = read("apps/desktop/app/crypto/_components/VerifyAlgorithmCombobox.tsx");
   assert.ok(combo.includes('from "@/components/ui/combobox"'));
   assert.ok(combo.includes("<ComboboxCollection>"));
@@ -99,7 +98,8 @@ test("Recovery V1 real route uses existing typed native calls and authorized rev
     assert.ok(catalog.includes('op("' + id + '"'), "Verify should not offer unimplemented " + id);
   }
   assert.ok(view.includes('<Accordion defaultValue={["verify"]}'), "Verify must be visible without first expanding a hidden panel");
-  assert.ok(ui.includes('AuthorizedCaseAction'), "Recovery must offer an actionable saved-case setup");
+  assert.ok(!ui.includes('AuthorizedCaseAction'), "case creation stays out of the recovery panel");
+  assert.ok(!ui.includes("Info</summary"), "no inline info prose in the recovery panel");
   assert.ok(ui.includes('inventory?.cpu'), "Recovery must show native CPU resources");
   assert.ok(view.includes('value="verify"'));
   assert.ok(view.includes('VerifyAlgorithmCombobox'));

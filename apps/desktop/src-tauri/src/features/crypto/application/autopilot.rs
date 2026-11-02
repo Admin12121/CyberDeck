@@ -13,6 +13,15 @@ pub const WORDLIST_PREFERENCE: &[&str] = &[
 
 pub const RULES_PREFERENCE: &[&str] = &["best66", "rockyou-30000"];
 
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum StageEngine {
+    /// Native Rust, all cores.
+    Cpu,
+    /// Embedded pinned Hashcat core on the operator's GPU (KAT-verified modes only).
+    Gpu,
+}
+
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct AutopilotStagePlan {
     pub algorithm: String,
@@ -20,6 +29,7 @@ pub struct AutopilotStagePlan {
     pub rules_set: Option<String>,
     /// Final mask fallback stage (e.g. four digits) when no wordlist pass hit.
     pub mask: Option<String>,
+    pub engine: StageEngine,
     pub label: String,
 }
 
@@ -49,6 +59,7 @@ pub fn detect_target(target_hash: &str) -> Result<Detection, String> {
     if let Some(format) = cyberdeck_crypto::kdf_format(text) {
         return Ok(Detection {
             algorithms: vec![match format {
+                "wpa-pmkid" => "wpa-pmkid",
                 "bcrypt" => "bcrypt",
                 "argon2id" => "argon2id",
                 "argon2i" => "argon2i",
@@ -116,6 +127,7 @@ pub fn build_plan(
     detection: &Detection,
     present_wordlists: &[String],
     available_rules: &[String],
+    gpu_algorithms: &[String],
 ) -> Result<AutopilotPlan, String> {
     let wordlist_id = WORDLIST_PREFERENCE
         .iter()
@@ -132,12 +144,21 @@ pub fn build_plan(
         .first()
         .ok_or("no algorithm candidate")?;
     for algorithm in &detection.algorithms {
+        let engine = if gpu_algorithms.iter().any(|gpu| gpu == algorithm) {
+            StageEngine::Gpu
+        } else {
+            StageEngine::Cpu
+        };
         stages.push(AutopilotStagePlan {
             algorithm: (*algorithm).to_string(),
             wordlist_id: (*wordlist_id).to_string(),
             rules_set: None,
             mask: None,
-            label: format!("{wordlist_name} wordlist as {algorithm}"),
+            engine,
+            label: format!(
+                "{wordlist_name} wordlist as {algorithm} ({})",
+                if engine == StageEngine::Gpu { "GPU" } else { "CPU" }
+            ),
         });
     }
     if !detection.kdf {
@@ -148,7 +169,8 @@ pub fn build_plan(
                     wordlist_id: (*wordlist_id).to_string(),
                     rules_set: Some((*rules).to_string()),
                     mask: None,
-                    label: format!("{wordlist_name} + {rules} rules as {primary}"),
+                    engine: StageEngine::Cpu,
+                    label: format!("{wordlist_name} + {rules} rules as {primary} (CPU)"),
                 });
             }
         }
@@ -158,7 +180,8 @@ pub fn build_plan(
             wordlist_id: String::new(),
             rules_set: None,
             mask: Some("?d?d?d?d".to_string()),
-            label: format!("mask ?d?d?d?d as {primary}"),
+            engine: StageEngine::Cpu,
+            label: format!("mask ?d?d?d?d as {primary} (CPU)"),
         });
     }
     Ok(AutopilotPlan {
@@ -223,13 +246,19 @@ mod tests {
             &detection,
             &wordlists(&["seclists-top-100000", "rockyou", "cyberdeck-common"]),
             &rules(&["best66", "rockyou-30000"]),
+            &vec!["md5".to_string(), "ntlm".to_string(), "lm".to_string()],
         )
         .unwrap();
         assert_eq!(plan.stages.len(), 6);
         assert_eq!(plan.stages[0].wordlist_id, "rockyou");
         assert_eq!(plan.stages[0].algorithm, "md5");
+        assert_eq!(plan.stages[0].engine, StageEngine::Gpu);
         assert_eq!(plan.stages[1].algorithm, "ntlm");
+        assert_eq!(plan.stages[1].engine, StageEngine::Gpu);
         assert_eq!(plan.stages[1].rules_set, None);
+        // Rule escalation and mask fallback always run on the CPU engine.
+        assert_eq!(plan.stages[3].engine, StageEngine::Cpu);
+        assert_eq!(plan.stages[5].engine, StageEngine::Cpu);
         assert_eq!(plan.stages[2].algorithm, "lm");
         assert_eq!(plan.stages[3].rules_set.as_deref(), Some("best66"));
         assert_eq!(plan.stages[3].algorithm, "md5");
@@ -249,6 +278,7 @@ mod tests {
             &detection,
             &wordlists(&["rockyou", "cyberdeck-common"]),
             &rules(&["best66"]),
+            &[],
         )
         .unwrap();
         assert_eq!(plan.stages.len(), 1);
@@ -259,7 +289,7 @@ mod tests {
     #[test]
     fn plan_falls_back_to_builtin_wordlist_and_skips_missing_rules() {
         let detection = detect_target("a9993e364706816aba3e25717850c26c9cd0d89d").unwrap();
-        let plan = build_plan(&detection, &wordlists(&["cyberdeck-common"]), &[]).unwrap();
+        let plan = build_plan(&detection, &wordlists(&["cyberdeck-common"]), &[], &[]).unwrap();
         // wordlist-only stage plus the bounded mask fallback
         assert_eq!(plan.stages.len(), 2);
         assert_eq!(plan.stages[0].wordlist_id, "cyberdeck-common");
@@ -270,7 +300,7 @@ mod tests {
     #[test]
     fn plan_requires_at_least_one_wordlist() {
         let detection = detect_target("a9993e364706816aba3e25717850c26c9cd0d89d").unwrap();
-        let error = build_plan(&detection, &[], &rules(&["best66"])).unwrap_err();
+        let error = build_plan(&detection, &[], &rules(&["best66"]), &[]).unwrap_err();
         assert!(error.contains("no wordlist"));
     }
 }

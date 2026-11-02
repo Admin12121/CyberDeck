@@ -212,6 +212,33 @@ pub fn verify_netntlmv2(encoded: &str, candidate: &str) -> Result<bool, String> 
     Ok(response.as_slice() == expected.as_slice())
 }
 
+/// WPA-PMKID (hashcat 22000): PMK = pbkdf2-hmac-sha1(pass, ssid, 4096, 32),
+/// PMKID = hmac-sha1(PMK, "PMK Name" || ap_mac || sta_mac).
+/// Wire form: WPA*01*pmkid*ap_mac*sta_mac*essid_hex**** (hashcat 22000).
+pub fn verify_wpa_pmkid(encoded: &str, candidate: &str) -> Result<bool, String> {
+    use hmac::{Hmac, Mac};
+    use sha1::Sha1;
+    let fields: Vec<&str> = encoded.split('*').collect();
+    if fields.len() < 6 || fields[0] != "WPA" || fields[1] != "01" {
+        return Err("not a WPA*01* PMKID target".into());
+    }
+    let pmkid_hex = fields[2];
+    let ap = hex::decode(fields[3]).map_err(|_| "invalid AP MAC")?;
+    let sta = hex::decode(fields[4]).map_err(|_| "invalid client MAC")?;
+    let essid = hex::decode(fields[5]).map_err(|_| "invalid ESSID")?;
+    if pmkid_hex.len() != 40 || ap.len() != 6 || sta.len() != 6 || essid.len() > 32 {
+        return Err("invalid PMKID field lengths".into());
+    }
+    let expected = hex::decode(pmkid_hex).map_err(|_| "invalid PMKID")?;
+    let mut pmk = [0u8; 32];
+    pbkdf2::pbkdf2_hmac::<Sha1>(candidate.as_bytes(), &essid, 4096, &mut pmk);
+    let mut mac = <Hmac<Sha1> as Mac>::new_from_slice(&pmk).map_err(|e| e.to_string())?;
+    mac.update(b"PMK Name");
+    mac.update(&ap);
+    mac.update(&sta);
+    Ok(mac.finalize().into_bytes().as_slice() == expected.as_slice())
+}
+
 /// HMAC keyed digests (hashcat modes 50/60): key = password, message = salt.
 pub fn hmac_digest(kind: &str, password: &[u8], salt: &[u8]) -> Result<Vec<u8>, String> {
     match kind {
@@ -248,6 +275,22 @@ mod tests {
             verify_mscash2("$DCC2$10240#test1#607bbe89611e37446e736f7856515bf8", "test1").unwrap()
         );
         assert!(!verify_mscash2("$DCC2$10240#test1#607bbe89611e37446e736f7856515bf8", "test2").unwrap());
+    }
+
+    #[test]
+    fn wpa_pmkid_matches_independent_vector() {
+        // Node-crypto vector: PBKDF2-HMAC-SHA1 4096 + HMAC-SHA1 over
+        // "PMK Name"||AP||STA, independent of RustCrypto.
+        assert!(verify_wpa_pmkid(
+            "WPA*01*8f1bddadd02e1417163f03af545892cc6998eff4*aabbccddeeff*112233445566*546573744e6574****",
+            "cyberdeck",
+        )
+        .unwrap());
+        assert!(!verify_wpa_pmkid(
+            "WPA*01*8f1bddadd02e1417163f03af545892cc6998eff4*aabbccddeeff*112233445566*546573744e6574****",
+            "Cyberdeck",
+        )
+        .unwrap());
     }
 
     #[test]

@@ -77,7 +77,8 @@ export type HashcatRawAlgorithmV1 =
   | "netntlm-v2"
   | "sha256crypt"
   | "descrypt"
-  | "mssql-2005";
+  | "mssql-2005"
+  | "mssql-2012";
 /** Native Rust CPU digest coverage (embedded Hashcat is raw 5 modes only). */
 export type RecoveryRawAlgorithmV1 =
   | HashcatRawAlgorithmV1
@@ -136,6 +137,8 @@ export interface RecoverySummaryV1 {
   duration_ms: number;
   matches: { candidate_index: number; masked: boolean; target_index?: number }[];
   stages?: RecoveryStageSummaryV1[];
+  /** Next candidate ordinal for a resumed CPU run; absent when n/a. */
+  resume_index?: number;
 }
 export type RecoveryPhaseV1 = "running" | "cancelling" | "completed" | "cancelled" | "failed";
 export interface RecoveryJobStatusV1 {
@@ -185,6 +188,7 @@ export async function recoveryStartV1(
   onEvent: (event: RecoveryEventV1) => void,
   rules?: string,
   rulesSet?: string | null,
+  resumeFrom?: number,
 ): Promise<number> {
   if (!inTauri) throw new Error("Native wordlist recovery requires the desktop runtime");
   const channel = new Channel<RecoveryEventV1>();
@@ -195,6 +199,7 @@ export async function recoveryStartV1(
     request,
     rules: rules?.trim() || null,
     rulesSet: rulesSet || null,
+    resumeFrom: resumeFrom ?? 0,
     onEvent: channel,
   });
 }

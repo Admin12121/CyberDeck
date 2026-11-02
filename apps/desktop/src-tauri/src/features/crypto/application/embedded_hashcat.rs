@@ -207,7 +207,8 @@ const PUBLIC_KATS: &[(u32, &str, &str)] = &[
     (5600, "password", "NTLMV2TEST::WORKGROUP:1122334455667788:07659A550D5E9D02996DFD95C87EC1D5:0101000000000000006CF6385B74CA01B3610B02D99732DD000000000200120057004F0052004B00470052004F00550050000100200044004100540041002E00420049004E0043002D0053004500430055005200490000000000"),
     (7400, "cyberdeck-kat-2026", "$5$CyberDeckKAT$kGyqS./awuvI5h4KB95ES/o9w3pxHqKFF8aBBpvSGvD"),
     (1500, "cyberdeck-descrypt-kat", "KySCHrKHoR6zc"),
-    (132, "cyberdeck", "3b2dc7d2b00deaec43445d9a53efa3108cf24926:kat42"),
+    (132, "cyberdeck", "0x01004b617431118f284707047f3aca6a8aa6efc55a14ebf4bda1"),
+    (1731, "cyberdeck", "0x02004b617432e84f1ad231ba962162606f404c602512e47115fe3318ce08ee7cb1bcb1a87794e8c7c903d8aef844b99c020ec88a21bc36f6c2d4f931e92491ddc919d49e70d5"),
 ];
 type Readiness = Result<Vec<u32>, String>;
 static READINESS_CACHE: OnceLock<Mutex<HashMap<PathBuf, Readiness>>> = OnceLock::new();
@@ -392,6 +393,7 @@ pub(super) fn validate_embedded_request(request: &RecoveryRequest) -> Result<u32
         "sha256crypt" => 7400,
         "descrypt" => 1500,
         "mssql-2005" => 132,
+        "mssql-2012" => 1731,
         _ => return Err("hash mode not bundled for embedded Hashcat".into()),
     };
     match RecoveryTarget::parse(&request.algorithm, &request.target_hash)? {
@@ -655,7 +657,7 @@ mod tests {
     use super::*;
     #[test]
     fn every_public_native_mode_fixture_is_independently_verifiable_without_gpu() {
-        assert_eq!(PUBLIC_KATS.len(), 22);
+        assert_eq!(PUBLIC_KATS.len(), 23);
         for &(mode, word, hash) in PUBLIC_KATS {
             let algorithm = match mode {
                 0 => "md5",
@@ -665,8 +667,10 @@ mod tests {
                 1700 => "sha512",
                 // KDF fixtures are verified through the KDF verifier, which
                 // derives the family from the modular string itself.
-                400 | 500 | 1500 | 1800 | 2100 | 3200 | 5500 | 5600 | 7400 => "kdf",
-                132 => "mssql-2005",
+                400 | 500 | 1800 | 2100 | 3200 | 5500 | 5600 | 7400 => "kdf",
+                1500 => "descrypt",
+                132 => "kdf",
+                1731 => "kdf",
                 // Hint-driven composed targets: the wire shape is ambiguous.
                 10 => "md5-pass-salt",
                 20 => "md5-salt-pass",

@@ -16,7 +16,7 @@ test("Normal desktop build owns version-pinned C/shim/Rust-worker source graph",
   assert.ok(build.includes('"--install"'));
   assert.equal(manifest.commit, "1994b513b550edfe3e7fcaa1103759a9343e57a4");
   // Vendored set grows with each bundled-mode batch (batch-1 KDF modes added).
-  assert.equal(Object.keys(manifest.files).length, 642);
+  assert.equal(Object.keys(manifest.files).length, 643);
   assert.ok(manifest.files["src/modules/module_00000.c"], "upstream startup dependency must be pinned");
   assert.ok(manifest.files["src/modules/module_01400.c"], "SHA-256 selected mode must be pinned");
   assert.ok(manifest.files["src/modules/module_01000.c"], "NTLM module must be pinned to upstream");
@@ -27,7 +27,7 @@ test("Normal desktop build owns version-pinned C/shim/Rust-worker source graph",
 
   assert.ok(manifest.files["OpenCL/m04000-pure.cl"], "required upstream startup kernel must be pinned");
   const caps = JSON.parse(read(hc + "/capability-manifest.json"));
-  assert.deepEqual(caps.hash_modes.map(({id}) => id), [0,10,20,50,60,100,110,120,132,400,500,1000,1100,1400,1500,1700,1800,2100,3200,5500,5600,7400]);
+  assert.deepEqual(caps.hash_modes.map(({id}) => id), [0,10,20,50,60,100,110,120,132,400,500,1000,1100,1400,1500,1700,1731,1800,2100,3200,5500,5600,7400]);
   assert.ok(caps.hash_modes.every(({hardware_verified}) => hardware_verified === false));
   assert.ok(caps.attack_modes.every(({id}) => id === 0), "only wordlist currently worker-connected");
   assert.ok(native.includes('modulePaths'), "every selected module must be compiled");
@@ -79,9 +79,8 @@ test("Hashcat opt-in preserves native Rust as default and masked-result IPC", ()
   assert.ok(ui.includes('useState<"rust" | "hashcat">("rust")'));
   assert.ok(ui.includes('recoveryStartHashcatV1'));
   assert.match(ui, /engineChoice === "hashcat"\s*\? await recoveryStartHashcatV1\(request, onEvent, hashcatPreset\)/);
-  assert.ok(ui.includes("await recoveryStartV1(request, onEvent, isKdfHash ? undefined : ruleText, ruleSetId)"), "native Rust must remain the distinct streamed wordlist/rules fallback");
+  assert.ok(ui.includes("await recoveryStartV1(request, onEvent, isKdfHash ? undefined : ruleText, ruleSetId,"), "native Rust must remain the distinct streamed wordlist/rules fallback (with auto-resume ordinal)");
   assert.ok(ui.includes('hashcatCapability?.available'));
-  assert.ok(ui.includes("GPU detection,"));
   assert.ok(ui.includes('recoveryRevealV1'));
   assert.ok(ui.includes('recoveryDiscardV1'));
   assert.ok(ui.includes('recoveryCancelV1'));
@@ -144,7 +143,7 @@ test("five bundled wordlist modes are explicitly validated and desktop-selectabl
   }
   assert.ok(controller.includes("embedded_hashcat::validate_embedded_request(&request)?"));
   assert.ok(ui.includes('algorithm: isKdfHash ? "kdf" : hashcatAlgorithm'), "Rust CPU and embedded Hashcat should use the explicitly selected raw digest mode; KDF derives the family backend-side");
-  assert.ok(ui.includes("digest length alone is not proof") ||
+  assert.ok(ui.includes("share 32 hex digits") ||
     ui.includes("digest length alone cannot identify it"));
   assert.ok(core.includes("target.is_match(candidate)"));
   assert.ok(core.includes("Hashcat output is not a verified original wordlist candidate"));

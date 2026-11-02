@@ -159,7 +159,7 @@ int cd_hashcat_prepare_mode (
       || device_id > 128) return -2;
   switch (hash_mode) {
     case 0: case 10: case 20: case 50: case 60: case 100: case 110: case 120:
-    case 400: case 1500: case 132:
+    case 400: case 1500: case 132: case 1731:
     case 500: case 1000: case 1400: case 1700: case 1800: case 3200: case 7400:
     case 1100: case 2100: case 5500: case 5600:
       break;

@@ -100,6 +100,12 @@ pub struct RecoverySummaryWire {
     /// Autopilot per-stage reports; empty for single-stage jobs.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub stages: Vec<StageSummaryWire>,
+    /// Next candidate ordinal for a resumed run; zero when not resumable.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub resume_index: u64,
+}
+fn is_zero(value: &u64) -> bool {
+    *value == 0
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -355,6 +361,7 @@ pub(super) fn embedded_result(
                 "sha256crypt" => "embedded_hashcat_07400",
                 "descrypt" => "embedded_hashcat_01500",
                 "mssql-2005" => "embedded_hashcat_00132",
+                "mssql-2012" => "embedded_hashcat_01731",
                 _ => "embedded_hashcat_unsupported",
             }
             .into(),
@@ -364,6 +371,7 @@ pub(super) fn embedded_result(
             duration_ms,
             matches,
             stages: Vec::new(),
+            resume_index: 0,
         },
         confidential_hits,
     }
@@ -476,6 +484,7 @@ fn execute_reader_options<R: BufRead, P: FnMut(RecoveryProgressWire)>(
             duration_ms: started.elapsed().as_millis() as u64,
             matches,
             stages: Vec::new(),
+            resume_index: 0,
         },
         confidential_hits,
     })
@@ -562,13 +571,83 @@ pub fn execute_mask<P: FnMut(RecoveryProgressWire)>(
             duration_ms: started.elapsed().as_millis() as u64,
             matches,
             stages: Vec::new(),
+            resume_index: 0,
+        },
+        confidential_hits,
+    })
+}
+
+/// CPU wordlist recovery resuming at a previous candidate ordinal. The
+/// summary reports the next resume position for cancelled or capped runs.
+pub fn execute_path_resumable<P: FnMut(RecoveryProgressWire)>(
+    request: &RecoveryRequest,
+    path: &Path,
+    resume_from: u64,
+    cancel: &RecoveryCancel,
+    mut progress: P,
+) -> Result<RecoveryRun, String> {
+    if !matches!(request.backend, BackendSelection::Cpu) {
+        return Err("resume runs on the native CPU backend only; select CPU".into());
+    }
+    validate_request(request)?;
+    if !path.is_file() {
+        return Err("wordlist must be a regular file".into());
+    }
+    let started = Instant::now();
+    let file = File::open(path).map_err(|e| format!("cannot open wordlist: {e}"))?;
+    let limits = RecoveryLimits {
+        max_candidates: request.max_candidates,
+        max_matches: request.max_matches,
+    };
+    let target = if !request.target_hashes.is_empty() {
+        RecoveryTarget::parse_multi(&request.algorithm, &request.target_hashes)?
+    } else {
+        RecoveryTarget::parse(&request.algorithm, &request.target_hash)?
+    };
+    let completed = cyberdeck_crypto::recovery::recover_wordlist_resumable(
+        &target,
+        BufReader::with_capacity(1 << 20, file),
+        resume_from,
+        limits,
+        || cancel.is_cancelled(),
+        |p| progress(p.into()),
+    )?;
+    let (matches, confidential_hits): (Vec<_>, Vec<_>) = completed
+        .hits
+        .into_iter()
+        .map(|hit| {
+            (
+                MatchMetadata {
+                    candidate_index: hit.index,
+                    masked: true,
+                    target_index: hit.target,
+                },
+                hit.candidate,
+            )
+        })
+        .unzip();
+    Ok(RecoveryRun {
+        summary: RecoverySummaryWire {
+            algorithm: request.algorithm.clone(),
+            backend: request.backend,
+            engine: completed.engine.into(),
+            tried: completed.tried,
+            cancelled: completed.cancelled,
+            limit_reached: completed.limit_reached,
+            duration_ms: started.elapsed().as_millis() as u64,
+            matches,
+            stages: Vec::new(),
+            resume_index: resume_from + completed.tried,
         },
         confidential_hits,
     })
 }
 
 /// The IPC/controller owner handles path authorization and dialog selection.
-pub fn execute_path<P: FnMut(RecoveryProgressWire)>(
+/// Wordlist runs use the multi-core engine (workers self-fall back to the
+/// sequential stream on small files); resumed runs stay sequential so the
+/// skip cursor keeps single-stream semantics.
+pub fn execute_path<P: FnMut(RecoveryProgressWire) + Send>(
     request: &RecoveryRequest,
     path: &Path,
     cancel: &RecoveryCancel,
@@ -578,13 +657,52 @@ pub fn execute_path<P: FnMut(RecoveryProgressWire)>(
     if !path.is_file() {
         return Err("wordlist must be a regular file".into());
     }
-    let file = File::open(path).map_err(|e| format!("cannot open wordlist: {e}"))?;
-    execute_reader(
-        request,
-        BufReader::with_capacity(1 << 20, file),
-        cancel,
-        progress,
-    )
+    let started = Instant::now();
+    let limits = RecoveryLimits {
+        max_candidates: request.max_candidates,
+        max_matches: request.max_matches,
+    };
+    let completed = {
+        let progress = std::sync::Arc::new(std::sync::Mutex::new(progress));
+        cyberdeck_crypto::recovery::recover_wordlist_parallel(
+            &RecoveryTarget::parse(&request.algorithm, &request.target_hash)?,
+            path,
+            limits,
+            &|| cancel.is_cancelled(),
+            &move |p| {
+                (progress.lock().unwrap())(p.into());
+            },
+        )?
+    };
+    let (matches, confidential_hits): (Vec<_>, Vec<_>) = completed
+        .hits
+        .into_iter()
+        .map(|hit| {
+            (
+                MatchMetadata {
+                    candidate_index: hit.index,
+                    masked: true,
+                    target_index: hit.target,
+                },
+                hit.candidate,
+            )
+        })
+        .unzip();
+    Ok(RecoveryRun {
+        summary: RecoverySummaryWire {
+            algorithm: request.algorithm.clone(),
+            backend: request.backend,
+            engine: completed.engine.into(),
+            tried: completed.tried,
+            cancelled: completed.cancelled,
+            limit_reached: completed.limit_reached,
+            duration_ms: started.elapsed().as_millis() as u64,
+            matches,
+            stages: Vec::new(),
+            resume_index: 0,
+        },
+        confidential_hits,
+    })
 }
 
 #[cfg(test)]

@@ -464,7 +464,7 @@ fn start_recovery_with_wordlist_engine(
     emit(RecoveryEvent::Started { job_id });
     let worker_token = token.clone();
     let worker = move |sink: &(dyn Fn(RecoveryEvent) + Send + Sync),
-                       forward: &mut dyn FnMut(RecoveryProgressWire)|
+                       forward: &mut (dyn FnMut(RecoveryProgressWire) + Send)|
           -> Result<RecoveryRun, String> {
         let _ = sink;
         let token = &worker_token;
@@ -500,7 +500,7 @@ fn spawn_recovery_worker<F>(
 ) where
     F: FnOnce(
             &(dyn Fn(RecoveryEvent) + Send + Sync),
-            &mut dyn FnMut(RecoveryProgressWire),
+            &mut (dyn FnMut(RecoveryProgressWire) + Send),
         ) -> Result<RecoveryRun, String>
         + Send
         + 'static,
@@ -666,6 +666,7 @@ pub fn recovery_start_v1(
     request: RecoveryRequest,
     rules: Option<String>,
     rules_set: Option<String>,
+    resume_from: Option<u64>,
     on_event: Channel<RecoveryEvent>,
     state: State<'_, RecoveryCtx>,
     session: State<'_, CaseSessionCtx>,
@@ -710,11 +711,36 @@ pub fn recovery_start_v1(
     // Revalidate that the selected file still exists and passes native
     // wordlist inspection; do not accept an untrusted frontend-supplied path.
     recheck_selected_wordlist(&selected)?;
+    let resume_from = resume_from.unwrap_or(0);
+    let scope = RecoveryCtx::scope_from_session(&session)?;
     if let Some(input) = hash_input {
         if !matches!(request.backend, recovery_backend::BackendSelection::Cpu) {
             return Err("hash-file recovery runs on the native CPU backend only; select CPU".into());
         }
         let request = apply_hash_input(request, input)?;
+        if resume_from > 0 && compiled.is_none() {
+            let (job_id, token) = state.with_active(&session, |registry, verified| {
+                if *verified != scope {
+                    return Err("recovery case changed".into());
+                }
+                registry.reserve_job()
+            })?;
+            emit_started(&on_event, job_id);
+            let registry = state.registry.clone();
+            let path = selected.path.clone();
+            let worker_token = token.clone();
+            let worker = move |sink: &(dyn Fn(RecoveryEvent) + Send + Sync),
+                               forward: &mut (dyn FnMut(RecoveryProgressWire) + Send)|
+                  -> Result<RecoveryRun, String> {
+                let _ = sink;
+                recovery_backend::execute_path_resumable(
+                    &request, &path, resume_from, &worker_token,
+                    |progress| forward(progress),
+                )
+            };
+            spawn_recovery_worker(registry, job_id, scope, token, emit_channel(on_event), worker);
+            return Ok(job_id);
+        }
         start_recovery_with_wordlist_engine(
             &state,
             &session,
@@ -727,6 +753,28 @@ pub fn recovery_start_v1(
                 let _ = on_event.send(event);
             },
         )
+    } else if resume_from > 0 && compiled.is_none() && request.target_hashes.is_empty() {
+        let (job_id, token) = state.with_active(&session, |registry, verified| {
+            if *verified != scope {
+                return Err("recovery case changed".into());
+            }
+            registry.reserve_job()
+        })?;
+        emit_started(&on_event, job_id);
+        let registry = state.registry.clone();
+        let path = selected.path.clone();
+        let worker_token = token.clone();
+        let worker = move |sink: &(dyn Fn(RecoveryEvent) + Send + Sync),
+                           forward: &mut (dyn FnMut(RecoveryProgressWire) + Send)|
+              -> Result<RecoveryRun, String> {
+            let _ = sink;
+            recovery_backend::execute_path_resumable(
+                &request, &path, resume_from, &worker_token,
+                |progress| forward(progress),
+            )
+        };
+        spawn_recovery_worker(registry, job_id, scope, token, emit_channel(on_event), worker);
+        Ok(job_id)
     } else {
         start_recovery_with_wordlist_engine(
             &state,
@@ -799,6 +847,7 @@ fn bundled_hashcat_modes() -> Vec<EmbeddedHashcatMode> {
         ("sha256crypt", 7400, 0),
         ("descrypt", 1500, 0),
         ("mssql-2005", 132, 0),
+        ("mssql-2012", 1731, 0),
     ]
     .into_iter()
     .map(|(algorithm, mode, digest_hex_length)| EmbeddedHashcatMode {
@@ -1045,7 +1094,7 @@ pub async fn recovery_reveal_v1(
 /// primary algorithm. Reuses the single-job lifecycle, cancellation and
 /// confidential reveal flow; the frontend only supplies the hash text.
 #[tauri::command]
-pub fn recovery_autopilot_v1(
+pub async fn recovery_autopilot_v1(
     app: AppHandle,
     target_hash: String,
     max_candidates: u64,
@@ -1065,7 +1114,28 @@ pub fn recovery_autopilot_v1(
         .into_iter()
         .map(|entry| entry.id)
         .collect::<Vec<_>>();
-    let plan = autopilot::build_plan(&detection, &present, &rules_ids)?;
+    // Environment auto-detect: only modes that passed their known-answer test
+    // on this machine's devices are offered the GPU; everything else — and all
+    // memory-hard KDFs — stays on the multi-core CPU.
+    let gpu_algorithms: Vec<String> = match hashcat_resource_root(&app) {
+        Ok(runtime) => {
+            let verified = tauri::async_runtime::spawn_blocking(move || {
+                embedded_hashcat::verified_modes(&runtime)
+            })
+            .await
+            .map_err(|_| "native Hashcat readiness check failed".to_string())
+            .ok()
+            .and_then(|modes| modes.ok())
+            .unwrap_or_default();
+            bundled_hashcat_modes()
+                .into_iter()
+                .filter(|mode| verified.contains(&mode.mode))
+                .map(|mode| mode.algorithm.to_string())
+                .collect()
+        }
+        Err(_) => Vec::new(),
+    };
+    let plan = autopilot::build_plan(&detection, &present, &rules_ids, &gpu_algorithms)?;
     if !(1..=cyberdeck_crypto::recovery::MAX_FAST_CANDIDATES).contains(&max_candidates) {
         return Err("max_candidates exceeds global recovery limit".into());
     }
@@ -1103,7 +1173,7 @@ pub fn recovery_autopilot_v1(
     let stage_count = plan.stages.len();
     let worker_token = token.clone();
     let worker = move |sink: &(dyn Fn(RecoveryEvent) + Send + Sync),
-                       forward: &mut dyn FnMut(RecoveryProgressWire)|
+                       forward: &mut (dyn FnMut(RecoveryProgressWire) + Send)|
           -> Result<RecoveryRun, String> {
         let token = &worker_token;
         let mut total_tried = 0u64;
@@ -1139,6 +1209,20 @@ pub fn recovery_autopilot_v1(
             };
             let result = if let Some(mask) = &stage.mask {
                 recovery_backend::execute_mask(&request, mask, &token, progress_with_stage)
+            } else if stage.engine == autopilot::StageEngine::Gpu {
+                // GPU stage: the embedded pinned core runs its own devices.
+                let path = library_wordlists::resolve(&worker_app, &stage.wordlist_id)?;
+                let runtime = hashcat_resource_root(&worker_app)?;
+                let mut gpu_request = request.clone();
+                gpu_request.backend = recovery_backend::BackendSelection::HashcatManaged;
+                embedded_hashcat::execute_path(
+                    &gpu_request,
+                    &path,
+                    &runtime,
+                    &token,
+                    embedded_hashcat::WordlistPreset::Plain,
+                    progress_with_stage,
+                )
             } else {
                 let path = library_wordlists::resolve(&worker_app, &stage.wordlist_id)?;
                 match &stage.rules_set {
@@ -1190,6 +1274,7 @@ pub fn recovery_autopilot_v1(
                 duration_ms: started.elapsed().as_millis() as u64,
                 matches: matches_meta,
                 stages: stage_reports,
+                resume_index: 0,
             },
             confidential,
         ))
@@ -1305,7 +1390,7 @@ pub fn recovery_mask_v1(
     emit_started(&on_event, job_id);
     let worker_token = token.clone();
     let worker = move |sink: &(dyn Fn(RecoveryEvent) + Send + Sync),
-                       forward: &mut dyn FnMut(RecoveryProgressWire)|
+                       forward: &mut (dyn FnMut(RecoveryProgressWire) + Send)|
           -> Result<RecoveryRun, String> {
         let _ = sink;
         recovery_backend::execute_mask(&request, &mask, &worker_token, |progress| {

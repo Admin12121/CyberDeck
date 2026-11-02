@@ -262,6 +262,12 @@ pub fn kdf_format(hash: &str) -> Option<&'static str> {
         Some("apr1")
     } else if hash.starts_with("$sha1$") {
         Some("sha1crypt")
+    } else if hash.starts_with("0x0200") && hash.len() == 142 {
+        Some("mssql-2012")
+    } else if hash.starts_with("0x0100") && hash.len() == 54 {
+        Some("mssql-2005")
+    } else if hash.starts_with("WPA*01*") {
+        Some("wpa-pmkid")
     } else if hash.starts_with("$NETNTLMv2$") {
         Some("netntlm-v2")
     } else if hash.starts_with("$NETNTLM$") {
@@ -342,16 +348,37 @@ pub fn verify_kdf_format(format: &str, hash: &str, candidate: &str) -> Result<bo
         }
         "md5crypt" | "apr1" => unix_crypt::verify_md5_crypt(hash, candidate),
         "descrypt" => unix_crypt::verify_descrypt(hash, candidate),
-        // MSSQL 2005 (hashcat 132): sha1(utf16le(pass) . salt), wire "sha1hex:salt".
+        // MSSQL 2005 (hashcat 132): self-contained wire 0x0100 + salt(4 bytes)
+        // + sha1(utf16le(pass) . salt_bytes).
         "mssql-2005" => {
-            let (expected, salt) = hash.split_once(':').ok_or("mssql-2005 requires sha1hex:salt")?;
-            if expected.len() != 40 || !expected.bytes().all(|b| b.is_ascii_hexdigit()) {
-                return Err("mssql-2005 digest must be 40 hex characters".into());
+            let body = hash
+                .strip_prefix("0x0100")
+                .ok_or("mssql-2005 requires the 0x0100 prefix")?;
+            if body.len() != 48 || !body.bytes().all(|b| b.is_ascii_hexdigit()) {
+                return Err("mssql-2005 encoding must be 0x0100 + 48 hex characters".into());
             }
+            let salt = hex::decode(&body[..8]).map_err(|_| "invalid mssql-2005 salt")?;
+            let expected = &body[8..];
             let utf16: Vec<u8> = candidate.encode_utf16().flat_map(|u| u.to_le_bytes()).collect();
             let mut input = utf16;
-            input.extend_from_slice(salt.as_bytes());
+            input.extend_from_slice(&salt);
             let digest = sha1::Sha1::digest(&input);
+            Ok(constant_time_eq_str(&hex::encode(digest), expected))
+        }
+        // MSSQL 2012/2014 (hashcat 1731): 0x0200 + salt(4) + sha512(utf16le(pass) . salt).
+        "mssql-2012" => {
+            let body = hash
+                .strip_prefix("0x0200")
+                .ok_or("mssql-2012 requires the 0x0200 prefix")?;
+            if body.len() != 136 || !body.bytes().all(|b| b.is_ascii_hexdigit()) {
+                return Err("mssql-2012 encoding must be 0x0200 + 136 hex characters".into());
+            }
+            let salt = hex::decode(&body[..8]).map_err(|_| "invalid mssql-2012 salt")?;
+            let expected = &body[8..];
+            let utf16: Vec<u8> = candidate.encode_utf16().flat_map(|u| u.to_le_bytes()).collect();
+            let mut input = utf16;
+            input.extend_from_slice(&salt);
+            let digest = sha2::Sha512::digest(&input);
             Ok(constant_time_eq_str(&hex::encode(digest), expected))
         }
         "phpass" => unix_crypt::verify_phpass(hash, candidate),
@@ -361,6 +388,7 @@ pub fn verify_kdf_format(format: &str, hash: &str, candidate: &str) -> Result<bo
         "mscash" => windows_auth::verify_mscash(hash, candidate),
         "mscash2" => windows_auth::verify_mscash2(hash, candidate),
         "netntlm-v1" => windows_auth::verify_netntlmv1(hash, candidate),
+        "wpa-pmkid" => windows_auth::verify_wpa_pmkid(hash, candidate),
         "netntlm-v2" => windows_auth::verify_netntlmv2(hash, candidate),
         // Composed salted/HMAC digests carry an explicit algorithm hint; the
         // encoded form is "digest:salt" with the salt taken after the first
