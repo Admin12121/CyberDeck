@@ -86,7 +86,7 @@ fn parameter_vectors(url: &Url) -> Result<Vec<Vector>, String> {
     Ok(out)
 }
 
-fn single_mutation(base: &Url, index: usize, replacement: &str) -> Result<Url, String> {
+pub(super) fn single_mutation(base: &Url, index: usize, replacement: &str) -> Result<Url, String> {
     if !matches!(base.scheme(), "http" | "https") {
         return Err("active mutation requires HTTP(S)".into());
     }

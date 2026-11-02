@@ -1,7 +1,16 @@
-//! Legacy crack-history persistence adapter; preserves existing write behavior.
-//! Never use this as evidence of encrypted storage: Agent 5 owns that migration.
+//! Legacy recovery-history compatibility boundary.
+//!
+//! No new recovered plaintext, target digest, or wordlist provenance may be
+//! written to SQLite automatically. Old history remains readable/deletable for
+//! a separately coordinated storage migration; Recovery V1 keeps results
+//! transient, masked and explicitly revealable.
+//!
+//! Preserve call compatibility with the legacy attack IPC until the frontend
+//! and Cases/Storage owners migrate the history UX. Intentionally do not
+//! enumerate the candidate iterator or log its contents.
 use crate::features::forensics::ipc::evidence::EvidenceCtx;
 
+#[allow(unused_variables)]
 pub fn persist<'a>(
     ctx: &EvidenceCtx,
     algorithm: &str,
@@ -10,12 +19,5 @@ pub fn persist<'a>(
     source: Option<&str>,
     passwords: impl IntoIterator<Item = &'a str>,
 ) {
-    let mut passwords = passwords.into_iter().peekable();
-    if passwords.peek().is_none() {
-        return;
-    }
-    let store = ctx.store.lock().expect("artifact store poisoned");
-    for password in passwords {
-        let _ = store.add_crack_entry(algorithm, target, password, engine, source);
-    }
+    // Fail-closed: legacy plaintext history writes are disabled.
 }

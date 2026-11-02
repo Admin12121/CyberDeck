@@ -50,6 +50,7 @@ const NATIVE_RECIPE_OPS = new Set([
   "hex_dump", "from_hexdump", "html_encode", "html_decode", "strip_html_tags",
   "to_charcode", "from_charcode", "vigenere", "nato_encode", "morse_encode", "morse_decode",
   "escape_string", "unescape_string",
+  "extract_urls", "extract_ips", "extract_emails", "extract_domains", "jwt_decode",
 ]);
 
 function nativeUiResult(wire: RecipeRunWire): RecipeResult {

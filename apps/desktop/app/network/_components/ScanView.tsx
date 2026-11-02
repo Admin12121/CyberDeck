@@ -519,7 +519,7 @@ export function ScanView() {
                 <ToolButton onClick={() => void runTrace()}
                   disabled={!desktop || !authorized || revision === null || !arpInterface ||
                     !target.trim() || running || status.running || arpBusy || ndpBusy || synBusy || icmpBusy}
-                  title="Linux: up to 12 TTL-limited IPv4 ICMP probes, native confirmation and CAP_NET_RAW required">
+                  title="Linux or Windows: up to 12 TTL-limited ICMPv4 probes, backend confirmation and saved-case authorization required">
                   Trace IPv4
                 </ToolButton>
               )}

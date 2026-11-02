@@ -95,6 +95,9 @@ pub fn native_operation(id: &str) -> bool {
             | "unescape_string"
             | "extract_urls"
             | "extract_ips"
+            | "extract_emails"
+            | "extract_domains"
+            | "jwt_decode"
     )
 }
 
@@ -365,6 +368,12 @@ fn transform(op: &str, bytes: &[u8], param: Option<&str>) -> Result<Vec<u8>, Str
     }
     if crate::recipe_ioc_parity::supports(op) {
         return crate::recipe_ioc_parity::apply(op, bytes);
+    }
+    if crate::recipe_ioc_extra::supports(op) {
+        return crate::recipe_ioc_extra::apply(op, bytes);
+    }
+    if op == "jwt_decode" {
+        return crate::recipe_jwt::decode(bytes);
     }
     match op {
         "to_base64" => Ok(STANDARD.encode(bytes).into_bytes()),

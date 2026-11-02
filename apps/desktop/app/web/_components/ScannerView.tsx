@@ -64,7 +64,7 @@ export function ScannerView() {
     return () => { disposed = true; clearInterval(timer); };
   }, [desktop, jobId, caseId, caseSession.revision]);
 
-  const start = async (kind: "scanner" | "active-query" | "active-form" | "active-json" = "scanner") => {
+  const start = async (kind: "scanner" | "active-query" | "active-form" | "active-json" | "active-sql" | "active-sql-boolean" | "active-traversal" = "scanner") => {
     if (!desktop || running || !normalized || !authorized) return;
     const post = kind === "active-form" || kind === "active-json";
     if (post && (!postRiskApproved || !postTemplate.trim())) return;
@@ -76,6 +76,9 @@ export function ScannerView() {
       // a terminal state. Navigation does not stop the native worker.
       const completed = await wb.trackOperation(
         kind === "active-query" ? "Web active query" :
+        kind === "active-sql" ? "Web SQL injection probe" :
+        kind === "active-sql-boolean" ? "Web boolean SQL probe" :
+        kind === "active-traversal" ? "Web file inclusion probe" :
         post ? "Web approved POST probe" : "Web scanner", async () => {
         const id = await startWebAssessment(kind, stamp.target, true, 2, template,
           kind === "scanner" ? undefined : scanIntensity);
@@ -142,6 +145,21 @@ export function ScannerView() {
         title="Send a baseline and bounded inert GET parameter probes, only to the approved private origin"
         onClick={() => void start("active-query")}>
         <Play size={12} /> Test query parameters
+      </ToolButton>
+      <ToolButton disabled={!desktop || !normalized || !authorized || running || !hasQuery}
+        title="Append one quote to each eligible GET parameter and compare database error signatures; read-only, bounded"
+        onClick={() => void start("active-sql")}>
+        <Play size={12} /> Test SQL injection
+      </ToolButton>
+      <ToolButton disabled={!desktop || !normalized || !authorized || running || !hasQuery}
+        title="Compare tautological and contradictory GET clauses against the baseline; heuristic, read-only, bounded"
+        onClick={() => void start("active-sql-boolean")}>
+        <Play size={12} /> Test SQL boolean
+      </ToolButton>
+      <ToolButton disabled={!desktop || !normalized || !authorized || running || !hasQuery}
+        title="Substitute traversal sequences in file-like GET parameters and confirm known file signatures; read-only, bounded"
+        onClick={() => void start("active-traversal")}>
+        <Play size={12} /> Test file inclusion
       </ToolButton>
       <span className="ml-auto font-mono text-[10px] text-fg-muted">
         {job ? `${job.kind} · ${job.state} · ${job.processed} requests · ${job.discovered} findings` : "Native review"}

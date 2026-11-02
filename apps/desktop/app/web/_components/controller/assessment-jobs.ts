@@ -24,7 +24,7 @@ const MAX_PASSIVE_RULES = 30;
 
 export interface WebAssessmentJob {
   job_id: number;
-  kind: "scanner" | "spider" | "passive" | "active-query" | "active-form" | "active-json";
+  kind: "scanner" | "spider" | "passive" | "active-query" | "active-form" | "active-json" | "active-sql" | "active-sql-boolean" | "active-traversal";
   state: "running" | "completed" | "failed" | "cancelled";
   processed: number;
   discovered: number;
@@ -49,7 +49,7 @@ export async function startWebPassiveScan(enabledRules: string[]): Promise<numbe
 }
 
 export async function startWebAssessment(
-  kind: "scanner" | "spider" | "active-query" | "active-form" | "active-json",
+  kind: "scanner" | "spider" | "active-query" | "active-form" | "active-json" | "active-sql" | "active-sql-boolean" | "active-traversal",
   targetUrl: string, authorized: boolean, maxDepth = 2, probeBody?: string,
   scanIntensity?: "quick" | "standard" | "thorough",
 ): Promise<number> {

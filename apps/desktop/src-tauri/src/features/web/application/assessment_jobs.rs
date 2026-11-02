@@ -1,6 +1,7 @@
 //! Backend-owned bounded Web assessment jobs: no UI-owned cancellation truth.
 use super::{
-    active_body_application, active_query_application, authorize_pinned_assessment,
+    active_body_application, active_injection_application, active_query_application,
+    authorize_pinned_assessment,
     crawl_application, execute_case_scoped_assessment, passive_rules_application, scan_application,
     scan_domain, selected_history_grant, target_scope, webhistory, Finding, WebCtx,
 };
@@ -48,6 +49,16 @@ impl ScanIntensity {
                 Self::Standard => 2,
                 Self::Thorough => 4,
             },
+            Kind::ActiveSql | Kind::ActiveTraversal => match self {
+                Self::Quick => 2,
+                Self::Standard => 4,
+                Self::Thorough => 8,
+            },
+            Kind::ActiveSqlBoolean => match self {
+                Self::Quick => 1,
+                Self::Standard => 2,
+                Self::Thorough => 4,
+            },
             _ => 0,
         }
     }
@@ -61,6 +72,9 @@ enum Kind {
     ActiveQuery,
     ActiveForm,
     ActiveJson,
+    ActiveSql,
+    ActiveSqlBoolean,
+    ActiveTraversal,
 }
 impl Kind {
     fn parse(text: &str) -> Result<Self, String> {
@@ -71,6 +85,9 @@ impl Kind {
             "active-query" => Ok(Self::ActiveQuery),
             "active-form" => Ok(Self::ActiveForm),
             "active-json" => Ok(Self::ActiveJson),
+            "active-sql" => Ok(Self::ActiveSql),
+            "active-sql-boolean" => Ok(Self::ActiveSqlBoolean),
+            "active-traversal" => Ok(Self::ActiveTraversal),
             _ => Err("unknown native Web job kind".into()),
         }
     }
@@ -82,6 +99,9 @@ impl Kind {
             Self::ActiveQuery => "active-query",
             Self::ActiveForm => "active-form",
             Self::ActiveJson => "active-json",
+            Self::ActiveSql => "active-sql",
+            Self::ActiveSqlBoolean => "active-sql-boolean",
+            Self::ActiveTraversal => "active-traversal",
         }
     }
 }
@@ -228,7 +248,14 @@ impl Job {
         if state.state != "completed"
             || !matches!(
                 state.kind.as_str(),
-                "scanner" | "passive" | "active-query" | "active-form" | "active-json"
+                "scanner"
+                    | "passive"
+                    | "active-query"
+                    | "active-form"
+                    | "active-json"
+                    | "active-sql"
+                    | "active-sql-boolean"
+                    | "active-traversal"
             )
         {
             return Err("only completed native Web findings may be saved".into());
@@ -297,6 +324,9 @@ impl Job {
             "active-query" => "web.active.query",
             "active-form" => "web.active.form",
             "active-json" => "web.active.json",
+            "active-sql" => "web.active.sql",
+            "active-sql-boolean" => "web.active.sql.boolean",
+            "active-traversal" => "web.active.traversal",
             _ => "web.native",
         };
         let written = store.add_findings(case_id, source, None, &records)?;
@@ -436,7 +466,12 @@ pub async fn web_assessment_start_v2(
     if scan_intensity.is_some()
         && !matches!(
             kind,
-            Kind::ActiveQuery | Kind::ActiveForm | Kind::ActiveJson
+            Kind::ActiveQuery
+                | Kind::ActiveForm
+                | Kind::ActiveJson
+                | Kind::ActiveSql
+                | Kind::ActiveSqlBoolean
+                | Kind::ActiveTraversal
         )
     {
         return Err("scan intensity applies only to parameter probes".into());
@@ -469,6 +504,9 @@ pub async fn web_assessment_start_v2(
     let purpose = match kind {
         Kind::ActiveQuery => "at most nine GET requests with inert HTML markup query probes",
         Kind::ActiveForm | Kind::ActiveJson => "an explicitly supplied POST template and up to four inert markup mutations; POST MAY CHANGE SERVER STATE even if probes are harmless HTML markers",
+        Kind::ActiveSql => "at most nine read-only GET requests with bounded SQL syntax probes",
+        Kind::ActiveSqlBoolean => "read-only paired GET comparisons for boolean SQL inference",
+        Kind::ActiveTraversal => "bounded read-only GET requests with file-inclusion signatures",
         Kind::Scanner => "a bounded native HTTP security review",
         Kind::Spider => "bounded same-origin GET discovery",
         Kind::Passive => return Err("passive mode does not send network requests".into()),
@@ -506,6 +544,37 @@ pub async fn web_assessment_start_v2(
                 )
                 .await
                 .map(Outcome::Findings),
+                Kind::ActiveSql => active_injection_application::run_active_injection_with_budget(
+                    &pinned.client,
+                    pinned.url.clone(),
+                    active_injection_application::Policy::SqlError,
+                    intensity.request_budget(kind),
+                    &on_progress,
+                )
+                .await
+                .map(Outcome::Findings),
+                Kind::ActiveSqlBoolean => {
+                    active_injection_application::run_active_injection_with_budget(
+                        &pinned.client,
+                        pinned.url.clone(),
+                        active_injection_application::Policy::SqlBoolean,
+                        intensity.request_budget(kind),
+                        &on_progress,
+                    )
+                    .await
+                    .map(Outcome::Findings)
+                }
+                Kind::ActiveTraversal => {
+                    active_injection_application::run_active_injection_with_budget(
+                        &pinned.client,
+                        pinned.url.clone(),
+                        active_injection_application::Policy::Traversal,
+                        intensity.request_budget(kind),
+                        &on_progress,
+                    )
+                    .await
+                    .map(Outcome::Findings)
+                }
                 Kind::Scanner => scan_application::run_scan_with_progress(
                     &pinned.client,
                     pinned.url.to_string(),

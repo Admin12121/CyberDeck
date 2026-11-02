@@ -255,7 +255,7 @@ pub async fn netscan_trace_ipv4_v1(
     if !authorized {
         return Err("explicit route-tracing authorization required".into());
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
     {
         let _ = (
             target,
@@ -269,9 +269,9 @@ pub async fn netscan_trace_ipv4_v1(
             syn,
             ctx,
         );
-        return Err("native IPv4 traceroute currently requires Linux CAP_NET_RAW".into());
+        return Err("native IPv4 traceroute currently supports Windows and Linux".into());
     }
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
     {
         use cyberdeck_packet::active_echo::{trace_ipv4_echo, MAX_TRACE_HOPS};
         if max_hops == 0 || max_hops > MAX_TRACE_HOPS {
@@ -298,7 +298,7 @@ pub async fn netscan_trace_ipv4_v1(
             return Err("saved case does not exist".into());
         }
         let prompt=format!(
-            "Authorize native IPv4 route tracing to {} using selected interface '{}' in saved case '{}'? At most {} TTL-limited ICMP probes, 600ms each, no retries. Router responses may be absent or altered; all active probes require permission and Linux CAP_NET_RAW.",
+            "Authorize native IPv4 route tracing to {} using selected interface '{}' in saved case '{}'? At most {} TTL-limited ICMP probes, 600ms each, no retries. Router responses may be absent or altered; all active probes require permission; Linux needs CAP_NET_RAW and Windows uses IP Helper without external capture drivers.",
             host,interface_name,case,max_hops
         );
         let dialog = app.clone();
@@ -366,7 +366,7 @@ pub async fn netscan_trace_ipv4_v1(
                 title:format!("IPv4 route trace hop {} toward {}",hop.ttl,host),
                 severity:"info".into(),
                 details:format!(
-                    "Authorized IPv4 ICMP traceroute\nInterface: {}\nDestination: {}\nTTL: {}\nObserved responder: {}\nReached destination: {}\nReason: {}\nElapsed ms: {}\nEvidence: backend-matched ICMP echo identifier/sequence; intermediate-router addresses are unverified network claims; silence is inconclusive",
+                    "Authorized IPv4 ICMP traceroute\nInterface: {}\nDestination: {}\nTTL: {}\nObserved responder: {}\nReached destination: {}\nReason: {}\nElapsed ms: {}\nEvidence: Linux matches quoted echo identifier/sequence; Windows reports replies through native IP Helper. Router addresses are unverified network claims; silence is inconclusive",
                     interface_name,host,hop.ttl,hop.responder.as_deref().unwrap_or("no response"),
                     hop.reached,hop.reason,hop.elapsed_ms,
                 ),

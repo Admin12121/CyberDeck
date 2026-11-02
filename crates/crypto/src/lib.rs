@@ -6,6 +6,8 @@ mod recipe_native_parity;
 mod recipe_text_parity;
 mod recipe_escape_parity;
 mod recipe_ioc_parity;
+mod recipe_ioc_extra;
+mod recipe_jwt;
 pub mod key_derivation;
 pub mod hkdf;
 pub mod recovery;
@@ -128,9 +130,19 @@ pub fn apply_op(op_id: &str, input: &[u8], key: Option<&[u8]>) -> Result<Vec<u8>
             encoder.finish().map_err(|e| e.to_string())
         }
         "gunzip" => {
-            let mut decoder = flate2::read::GzDecoder::new(input);
+            // A gzip bomb must not allocate an unbounded output buffer.
+            const MAX_UNCOMPRESSED: u64 = 8 * 1024 * 1024;
+            if input.len() as u64 > MAX_UNCOMPRESSED {
+                return Err("gzip input size limit exceeded".into());
+            }
+            let decoder = flate2::read::GzDecoder::new(input);
+            let mut bounded = std::io::Read::take(decoder, MAX_UNCOMPRESSED + 1);
             let mut out = Vec::new();
-            std::io::Read::read_to_end(&mut decoder, &mut out).map_err(|e| format!("not gzip data: {e}"))?;
+            std::io::Read::read_to_end(&mut bounded, &mut out)
+                .map_err(|e| format!("not gzip data: {e}"))?;
+            if out.len() as u64 > MAX_UNCOMPRESSED {
+                return Err("gzip output size limit exceeded".into());
+            }
             Ok(out)
         }
         other => Err(format!("unknown operation: {other}")),
@@ -506,5 +518,27 @@ mod tests {
         assert!(apply_op("gunzip", b"not gzip", None).is_err());
         let _ = std::io::sink().write(b"").unwrap();
         let _ = std::io::empty().read(&mut []).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod decompression_resource_policy_tests {
+    use super::*;
+    #[test]
+    fn gunzip_rejects_high_ratio_bombs_but_accepts_exact_cap() {
+        let maximum = 8 * 1024 * 1024;
+        let exact = vec![b'X'; maximum];
+        let compressed = apply_op("gzip", &exact, None).unwrap();
+        assert!(compressed.len() < maximum / 10);
+        assert_eq!(apply_op("gunzip", &compressed, None).unwrap(), exact);
+        let too_large = apply_op("gzip", &vec![b'X'; maximum + 1], None).unwrap();
+        assert_eq!(apply_op("gunzip", &too_large, None).unwrap_err(), "gzip output size limit exceeded");
+        assert_eq!(apply_op("gunzip", &vec![0; maximum + 1], None).unwrap_err(), "gzip input size limit exceeded");
+    }
+    #[test]
+    fn gunzip_rejects_truncated_and_malformed_gzip() {
+        let compressed = apply_op("gzip", b"known answer", None).unwrap();
+        assert!(apply_op("gunzip", &compressed[..compressed.len() - 4], None).is_err());
+        assert!(apply_op("gunzip", b"\x1f\x8b\x08\x00", None).is_err());
     }
 }

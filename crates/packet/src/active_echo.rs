@@ -1,4 +1,4 @@
-//! Native Linux IPv4 ICMP echo discovery, independently authored.
+//! Native IPv4 ICMP echo and traceroute discovery for Linux and Windows.
 //! One operator-authorized selected NIC, true kernel source IPv4 address,
 //! bounded raw probes, explicit cancellation and matched echo identities.
 //! Silence means inconclusive, never proof that a host is down.
@@ -136,13 +136,58 @@ pub fn trace_ipv4_echo(
     {
         linux::trace(interface_name, target, max_hops, stop, scope_active)
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "windows")]
+    {
+        windows::trace(interface_name, target, max_hops, stop, scope_active)
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
     {
         let _ = interface_name;
         Err(EchoError::new(
             EchoErrorCode::Unsupported,
-            "native ICMP traceroute requires Linux CAP_NET_RAW",
+            "native ICMP traceroute supports Linux and Windows",
         ))
+    }
+}
+
+// Windows IP Helper status interpretation is pure and tested on every host.
+// These constants are Windows IP_STATUS values, not inferred from TCP ports.
+#[cfg(any(target_os = "windows", test))]
+fn windows_trace_reply(
+    ttl: u8,
+    from: Ipv4Addr,
+    destination: Ipv4Addr,
+    status: u32,
+    elapsed_ms: u64,
+) -> TraceHop {
+    const IP_SUCCESS: u32 = 0;
+    const IP_DEST_NET_UNREACHABLE: u32 = 11002;
+    const IP_DEST_HOST_UNREACHABLE: u32 = 11003;
+    const IP_DEST_PROT_UNREACHABLE: u32 = 11004;
+    const IP_DEST_PORT_UNREACHABLE: u32 = 11005;
+    const IP_TTL_EXPIRED_TRANSIT: u32 = 11013;
+    let (reached, responder, reason) = match status {
+        IP_SUCCESS if from == destination => (true, Some(from), "windows_matching_echo_reply"),
+        IP_SUCCESS => (false, None, "windows_unexpected_echo_responder"),
+        IP_TTL_EXPIRED_TRANSIT if !from.is_unspecified() && !from.is_multicast() => {
+            (false, Some(from), "windows_icmp_ttl_expired")
+        }
+        IP_DEST_NET_UNREACHABLE
+        | IP_DEST_HOST_UNREACHABLE
+        | IP_DEST_PROT_UNREACHABLE
+        | IP_DEST_PORT_UNREACHABLE
+            if !from.is_unspecified() && !from.is_multicast() =>
+        {
+            (false, Some(from), "windows_icmp_destination_unreachable")
+        }
+        _ => (false, None, "windows_icmp_no_confirmed_route_reply"),
+    };
+    TraceHop {
+        ttl,
+        responder,
+        reached,
+        reason,
+        elapsed_ms,
     }
 }
 
@@ -321,9 +366,175 @@ mod windows {
         Ok(reports)
     }
 
+    const IP_TTL_EXPIRED_TRANSIT: u32 = 11013;
+    const IP_DEST_PROT_UNREACHABLE: u32 = 11004;
+    const IP_DEST_PORT_UNREACHABLE: u32 = 11005;
+
+    #[repr(C)]
+    struct IpOptionInformation {
+        ttl: u8,
+        tos: u8,
+        flags: u8,
+        options_size: u8,
+        // Win64 ICMP API explicitly requires IP_OPTION_INFORMATION32 (POINTER_32).
+        // Zero is a null optional-data pointer on both x86 and x86_64.
+        options_data: u32,
+    }
+
+    /// Source-selected bounded native Win32 IPv4 traceroute without the
+    /// Npcap/WinPcap driver or a subprocess. Cancellation is checked before
+    /// and immediately after every <=600ms synchronous OS echo call.
+    pub(super) fn trace(
+        interface: &str,
+        target: Ipv4Addr,
+        max_hops: u8,
+        stop: &AtomicBool,
+        scope: &(impl Fn() -> bool + Sync),
+    ) -> Result<Vec<TraceHop>, EchoError> {
+        let interfaces =
+            discover_interfaces().map_err(|e| EchoError::new(EchoErrorCode::Device, e.message))?;
+        let nic = select_interface(&interfaces, interface)
+            .map_err(|e| EchoError::new(EchoErrorCode::Device, e.message))?;
+        let source = crate::infrastructure::windows_interfaces::selected_ipv4_source(nic.index)
+            .map_err(|e| EchoError::new(EchoErrorCode::Device, e.message))?;
+        if source == target {
+            return Err(EchoError::new(
+                EchoErrorCode::InvalidScope,
+                "traceroute target cannot be the selected adapter's own IPv4 address",
+            ));
+        }
+        let raw = unsafe { IcmpCreateFile() };
+        if raw.is_null() || raw == (-1isize as Handle) {
+            let code = unsafe { GetLastError() };
+            return Err(EchoError::new(
+                EchoErrorCode::Permission,
+                format!("open Windows IP Helper traceroute handle failed ({code})"),
+            ));
+        }
+        let handle = IcmpHandle(raw);
+        let mut steps = Vec::with_capacity(usize::from(max_hops));
+        let mut previous_send: Option<Instant> = None;
+        for ttl in 1..=max_hops {
+            if stop.load(Ordering::Acquire) || !scope() {
+                return Err(EchoError::new(
+                    EchoErrorCode::Cancelled,
+                    "Windows traceroute scope revoked",
+                ));
+            }
+            if let Some(previous) = previous_send {
+                while previous.elapsed() < MIN_SEND_INTERVAL {
+                    if stop.load(Ordering::Acquire) || !scope() {
+                        return Err(EchoError::new(
+                            EchoErrorCode::Cancelled,
+                            "Windows traceroute scope revoked",
+                        ));
+                    }
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+            }
+            let options = IpOptionInformation {
+                ttl,
+                tos: 0,
+                flags: 0,
+                options_size: 0,
+                options_data: 0,
+            };
+            let mut reply = [0u64; REPLY_WORDS];
+            let began = Instant::now();
+            let count = unsafe {
+                IcmpSendEcho2Ex(
+                    handle.0,
+                    ptr::null_mut(),
+                    ptr::null(),
+                    ptr::null(),
+                    winaddr(source),
+                    winaddr(target),
+                    REQUEST.as_ptr().cast(),
+                    REQUEST.len() as u16,
+                    (&raw const options).cast(),
+                    reply.as_mut_ptr().cast(),
+                    std::mem::size_of_val(&reply) as u32,
+                    WAIT_MS,
+                )
+            };
+            previous_send = Some(began);
+            if stop.load(Ordering::Acquire) || !scope() {
+                return Err(EchoError::new(
+                    EchoErrorCode::Cancelled,
+                    "Windows traceroute scope revoked",
+                ));
+            }
+            let millis = began.elapsed().as_millis().min(u64::MAX as u128) as u64;
+            let hop = if count > 0 {
+                // ICMP_ECHO_REPLY begins with IPAddr, Status (u32 each).
+                let bytes = unsafe {
+                    std::slice::from_raw_parts(
+                        reply.as_ptr().cast::<u8>(),
+                        std::mem::size_of_val(&reply),
+                    )
+                };
+                let from = Ipv4Addr::from(
+                    <[u8; 4]>::try_from(&bytes[0..4])
+                        .expect("fixed-size ICMP_ECHO_REPLY IPv4 source"),
+                );
+                let status = u32::from_ne_bytes(
+                    bytes[4..8]
+                        .try_into()
+                        .expect("fixed-size ICMP_ECHO_REPLY status"),
+                );
+                super::windows_trace_reply(ttl, from, target, status, millis)
+            } else {
+                let err = unsafe { GetLastError() };
+                let mut item = TraceHop {
+                    ttl,
+                    responder: None,
+                    reached: false,
+                    reason: "windows_icmp_no_confirmed_route_reply",
+                    elapsed_ms: millis,
+                };
+                if matches!(err, IP_REQ_TIMED_OUT | WIN_ERROR_TIMEOUT) {
+                    item.reason = "windows_icmp_route_timeout";
+                } else if matches!(err, IP_DEST_NET_UNREACHABLE | IP_DEST_HOST_UNREACHABLE) {
+                    item.reason = "windows_icmp_route_unreachable_no_source";
+                } else {
+                    return Err(EchoError::new(
+                        EchoErrorCode::Io,
+                        format!("Windows IP Helper traceroute failed ({err})"),
+                    ));
+                }
+                item
+            };
+            let terminal =
+                hop.reached || matches!(hop.reason, "windows_icmp_destination_unreachable");
+            steps.push(hop);
+            if terminal {
+                break;
+            }
+        }
+        Ok(steps)
+    }
+
     #[cfg(test)]
     mod tests {
         use super::*;
+        #[test]
+        fn native_trace_status_and_abi_are_conservative() {
+            assert_eq!(std::mem::size_of::<IpOptionInformation>(), 8);
+            let dst = Ipv4Addr::new(203, 0, 113, 9);
+            let router = Ipv4Addr::new(192, 0, 2, 1);
+            let intermediate =
+                super::windows_trace_reply(1, router, dst, IP_TTL_EXPIRED_TRANSIT, 3);
+            assert_eq!(intermediate.responder, Some(router));
+            assert!(!intermediate.reached);
+            assert_eq!(
+                super::windows_trace_reply(2, dst, dst, IP_SUCCESS, 4).reached,
+                true
+            );
+            let unrelated = super::windows_trace_reply(2, router, dst, IP_SUCCESS, 4);
+            assert!(!unrelated.reached);
+            assert_eq!(unrelated.responder, None);
+            assert!(!super::windows_trace_reply(2, router, dst, IP_REQ_TIMED_OUT, 600).reached);
+        }
         #[test]
         fn native_reply_statuses_do_not_invent_reachability() {
             assert_eq!(classify(IP_SUCCESS).0, EchoState::Responded);
@@ -903,6 +1114,29 @@ mod tests {
                 .code,
             EchoErrorCode::Cancelled
         );
+    }
+
+    #[test]
+    fn windows_trace_response_policy_is_strict_without_windows_hardware() {
+        let target = Ipv4Addr::new(203, 0, 113, 9);
+        let router = Ipv4Addr::new(192, 0, 2, 1);
+        let mid = windows_trace_reply(1, router, target, 11013, 21);
+        assert!(!mid.reached);
+        assert_eq!(mid.responder, Some(router));
+        assert_eq!(mid.elapsed_ms, 21);
+        let end = windows_trace_reply(2, target, target, 0, 12);
+        assert!(end.reached);
+        let spoof = windows_trace_reply(2, router, target, 0, 12);
+        assert!(!spoof.reached);
+        assert!(spoof.responder.is_none());
+        assert!(
+            windows_trace_reply(3, Ipv4Addr::UNSPECIFIED, target, 11013, 12)
+                .responder
+                .is_none()
+        );
+        assert!(windows_trace_reply(3, router, target, 11010, 600)
+            .responder
+            .is_none());
     }
 
     #[test]
