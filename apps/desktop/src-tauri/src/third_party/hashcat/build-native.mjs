@@ -29,7 +29,7 @@ const capabilities = JSON.parse(readFileSync(capabilityPath, "utf8"));
 if (capabilities.schema !== 1 ||
     capabilities.source_commit !== "1994b513b550edfe3e7fcaa1103759a9343e57a4" ||
     capabilities.abi_version !== 4 ||
-    capabilities.hash_modes.map(x => x.id).join(",") !== "0,100,1000,1400,1700") {
+    capabilities.hash_modes.map(x => x.id).join(",") !== "0,100,400,500,1000,1400,1700,1800,3200") {
   throw new Error("embedded Hashcat capability manifest conflicts with pinned C/worker contract");
 }
 const argIndex = process.argv.indexOf("--out");
@@ -96,9 +96,13 @@ const library = process.platform === "win32" ? "hashcat.dll" :
 const supportedModes = [
   { id: 0, algorithm: "md5" },
   { id: 100, algorithm: "sha1" },
+  { id: 400, algorithm: "phpass" },
+  { id: 500, algorithm: "md5crypt" },
   { id: 1000, algorithm: "ntlm" },
   { id: 1400, algorithm: "sha256" },
   { id: 1700, algorithm: "sha512" },
+  { id: 1800, algorithm: "sha512crypt" },
+  { id: 3200, algorithm: "bcrypt" },
 ];
 const moduleNames = supportedModes.map(({ id }) =>
   "module_" + String(id).padStart(5, "0") +

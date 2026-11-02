@@ -116,6 +116,7 @@ pub fn engine_attack(
     target_hash: String,
     mode: String,
     mask: Option<String>,
+    rules_set: Option<String>,
     ctx: State<'_, crate::features::forensics::ipc::evidence::EvidenceCtx>,
 ) -> Result<EngineAttackResult, String> {
     let target = application::normalized_target(&target_hash)?;
@@ -152,6 +153,19 @@ pub fn engine_attack(
     } else {
         None
     };
+    // Bundled rule sets resolve backend-side by manifest id (hashcat only;
+    // john rule syntax differs and stays out of this command).
+    let rules = match (engine.as_str(), rules_set.as_deref()) {
+        ("hashcat", Some(id)) => {
+            if mode != "wordlist" {
+                return Err("rules apply to wordlist mode only".into());
+            }
+            Some(
+                crate::features::crypto::ipc::recovery::library_rules::resolve_rules_path(&app, id)?,
+            )
+        }
+        _ => None,
+    };
 
     let started = Instant::now();
     let cache = app
@@ -167,6 +181,7 @@ pub fn engine_attack(
             &mode,
             mask.as_deref(),
             wordlist.as_deref(),
+            rules.as_deref(),
             &scratch,
         )?,
         "john" => sidecar::john(

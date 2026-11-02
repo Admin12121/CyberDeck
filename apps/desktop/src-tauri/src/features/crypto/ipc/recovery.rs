@@ -109,6 +109,7 @@ pub(crate) struct Registry {
     jobs: HashMap<u64, Job>,
     secrets: RecoveryResultAccess,
     pub(crate) selected_wordlist: Option<SelectedWordlist>,
+    pub(crate) selected_hash_input: Option<SelectedHashInput>,
 }
 
 #[derive(Clone)]
@@ -116,6 +117,71 @@ pub(crate) struct SelectedWordlist {
     pub path: PathBuf,
     pub name: String,
     pub size_bytes: u64,
+}
+
+/// Backend-held hash input: either a picked hash file (resolved path, never
+/// exposed to the frontend) or parsed text such as unshadow output.
+#[derive(Clone)]
+pub(crate) enum SelectedHashInput {
+    File { path: PathBuf, count: usize },
+    Text(Vec<String>),
+}
+
+const MAX_HASH_INPUT_BYTES: u64 = 1 << 20;
+const MAX_HASH_LINES: usize = 1024;
+
+/// Sanitize hash-file text: cap size and count, keep non-empty non-comment
+/// lines, enforce uniform digest shape per family (raw digests must share one
+/// length; modular KDF hashes must share the first two $ fields).
+fn sanitize_hash_lines(text: &str) -> Result<Vec<String>, String> {
+    if text.len() as u64 > MAX_HASH_INPUT_BYTES {
+        return Err("hash input exceeds the 1 MiB limit".into());
+    }
+    let mut lines = Vec::new();
+    let mut raw_shape: Option<usize> = None;
+    let mut kdf_family: Option<String> = None;
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if lines.len() >= MAX_HASH_LINES {
+            return Err(format!("hash input exceeds {} targets", MAX_HASH_LINES));
+        }
+        if line.len() > 8192 {
+            return Err("hash line exceeds 8 KiB".into());
+        }
+        if line.starts_with('$') {
+            let family = line
+                .splitn(3, '$')
+                .take(2)
+                .last()
+                .map(|f| f.to_string())
+                .unwrap_or_default();
+            if let Some(existing) = &kdf_family {
+                if &family != existing {
+                    return Err("hash file mixes modular hash families".into());
+                }
+            }
+            kdf_family = Some(family);
+        } else if !line.contains(':') {
+            // bare raw digest
+            let length = line.len();
+            if let Some(existing) = raw_shape {
+                if length != existing {
+                    return Err(
+                        "hash file mixes raw digest lengths; split it by algorithm".into(),
+                    );
+                }
+            }
+            raw_shape = Some(length);
+        }
+        lines.push(line.to_string());
+    }
+    if lines.is_empty() {
+        return Err("hash input has no hashes".into());
+    }
+    Ok(lines)
 }
 
 fn recheck_selected_wordlist(selection: &SelectedWordlist) -> Result<(), String> {
@@ -235,6 +301,7 @@ impl Default for Registry {
             jobs: HashMap::new(),
             secrets: RecoveryResultAccess::new(),
             selected_wordlist: None,
+            selected_hash_input: None,
         }
     }
 }
@@ -278,6 +345,7 @@ impl RecoveryCtx {
         registry.jobs.clear();
         registry.secrets.revoke_all();
         registry.selected_wordlist = None;
+        registry.selected_hash_input = None;
         registry.secrets.set_active(scope.clone());
         registry.current = Some(scope);
         Ok(())
@@ -291,6 +359,7 @@ impl RecoveryCtx {
             registry.jobs.clear();
             registry.secrets.revoke_all();
             registry.selected_wordlist = None;
+            registry.selected_hash_input = None;
             registry.current = None;
         }
     }
@@ -629,27 +698,65 @@ pub fn recovery_start_v1(
         }
         _ => None,
     };
-    let selected = state.with_active(&session, |registry, _| {
-        registry
-            .selected_wordlist
-            .clone()
-            .ok_or_else(|| "choose a wordlist before starting recovery".to_owned())
+    let (selected, hash_input) = state.with_active(&session, |registry, _| {
+        Ok((
+            registry
+                .selected_wordlist
+                .clone()
+                .ok_or_else(|| "choose a wordlist before starting recovery".to_owned())?,
+            registry.selected_hash_input.clone(),
+        ))
     })?;
     // Revalidate that the selected file still exists and passes native
     // wordlist inspection; do not accept an untrusted frontend-supplied path.
     recheck_selected_wordlist(&selected)?;
-    start_recovery_with_wordlist_engine(
-        &state,
-        &session,
-        request,
-        selected.path,
-        None,
-        embedded_hashcat::WordlistPreset::Plain,
-        compiled,
-        move |event| {
-            let _ = on_event.send(event);
-        },
-    )
+    if let Some(input) = hash_input {
+        if !matches!(request.backend, recovery_backend::BackendSelection::Cpu) {
+            return Err("hash-file recovery runs on the native CPU backend only; select CPU".into());
+        }
+        let request = apply_hash_input(request, input)?;
+        start_recovery_with_wordlist_engine(
+            &state,
+            &session,
+            request,
+            selected.path,
+            None,
+            embedded_hashcat::WordlistPreset::Plain,
+            compiled,
+            move |event| {
+                let _ = on_event.send(event);
+            },
+        )
+    } else {
+        start_recovery_with_wordlist_engine(
+            &state,
+            &session,
+            request,
+            selected.path,
+            None,
+            embedded_hashcat::WordlistPreset::Plain,
+            compiled,
+            move |event| {
+                let _ = on_event.send(event);
+            },
+        )
+    }
+}
+
+/// Bind the backend-held hash input into a request (CPU multi-target mode).
+fn apply_hash_input(
+    mut request: RecoveryRequest,
+    input: SelectedHashInput,
+) -> Result<RecoveryRequest, String> {
+    request.target_hashes = match input {
+        SelectedHashInput::File { path, .. } => {
+            let text = std::fs::read_to_string(&path)
+                .map_err(|_| "selected hash file is no longer readable".to_string())?;
+            sanitize_hash_lines(&text)?
+        }
+        SelectedHashInput::Text(lines) => lines,
+    };
+    Ok(request)
 }
 
 #[derive(Serialize)]
@@ -672,9 +779,13 @@ fn bundled_hashcat_modes() -> Vec<EmbeddedHashcatMode> {
     [
         ("md5", 0, 32),
         ("sha1", 100, 40),
+        ("phpass", 400, 0),
+        ("md5crypt", 500, 0),
         ("ntlm", 1000, 32),
         ("sha256", 1400, 64),
         ("sha512", 1700, 128),
+        ("sha512crypt", 1800, 0),
+        ("bcrypt", 3200, 0),
     ]
     .into_iter()
     .map(|(algorithm, mode, digest_hex_length)| EmbeddedHashcatMode {
@@ -949,17 +1060,30 @@ pub fn recovery_autopilot_v1(
         return Err("max_matches exceeds global recovery limit".into());
     }
     let scope = RecoveryCtx::scope_from_session(&session)?;
-    let (job_id, token) = state.with_active(&session, |registry, verified| {
+    let (job_id, token, hash_input) = state.with_active(&session, |registry, verified| {
         if *verified != scope {
             return Err("recovery case changed".into());
         }
-        registry.reserve_job()
+        let input = registry.selected_hash_input.clone();
+        let (job_id, token) = registry.reserve_job()?;
+        Ok((job_id, token, input))
     })?;
     let registry = state.registry.clone();
     let started = Instant::now();
     emit_started(&on_event, job_id);
     let worker_app = app.clone();
     let worker_target = target_hash.trim().to_string();
+    let worker_targets: Vec<String> = match hash_input {
+        Some(input) => match input {
+            SelectedHashInput::File { path, .. } => {
+                let text = std::fs::read_to_string(&path)
+                    .map_err(|_| "selected hash file is no longer readable".to_string())?;
+                sanitize_hash_lines(&text)?
+            }
+            SelectedHashInput::Text(lines) => lines,
+        },
+        None => Vec::new(),
+    };
     let emit = move |event| {
         let _ = on_event.send(event);
     };
@@ -992,31 +1116,36 @@ pub fn recovery_autopilot_v1(
                 backend: recovery_backend::BackendSelection::Cpu,
                 max_candidates,
                 max_matches,
+                target_hashes: worker_targets.clone(),
             };
-            let path = library_wordlists::resolve(&worker_app, &stage.wordlist_id)?;
             let label = stage.label.clone();
             let progress_with_stage = |progress: RecoveryProgressWire| {
                 let mut labeled = progress;
                 labeled.stage = Some(label.clone());
                 forward(labeled);
             };
-            let result = match &stage.rules_set {
-                Some(set_id) => {
-                    let compiled = library_rules::load(&worker_app, set_id)?;
-                    recovery_backend::execute_path_with_rules(
+            let result = if let Some(mask) = &stage.mask {
+                recovery_backend::execute_mask(&request, mask, &token, progress_with_stage)
+            } else {
+                let path = library_wordlists::resolve(&worker_app, &stage.wordlist_id)?;
+                match &stage.rules_set {
+                    Some(set_id) => {
+                        let compiled = library_rules::load(&worker_app, set_id)?;
+                        recovery_backend::execute_path_with_rules(
+                            &request,
+                            &path,
+                            &token,
+                            progress_with_stage,
+                            compiled.rules,
+                        )
+                    }
+                    None => recovery_backend::execute_path(
                         &request,
                         &path,
                         &token,
                         progress_with_stage,
-                        compiled.rules,
-                    )
+                    ),
                 }
-                None => recovery_backend::execute_path(
-                    &request,
-                    &path,
-                    &token,
-                    progress_with_stage,
-                ),
             };
             let run = result.map_err(|error| format!("stage '{}': {error}", stage.label))?;
             let (summary, hits) = run.into_parts();
@@ -1058,6 +1187,126 @@ pub fn recovery_autopilot_v1(
 
 fn emit_started(on_event: &Channel<RecoveryEvent>, job_id: u64) {
     let _ = on_event.send(RecoveryEvent::Started { job_id });
+}
+
+#[derive(Serialize)]
+pub struct RecoveryHashInputStatus {
+    pub count: usize,
+    pub source: &'static str,
+}
+
+/// Pick a hash file (native dialog), sanitize it backend-side and keep only
+/// the resolved path and count. john/shadow `user:hash` lines are accepted.
+#[tauri::command]
+pub async fn recovery_select_hash_file_v1(
+    app: AppHandle,
+    state: State<'_, RecoveryCtx>,
+    session: State<'_, CaseSessionCtx>,
+) -> Result<RecoveryHashInputStatus, String> {
+    let before = session.selected()?;
+    state.with_active(&session, |_, _| Ok(()))?;
+    let (path, name) = tauri::async_runtime::spawn_blocking(move || {
+        crate::features::crypto::ipc::crack::resolved_wordlist(&app, None)
+    })
+    .await
+    .map_err(|_| "native hash-file picker could not complete")??;
+    session.ensure(&before)?;
+    let text = std::fs::read_to_string(&path)
+        .map_err(|_| "hash file is not readable UTF-8 text".to_string())?;
+    let lines = sanitize_hash_lines(&text)?;
+    let count = lines.len();
+    state.with_active(&session, |registry, _| {
+        registry.selected_hash_input = Some(SelectedHashInput::File {
+            path: path.clone(),
+            count,
+        });
+        Ok(())
+    })?;
+    let _ = name;
+    Ok(RecoveryHashInputStatus {
+        count,
+        source: "file",
+    })
+}
+
+/// Bind backend-parsed hash text (e.g. unshadow output) as the active hash
+/// input. No path, no plaintext beyond the hashes themselves, case-scoped.
+#[tauri::command]
+pub fn recovery_use_hash_text_v1(
+    text: String,
+    state: State<'_, RecoveryCtx>,
+    session: State<'_, CaseSessionCtx>,
+) -> Result<RecoveryHashInputStatus, String> {
+    let lines = sanitize_hash_lines(&text)?;
+    let count = lines.len();
+    state.with_active(&session, |registry, _| {
+        registry.selected_hash_input = Some(SelectedHashInput::Text(lines));
+        Ok(())
+    })?;
+    Ok(RecoveryHashInputStatus {
+        count,
+        source: "text",
+    })
+}
+
+#[tauri::command]
+pub fn recovery_hash_status_v1(
+    state: State<'_, RecoveryCtx>,
+    session: State<'_, CaseSessionCtx>,
+) -> Result<Option<RecoveryHashInputStatus>, String> {
+    state.with_active(&session, |registry, _| {
+        Ok(registry.selected_hash_input.as_ref().map(|input| match input {
+            SelectedHashInput::File { count, .. } => RecoveryHashInputStatus {
+                count: *count,
+                source: "file",
+            },
+            SelectedHashInput::Text(lines) => RecoveryHashInputStatus {
+                count: lines.len(),
+                source: "text",
+            },
+        }))
+    })
+}
+
+/// Dedicated mask attack command: CPU, bounded keyspace, single or hash-file
+/// targets, same job/reveal lifecycle as wordlist recovery.
+#[tauri::command]
+pub fn recovery_mask_v1(
+    request: RecoveryRequest,
+    mask: String,
+    on_event: Channel<RecoveryEvent>,
+    state: State<'_, RecoveryCtx>,
+    session: State<'_, CaseSessionCtx>,
+) -> Result<u64, String> {
+    if mask.len() > 256 {
+        return Err("mask exceeds the 256-character limit".into());
+    }
+    let scope = RecoveryCtx::scope_from_session(&session)?;
+    let (job_id, token) = state.with_active(&session, |registry, verified| {
+        if *verified != scope {
+            return Err("recovery case changed".into());
+        }
+        registry.reserve_job()
+    })?;
+    let registry = state.registry.clone();
+    emit_started(&on_event, job_id);
+    let worker_token = token.clone();
+    let worker = move |sink: &(dyn Fn(RecoveryEvent) + Send + Sync),
+                       forward: &mut dyn FnMut(RecoveryProgressWire)|
+          -> Result<RecoveryRun, String> {
+        let _ = sink;
+        recovery_backend::execute_mask(&request, &mask, &worker_token, |progress| {
+            forward(progress)
+        })
+    };
+    spawn_recovery_worker(registry, job_id, scope, token, emit_channel(on_event), worker);
+    Ok(job_id)
+}
+
+fn emit_channel(on_event: Channel<RecoveryEvent>) -> impl Fn(RecoveryEvent) + Send + 'static {
+    move |event| {
+        let _ = on_event.send(event);
+    }
 }
 
 #[cfg(test)]
@@ -1186,6 +1435,7 @@ mod tests {
             backend: recovery_backend::BackendSelection::Cpu,
             max_candidates: 3,
             max_matches: 1,
+            target_hashes: Vec::new(),
         };
         let run = execute_reader(
             &request,
@@ -1316,6 +1566,7 @@ mod tests {
             backend: recovery_backend::BackendSelection::Cpu,
             max_candidates: 3,
             max_matches: 1,
+            target_hashes: Vec::new(),
         };
         let (send, receive) = channel::<RecoveryEvent>();
         let id = start_recovery_with_wordlist(&ctx, &session, request, words, move |event| {
@@ -1394,6 +1645,7 @@ mod tests {
                 backend: recovery_backend::BackendSelection::Cpu,
                 max_candidates: 100_000,
                 max_matches: 1,
+                target_hashes: Vec::new(),
             },
             words,
             move |event| {

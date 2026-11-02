@@ -55,9 +55,26 @@ export type RecoveryBackendV1 =
   | { backend: "open_cl"; device_index: number; batch_size: number }
   | { backend: "hashcat_managed" };
 
-export type HashcatRawAlgorithmV1 = "md5" | "sha1" | "ntlm" | "sha256" | "sha512";
-/** Native Rust CPU supports SHA3-256; the embedded Hashcat build does not. */
-export type RecoveryRawAlgorithmV1 = HashcatRawAlgorithmV1 | "sha3_256";
+export type HashcatRawAlgorithmV1 =
+  | "md5"
+  | "sha1"
+  | "phpass"
+  | "md5crypt"
+  | "ntlm"
+  | "sha256"
+  | "sha512"
+  | "sha512crypt"
+  | "bcrypt";
+/** Native Rust CPU digest coverage (embedded Hashcat is raw 5 modes only). */
+export type RecoveryRawAlgorithmV1 =
+  | HashcatRawAlgorithmV1
+  | "sha3_256"
+  | "sha3_512"
+  | "ripemd160"
+  | "whirlpool"
+  | "blake2b512"
+  | "mysql5"
+  | "lm";
 /** "kdf" lets the backend derive the family from a modular hash string. */
 export type RecoveryRequestAlgorithmV1 = RecoveryRawAlgorithmV1 | "kdf";
 export type HashcatWordlistPresetV1 = "plain" | "uppercase" | "append_one";
@@ -67,6 +84,8 @@ export interface RecoveryRequestV1 {
   backend: RecoveryBackendV1;
   max_candidates: number;
   max_matches: number;
+  /** Hash-file mode; backend-owned and CPU-only. */
+  target_hashes?: string[];
 }
 export interface RecoveryDeviceWireV1 {
   device_index: number;
@@ -102,7 +121,7 @@ export interface RecoverySummaryV1 {
   cancelled: boolean;
   limit_reached: boolean;
   duration_ms: number;
-  matches: { candidate_index: number; masked: boolean }[];
+  matches: { candidate_index: number; masked: boolean; target_index?: number }[];
   stages?: RecoveryStageSummaryV1[];
 }
 export type RecoveryPhaseV1 = "running" | "cancelling" | "completed" | "cancelled" | "failed";
@@ -183,6 +202,42 @@ export async function recoveryAutopilotV1(
     maxMatches,
     onEvent: channel,
   });
+}
+
+/** Dedicated bounded mask attack (CPU only, single or hash-file targets). */
+export async function recoveryMaskV1(
+  request: RecoveryRequestV1,
+  mask: string,
+  onEvent: (event: RecoveryEventV1) => void,
+): Promise<number> {
+  if (!inTauri) throw new Error("Mask recovery requires the desktop runtime");
+  const channel = new Channel<RecoveryEventV1>();
+  channel.onmessage = onEvent;
+  return invoke<number>("recovery_mask_v1", { request, mask, onEvent: channel });
+}
+
+export interface RecoveryHashInputStatusV1 {
+  count: number;
+  source: "file" | "text";
+}
+/** Pick a hash file in the native dialog; lines stay backend-held. */
+export async function recoverySelectHashFileV1(): Promise<RecoveryHashInputStatusV1> {
+  if (!inTauri) throw new Error("Hash-file selection requires the desktop runtime");
+  return invoke<RecoveryHashInputStatusV1>("recovery_select_hash_file_v1");
+}
+export async function recoveryHashStatusV1(): Promise<RecoveryHashInputStatusV1 | null> {
+  if (!inTauri) return null;
+  return invoke<RecoveryHashInputStatusV1 | null>("recovery_hash_status_v1");
+}
+/** Bind parsed hash text (e.g. unshadow output) as the active hash input. */
+export async function recoveryUseHashTextV1(text: string): Promise<RecoveryHashInputStatusV1> {
+  if (!inTauri) throw new Error("Hash binding requires the desktop runtime");
+  return invoke<RecoveryHashInputStatusV1>("recovery_use_hash_text_v1", { text });
+}
+/** john-style unshadow over two native file picks. */
+export async function unshadowV1(): Promise<string> {
+  if (!inTauri) throw new Error("unshadow requires the desktop runtime");
+  return invoke<string>("unshadow_v1");
 }
 
 // --- wordlist + rules library v1 ---------------------------------------------
@@ -1238,9 +1293,14 @@ export async function engineAttack(
   targetHash: string,
   mode: string,
   mask?: string,
+  rulesSet?: string | null,
 ): Promise<EngineAttackResultWire> {
   if (!inTauri) throw new Error("external engines require the desktop runtime");
-  return invoke<EngineAttackResultWire>("engine_attack", { engine, algo, targetHash, mode, mask: mask ?? null });
+  return invoke<EngineAttackResultWire>("engine_attack", {
+    engine, algo, targetHash, mode,
+    mask: mask ?? null,
+    rulesSet: rulesSet ?? null,
+  });
 }
 
 /** Verify a candidate against a bcrypt/argon2 PHC string (native engine). */

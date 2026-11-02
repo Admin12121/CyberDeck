@@ -5,9 +5,10 @@
 //        node apps/desktop/src-tauri/src/third_party/hashcat/vendor.mjs --verify
 import { readFileSync, writeFileSync, mkdirSync, copyFileSync, readdirSync, statSync, existsSync } from "node:fs";
 import { resolve, dirname, join, relative, sep } from "node:path";
+import { fileURLToPath } from "node:url";
 import { createHash } from "node:crypto";
 
-const here = dirname(new URL(import.meta.url).pathname);
+const here = dirname(fileURLToPath(import.meta.url));
 const repo = resolve(here, "../../../../../..");
 const reference = resolve(repo, "reference/hashcat");
 const vendor = resolve(here, "upstream");
@@ -72,6 +73,22 @@ if (mode === "--import") {
   // It is a native bootstrap dependency, not an exposed CyberDeck mode.
   add("src/modules/module_00000.c");
   add("src/modules/module_01400.c");
+  // Batch-1 KDF/raw modes: phpass, md5crypt, sha512crypt, bcrypt. Modules and
+  // kernels are upstream MIT files used verbatim; inc_* dependencies are
+  // already included wholesale above.
+  for (const mode of ["00400", "00500", "01800", "03200"]) {
+    add("src/modules/module_" + mode + ".c");
+  }
+  for (const kernel of [
+    "OpenCL/m00400-optimized.cl",
+    "OpenCL/m00500-optimized.cl",
+    "OpenCL/m00500-pure.cl",
+    "OpenCL/m01800-optimized.cl",
+    "OpenCL/m01800-pure.cl",
+    "OpenCL/m03200-pure.cl",
+  ]) {
+    add(kernel);
+  }
   // Modern hashcat's OpenCL function prototypes are loaded dynamically.
   dirFiles("deps/OpenCL-Headers/CL", (name) => name.endsWith(".h"));
   add("deps/OpenCL-Headers/LICENSE");
@@ -114,8 +131,8 @@ if (mode === "--import") {
     version: "v8.0.0-development",
     build: "SHARED=1 PRODUCTION=1 ENABLE_BRAIN=0 ENABLE_CUBIN=0; module_00000 bootstrap + module_01400",
     supportedModesPlanned: [1400],
-    includes: ["C core Makefile object closure", "all public and internal C headers", "host EMU kernel includes", "SHA-256 kernels and amplifiers", "OpenCL headers", "sse2neon compatibility", "runtime tunings", "licenses"],
-    excludes: ["standalone hashcat CLI", "other hash modules beyond required 00000 bootstrap and 01400", "other mode kernels", "Python", "FPGA", "unused bridges and feeds", "docs/examples/test suites"],
+    includes: ["C core Makefile object closure", "all public and internal C headers", "host EMU kernel includes", "SHA-256 kernels and amplifiers", "batch-1 KDF kernels (phpass/md5crypt/sha512crypt/bcrypt)", "OpenCL headers", "sse2neon compatibility", "runtime tunings", "licenses"],
+    excludes: ["standalone hashcat CLI", "hash modules beyond the bundled batch-1 set (0,100,400,500,1000,1400,1700,1800,3200)", "other mode kernels", "Python", "FPGA", "unused bridges and feeds", "docs/examples/test suites"],
     files,
   }, null, 2) + "\n");
   console.log("Imported " + paths.length + " pinned source and license files (" + core.length + " C core objects).");

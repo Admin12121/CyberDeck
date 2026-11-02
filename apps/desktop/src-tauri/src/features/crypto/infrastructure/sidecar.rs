@@ -27,6 +27,7 @@ pub fn hashcat(
     mode: &str,
     mask: Option<&str>,
     wordlist: Option<&Path>,
+    rules: Option<&Path>,
     scratch: &ScratchDir,
 ) -> Result<EngineRun, String> {
     let hash_file = scratch.write_hash_file(target)?;
@@ -47,7 +48,11 @@ pub fn hashcat(
         }
         "wordlist" => {
             let path = wordlist.ok_or("wordlist mode requires a selected file")?;
-            command.arg("-a").arg("0").arg(&hash_file).arg(path);
+            command.arg("-a").arg("0");
+            if let Some(rules_path) = rules {
+                command.arg("-r").arg(rules_path);
+            }
+            command.arg(&hash_file).arg(path);
         }
         _ => return Err("unsupported engine mode".into()),
     }

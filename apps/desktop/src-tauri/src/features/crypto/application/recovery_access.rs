@@ -211,6 +211,7 @@ mod tests {
                 backend: BackendSelection::Cpu,
                 max_candidates: 3,
                 max_matches: 1,
+                target_hashes: Vec::new(),
             },
             Cursor::new(b"bad\nabc\n"),
             &RecoveryCancel::new(),

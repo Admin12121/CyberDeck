@@ -15,8 +15,14 @@ pub enum FastHash {
     Sha1,
     Sha256,
     Sha3_256,
+    Sha3_512,
     Sha512,
     Ntlm,
+    Ripemd160,
+    Whirlpool,
+    Blake2b512,
+    Mysql5,
+    Lm,
 }
 impl FastHash {
     fn name(self) -> &'static str {
@@ -25,16 +31,22 @@ impl FastHash {
             Self::Sha1 => "sha1",
             Self::Sha256 => "sha256",
             Self::Sha3_256 => "sha3_256",
+            Self::Sha3_512 => "sha3_512",
             Self::Sha512 => "sha512",
             Self::Ntlm => "ntlm",
+            Self::Ripemd160 => "ripemd160",
+            Self::Whirlpool => "whirlpool",
+            Self::Blake2b512 => "blake2b512",
+            Self::Mysql5 => "mysql5",
+            Self::Lm => "lm",
         }
     }
     fn size(self) -> usize {
         match self {
-            Self::Md5 | Self::Ntlm => 16,
-            Self::Sha1 => 20,
+            Self::Md5 | Self::Ntlm | Self::Lm => 16,
+            Self::Sha1 | Self::Mysql5 | Self::Ripemd160 => 20,
             Self::Sha256 | Self::Sha3_256 => 32,
-            Self::Sha512 => 64,
+            Self::Sha512 | Self::Sha3_512 | Self::Whirlpool | Self::Blake2b512 => 64,
         }
     }
 }
@@ -48,7 +60,12 @@ pub enum RecoveryTarget {
         format: &'static str,
         encoded: String,
     },
+    /// One pass over a candidate stream checked against many targets
+    /// (hash files, unshadow output). Bounded by MAX_TARGETS.
+    Multi(Vec<RecoveryTarget>),
 }
+
+pub const MAX_TARGETS: usize = 1024;
 fn check_param(text: &str, prefix: &str, maximum: u32) -> Result<u32, String> {
     let mut found = None;
     for part in text.split('$').flat_map(|section| section.split(',')) {
@@ -171,6 +188,35 @@ impl RecoveryTarget {
                     check_param(text, "i=", 500_000)?;
                 }
                 "yescrypt" => check_yescrypt_recovery_hash(text)?,
+                "gost-yescrypt" => {
+                    return Err(
+                        "gost-yescrypt is not native yet; route it through the john sidecar"
+                            .into(),
+                    )
+                }
+                "md5crypt" | "apr1" => {
+                    super::unix_crypt::validate_md5_crypt(text)?;
+                }
+                "phpass" => {
+                    // Shape validation only; verify_phpass enforces the rest.
+                    let body = &text[3..];
+                    if !(text.starts_with("$P$") || text.starts_with("$H$"))
+                        || body.len() != 31
+                        || !body.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'/')
+                    {
+                        return Err("invalid phpass encoding".into());
+                    }
+                }
+                "sha512crypt" | "sha256crypt" | "sha1crypt" => {
+                    super::unix_crypt::validate_sha_crypt(text)?;
+                    let rounds = super::unix_crypt::crypt_rounds(text)?;
+                    if rounds > super::unix_crypt::MAX_CRYPT_ROUNDS {
+                        return Err(format!(
+                            "crypt rounds {rounds} exceed the recovery policy cap {}",
+                            super::unix_crypt::MAX_CRYPT_ROUNDS
+                        ));
+                    }
+                }
                 _ => return Err("unsupported KDF".into()),
             }
             return Ok(Self::Kdf {
@@ -181,13 +227,21 @@ impl RecoveryTarget {
         if text.starts_with('$') {
             return Err("unsupported modular hash format".into());
         }
+        // MySQL 4.1+ digests are canonically written with a leading '*'.
+        let text = text.strip_prefix('*').unwrap_or(text);
         let algorithm = match algo.to_ascii_lowercase().as_str() {
             "md5" => FastHash::Md5,
             "sha1" => FastHash::Sha1,
             "sha256" => FastHash::Sha256,
             "sha3_256" | "sha3-256" => FastHash::Sha3_256,
+            "sha3_512" | "sha3-512" => FastHash::Sha3_512,
             "sha512" => FastHash::Sha512,
             "ntlm" => FastHash::Ntlm,
+            "ripemd160" | "ripemd-160" => FastHash::Ripemd160,
+            "whirlpool" => FastHash::Whirlpool,
+            "blake2b512" | "blake2b" | "blake2b-512" => FastHash::Blake2b512,
+            "mysql5" | "mysql" => FastHash::Mysql5,
+            "lm" => FastHash::Lm,
             _ => return Err("unsupported raw digest algorithm".into()),
         };
         let bytes = hex::decode(text).map_err(|_| "digest is not valid hexadecimal")?;
@@ -200,7 +254,56 @@ impl RecoveryTarget {
         }
         Ok(Self::Digest { algorithm, bytes })
     }
+
+    /// Parse a batch of hash-file lines into one multi-target. Lines may be
+    /// raw `user:hash` (john/shadow style; the hash is taken after the last
+    /// colon) or bare hashes. The algorithm hint applies to bare raw digests;
+    /// modular KDF strings detect their own family.
+    pub fn parse_multi(
+        algo: &str,
+        lines: &[String],
+    ) -> Result<Self, String> {
+        if lines.is_empty() {
+            return Err("hash list is empty".into());
+        }
+        if lines.len() > MAX_TARGETS {
+            return Err(format!("hash list exceeds {} targets", MAX_TARGETS));
+        }
+        let mut targets = Vec::with_capacity(lines.len());
+        for (index, line) in lines.iter().enumerate() {
+            let text = line.trim();
+            if text.is_empty() || text.starts_with('#') {
+                continue;
+            }
+            // user:hash extraction for unshadow-style files; a bare digest
+            // never contains ':'.
+            let hash_part = match text.split_once(':') {
+                Some((_, rest)) if !rest.is_empty() => rest,
+                _ => text,
+            };
+            // Fast digests that carry their own marker override the hint.
+            let parsed = if hash_part.starts_with('$') {
+                Self::parse(algo, hash_part)?
+            } else if hash_part.starts_with('*') && hash_part.len() == 41 {
+                Self::parse("mysql5", &hash_part[1..])?
+            } else {
+                Self::parse(algo, hash_part)?
+            };
+            targets.push(parsed);
+        }
+        if targets.is_empty() {
+            return Err("hash list has no parsable targets".into());
+        }
+        if targets.len() == 1 {
+            return Ok(targets.remove(0));
+        }
+        Ok(Self::Multi(targets))
+    }
     pub fn is_match(&self, candidate: &[u8]) -> Result<bool, String> {
+        Ok(self.match_target(candidate)?.is_some())
+    }
+    /// Returns the ordinal of the first matching target, if any.
+    pub fn match_target(&self, candidate: &[u8]) -> Result<Option<usize>, String> {
         match self {
             Self::Digest { algorithm, bytes } => {
                 let digest = apply_op(algorithm.name(), candidate, None)?;
@@ -208,17 +311,29 @@ impl RecoveryTarget {
                     .iter()
                     .zip(bytes)
                     .fold(0u8, |acc, (a, b)| acc | (a ^ b));
-                Ok(diff == 0)
+                Ok((diff == 0).then_some(0))
             }
             Self::Kdf { encoded, .. } => {
                 let value =
                     std::str::from_utf8(candidate).map_err(|_| "KDF candidate is not UTF-8")?;
-                verify_kdf(encoded, value)
+                Ok(verify_kdf(encoded, value)?.then_some(0))
+            }
+            Self::Multi(targets) => {
+                for (ordinal, target) in targets.iter().enumerate() {
+                    if target.match_target(candidate)? == Some(0) {
+                        return Ok(Some(ordinal));
+                    }
+                }
+                Ok(None)
             }
         }
     }
     pub fn is_kdf(&self) -> bool {
-        matches!(self, Self::Kdf { .. })
+        match self {
+            Self::Kdf { .. } => true,
+            Self::Multi(targets) => targets.iter().any(RecoveryTarget::is_kdf),
+            Self::Digest { .. } => false,
+        }
     }
 }
 #[derive(Debug, Clone, Copy)]
@@ -238,6 +353,9 @@ impl Default for RecoveryLimits {
 pub struct RecoveryHit {
     pub index: u64,
     pub candidate: Vec<u8>,
+    /// Which target in a multi-hash run matched; absent for single targets.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target: Option<usize>,
 }
 #[derive(Debug, Serialize)]
 pub struct RecoveryResult {
@@ -312,6 +430,30 @@ where
     recover_checked(
         target,
         crate::candidates::WordlistCandidates::new(reader),
+        limits,
+        cancel,
+        on_progress,
+    )
+}
+
+/// Recovery over any bounded candidate stream (masks, enumerators). Shares
+/// the same attempt budget, cancellation and progress policy as wordlists.
+pub fn recover_candidates_with_progress<I, B, F, P>(
+    target: &RecoveryTarget,
+    candidates: I,
+    limits: RecoveryLimits,
+    cancel: F,
+    on_progress: P,
+) -> Result<RecoveryResult, String>
+where
+    I: IntoIterator<Item = B>,
+    B: AsRef<[u8]>,
+    F: FnMut() -> bool,
+    P: FnMut(RecoveryProgress),
+{
+    recover_checked(
+        target,
+        candidates.into_iter().map(Ok::<B, String>),
         limits,
         cancel,
         on_progress,
@@ -396,6 +538,7 @@ where
                     .map(|hit| RecoveryHit {
                         index: hit.index,
                         candidate: hit.candidate,
+                        target: None,
                     })
                     .collect(),
                 cancelled: result.cancelled,
@@ -475,10 +618,11 @@ where
         }
         let index = result.tried;
         result.tried += 1;
-        if target.is_match(candidate)? {
+        if let Some(target) = target.match_target(candidate)? {
             result.hits.push(RecoveryHit {
                 index,
                 candidate: candidate.to_vec(),
+                target: (target != 0).then_some(target),
             });
             if result.hits.len() == limits.max_matches {
                 break;

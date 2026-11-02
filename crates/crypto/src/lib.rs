@@ -16,6 +16,9 @@ pub mod candidates;
 pub mod gpu;
 pub mod formats;
 pub mod extraction;
+pub mod unix_crypt;
+pub mod legacy_digests;
+pub mod shadow;
 
 use base64::Engine as _;
 use hmac::{Hmac, Mac};
@@ -48,6 +51,11 @@ pub fn catalog() -> Vec<OpInfo> {
         op("sha512", "SHA-512", "hash", "SHA-512 digest", false),
         op("sha3_256", "SHA3-256", "hash", "SHA3-256 digest", false),
         op("sha3_512", "SHA3-512", "hash", "SHA3-512 digest", false),
+        op("ripemd160", "RIPEMD-160", "hash", "RIPEMD-160 digest (160 bit)", false),
+        op("whirlpool", "Whirlpool", "hash", "Whirlpool digest (512 bit)", false),
+        op("blake2b512", "BLAKE2b-512", "hash", "BLAKE2b digest (512 bit, unkeyed)", false),
+        op("lm", "LAN Manager", "hash", "Legacy LAN Manager: uppercase, 14 bytes, split DES halves", false),
+        op("mysql5", "MySQL 4.1+", "hash", "MySQL 4.1+ password digest: sha1(sha1(input))", false),
         op("crc32", "CRC32", "hash", "CRC-32 checksum (IEEE, 8 hex chars)", false),
         op("hmac_sha256", "HMAC-SHA256", "hash", "HMAC over the input with the supplied key", true),
         op("hmac_sha512", "HMAC-SHA512", "hash", "HMAC-SHA-512 over the input with the supplied key", true),
@@ -92,6 +100,11 @@ pub fn apply_op(op_id: &str, input: &[u8], key: Option<&[u8]>) -> Result<Vec<u8>
         "sha512" => Ok(Sha512::digest(input).to_vec()),
         "sha3_256" => Ok(sha3::Sha3_256::digest(input).to_vec()),
         "sha3_512" => Ok(Sha3_512::digest(input).to_vec()),
+        "ripemd160" => Ok(ripemd::Ripemd160::digest(input).to_vec()),
+        "whirlpool" => Ok(whirlpool::Whirlpool::digest(input).to_vec()),
+        "blake2b512" => Ok(blake2::Blake2b512::digest(input).to_vec()),
+        "lm" => Ok(legacy_digests::lm_hash(input).to_vec()),
+        "mysql5" => Ok(legacy_digests::mysql5_digest(input).to_vec()),
         "crc32" => {
             let mut hasher = crc32fast::Hasher::new();
             hasher.update(input);
@@ -226,6 +239,8 @@ pub fn kdf_format(hash: &str) -> Option<&'static str> {
         Some("argon2d")
     } else if hash.starts_with("$y$") || hash.starts_with("$7$") {
         Some("yescrypt")
+    } else if hash.starts_with("$gy$") || hash.starts_with("$G$") {
+        Some("gost-yescrypt")
     } else if hash.starts_with("$scrypt$") {
         Some("scrypt")
     } else if hash.starts_with("$pbkdf2-sha256$") {
@@ -234,6 +249,18 @@ pub fn kdf_format(hash: &str) -> Option<&'static str> {
         Some("pbkdf2-sha512")
     } else if hash.starts_with("$pbkdf2$") {
         Some("pbkdf2-sha1")
+    } else if hash.starts_with("$P$") || hash.starts_with("$H$") {
+        Some("phpass")
+    } else if hash.starts_with("$6$") {
+        Some("sha512crypt")
+    } else if hash.starts_with("$5$") {
+        Some("sha256crypt")
+    } else if hash.starts_with("$1$") {
+        Some("md5crypt")
+    } else if hash.starts_with("$apr1$") {
+        Some("apr1")
+    } else if hash.starts_with("$sha1$") {
+        Some("sha1crypt")
     } else {
         None
     }
@@ -260,6 +287,15 @@ pub fn verify_kdf(hash: &str, candidate: &str) -> Result<bool, String> {
             let parsed = PasswordHash::new(hash).map_err(|e| format!("invalid pbkdf2 hash string: {e}"))?;
             Ok(pbkdf2::Pbkdf2.verify_password(candidate.as_bytes(), &parsed).is_ok())
         }
+        Some("md5crypt") | Some("apr1") => unix_crypt::verify_md5_crypt(hash, candidate),
+        Some("phpass") => unix_crypt::verify_phpass(hash, candidate),
+        Some("sha512crypt") | Some("sha256crypt") | Some("sha1crypt") => {
+            unix_crypt::verify_sha_crypt(hash, candidate)
+        }
+        Some("gost-yescrypt") => Err(
+            "gost-yescrypt is not native yet; route it through the john sidecar in the Engines panel"
+                .to_string(),
+        ),
         Some(_) => {
             let parsed = PasswordHash::new(hash).map_err(|e| format!("invalid argon2 hash string: {e}"))?;
             Ok(argon2::Argon2::default().verify_password(candidate.as_bytes(), &parsed).is_ok())
@@ -425,7 +461,12 @@ mod tests {
         assert_eq!(kdf_format("$argon2id$v=19$m=65536,t=3,p=4$c2FsdXNhbHQ"), Some("argon2id"));
         assert_eq!(kdf_format("$scrypt$ln=16384,r=8,p=1$c2FsdQ$aGFzaA"), Some("scrypt"));
         assert_eq!(kdf_format("$pbkdf2-sha256$i=10000$c2FsdQ$aGFzaA"), Some("pbkdf2-sha256"));
-        assert_eq!(kdf_format("$6$salt$hash"), None);
+        assert_eq!(kdf_format("$6$salt$hash"), Some("sha512crypt"));
+        assert_eq!(kdf_format("$5$salt$hash"), Some("sha256crypt"));
+        assert_eq!(kdf_format("$1$salt$hash"), Some("md5crypt"));
+        assert_eq!(kdf_format("$apr1$salt$hash"), Some("apr1"));
+        assert_eq!(kdf_format("$sha1$1000$salt$hash"), Some("sha1crypt"));
+        assert_eq!(kdf_format("$gy$J8$salt$hash"), Some("gost-yescrypt"));
     }
 
     #[test]
@@ -500,8 +541,13 @@ mod tests {
     }
 
     #[test]
-    fn verify_kdf_rejects_unknown_format() {
-        assert!(verify_kdf("$6$salt$hash", "hello").is_err());
+    fn verify_kdf_rejects_unknown_or_malformed_format() {
+        // A malformed sha512crypt encoding simply never matches; it must not
+        // panic or false-positive.
+        assert!(!verify_kdf("$6$salt$hash", "hello").unwrap());
+        // gost-yescrypt is detected but honestly routed elsewhere.
+        let error = verify_kdf("$gy$J8$salt$hash", "hello").unwrap_err();
+        assert!(error.contains("john sidecar"));
     }
 
     #[test]

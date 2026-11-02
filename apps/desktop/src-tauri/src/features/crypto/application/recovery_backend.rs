@@ -54,6 +54,10 @@ pub struct RecoveryRequest {
     pub backend: BackendSelection,
     pub max_candidates: u64,
     pub max_matches: usize,
+    /// Hash-file mode: when present, one pass checks every target and CPU
+    /// backend is required. Empty for single-hash requests.
+    #[serde(default)]
+    pub target_hashes: Vec<String>,
 }
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct RecoveryProgressWire {
@@ -79,6 +83,9 @@ pub struct MatchMetadata {
     /// Zero-based candidate ordinal, not necessarily the physical file line.
     pub candidate_index: u64,
     pub masked: bool,
+    /// Which hash-file target matched; absent for single-hash runs.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target_index: Option<usize>,
 }
 #[derive(Debug, Clone, Serialize)]
 pub struct RecoverySummaryWire {
@@ -278,11 +285,21 @@ pub(super) fn validate_request(request: &RecoveryRequest) -> Result<(), String> 
     if !(1..=MAX_MATCHES).contains(&request.max_matches) {
         return Err("max_matches exceeds global recovery limit".into());
     }
+    if !request.target_hashes.is_empty() {
+        if !matches!(request.backend, BackendSelection::Cpu) {
+            return Err(
+                "hash-file recovery runs on the native CPU backend only; select CPU".into(),
+            );
+        }
+        RecoveryTarget::parse_multi(&request.algorithm, &request.target_hashes)?;
+        return Ok(());
+    }
     let parsed = RecoveryTarget::parse(&request.algorithm, &request.target_hash)?;
     match parsed {
-        RecoveryTarget::Digest { .. } => Ok(()),
-        // KDF targets (bcrypt/argon2/scrypt/pbkdf2/yescrypt) share the same
-        // lifecycle but only the bounded CPU engine verifies them.
+        RecoveryTarget::Digest { .. } | RecoveryTarget::Multi(_) => Ok(()),
+        // KDF targets (bcrypt/argon2/scrypt/pbkdf2/yescrypt/sha-crypt family)
+        // share the same lifecycle but only the bounded CPU engine verifies
+        // them.
         RecoveryTarget::Kdf { .. } if matches!(request.backend, BackendSelection::Cpu) => Ok(()),
         RecoveryTarget::Kdf { .. } => {
             Err("KDF targets run on the native CPU backend only; select CPU".into())
@@ -305,6 +322,7 @@ pub(super) fn embedded_result(
                 MatchMetadata {
                     candidate_index,
                     masked: true,
+                    target_index: None,
                 },
                 secret,
             )
@@ -317,9 +335,13 @@ pub(super) fn embedded_result(
             engine: match request.algorithm.as_str() {
                 "md5" => "embedded_hashcat_00000",
                 "sha1" => "embedded_hashcat_00100",
+                "phpass" => "embedded_hashcat_00400",
+                "md5crypt" => "embedded_hashcat_00500",
                 "ntlm" => "embedded_hashcat_01000",
                 "sha256" => "embedded_hashcat_01400",
                 "sha512" => "embedded_hashcat_01700",
+                "sha512crypt" => "embedded_hashcat_01800",
+                "bcrypt" => "embedded_hashcat_03200",
                 _ => "embedded_hashcat_unsupported",
             }
             .into(),
@@ -380,7 +402,11 @@ fn execute_reader_options<R: BufRead, P: FnMut(RecoveryProgressWire)>(
     };
     let completed = match request.backend {
         BackendSelection::Cpu => {
-            let target = RecoveryTarget::parse(&request.algorithm, &request.target_hash)?;
+            let target = if !request.target_hashes.is_empty() {
+                RecoveryTarget::parse_multi(&request.algorithm, &request.target_hashes)?
+            } else {
+                RecoveryTarget::parse(&request.algorithm, &request.target_hash)?
+            };
             if let Some(rules) = rules {
                 recover_wordlist_with_rules(
                     &target,
@@ -420,6 +446,7 @@ fn execute_reader_options<R: BufRead, P: FnMut(RecoveryProgressWire)>(
                 MatchMetadata {
                     candidate_index: hit.index,
                     masked: true,
+                    target_index: hit.target,
                 },
                 hit.candidate,
             )
@@ -464,6 +491,69 @@ pub fn execute_path_with_rules<P: FnMut(RecoveryProgressWire)>(
     )
 }
 
+/// Bounded mask recovery: CPU-only, keyspace already capped by the mask
+/// engine, attempt budget still enforced. Supports single and hash-file runs.
+pub fn execute_mask<P: FnMut(RecoveryProgressWire)>(
+    request: &RecoveryRequest,
+    mask: &str,
+    cancel: &RecoveryCancel,
+    mut progress: P,
+) -> Result<RecoveryRun, String> {
+    if !matches!(request.backend, BackendSelection::Cpu) {
+        return Err("mask recovery runs on the native CPU backend only; select CPU".into());
+    }
+    validate_request(request)?;
+    let candidates = cyberdeck_crypto::recovery::MaskCandidates::parse(mask)?;
+    if candidates.total() == 0 {
+        return Err("mask keyspace is empty".into());
+    }
+    let started = Instant::now();
+    let limits = RecoveryLimits {
+        max_candidates: request.max_candidates,
+        max_matches: request.max_matches,
+    };
+    let target = if !request.target_hashes.is_empty() {
+        RecoveryTarget::parse_multi(&request.algorithm, &request.target_hashes)?
+    } else {
+        RecoveryTarget::parse(&request.algorithm, &request.target_hash)?
+    };
+    let completed = cyberdeck_crypto::recovery::recover_candidates_with_progress(
+        &target,
+        candidates,
+        limits,
+        || cancel.is_cancelled(),
+        |p| progress(p.into()),
+    )?;
+    let (matches, confidential_hits): (Vec<_>, Vec<_>) = completed
+        .hits
+        .into_iter()
+        .map(|hit| {
+            (
+                MatchMetadata {
+                    candidate_index: hit.index,
+                    masked: true,
+                    target_index: hit.target,
+                },
+                hit.candidate,
+            )
+        })
+        .unzip();
+    Ok(RecoveryRun {
+        summary: RecoverySummaryWire {
+            algorithm: request.algorithm.clone(),
+            backend: request.backend,
+            engine: completed.engine.into(),
+            tried: completed.tried,
+            cancelled: completed.cancelled,
+            limit_reached: completed.limit_reached,
+            duration_ms: started.elapsed().as_millis() as u64,
+            matches,
+            stages: Vec::new(),
+        },
+        confidential_hits,
+    })
+}
+
 /// The IPC/controller owner handles path authorization and dialog selection.
 pub fn execute_path<P: FnMut(RecoveryProgressWire)>(
     request: &RecoveryRequest,
@@ -495,6 +585,7 @@ mod tests {
             backend,
             max_candidates: 3,
             max_matches: 1,
+            target_hashes: Vec::new(),
         }
     }
     #[test]

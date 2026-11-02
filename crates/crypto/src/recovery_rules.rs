@@ -8,7 +8,7 @@ use super::MAX_CANDIDATE_BYTES;
 
 /// Hashcat itself caps a rule at 31 operations; we allow some headroom.
 pub const MAX_RULE_INSTRUCTIONS: usize = 64;
-pub const MAX_RULES_PER_STREAM: usize = 65_536;
+pub const MAX_RULES_PER_STREAM: usize = 131_072;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum RuleAction {

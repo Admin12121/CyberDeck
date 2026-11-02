@@ -187,6 +187,12 @@ const PUBLIC_KATS: &[(u32, &str, &str)] = &[
     (100, "abc", "a9993e364706816aba3e25717850c26c9cd0d89d"),
     (1000, "password", "8846f7eaee8fb117ad06bdd830b7586c"),
     (1700, "abc", "ddaf35a193617abacc417349ae20413112e6fa4e89a97ea20a9eeee64b55d39a2192992a274fc1a836ba3c23a3feebbd454d4423643ce80e2a9ac94fa54ca49f"),
+    // Batch-1 KDF modes: vectors verified independently by our native Rust
+    // engines (pwhash / john / Openwall published bcrypt vectors).
+    (400, "openwall", "$P$900000000m6YEJzWtTmNBBL4jypbHv1"),
+    (500, "password", "$1$5pZSV9va$azfrPr6af3Fc7dLblQXVa0"),
+    (1800, "test", "$6$G/gkPn17kHYo0gTF$xhDFU0QYExdMH2ghOWKrrVtu1BuTpNMSJURCXk43.EYekmK8iwV6RNqftUUC8mqDel1J7m3JEbUkbu4YyqSyv/"),
+    (3200, "U*U", "$2a$05$CCCCCCCCCCCCCCCCCCCCC.E5YPO9kmyuRGyh0XouQYb4YMJKvyOeW"),
 ];
 type Readiness = Result<Vec<u32>, String>;
 static READINESS_CACHE: OnceLock<Mutex<HashMap<PathBuf, Readiness>>> = OnceLock::new();
@@ -351,10 +357,14 @@ pub(super) fn validate_embedded_request(request: &RecoveryRequest) -> Result<u32
     let mode = match request.algorithm.as_str() {
         "md5" => 0,
         "sha1" => 100,
+        "phpass" => 400,
+        "md5crypt" => 500,
         "ntlm" => 1000,
         "sha256" => 1400,
         "sha512" => 1700,
-        _ => return Err("raw hash mode not bundled for embedded Hashcat".into()),
+        "sha512crypt" => 1800,
+        "bcrypt" => 3200,
+        _ => return Err("hash mode not bundled for embedded Hashcat".into()),
     };
     match RecoveryTarget::parse(&request.algorithm, &request.target_hash)? {
         RecoveryTarget::Digest { .. } => Ok(mode),
@@ -617,7 +627,7 @@ mod tests {
     use super::*;
     #[test]
     fn every_public_native_mode_fixture_is_independently_verifiable_without_gpu() {
-        assert_eq!(PUBLIC_KATS.len(), 5);
+        assert_eq!(PUBLIC_KATS.len(), 9);
         for &(mode, word, hash) in PUBLIC_KATS {
             let algorithm = match mode {
                 0 => "md5",
@@ -625,9 +635,16 @@ mod tests {
                 1000 => "ntlm",
                 1400 => "sha256",
                 1700 => "sha512",
+                // KDF fixtures are verified through the KDF verifier, which
+                // derives the family from the modular string itself.
+                400 | 500 | 1800 | 3200 => "kdf",
                 _ => panic!("invalid pinned Hashcat self-test mode"),
             };
-            let target = RecoveryTarget::parse(algorithm, hash).unwrap();
+            let target = if algorithm == "kdf" {
+                RecoveryTarget::parse("", hash).unwrap()
+            } else {
+                RecoveryTarget::parse(algorithm, hash).unwrap()
+            };
             assert!(
                 target.is_match(word.as_bytes()).unwrap(),
                 "{algorithm} fixture"
@@ -657,6 +674,7 @@ mod tests {
                 backend: recovery_backend::BackendSelection::HashcatManaged,
                 max_candidates: 100,
                 max_matches: 1,
+                target_hashes: Vec::new(),
             };
             assert_eq!(validate_embedded_request(&request), Ok(mode));
             let path = Path::new("/tmp/fixture");
@@ -686,6 +704,7 @@ mod tests {
             backend: recovery_backend::BackendSelection::HashcatManaged,
             max_candidates: 100,
             max_matches: 1,
+            target_hashes: Vec::new(),
         };
         assert_eq!(validate_embedded_request(&request), Ok(1000));
     }

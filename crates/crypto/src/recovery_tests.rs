@@ -153,6 +153,7 @@ fn sha256_reference_recovery() {
     assert_eq!(
         result.hits[0],
         RecoveryHit {
+            target: None,
             index: 1,
             candidate: b"hello".to_vec()
         }

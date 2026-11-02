@@ -39,16 +39,28 @@ export function detectHashFormats(input: string): HashFormatCandidate[] {
     candidates.push({ format: "argon2 (id/i/d)", confidence: "high", note: "Memory-hard KDF; not supported by SHA-256 Recovery V1", gpuCapable: false });
   }
   if (/^\$y\$/.test(value)) {
-    candidates.push({ format: "yescrypt", confidence: "high", note: "yescrypt-style prefix; outside SHA-256 Recovery V1", gpuCapable: true });
+    candidates.push({ format: "yescrypt", confidence: "high", note: "yescrypt $y$; native CPU recovery in Recovery V1", gpuCapable: true });
   }
   if (/^\$7\$/.test(value)) {
     candidates.push({ format: "yescrypt (scrypt field)", confidence: "medium", note: "libxcrypt scrypt-style prefix, often yescrypt in modern shadows", gpuCapable: true });
   }
+  if (/^\$gy\$/.test(value) || /^\$G\$/.test(value)) {
+    candidates.push({ format: "gost-yescrypt", confidence: "medium", note: "not native yet; route through the john sidecar in the Engines panel", gpuCapable: true });
+  }
   if (/^\$6\$/.test(value)) {
-    candidates.push({ format: "sha512crypt", confidence: "high", note: "Unix crypt-style prefix; outside Recovery V1", gpuCapable: true });
+    candidates.push({ format: "sha512crypt", confidence: "high", note: "Unix /etc/shadow $6$; native CPU recovery in Recovery V1", gpuCapable: true });
   }
   if (/^\$5\$/.test(value)) {
-    candidates.push({ format: "sha256crypt", confidence: "high", note: "Unix crypt-style prefix; outside Recovery V1", gpuCapable: true });
+    candidates.push({ format: "sha256crypt", confidence: "high", note: "Unix /etc/shadow $5$; native CPU recovery in Recovery V1", gpuCapable: true });
+  }
+  if (/^\$1\$/.test(value)) {
+    candidates.push({ format: "md5crypt", confidence: "high", note: "classic Unix MD5-crypt $1$; native CPU recovery in Recovery V1", gpuCapable: true });
+  }
+  if (/^\$apr1\$/.test(value)) {
+    candidates.push({ format: "apr1 (Apache md5)", confidence: "high", note: "Apache $apr1$ variant of md5crypt; native CPU recovery in Recovery V1", gpuCapable: true });
+  }
+  if (/^\$sha1\$/.test(value)) {
+    candidates.push({ format: "sha1crypt", confidence: "high", note: "$sha1$ rounds-based crypt; native CPU recovery in Recovery V1", gpuCapable: true });
   }
   if (/^\$NT\$/.test(value)) {
     candidates.push({ format: "NTLM (pass-the-hash form)", confidence: "high", note: "$NT$ prefix", gpuCapable: true });

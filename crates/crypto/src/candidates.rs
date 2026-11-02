@@ -392,7 +392,7 @@ mod tests {
         );
         assert!(RuleCandidates::new(
             std::iter::empty::<Result<Vec<u8>, String>>(),
-            vec![CompiledRule::parse(":").unwrap(); 65_537],
+            vec![CompiledRule::parse(":").unwrap(); 131_073],
         )
         .is_err());
     }

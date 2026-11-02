@@ -1,6 +1,6 @@
 "use client";
 import { createContext, useCallback, useContext, useEffect, useRef, useState, type ReactNode } from "react";
-import { Play, Square, Trash2, Eye, EyeOff, Info, FileUp, SlidersHorizontal, FileText, Library, Download, Wand2 } from "lucide-react";
+import { Play, Square, Trash2, Eye, EyeOff, Info, FileUp, SlidersHorizontal, FileText, Library, Download, Wand2, Hash, UserSquare2 } from "lucide-react";
 import { Phosphor } from "@lucasmarkes/hairline/react";
 import { Accordion, AccordionItem, AccordionTrigger, AccordionPanel } from "@/components/ui/accordion";
 import { Chip } from "@ds/panes";
@@ -14,6 +14,8 @@ import {
   isDesktop, recoveryCancelV1, recoveryDevicesV1, recoveryDiscardV1,
   recoverySelectWordlistV1, recoveryWordlistStatusV1, type RecoveryWordlistV1,
   recoveryRevealV1, recoveryStartV1, recoveryStatusV1, recoveryAutopilotV1,
+  recoveryMaskV1, recoverySelectHashFileV1, recoveryHashStatusV1,
+  recoveryUseHashTextV1, unshadowV1, type RecoveryHashInputStatusV1,
   recoveryHashcatCapabilitiesV1, recoveryStartHashcatV1,
   wordlistLibraryListV1, wordlistLibraryFetchV1, wordlistLibraryDeleteV1, wordlistLibraryUseV1,
   rulesLibraryListV1, rulesLibraryInspectV1,
@@ -26,13 +28,23 @@ import {
 const EMBEDDED_MODES: readonly { value: HashcatRawAlgorithmV1; label: string; digits: number }[] = [
   { value: "md5", label: "MD5 · mode 0", digits: 32 },
   { value: "sha1", label: "SHA-1 · mode 100", digits: 40 },
+  { value: "phpass", label: "phpass (WordPress/phpBB) · mode 400", digits: 0 },
+  { value: "md5crypt", label: "md5crypt $1$/$apr1$ · mode 500", digits: 0 },
   { value: "ntlm", label: "NTLM · mode 1000", digits: 32 },
   { value: "sha256", label: "SHA-256 · mode 1400", digits: 64 },
   { value: "sha512", label: "SHA-512 · mode 1700", digits: 128 },
+  { value: "sha512crypt", label: "sha512crypt $6$ · mode 1800", digits: 0 },
+  { value: "bcrypt", label: "bcrypt $2*$ · mode 3200", digits: 0 },
 ];
 const RUST_MODES: readonly { value: RecoveryRawAlgorithmV1; label: string; digits: number }[] = [
   ...EMBEDDED_MODES,
   { value: "sha3_256", label: "SHA3-256 · CPU", digits: 64 },
+  { value: "sha3_512", label: "SHA3-512 · CPU", digits: 128 },
+  { value: "ripemd160", label: "RIPEMD-160 · CPU", digits: 40 },
+  { value: "whirlpool", label: "Whirlpool · CPU", digits: 128 },
+  { value: "blake2b512", label: "BLAKE2b-512 · CPU", digits: 128 },
+  { value: "mysql5", label: "MySQL 4.1+ (*sha1(sha1)) · CPU", digits: 40 },
+  { value: "lm", label: "LAN Manager · CPU", digits: 32 },
 ];
 // A digest algorithm is an explicit operator choice: length alone is insufficient.
 let lastHashcatMode: RecoveryRawAlgorithmV1 = "sha256";
@@ -50,6 +62,10 @@ function useRecoveryController(targetHash: string, onCaseCreated?: (caseId: stri
   const scopeRef = useRef(scope);
   scopeRef.current = scope;
   const [backend, setBackend] = useState("auto");
+  const [attackMode, setAttackMode] = useState<"wordlist" | "mask">("wordlist");
+  const [maskText, setMaskText] = useState("");
+  const [hashInput, setHashInput] = useState<RecoveryHashInputStatusV1 | null>(null);
+  const [hashInputBusy, setHashInputBusy] = useState(false);
   const [engineChoice, setEngineChoice] = useState<"rust" | "hashcat">("rust");
   const [hashcatAlgorithm, setHashcatAlgorithm] = useState<RecoveryRawAlgorithmV1>(lastHashcatMode);
   const [hashcatPreset, setHashcatPreset] = useState<HashcatWordlistPresetV1>(lastHashcatPreset);
@@ -75,20 +91,36 @@ function useRecoveryController(targetHash: string, onCaseCreated?: (caseId: stri
   const hash = targetHash.trim();
   const hashcatMode = RUST_MODES.find((item) => item.value === hashcatAlgorithm)!;
   // Modular KDF strings (bcrypt, argon2, scrypt, pbkdf2, yescrypt) run on the
-  // native CPU engine; the backend re-derives the family from the hash text.
+  // native CPU engine by default; the embedded core covers four of them when
+  // explicitly selected (phpass/md5crypt/sha512crypt/bcrypt).
   const isKdfHash = hash.startsWith("$") && hash.length >= 8;
-  const validHash = isKdfHash
-    || (hash.length === hashcatMode.digits && /^[a-fA-F0-9]+$/.test(hash));
+  const hexBody = hash.startsWith("*") ? hash.slice(1) : hash;
+  const modularModeSelected = hashcatMode.digits === 0;
+  const validHash = isKdfHash || modularModeSelected
+    ? (isKdfHash || (hash.startsWith("*") && hexBody.length === 40 && /^[a-fA-F0-9]+$/.test(hexBody)))
+    : hexBody.length === hashcatMode.digits && /^[a-fA-F0-9]+$/.test(hexBody);
   useEffect(() => {
     // Length is a suggestion, never an identity claim: preserve an operator's
     // explicit MD5/NTLM choice when both share 32-digit digest shapes.
+    if (engineChoice === "hashcat") {
+      const kdfSuggestion: Partial<Record<string, HashcatRawAlgorithmV1>> = {
+        "$6$": "sha512crypt", "$1$": "md5crypt", "$apr1$": "md5crypt",
+        "$P$": "phpass", "$H$": "phpass", "$2a$": "bcrypt", "$2b$": "bcrypt", "$2y$": "bcrypt",
+      };
+      const match = Object.entries(kdfSuggestion).find(([prefix]) => hash.startsWith(prefix));
+      if (match && match[1]) {
+        setHashcatAlgorithm(match[1]);
+        lastHashcatMode = match[1];
+        return;
+      }
+    }
     if (!/^[a-fA-F0-9]+$/.test(hash) || hash.length === hashcatMode.digits) return;
     const suggestions: Partial<Record<number, RecoveryRawAlgorithmV1>> = {
       32: "md5", 40: "sha1", 64: "sha256", 128: "sha512",
     };
     const suggestion = suggestions[hash.length];
     if (suggestion) setHashcatAlgorithm(suggestion);
-  }, [hash, hashcatMode.digits]);
+  }, [hash, hashcatMode.digits, engineChoice]);
   const running = status?.phase === "running" || status?.phase === "cancelling";
   // GPU route is currently SHA-256-only. In Auto, other raw modes must run
   // on the available Rust CPU, even if a GPU later passes independent KAT.
@@ -153,6 +185,9 @@ function useRecoveryController(targetHash: string, onCaseCreated?: (caseId: stri
     }).catch((reason: unknown) => {
       if (active && scopeRef.current === scope) setWordlistError(String(reason));
     });
+    void recoveryHashStatusV1().then((status) => {
+      if (active && scopeRef.current === scope) setHashInput(status);
+    }).catch(() => {});
     return () => { active = false; };
   }, [scope, desktop]);
 
@@ -283,6 +318,28 @@ function useRecoveryController(targetHash: string, onCaseCreated?: (caseId: stri
   };
 
   const start = async () => {
+    if (attackMode === "mask") {
+      if (!scope || !validHash || !maskText.trim() || busy || jobId !== null) return;
+      clearReveal(); setError(null); setBusy(true); setStatus(null); setJobId(null);
+      setDiscarded(false);
+      const requestScope = scope;
+      const request: RecoveryRequestV1 = {
+        algorithm: isKdfHash ? "kdf" : hashcatAlgorithm,
+        target_hash: hash.toLowerCase(),
+        backend: { backend: "cpu" },
+        max_candidates: maxCandidates, max_matches: maxMatches,
+      };
+      try {
+        const id = await recoveryMaskV1(request, maskText.trim(), () => {});
+        if (scopeRef.current !== requestScope) return;
+        currentJob = { scope: requestScope, id };
+        setJobId(id);
+      } catch (reason) {
+        if (scopeRef.current === requestScope && !/cancelled/i.test(String(reason)))
+          setError(String(reason));
+      } finally { if (scopeRef.current === requestScope) setBusy(false); }
+      return;
+    }
     if (!scope || !validHash || !selectedWordlist || busy ||
       (engineChoice === "hashcat" ? !hashcatCapability?.available : !deviceAvailable) ||
       jobId !== null) return;
@@ -290,18 +347,18 @@ function useRecoveryController(targetHash: string, onCaseCreated?: (caseId: stri
       setError("Wordlist rules require the native Rust CPU backend. Select CPU first.");
       return;
     }
-    if (isKdfHash && (engineChoice !== "rust" || selection.backend !== "cpu")) {
+    if (isKdfHash && engineChoice === "rust" && selection.backend !== "cpu") {
       setError("KDF hashes run on the native Rust CPU backend only.");
       return;
     }
     clearReveal(); setError(null); setBusy(true); setStatus(null); setJobId(null);
     setDiscarded(false);
     const requestScope = scope;
-    const selected: RecoveryBackendV1 = engineChoice === "hashcat" && !isKdfHash
+    const selected: RecoveryBackendV1 = engineChoice === "hashcat"
       ? { backend: "hashcat_managed" }
       : selection;
     const request: RecoveryRequestV1 = {
-      algorithm: isKdfHash ? "kdf" : hashcatAlgorithm,
+      algorithm: isKdfHash && engineChoice === "rust" ? "kdf" : hashcatAlgorithm,
       target_hash: hash.toLowerCase(), backend: selected,
       max_candidates: maxCandidates, max_matches: maxMatches,
     };
@@ -311,7 +368,7 @@ function useRecoveryController(targetHash: string, onCaseCreated?: (caseId: stri
       const onEvent = () => {
         // Poll authoritative Rust state; events never contain recovered plaintext.
       };
-      const id = engineChoice === "hashcat" && !isKdfHash
+      const id = engineChoice === "hashcat"
         ? await recoveryStartHashcatV1(request, onEvent, hashcatPreset)
         : await recoveryStartV1(request, onEvent, isKdfHash ? undefined : ruleText, ruleSetId);
       if (scopeRef.current !== requestScope) return;
@@ -321,6 +378,35 @@ function useRecoveryController(targetHash: string, onCaseCreated?: (caseId: stri
       if (scopeRef.current === requestScope && !/cancelled/i.test(String(reason)))
         setError(String(reason));
     } finally { if (scopeRef.current === requestScope) setBusy(false); }
+  };
+
+  const importHashFile = async () => {
+    if (!scope || hashInputBusy || jobId !== null) return;
+    const requestedScope = scope;
+    setHashInputBusy(true);
+    setError(null);
+    try {
+      const status = await recoverySelectHashFileV1();
+      if (scopeRef.current === requestedScope) setHashInput(status);
+    } catch (reason) {
+      if (scopeRef.current === requestedScope && !/cancelled/i.test(String(reason)))
+        setError(String(reason));
+    } finally { if (scopeRef.current === requestedScope) setHashInputBusy(false); }
+  };
+  const importUnshadow = async () => {
+    if (!scope || hashInputBusy || jobId !== null) return;
+    const requestedScope = scope;
+    setHashInputBusy(true);
+    setError(null);
+    try {
+      const merged = await unshadowV1();
+      if (!merged.trim()) return;
+      const status = await recoveryUseHashTextV1(merged);
+      if (scopeRef.current === requestedScope) setHashInput(status);
+    } catch (reason) {
+      if (scopeRef.current === requestedScope && !/cancelled/i.test(String(reason)))
+        setError(String(reason));
+    } finally { if (scopeRef.current === requestedScope) setHashInputBusy(false); }
   };
 
   const autoStart = async () => {
@@ -381,11 +467,11 @@ function useRecoveryController(targetHash: string, onCaseCreated?: (caseId: stri
       : caseSession.error ?? "Waiting for native case selection")
     : !validHash ? (isKdfHash ? "This modular hash is not a supported KDF format"
       : "Enter a " + hashcatMode.label + " digest (" + hashcatMode.digits + " hexadecimal characters)")
+    : attackMode === "mask" ? (maskText.trim() ? null : "Enter a mask pattern first")
     : !selectedWordlist ? "Choose a wordlist from the library or file picker before starting"
     : ruleText.trim().length > 4096 ? "Rule text exceeds the 4 KiB limit"
     : ruleText.trim() && (engineChoice !== "rust" || selection.backend !== "cpu")
       ? "Wordlist rules require native Rust CPU mode"
-    : engineChoice === "hashcat" && isKdfHash ? "KDF hashes are not available in embedded Hashcat; use the native engine"
     : engineChoice === "hashcat" && !hashcatCapability?.available
       ? hashcatCapability?.detail ?? "Embedded Hashcat capability unavailable"
     : engineChoice === "hashcat" && !hashcatCapability?.modes.some((mode) => mode.algorithm === hashcatAlgorithm)
@@ -419,6 +505,8 @@ function useRecoveryController(targetHash: string, onCaseCreated?: (caseId: stri
     discarded, revealing, pendingCancel, clearReveal, validHash,
     selectedWordlist, choosingWordlist, wordlistError, chooseWordlist,
     running: scopedJob && running, selectedDevice, deviceAvailable,
+    attackMode, setAttackMode, maskText, setMaskText,
+    hashInput, hashInputBusy, importHashFile, importUnshadow,
     start, autoStart, autoDisabledReason, cancel, discard, reveal,
     disabledReason, progress: scopedJob ? progress : null, percent, hash, caseId, selection,
   };
@@ -476,13 +564,60 @@ export function NativeRecoveryControls() {
 
       {!r.scope && <AuthorizedCaseAction activity="Password recovery" onCaseCreated={r.onCaseCreated} />}
       <div className="mt-4 space-y-1.5">
+        <div className="flex items-center gap-2">
+          <label className="min-w-0 flex-1 space-y-1">
+            <span className="text-[11px] text-fg-dim">Attack mode</span>
+            <Select ariaLabel="Recovery attack mode" value={r.attackMode}
+              onChange={(value) => {
+                if (r.jobId === null && !r.busy && (value === "wordlist" || value === "mask")) {
+                  r.setAttackMode(value); r.clearReveal();
+                }
+              }}
+              options={[
+                { value: "wordlist", label: "Wordlist · library or file" },
+                { value: "mask", label: "Mask · CPU bounded keyspace" },
+              ]} className="w-full" />
+          </label>
+          <label className="min-w-0 flex-1 space-y-1">
+            <span className="text-[11px] text-fg-dim">Hash file · optional</span>
+            <Button size="sm" variant="outline"
+              className="h-8 w-full justify-start gap-1.5 rounded-md px-2 text-[11px]"
+              title={r.hashInput ? r.hashInput.count + " hashes bound (" + r.hashInput.source + ")" : "Crack a whole hash file in one pass"}
+              disabled={!r.desktop || !r.scope || r.hashInputBusy || r.jobId !== null || r.busy}
+              onClick={() => void r.importHashFile()}>
+              <Hash size={13} aria-hidden="true" />
+              <span className="min-w-0 flex-1 truncate text-left">
+                {r.hashInputBusy ? "Selecting…" : r.hashInput ? r.hashInput.count + " hashes · " + r.hashInput.source : "Import hash file"}
+              </span>
+            </Button>
+          </label>
+        </div>
+        {r.attackMode === "mask" ? (
+          <div className="space-y-1.5">
+            <label className="block space-y-1">
+              <span className="text-[11px] text-fg-dim">Mask pattern</span>
+              <input type="text" aria-label="Recovery mask pattern"
+                value={r.maskText} maxLength={256}
+                disabled={r.jobId !== null || r.busy}
+                onChange={(event) => { r.setMaskText(event.target.value.slice(0, 256)); r.clearReveal(); }}
+                placeholder="?u?l?l?o?d?d?d?d"
+                className="h-8 w-full rounded-md border border-line bg-app px-2 font-mono text-xs text-fg outline-none focus-visible:ring-1 focus-visible:ring-orange disabled:opacity-50" />
+            </label>
+            <p className="text-[10px] leading-relaxed text-fg-muted">
+              ?l lowercase ?u uppercase ?d digit ?s symbol ?a printable, ?? for a literal question mark. Keyspace is bounded;
+              the attempt budget still applies. Works with a single hash or an imported hash file.
+            </p>
+          </div>
+        ) : null}
         <div className="flex items-center justify-between gap-2">
-          <span className="text-[11px] font-medium text-fg-dim">Wordlist</span>
+          <span className="text-[11px] font-medium text-fg-dim">{r.attackMode === "mask" ? "Mask target" : "Wordlist"}</span>
           <span className="text-[10px] text-fg-muted">{r.selectedWordlist
             ? r.selectedWordlist.size_bytes.toLocaleString() + " bytes"
             : "Required"}</span>
         </div>
         <div className="flex min-w-0 items-stretch gap-2" role="group" aria-label="Wordlist and recovery actions">
+          {r.attackMode === "wordlist" ? (
+            <>
           <Button size="sm" variant="outline"
             className="h-10 min-w-0 flex-1 justify-start gap-2 rounded-md px-2.5 text-left shadow-none"
             aria-label={r.choosingWordlist ? "Selecting wordlist" : "Choose wordlist"}
@@ -502,6 +637,8 @@ export function NativeRecoveryControls() {
             onClick={() => r.setLibraryOpen(!r.libraryOpen)}>
             <Library size={15} aria-hidden="true" />
           </Button>
+            </>
+          ) : null}
           {r.busy || r.jobId === null ? (
             <Button size="icon" className="h-10 w-10 shrink-0 rounded-md"
               aria-label={r.busy ? "Starting recovery" : "Start recovery"}
@@ -533,7 +670,7 @@ export function NativeRecoveryControls() {
             </Button>
           )}
         </div>
-        {r.libraryOpen ? (
+        {r.libraryOpen && r.attackMode === "wordlist" ? (
           <div role="region" aria-label="Wordlist library" className="space-y-1.5 rounded-md border border-line bg-app p-2">
             <div className="flex items-center justify-between gap-2">
               <span className="text-[10px] font-semibold uppercase tracking-wider text-fg-muted">Library</span>
@@ -587,6 +724,7 @@ export function NativeRecoveryControls() {
         <div className="flex items-center gap-2">
           <Button size="sm" variant="outline" className="h-8 flex-1 gap-1.5 rounded-md text-[11px]"
             aria-label="Auto crack: detect and run the full attack ladder"
+            style={r.attackMode === "mask" ? { display: "none" } : undefined}
             title={r.autoDisabledReason ?? "Detect the hash and run wordlist, then rule escalation, in one job"}
             disabled={!!r.autoDisabledReason || r.busy || r.jobId !== null}
             onClick={() => void r.autoStart()}>
@@ -920,6 +1058,9 @@ export function NativeRecoveryResults() {
               ? <span>Hashcat processed · count unavailable in ABI v1</span>
               : <span>{r.status.summary.tried.toLocaleString()} checked</span>}
           <span>{r.status.summary.duration_ms.toLocaleString()} ms</span>
+          {r.status.summary.duration_ms > 0 && !r.status.summary.engine.startsWith("embedded_hashcat") ? (
+            <span>{Math.round(r.status.summary.tried / (r.status.summary.duration_ms / 1000)).toLocaleString()} H/s</span>
+          ) : null}
           {r.status.summary.limit_reached ? <span>Candidate limit reached</span> : null}
         </div>
       )}

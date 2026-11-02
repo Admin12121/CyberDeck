@@ -62,6 +62,13 @@
       "sha256": "41acd7fdd579e3bd8b2ac2675ee39cfdadec75cf4de4f655a43a29f1fe6267d0",
       "size_bytes": 3755,
       "rule_count": 575
+    },
+    {
+      "id": "dive",
+      "file": "dive.rule",
+      "sha256": "eb22ac6ac9f6cada8eac85671912bd0e91b08d1ae4e20af13deffdcfdaad9e01",
+      "size_bytes": 808680,
+      "rule_count": 98668
     }
   ]
 }

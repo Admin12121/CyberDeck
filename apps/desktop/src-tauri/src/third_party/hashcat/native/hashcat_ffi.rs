@@ -147,7 +147,7 @@ impl NativeHashcat {
             || runtime_seconds == 0
             || runtime_seconds > MAX_RUNTIME_SECONDS
             || device_id > 128
-            || !matches!(hash_mode, 0 | 100 | 1000 | 1400 | 1700)
+            || !matches!(hash_mode, 0 | 100 | 400 | 500 | 1000 | 1400 | 1700 | 1800 | 3200)
         {
             return Err(NativeError::InvalidBound);
         }

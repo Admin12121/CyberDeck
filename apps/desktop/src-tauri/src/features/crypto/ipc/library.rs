@@ -96,6 +96,27 @@ pub fn rules_library_list_v1(app: AppHandle) -> Result<Vec<rules_library::RuleSe
     rules_library::list(&app)
 }
 
+/// john-style unshadow over two native file picks. Returns the merged
+/// `user:cipher` text for display; binding it as the active hash input is a
+/// separate explicit step (recovery_use_hash_text_v1).
+#[tauri::command]
+pub async fn unshadow_v1(app: AppHandle) -> Result<String, String> {
+    let (passwd, shadow) = tauri::async_runtime::spawn_blocking(move || {
+        let passwd = crate::features::crypto::ipc::crack::resolved_wordlist(&app, None)?;
+        let shadow = crate::features::crypto::ipc::crack::resolved_wordlist(&app, None)?;
+        Ok::<_, String>((passwd, shadow))
+    })
+    .await
+    .map_err(|_| "unshadow pickers could not complete".to_string())??;
+    let passwd_text = std::fs::read_to_string(&passwd.0)
+        .map_err(|_| "passwd file is not readable UTF-8 text".to_string())?;
+    let shadow_text = std::fs::read_to_string(&shadow.0)
+        .map_err(|_| "shadow file is not readable UTF-8 text".to_string())?;
+    let merged = cyberdeck_crypto::shadow::unshadow(&passwd_text, &shadow_text)?;
+    Ok(merged.join("
+"))
+}
+
 #[tauri::command]
 pub fn rules_library_inspect_v1(
     app: AppHandle,

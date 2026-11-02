@@ -18,6 +18,8 @@ pub struct AutopilotStagePlan {
     pub algorithm: String,
     pub wordlist_id: String,
     pub rules_set: Option<String>,
+    /// Final mask fallback stage (e.g. four digits) when no wordlist pass hit.
+    pub mask: Option<String>,
     pub label: String,
 }
 
@@ -59,26 +61,31 @@ pub fn detect_target(target_hash: &str) -> Result<Detection, String> {
             detail: format!("KDF hash detected ({format}); CPU wordlist attack with a bounded candidate budget"),
         });
     }
+    let is_mysql5 = text.starts_with('*') && text.len() == 41;
     let is_hex = !text.is_empty()
         && text.len() % 2 == 0
         && text
             .bytes()
             .all(|byte| byte.is_ascii_hexdigit());
-    if !is_hex {
+    if !is_hex && !is_mysql5 {
         return Err(
             "target is neither a known modular hash nor a hexadecimal digest".into(),
         );
     }
-    let algorithms: &[&'static str] = match text.len() / 2 {
-        16 => &["md5", "ntlm"],
-        20 => &["sha1"],
-        32 => &["sha256", "sha3_256"],
-        64 => &["sha512"],
-        _ => {
-            return Err(format!(
-                "no supported digest algorithm matches {} hex digits",
-                text.len()
-            ))
+    let algorithms: &[&'static str] = if is_mysql5 {
+        &["mysql5"]
+    } else {
+        match text.len() / 2 {
+            16 => &["md5", "ntlm", "lm"],
+            20 => &["sha1"],
+            32 => &["sha256", "sha3_256"],
+            64 => &["sha512"],
+            _ => {
+                return Err(format!(
+                    "no supported digest algorithm matches {} hex digits",
+                    text.len()
+                ))
+            }
         }
     };
     let names = algorithms
@@ -86,6 +93,8 @@ pub fn detect_target(target_hash: &str) -> Result<Detection, String> {
         .map(|name| match *name {
             "md5" => "MD5",
             "ntlm" => "NTLM",
+            "lm" => "LAN Manager",
+            "mysql5" => "MySQL 4.1+",
             "sha1" => "SHA-1",
             "sha256" => "SHA-256",
             "sha3_256" => "SHA3-256",
@@ -127,6 +136,7 @@ pub fn build_plan(
             algorithm: (*algorithm).to_string(),
             wordlist_id: (*wordlist_id).to_string(),
             rules_set: None,
+            mask: None,
             label: format!("{wordlist_name} wordlist as {algorithm}"),
         });
     }
@@ -137,10 +147,19 @@ pub fn build_plan(
                     algorithm: (*primary).to_string(),
                     wordlist_id: (*wordlist_id).to_string(),
                     rules_set: Some((*rules).to_string()),
+                    mask: None,
                     label: format!("{wordlist_name} + {rules} rules as {primary}"),
                 });
             }
         }
+        // Bounded mask fallback: four digits catches year/pin tails cheaply.
+        stages.push(AutopilotStagePlan {
+            algorithm: (*primary).to_string(),
+            wordlist_id: String::new(),
+            rules_set: None,
+            mask: Some("?d?d?d?d".to_string()),
+            label: format!("mask ?d?d?d?d as {primary}"),
+        });
     }
     Ok(AutopilotPlan {
         algorithm: (*primary).to_string(),
@@ -165,7 +184,9 @@ mod tests {
     #[test]
     fn digest_shapes_expand_into_ordered_candidates() {
         let md5_like = detect_target("9a0364b9e99bb480dd25e1f0284c8555").unwrap();
-        assert_eq!(md5_like.algorithms, vec!["md5", "ntlm"]);
+        assert_eq!(md5_like.algorithms, vec!["md5", "ntlm", "lm"]);
+        let mysql = detect_target("*2470C0C06DEE42FD1618BB99005ADCA2EC9D1E19").unwrap();
+        assert_eq!(mysql.algorithms, vec!["mysql5"]);
         assert!(!md5_like.kdf);
         let sha1 = detect_target("a9993e364706816aba3e25717850c26c9cd0d89d").unwrap();
         assert_eq!(sha1.algorithms, vec!["sha1"]);
@@ -204,15 +225,18 @@ mod tests {
             &rules(&["best66", "rockyou-30000"]),
         )
         .unwrap();
-        assert_eq!(plan.stages.len(), 4);
+        assert_eq!(plan.stages.len(), 6);
         assert_eq!(plan.stages[0].wordlist_id, "rockyou");
         assert_eq!(plan.stages[0].algorithm, "md5");
         assert_eq!(plan.stages[1].algorithm, "ntlm");
         assert_eq!(plan.stages[1].rules_set, None);
-        assert_eq!(plan.stages[2].rules_set.as_deref(), Some("best66"));
-        assert_eq!(plan.stages[2].algorithm, "md5");
-        assert_eq!(plan.stages[3].rules_set.as_deref(), Some("rockyou-30000"));
-        assert_eq!(plan.stages[3].wordlist_id, "rockyou");
+        assert_eq!(plan.stages[2].algorithm, "lm");
+        assert_eq!(plan.stages[3].rules_set.as_deref(), Some("best66"));
+        assert_eq!(plan.stages[3].algorithm, "md5");
+        assert_eq!(plan.stages[4].rules_set.as_deref(), Some("rockyou-30000"));
+        assert_eq!(plan.stages[4].wordlist_id, "rockyou");
+        assert_eq!(plan.stages[5].mask.as_deref(), Some("?d?d?d?d"));
+        assert_eq!(plan.stages[5].algorithm, "md5");
     }
 
     #[test]
@@ -236,9 +260,11 @@ mod tests {
     fn plan_falls_back_to_builtin_wordlist_and_skips_missing_rules() {
         let detection = detect_target("a9993e364706816aba3e25717850c26c9cd0d89d").unwrap();
         let plan = build_plan(&detection, &wordlists(&["cyberdeck-common"]), &[]).unwrap();
-        assert_eq!(plan.stages.len(), 1);
+        // wordlist-only stage plus the bounded mask fallback
+        assert_eq!(plan.stages.len(), 2);
         assert_eq!(plan.stages[0].wordlist_id, "cyberdeck-common");
         assert_eq!(plan.stages[0].rules_set, None);
+        assert_eq!(plan.stages[1].mask.as_deref(), Some("?d?d?d?d"));
     }
 
     #[test]

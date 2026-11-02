@@ -142,6 +142,32 @@ fn sha256_hex(data: &[u8]) -> String {
     hex::encode(hasher.finalize())
 }
 
+/// Resolve a bundled rule set to its verified file path (for engine
+/// sidecars that consume rule files directly). The file is re-hashed first.
+pub fn resolve_rules_path(app: &tauri::AppHandle, id: &str) -> Result<PathBuf, String> {
+    if id.len() > 64 || !id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_') {
+        return Err("invalid rule set id".into());
+    }
+    let root = resource_root(app)?;
+    let bytes = std::fs::read(root.join("rules-manifest.json"))
+        .map_err(|_| "bundled rule manifest is missing".to_string())?;
+    let manifest = manifest_from_json(&bytes)?;
+    let entry = manifest
+        .rules
+        .iter()
+        .find(|rule| rule.id == id)
+        .ok_or_else(|| "unknown rule set".to_string())?;
+    if entry.file.contains('/') || entry.file.contains(std::path::MAIN_SEPARATOR) || entry.file.contains("..") {
+        return Err("invalid rule set file name".into());
+    }
+    let path = root.join(&entry.file);
+    let data = std::fs::read(&path).map_err(|_| "bundled rule set is missing".to_string())?;
+    if sha256_hex(&data) != entry.sha256.to_ascii_lowercase() {
+        return Err("bundled rule set failed integrity verification".into());
+    }
+    Ok(path)
+}
+
 /// Load and verify a rule set, returning only metadata over IPC.
 pub fn load_summary(app: &tauri::AppHandle, id: &str) -> Result<LoadedRuleSetSummary, String> {
     let loaded = load(app, id)?;
@@ -201,7 +227,7 @@ mod tests {
         let root = bundled_rules_root(dev).unwrap();
         let bytes = std::fs::read(root.join("rules-manifest.json")).unwrap();
         let manifest = manifest_from_json(&bytes).unwrap();
-        assert_eq!(manifest.rules.len(), 8);
+        assert_eq!(manifest.rules.len(), 9);
         for entry in &manifest.rules {
             let data = std::fs::read(root.join(&entry.file)).unwrap();
             assert_eq!(sha256_hex(&data), entry.sha256.to_ascii_lowercase());
@@ -224,7 +250,10 @@ mod tests {
             )
             .unwrap_or_else(|e| panic!("{} failed to parse: {e}", entry.file));
             assert_eq!(parsed.rules.len() as u64, entry.rule_count, "{}", entry.file);
-            assert_eq!(parsed.skipped, 0, "{}", entry.file);
+            // dive.rule ships two lines with truncated escape sequences
+            // upstream; they are counted, never silently applied.
+            let max_skipped = if entry.id == "dive" { 2 } else { 0 };
+            assert!(parsed.skipped <= max_skipped, "{}: {}", entry.file, parsed.skipped);
         }
     }
 }
