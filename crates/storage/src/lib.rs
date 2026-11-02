@@ -1,6 +1,8 @@
 //! SQLite artifact index (§8.4); artifact bytes live in the case directory.
 
-use rusqlite::{params, Connection};
+use rusqlite::Connection;
+#[cfg(test)]
+use rusqlite::params;
 
 mod application;
 mod domain;

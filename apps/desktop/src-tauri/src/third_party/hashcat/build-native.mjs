@@ -16,7 +16,7 @@
  * are shipped with the tracked repository, not downloaded at runtime.
  */
 import { readFileSync, copyFileSync, mkdirSync, cpSync, existsSync, statSync } from "node:fs";
-import { dirname, resolve, join, sep } from "node:path";
+import { dirname, resolve, join, sep, isAbsolute } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -33,7 +33,7 @@ if (capabilities.schema !== 1 ||
   throw new Error("embedded Hashcat capability manifest conflicts with pinned C/worker contract");
 }
 const argIndex = process.argv.indexOf("--out");
-if (argIndex < 0 || !process.argv[argIndex + 1] || !resolve(process.argv[argIndex + 1]).startsWith(sep)) {
+if (argIndex < 0 || !process.argv[argIndex + 1] || !isAbsolute(process.argv[argIndex + 1])) {
   console.error("usage: node build-native.mjs --out /absolute/build-output");
   process.exit(2);
 }
@@ -114,13 +114,21 @@ function checked(executable, args, cwd) {
     timeout: 600_000,
     env: { ...process.env, SOURCE_DATE_EPOCH: process.env.SOURCE_DATE_EPOCH || "1793534400" },
   });
+  if (z.error?.code === "ENOENT") {
+    const prerequisites = process.platform === "win32"
+      ? "Windows source builds require MSYS2 UCRT64 GNU Make, GCC and their Unix utilities on PATH (along with Node.js and Rust)."
+      : "Install the native GNU Make, C compiler and Rust build toolchain.";
+    throw new Error(`required native Hashcat build executable not found: ${executable}. ${prerequisites}`);
+  }
   if (z.error || z.status !== 0) {
     const tail = ((z.stderr || "") + "\n" + (z.stdout || "")).slice(-4500);
     throw new Error(executable + " failed: " + (z.error || "exit " + z.status) + "\n" + tail);
   }
   console.log(executable + " accepted: " + args.slice(-2).join(" "));
 }
-const c = process.env.CC || "cc";
+// The upstream Windows makefile uses GCC/MinGW, not the MSVC cl.exe ABI.
+// MSYS2 UCRT64 ships gcc.exe; cc.exe is not consistently available on PATH.
+const c = process.env.CC || (process.platform === "win32" ? "gcc" : "cc");
 checked(process.env.MAKE || "make",
   ["-j2", "PRODUCTION=1", "SHARED=1", "ENABLE_BRAIN=0", "ENABLE_CUBIN=0",
    "MAINTAINER_MODE=1", library, ...modulePaths], build);

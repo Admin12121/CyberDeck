@@ -13,10 +13,9 @@ pub use domain::{EngineAttackResult, EngineStatus};
 
 #[path = "../infrastructure/engine_formats.rs"]
 mod engine_formats;
-pub use engine_formats::{
-    hashcat_mode, john_format, parse_hashcat_outfile, parse_hashcat_version, parse_john_show,
-    parse_john_version,
-};
+pub use engine_formats::{hashcat_mode, john_format, parse_hashcat_version, parse_john_version};
+#[cfg(test)]
+pub use engine_formats::{parse_hashcat_outfile, parse_john_show};
 
 #[path = "../application/engines.rs"]
 mod application;

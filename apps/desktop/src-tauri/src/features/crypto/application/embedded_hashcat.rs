@@ -10,12 +10,13 @@ mod preset;
 pub use preset::WordlistPreset;
 
 use std::fs::{self, File};
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufReader, Write};
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
+#[cfg(test)]
 const MAGIC: &[u8; 8] = b"CDHC0001";
 const MAX_PRIVATE_OUTPUT: u64 = 1 << 20;
 const HARD_DEADLINE: Duration = Duration::from_secs(315);
@@ -219,6 +220,7 @@ pub(super) fn validate_embedded_request(request: &RecoveryRequest) -> Result<u32
     }
 }
 
+#[cfg(test)]
 fn frame(
     root: &Path,
     target: &Path,
@@ -528,7 +530,8 @@ mod tests {
 
     #[test]
     fn worker_failure_diagnostics_are_redacted_and_specific() {
-        assert!(worker_failure(Some(34)).contains("compute runtime"));
+        assert!(worker_failure(Some(34)).contains("before compute initialization"));
+        assert!(worker_failure(Some(37)).contains("compute runtime loader"));
         assert!(worker_failure(Some(21)).contains("ABI"));
         assert!(worker_failure(None).contains("crashed"));
         for code in [

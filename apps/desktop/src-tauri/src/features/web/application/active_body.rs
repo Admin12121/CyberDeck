@@ -8,6 +8,7 @@ use super::{active_query_application as query, scan_domain::Finding};
 use reqwest::{header::CONTENT_TYPE, Client, Url};
 use serde::de::{Error as _, MapAccess, Visitor};
 use serde::{Deserialize, Deserializer};
+#[cfg(test)]
 use serde_json::Value;
 
 const MAX_FIELDS: usize = 4;

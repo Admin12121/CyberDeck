@@ -9,7 +9,12 @@ const ABI_VERSION: u32 = 4;
 const MAX_CANDIDATES: u64 = 1_000_000;
 const MAX_RUNTIME_SECONDS: u32 = 300;
 
-#[link(name = "cyberdeck_hashcat_shim")]
+// Windows MSVC does not link a MinGW-produced DLL directly without an
+// import .lib. Rust raw-dylib generates its own import library from the fixed
+// C ABI, so the private worker can link the bundled DLL without a separate
+// MSVC/MinGW import-library conversion tool.
+#[cfg_attr(target_os = "windows", link(name = "cyberdeck_hashcat_shim", kind = "raw-dylib"))]
+#[cfg_attr(not(target_os = "windows"), link(name = "cyberdeck_hashcat_shim"))]
 unsafe extern "C" {
     fn cd_hashcat_abi_version() -> u32;
     fn cd_hashcat_opencl_loader_available() -> u32;

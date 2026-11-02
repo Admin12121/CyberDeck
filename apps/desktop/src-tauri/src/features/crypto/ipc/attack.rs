@@ -4,7 +4,9 @@
 
 #[path = "../domain/masks.rs"]
 mod masks;
+#[cfg(test)]
 use masks::plan_mask;
+#[cfg(test)]
 pub use masks::MaskPlan;
 
 #[path = "../domain/attack.rs"]
@@ -19,9 +21,9 @@ mod rules;
 /// their source line identity.
 #[path = "../application/attack.rs"]
 mod application;
-pub use application::{
-    combinator_over_bytes, hybrid_over_bytes, hybrid_reverse_over_bytes, rules_over_bytes,
-};
+pub use application::{combinator_over_bytes, hybrid_over_bytes, hybrid_reverse_over_bytes};
+#[cfg(test)]
+pub use application::rules_over_bytes;
 use application::{guard, mask_attack};
 
 #[tauri::command]

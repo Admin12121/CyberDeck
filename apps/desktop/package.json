@@ -1,6 +1,7 @@
 {
   "name": "@cyberdeck/desktop",
   "private": true,
+  "type": "module",
   "license": "MIT",
   "version": "0.1.0",
   "scripts": {

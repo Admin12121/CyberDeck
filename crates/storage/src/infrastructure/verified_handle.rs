@@ -1,10 +1,15 @@
 //! Immutable evidence verification and bounded reads from the same opened handle.
 //! This is an additive contract; existing verification remains compatible.
-use crate::{validate_case_id, ArtifactRecord};
+#[cfg(unix)]
+use crate::validate_case_id;
+use crate::ArtifactRecord;
+#[cfg(any(unix, test, all(windows, feature = "experimental-windows-handle")))]
 use sha2::{Digest, Sha256};
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
-use std::path::{Path, PathBuf};
+use std::path::Path;
+#[cfg(unix)]
+use std::path::PathBuf;
 
 /// Full-content verified, case-contained file handle. The underlying File is
 /// intentionally private so callers cannot reopen an unchecked pathname.
@@ -42,6 +47,7 @@ impl VerifiedArtifactHandle {
     }
 }
 
+#[cfg(any(unix, all(windows, feature = "experimental-windows-handle")))]
 pub(super) fn verified_file(
     mut file: File,
     record: &ArtifactRecord,
@@ -88,6 +94,7 @@ pub(super) fn verified_file(
     })
 }
 
+#[cfg(unix)]
 fn contained_leaf(record: &ArtifactRecord, root: &Path) -> Result<(PathBuf, String), String> {
     validate_case_id(&record.case_id)?;
     let canonical_root =

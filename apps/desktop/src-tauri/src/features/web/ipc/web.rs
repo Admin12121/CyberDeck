@@ -30,13 +30,17 @@ use proxy_policy_domain::{is_hop_header_for_message, parse_connect_target, tls_h
 use proxy_rules_domain::apply_rules;
 #[cfg(test)]
 use proxy_rules_domain::replace_bytes_limited;
-pub use proxy_rules_domain::{MatchReplaceRule, MAX_PROXY_BODY};
+pub use proxy_rules_domain::MatchReplaceRule;
+#[cfg(test)]
+pub use proxy_rules_domain::MAX_PROXY_BODY;
 
 pub use request_domain::parse_raw_request;
 #[path = "../application/active_body.rs"]
 mod active_body_application;
 #[path = "../application/active_injection.rs"]
 mod active_injection_application;
+#[path = "../application/active_oast.rs"]
+mod active_oast_application;
 #[path = "../application/auth_context.rs"]
 mod auth_context_application;
 #[path = "../application/active_query.rs"]
@@ -127,7 +131,7 @@ pub(crate) fn case_history_authorized_detail(
 /// Replays a *logical* original or post-edit message with exact binary body.
 /// Refuses truncated history and rechecks the active backend grant. Outbound
 /// HTTP headers/framing will still be normalized by reqwest.
-pub(crate) async fn replay_authorized_case_message(
+async fn replay_authorized_case_message(
     session: &crate::features::shared::session::CaseSessionCtx,
     selected: &crate::features::shared::session::CaseSessionWire,
     proxy: &WebCtx,
@@ -584,6 +588,9 @@ async fn authorize_pinned_assessment(
         .map(|socket| socket.ip().to_string())
         .collect::<Vec<_>>()
         .join(", ");
+    // spawn_blocking requires an owned message: the caller-provided purpose
+    // must not escape this async function as a borrowed reference.
+    let purpose = purpose.to_owned();
     let accepted = tauri::async_runtime::spawn_blocking(move || {
         app.dialog()
             .message(format!(
@@ -608,7 +615,7 @@ async fn execute_case_scoped_assessment<T>(
 ) -> Result<T, String> {
     // Bound concurrent active scans/crawls, independent of UI toggles.
     static WORK: std::sync::OnceLock<tokio::sync::Semaphore> = std::sync::OnceLock::new();
-    let permit = WORK
+    let _permit = WORK
         .get_or_init(|| tokio::sync::Semaphore::new(2))
         .try_acquire()
         .map_err(|_| "maximum concurrent Web assessments reached")?;

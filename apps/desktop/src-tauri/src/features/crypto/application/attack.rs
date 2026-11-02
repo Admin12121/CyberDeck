@@ -382,6 +382,7 @@ fn wire(
 
 /// Wordlist + built-in rules. The wordlist body arrives from the caller
 /// (dialog in the command, bytes in tests) so the file read stays testable.
+#[cfg(test)]
 pub fn rules_over_bytes(algo: &str, target: &str, body: &[u8]) -> Result<AttackResultWire, String> {
     let text = String::from_utf8_lossy(body);
     rules_over_lines(algo, target, text.lines().map(|line| Ok(line.to_string())))

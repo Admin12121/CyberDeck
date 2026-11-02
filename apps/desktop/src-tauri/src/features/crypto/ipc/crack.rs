@@ -13,7 +13,9 @@ mod domain;
 #[path = "../infrastructure/wordlists.rs"]
 mod wordlists;
 
-pub use domain::{CrackMatch, CrackProgress, CrackResultWire, WordlistInfoWire};
+pub use domain::{CrackProgress, CrackResultWire, WordlistInfoWire};
+#[cfg(test)]
+pub use domain::CrackMatch;
 
 const SUPPORTED: &[&str] = &["md5", "sha1", "sha256", "sha512"];
 

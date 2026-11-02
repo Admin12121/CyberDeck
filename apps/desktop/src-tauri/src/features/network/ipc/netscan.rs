@@ -41,7 +41,9 @@ mod tcp_probe;
 mod udp_probe;
 
 pub use host_targets::parse_targets;
-pub use port_rules::{parse_ports, TOP_PORTS_100};
+pub use port_rules::parse_ports;
+#[cfg(test)]
+pub use port_rules::TOP_PORTS_100;
 pub use scan_models::{ScanEntry, ScanHistoryItem, ScanObservation, ScanProgress};
 #[cfg(test)]
 use scan_service::scan_probe_count;

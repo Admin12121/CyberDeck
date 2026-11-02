@@ -248,6 +248,124 @@ fn active_text_probe(stream: &mut TcpStream, probe: TextProbe) -> bool {
     false
 }
 
+/// Read-only capability negotiation after a complete, unsolicited mail
+/// greeting. No mailbox names, credentials, message retrieval or mutation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MailCapabilityProbe {
+    Imap,
+    Pop3,
+}
+impl MailCapabilityProbe {
+    fn from_greeting(port: u16, raw: &[u8]) -> Option<Self> {
+        if raw.len() < 7 || raw.len() > 512 || !raw.windows(2).any(|p| p == b"\r\n") {
+            return None;
+        }
+        let line = raw.split(|b| *b == b'\n').next()?;
+        if line.last() != Some(&b'\r') || !line.iter().all(|b| matches!(*b, b'\r' | 0x20..=0x7e)) {
+            return None;
+        }
+        if matches!(port, 143 | 1143) && line.starts_with(b"* OK ") {
+            Some(Self::Imap)
+        } else if matches!(port, 110 | 1110) && line.starts_with(b"+OK ") {
+            Some(Self::Pop3)
+        } else {
+            None
+        }
+    }
+    fn request(self) -> &'static [u8] {
+        match self {
+            Self::Imap => b"A001 CAPABILITY\r\n",
+            Self::Pop3 => b"CAPA\r\n",
+        }
+    }
+    fn verified_reply(self, reply: &[u8]) -> bool {
+        if reply.len() < 18
+            || reply.len() > 512
+            || !reply.ends_with(b"\r\n")
+            || reply
+                .iter()
+                .any(|b| !matches!(*b, b'\r' | b'\n' | 0x20..=0x7e))
+        {
+            return false;
+        }
+        match self {
+            Self::Imap => {
+                let Some(split) = reply.windows(2).position(|part| part == b"\r\n") else {
+                    return false;
+                };
+                if split + 4 > reply.len() {
+                    return false;
+                }
+                let first = &reply[..split];
+                let final_line = &reply[split + 2..reply.len() - 2];
+                first.starts_with(b"* CAPABILITY ")
+                    && first.len() > b"* CAPABILITY ".len()
+                    && final_line.starts_with(b"A001 OK ")
+                    && final_line.len() > b"A001 OK ".len()
+                    && !final_line.windows(2).any(|part| part == b"\r\n")
+            }
+            Self::Pop3 => {
+                let Some(first_end) = reply.windows(2).position(|p| p == b"\r\n") else {
+                    return false;
+                };
+                reply[..first_end].starts_with(b"+OK ")
+                    && reply[first_end + 2..].ends_with(b"\r\n.\r\n")
+                    && reply[first_end + 2..].len() > 5
+            }
+        }
+    }
+    fn evidence(self) -> &'static str {
+        match self {
+            Self::Imap => "IMAP CAPABILITY returned a complete tagged OK reply",
+            Self::Pop3 => "POP3 CAPA returned a complete terminated capability list",
+        }
+    }
+    fn service(self) -> &'static str {
+        match self {
+            Self::Imap => "imap",
+            Self::Pop3 => "pop3",
+        }
+    }
+}
+fn active_mail_capabilities(stream: &mut TcpStream, probe: MailCapabilityProbe) -> bool {
+    if stream.set_write_timeout(Some(BANNER_TIMEOUT)).is_err()
+        || std::io::Write::write_all(stream, probe.request()).is_err()
+    {
+        return false;
+    }
+    let until = Instant::now() + BANNER_TIMEOUT;
+    let mut response = [0u8; 512];
+    let mut len = 0usize;
+    while len < response.len() {
+        let remaining = until.saturating_duration_since(Instant::now());
+        if remaining.is_zero() || stream.set_read_timeout(Some(remaining)).is_err() {
+            return false;
+        }
+        let read = match std::io::Read::read(stream, &mut response[len..]) {
+            Ok(0) | Err(_) => return false,
+            Ok(count) => count,
+        };
+        len += read;
+        if probe.verified_reply(&response[..len]) {
+            return true;
+        }
+        // A complete negative tagged response should not be reinterpreted as
+        // a future valid response after an attacker sends additional bytes.
+        if response[..len].ends_with(b"\r\n") {
+            match probe {
+                MailCapabilityProbe::Imap
+                    if response[..len].windows(10).any(|s| s == b"A001 BAD \r\n") =>
+                {
+                    return false
+                }
+                MailCapabilityProbe::Pop3 if response[..len].starts_with(b"-ERR ") => return false,
+                _ => {}
+            }
+        }
+    }
+    false
+}
+
 /// Bounded, complete Memcached ASCII VERSION reply. The version string is
 /// remote-asserted; it is not authenticated software identity.
 pub(super) fn memcached_version_claim(reply: &[u8]) -> Option<String> {
@@ -683,9 +801,11 @@ fn probe_observation_bounded(
             }
             let mut buffer = [0u8; 512];
             let mut verified_initial_service = None;
+            let mut mail_probe = None;
             let received_greeting = match std::io::Read::read(&mut stream, &mut buffer) {
                 Ok(length) if length > 0 => {
                     verified_initial_service = observed_service_bytes(&buffer[..length]);
+                    mail_probe = MailCapabilityProbe::from_greeting(port, &buffer[..length]);
                     obs.remote_software_claim = remote_protocol_claim_bytes(&buffer[..length]);
                     let raw = String::from_utf8_lossy(&buffer[..length]);
                     if obs.remote_software_claim.is_none() {
@@ -716,6 +836,8 @@ fn probe_observation_bounded(
                 None
             };
             let verified_text = text_probe.filter(|probe| active_text_probe(&mut stream, *probe));
+            let verified_mail =
+                mail_probe.filter(|probe| active_mail_capabilities(&mut stream, *probe));
             let tls_hello = if tls_probe && !received_greeting {
                 active_tls_probe(&mut stream, host)
             } else {
@@ -738,6 +860,10 @@ fn probe_observation_bounded(
                     TextProbe::FtpFeat => "FTP FEAT verified 211 reply",
                 }
                 .into();
+            } else if let Some(probe) = verified_mail {
+                obs.service = probe.service().into();
+                obs.service_basis = "observed_response".into();
+                obs.banner = probe.evidence().into();
             } else if let Some(hello) = tls_hello {
                 obs.service = "tls".into();
                 obs.service_basis = "observed_response".into();
@@ -794,6 +920,99 @@ pub(super) fn probe(host: IpAddr, port: u16) -> (String, String) {
 #[cfg(test)]
 mod evidence_tests {
     use super::*;
+
+    #[test]
+    fn imap_and_pop3_capabilities_require_complete_correlated_replies() {
+        let imap = MailCapabilityProbe::Imap;
+        let pop = MailCapabilityProbe::Pop3;
+        assert_eq!(
+            MailCapabilityProbe::from_greeting(143, b"* OK mail ready\r\n"),
+            Some(imap)
+        );
+        assert_eq!(
+            MailCapabilityProbe::from_greeting(110, b"+OK mail ready\r\n"),
+            Some(pop)
+        );
+        assert_eq!(
+            MailCapabilityProbe::from_greeting(587, b"* OK mail ready\r\n"),
+            None
+        );
+        assert_eq!(
+            MailCapabilityProbe::from_greeting(143, b"* OK incomplete"),
+            None
+        );
+        assert_eq!(
+            MailCapabilityProbe::from_greeting(110, b"+OK mail ready\n"),
+            None
+        );
+        assert_eq!(imap.request(), b"A001 CAPABILITY\r\n");
+        assert_eq!(pop.request(), b"CAPA\r\n");
+        assert!(imap.verified_reply(b"* CAPABILITY IMAP4rev1 IDLE\r\nA001 OK completed\r\n"));
+        assert!(!imap.verified_reply(b"* CAPABILITY IMAP4rev1 IDLE\r\nA002 OK completed\r\n"));
+        assert!(!imap.verified_reply(b"* CAPABILITY IMAP4rev1 IDLE\r\nA001 OK completed"));
+        assert!(!imap.verified_reply(b"A001 OK completed\r\n"));
+        assert!(!imap.verified_reply(b"* CAPABILITY IMAP4rev1\r\nA001 NO denied\r\n"));
+        assert!(pop.verified_reply(b"+OK Capability list\r\nUSER\r\nSASL PLAIN\r\n.\r\n"));
+        assert!(!pop.verified_reply(b"+OK Capability list\r\nUSER\r\n."));
+        assert!(!pop.verified_reply(b"-ERR not supported\r\n"));
+        assert!(!pop.verified_reply(b"+OK Capability list\r\n.\r\nTRAILER"));
+        assert!(!pop.verified_reply(&vec![b'X'; 513]));
+    }
+
+    #[test]
+    fn imap_pop3_capability_probes_send_only_read_only_commands() {
+        use std::io::{Read, Write};
+        for (probe, answer) in [
+            (
+                MailCapabilityProbe::Imap,
+                &b"* CAPABILITY IMAP4rev1\r\nA001 OK complete\r\n"[..],
+            ),
+            (
+                MailCapabilityProbe::Pop3,
+                &b"+OK Capability list\r\nUSER\r\n.\r\n"[..],
+            ),
+        ] {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let addr = listener.local_addr().unwrap();
+            let server = std::thread::spawn(move || {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(1)))
+                    .unwrap();
+                let mut req = vec![0; probe.request().len()];
+                stream.read_exact(&mut req).unwrap();
+                assert_eq!(req, probe.request());
+                stream.write_all(answer).unwrap();
+            });
+            let mut stream = TcpStream::connect(addr).unwrap();
+            assert!(active_mail_capabilities(&mut stream, probe));
+            server.join().unwrap();
+        }
+    }
+
+    #[test]
+    fn negative_mail_capability_reply_never_promotes_to_confirmed_service() {
+        use std::io::{Read, Write};
+        for (probe, reply) in [
+            (
+                MailCapabilityProbe::Imap,
+                &b"A001 BAD unknown command\r\n"[..],
+            ),
+            (MailCapabilityProbe::Pop3, &b"-ERR unknown command\r\n"[..]),
+        ] {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let addr = listener.local_addr().unwrap();
+            let server = std::thread::spawn(move || {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = vec![0; probe.request().len()];
+                stream.read_exact(&mut request).unwrap();
+                stream.write_all(reply).unwrap();
+            });
+            let mut stream = TcpStream::connect(addr).unwrap();
+            assert!(!active_mail_capabilities(&mut stream, probe));
+            server.join().unwrap();
+        }
+    }
 
     #[test]
     fn safe_negotiations_validate_complete_exact_protocol_replies() {

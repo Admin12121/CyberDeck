@@ -52,7 +52,7 @@ fn bounded_protocol_evidence(observation: &ScanObservation) -> Option<&str> {
     if observation.service_basis != "observed_response"
         || !matches!(
             observation.service.as_str(),
-            "stun" | "redis" | "postgresql" | "socks5" | "memcached"
+            "stun" | "redis" | "postgresql" | "socks5" | "memcached" | "imap" | "pop3"
         )
     {
         return None;
@@ -64,6 +64,8 @@ fn bounded_protocol_evidence(observation: &ScanObservation) -> Option<&str> {
         "postgresql" => banner.starts_with("PostgreSQL SSLRequest returned "),
         "socks5" => banner.starts_with("SOCKS5 method negotiation "),
         "memcached" => banner.starts_with("Memcached "),
+        "imap" => banner == "IMAP CAPABILITY returned a complete tagged OK reply",
+        "pop3" => banner == "POP3 CAPA returned a complete terminated capability list",
         _ => false,
     };
     if recognized
@@ -138,6 +140,38 @@ mod tests {
             service: "http".to_string(),
             banner: "Server: sample".to_string(),
         }
+    }
+
+    #[test]
+    fn imap_pop3_case_findings_require_exact_backend_generated_proof() {
+        let mut entry = ScanObservation {
+            host: "192.0.2.8".into(),
+            port: 143,
+            protocol: "tcp".into(),
+            state: "open".into(),
+            reason: "tcp_connect_accepted".into(),
+            method: "tcp_connect".into(),
+            service: "imap".into(),
+            service_basis: "observed_response".into(),
+            remote_software_claim: None,
+            banner: "IMAP CAPABILITY returned a complete tagged OK reply".into(),
+            started_at_ms: 1,
+            elapsed_ms: 3,
+            attempts: 1,
+            retries: 0,
+            os_error_code: None,
+        };
+        assert_eq!(
+            bounded_protocol_evidence(&entry),
+            Some("IMAP CAPABILITY returned a complete tagged OK reply")
+        );
+        entry.banner.push_str(" SECRET");
+        assert_eq!(bounded_protocol_evidence(&entry), None);
+        entry.service = "pop3".into();
+        entry.banner = "POP3 CAPA returned a complete terminated capability list".into();
+        assert!(bounded_protocol_evidence(&entry).is_some());
+        entry.service_basis = "port_hint_only".into();
+        assert_eq!(bounded_protocol_evidence(&entry), None);
     }
 
     #[test]

@@ -519,6 +519,11 @@ fn bundled_hashcat_modes() -> Vec<EmbeddedHashcatMode> {
 }
 
 fn hashcat_resource_root(app: &AppHandle) -> Result<PathBuf, String> {
+    // A Windows dev build that omitted native Hashcat must never accidentally
+    // discover stale DLLs or claim that a GPU worker is bundled.
+    if cfg!(cyberdeck_hashcat_dev_disabled) {
+        return Err("Embedded Hashcat was not built for this Windows development session. The native backend is unavailable; set CYBERDECK_HASHCAT_BUILD=1 and rebuild to opt in.".into());
+    }
     let packaged = app
         .path()
         .resource_dir()
