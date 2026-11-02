@@ -91,6 +91,24 @@
       "desktop_routed": true
     },
     {
+      "id": 132,
+      "algorithm": "mssql-2005",
+      "digest_hex_length": 0,
+      "source_build": true,
+      "desktop_available": false,
+      "hardware_verified": false,
+      "desktop_routed": true
+    },
+    {
+      "id": 400,
+      "algorithm": "phpass",
+      "digest_hex_length": 0,
+      "source_build": true,
+      "desktop_available": false,
+      "hardware_verified": false,
+      "desktop_routed": true
+    },
+    {
       "id": 500,
       "algorithm": "md5crypt",
       "digest_hex_length": 0,
@@ -121,6 +139,15 @@
       "id": 1400,
       "algorithm": "sha256",
       "digest_hex_length": 64,
+      "source_build": true,
+      "desktop_available": false,
+      "hardware_verified": false,
+      "desktop_routed": true
+    },
+    {
+      "id": 1500,
+      "algorithm": "descrypt",
+      "digest_hex_length": 0,
       "source_build": true,
       "desktop_available": false,
       "hardware_verified": false,

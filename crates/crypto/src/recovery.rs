@@ -187,6 +187,13 @@ impl RecoveryTarget {
             encoded: text.to_string(),
         });
     }
+    // descrypt and mssql-2005 are hint-driven (no self-detecting marker).
+    if algo == "descrypt" {
+        return Ok(Self::Kdf { format: "descrypt", encoded: text.to_string() });
+    }
+    if algo == "mssql-2005" {
+        return Ok(Self::Kdf { format: "mssql-2005", encoded: text.to_string() });
+    }
     // mscash is hint-driven when the wire shape is "digest:salt" (hashcat);
     // the tagged "user#digest" and "M$user#digest" shapes self-detect.
     if algo == "mscash" {
@@ -255,10 +262,14 @@ impl RecoveryTarget {
                     // nothing secret is computed at parse time.
                 }
                 "phpass" => {
-                    return Err(
-                        "phpass native recovery is pending an authoritative test vector"
-                            .into(),
-                    )
+                    // Shape validation; verify_phpass enforces the cost cap.
+                    let body = &text[3..];
+                    if !(text.starts_with("$P$") || text.starts_with("$H$"))
+                        || body.len() != 31
+                        || !body.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'/')
+                    {
+                        return Err("invalid phpass encoding".into());
+                    }
                 }
                 "sha512crypt" | "sha256crypt" | "sha1crypt" => {
                     super::unix_crypt::validate_sha_crypt(text)?;

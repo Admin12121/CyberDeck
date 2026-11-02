@@ -64,6 +64,7 @@ export type HashcatRawAlgorithmV1 =
   | "sha512"
   | "sha512crypt"
   | "bcrypt"
+  | "phpass"
   | "md5-pass-salt"
   | "md5-salt-pass"
   | "hmac-md5"
@@ -74,7 +75,9 @@ export type HashcatRawAlgorithmV1 =
   | "mscash2"
   | "netntlm-v1"
   | "netntlm-v2"
-  | "sha256crypt";
+  | "sha256crypt"
+  | "descrypt"
+  | "mssql-2005";
 /** Native Rust CPU digest coverage (embedded Hashcat is raw 5 modes only). */
 export type RecoveryRawAlgorithmV1 =
   | HashcatRawAlgorithmV1

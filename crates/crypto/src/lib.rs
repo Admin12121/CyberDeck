@@ -341,9 +341,20 @@ pub fn verify_kdf_format(format: &str, hash: &str, candidate: &str) -> Result<bo
             Ok(pbkdf2::Pbkdf2.verify_password(candidate.as_bytes(), &parsed).is_ok())
         }
         "md5crypt" | "apr1" => unix_crypt::verify_md5_crypt(hash, candidate),
-        "phpass" => Err(
-            "phpass native verify is pending an authoritative test vector; use the embedded Hashcat mode 400 on a native build".to_string(),
-        ),
+        "descrypt" => unix_crypt::verify_descrypt(hash, candidate),
+        // MSSQL 2005 (hashcat 132): sha1(utf16le(pass) . salt), wire "sha1hex:salt".
+        "mssql-2005" => {
+            let (expected, salt) = hash.split_once(':').ok_or("mssql-2005 requires sha1hex:salt")?;
+            if expected.len() != 40 || !expected.bytes().all(|b| b.is_ascii_hexdigit()) {
+                return Err("mssql-2005 digest must be 40 hex characters".into());
+            }
+            let utf16: Vec<u8> = candidate.encode_utf16().flat_map(|u| u.to_le_bytes()).collect();
+            let mut input = utf16;
+            input.extend_from_slice(salt.as_bytes());
+            let digest = sha1::Sha1::digest(&input);
+            Ok(constant_time_eq_str(&hex::encode(digest), expected))
+        }
+        "phpass" => unix_crypt::verify_phpass(hash, candidate),
         "sha512crypt" | "sha256crypt" | "sha1crypt" => {
             unix_crypt::verify_sha_crypt(hash, candidate)
         }

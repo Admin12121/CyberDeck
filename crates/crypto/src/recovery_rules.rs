@@ -67,6 +67,11 @@ enum RuleAction {
     RejectLast(u8),
     RejectAt(usize, u8),
     RejectCountLess(usize, u8),
+    Memorize,
+    AppendMemo,
+    PrependMemo,
+    InsertMemo(usize, usize, usize),
+    RejectUnchanged,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -262,6 +267,16 @@ impl CompiledRule {
                     let value = parser.char_operand()?;
                     RuleAction::RejectCountLess(minimum, value)
                 }
+                b'M' => RuleAction::Memorize,
+                b'4' => RuleAction::AppendMemo,
+                b'6' => RuleAction::PrependMemo,
+                b'X' => {
+                    let position = parser.position()?;
+                    let count = parser.position()?;
+                    let at = parser.position()?;
+                    RuleAction::InsertMemo(position, count, at)
+                }
+                b'Q' => RuleAction::RejectUnchanged,
                 _ => return Err(format!("unsupported rule opcode {}", op as char)),
             };
             actions.push(action);
@@ -276,8 +291,35 @@ impl CompiledRule {
             return Err("candidate too long".into());
         }
         let mut bytes = candidate.to_vec();
+        // The upstream memory feature: M saves the word, 4/6/X splice the
+        // saved bytes back, Q rejects a rule that left the word unchanged.
+        let mut memo: Vec<u8> = Vec::new();
         for action in &self.actions {
             let reject = match *action {
+                RuleAction::Memorize => {
+                    memo = bytes.clone();
+                    false
+                }
+                RuleAction::AppendMemo => {
+                    checked_push(&mut bytes, memo.len())?;
+                    bytes.extend_from_slice(&memo);
+                    false
+                }
+                RuleAction::PrependMemo => {
+                    checked_push(&mut bytes, memo.len())?;
+                    bytes.splice(..0, memo.iter().copied());
+                    false
+                }
+                RuleAction::InsertMemo(position, count, at) => {
+                    let end = (position + count).min(memo.len());
+                    if position <= memo.len() && position < end && at <= bytes.len() {
+                        let block = &memo[position..end];
+                        checked_push(&mut bytes, block.len())?;
+                        bytes.splice(at.min(bytes.len())..at.min(bytes.len()), block.iter().copied());
+                    }
+                    false
+                }
+                RuleAction::RejectUnchanged => bytes == memo,
                 RuleAction::Identity => false,
                 RuleAction::Lower => {
                     bytes.make_ascii_lowercase();
@@ -836,15 +878,28 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_memory_opcodes_are_rejected_strictly() {
-        assert!(CompiledRule::parse("M").is_err());
-        assert!(CompiledRule::parse("4").is_err());
-        assert!(CompiledRule::parse("X02").is_err());
+    fn memory_opcodes_follow_upstream_semantics() {
+        // M saves the word; 4 appends it, 6 prepends it, Q rejects no-ops.
+        assert_eq!(apply_ok("M d 4", "ab").as_deref(), Some("ababab"));
+        assert_eq!(apply_ok("M $1 6", "ab").as_deref(), Some("abab1"));
+        // Q rejects when the word equals the memorized one (no change since M).
+        assert_eq!(apply_ok("M : Q", "ab").as_deref(), None);
+        assert_eq!(apply_ok("M $1 Q", "ab").as_deref(), Some("ab1"));
+        assert_eq!(apply_ok("M $1 d Q", "ab").as_deref(), Some("ab1ab1"));
+        assert_eq!(apply_ok("M 4 6", "ab").as_deref(), Some("ababab"));
+        // Truly unsupported upstream syntax still errors in strict mode.
+        assert!(CompiledRule::parse("~s?D").is_err());
     }
 
     #[test]
     fn tolerant_parse_counts_unsupported_lines() {
-        let input = ":\nM\n$1\nX02\nl\n";
+        // Backtick is not an upstream opcode: two skipped lines, three kept.
+        let input = ":
+`
+$1
+`
+l
+";
         let parsed = parse_rule_file_tolerant(std::io::Cursor::new(input)).unwrap();
         assert_eq!(parsed.rules.len(), 3);
         assert_eq!(parsed.skipped, 2);

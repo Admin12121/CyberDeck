@@ -177,6 +177,15 @@ pub fn crypt_rounds(hash: &str) -> Result<u64, String> {
     Ok(5000) // the documented default for sha256crypt/sha512crypt
 }
 
+/// Verify classic DES crypt(3) (13 characters, no prefix). Hint-driven only:
+/// the encoding has no marker and is ambiguous with arbitrary 13-char text.
+pub fn verify_descrypt(encoded: &str, candidate: &str) -> Result<bool, String> {
+    if encoded.len() != 13 || !encoded.bytes().all(is_crypt64) {
+        return Err("descrypt encoding must be 13 crypt64 characters".into());
+    }
+    Ok(pwhash::unix_crypt::verify(candidate, encoded))
+}
+
 /// Verify `$5$` (sha256crypt), `$6$` (sha512crypt) or `$sha1$` (sha1crypt).
 pub fn verify_sha_crypt(hash: &str, candidate: &str) -> Result<bool, String> {
     let rounds = crypt_rounds(hash)?;
@@ -199,7 +208,6 @@ pub fn verify_sha_crypt(hash: &str, candidate: &str) -> Result<bool, String> {
 
 /// phpBB/WordPress portable phpass ($P$/$H$): MD5-based iterated digest with
 /// the crypt64 alphabet. Sequential triple encoding (different from md5crypt).
-#[allow(dead_code)] // pending an authoritative vector; see engine-review crypto notes
 pub fn verify_phpass(hash: &str, candidate: &str) -> Result<bool, String> {
     if !(hash.starts_with("$P$") || hash.starts_with("$H$")) {
         return Err("not a phpass portable hash".into());
@@ -234,10 +242,11 @@ pub fn verify_phpass(hash: &str, candidate: &str) -> Result<bool, String> {
     }
     let mut encoded = String::with_capacity(22);
     for triple in digest.chunks(3) {
+        // Hashcat/phpass layout: first byte lowest, LSB-first 6-bit groups.
         let value = match triple.len() {
-            3 => (u32::from(triple[0]) << 16) | (u32::from(triple[1]) << 8) | u32::from(triple[2]),
-            2 => (u32::from(triple[0]) << 16) | (u32::from(triple[1]) << 8),
-            _ => u32::from(triple[0]) << 16,
+            3 => u32::from(triple[0]) | (u32::from(triple[1]) << 8) | (u32::from(triple[2]) << 16),
+            2 => u32::from(triple[0]) | (u32::from(triple[1]) << 8),
+            _ => u32::from(triple[0]),
         };
         to64(value, if triple.len() == 3 { 4 } else { triple.len() + 1 }, &mut encoded);
     }
@@ -304,6 +313,19 @@ mod tests {
         let hash = "$6$rounds=999999$salt$digestdigestdigestdigestdigestdigestdigestdigestdi";
         let error = verify_sha_crypt(hash, "candidate").unwrap_err();
         assert!(error.contains("policy cap"));
+    }
+
+    #[test]
+    fn phpass_matches_john_and_passlib_vectors() {
+        // john the Ripper phpass_common_plug.c vectors, cross-confirmed by
+        // passlib (which verifies the same disputed vector).
+        assert!(verify_phpass("$P$900000000m6YEJzWtTmNBBL4jypbHv1", "openwall").unwrap());
+        assert!(verify_phpass("$P$90000000000tbNYOc9TwXvLEI62rPt1", "").unwrap());
+        assert!(verify_phpass("$P$9saltstriAcRMGl.91RgbAD6WSq64z.", "a").unwrap());
+        // passlib documentation vector.
+        assert!(verify_phpass("$P$8ohUJ.1sdFw09/bMaAQPTGDNi2BIUt1", "password").unwrap());
+        assert!(!verify_phpass("$P$900000000m6YEJzWtTmNBBL4jypbHv1", "Openwall").unwrap());
+        assert!(verify_phpass("$P$12costtooshort", "x").is_err());
     }
 
     #[test]

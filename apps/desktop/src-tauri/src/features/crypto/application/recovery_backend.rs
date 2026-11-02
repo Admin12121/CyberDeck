@@ -341,6 +341,7 @@ pub(super) fn embedded_result(
                 "sha512" => "embedded_hashcat_01700",
                 "sha512crypt" => "embedded_hashcat_01800",
                 "bcrypt" => "embedded_hashcat_03200",
+                "phpass" => "embedded_hashcat_00400",
                 "md5-pass-salt" => "embedded_hashcat_00010",
                 "md5-salt-pass" => "embedded_hashcat_00020",
                 "hmac-md5" => "embedded_hashcat_00050",
@@ -352,6 +353,8 @@ pub(super) fn embedded_result(
                 "netntlm-v1" => "embedded_hashcat_05500",
                 "netntlm-v2" => "embedded_hashcat_05600",
                 "sha256crypt" => "embedded_hashcat_07400",
+                "descrypt" => "embedded_hashcat_01500",
+                "mssql-2005" => "embedded_hashcat_00132",
                 _ => "embedded_hashcat_unsupported",
             }
             .into(),

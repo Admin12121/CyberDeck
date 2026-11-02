@@ -35,6 +35,9 @@ const EMBEDDED_MODES: readonly { value: HashcatRawAlgorithmV1; label: string; di
   { value: "sha512crypt", label: "sha512crypt $6$ · mode 1800", digits: 0 },
   { value: "bcrypt", label: "bcrypt $2*$ · mode 3200", digits: 0 },
   { value: "sha256crypt", label: "sha256crypt $5$ · mode 7400", digits: 0 },
+  { value: "descrypt", label: "descrypt (classic crypt(3)) · mode 1500", digits: 0 },
+  { value: "mssql-2005", label: "MSSQL 2005 · mode 132", digits: 0 },
+  { value: "phpass", label: "phpass (WordPress/phpBB) · mode 400", digits: 0 },
   { value: "md5-pass-salt", label: "md5($pass.$salt) · mode 10", digits: 0 },
   { value: "md5-salt-pass", label: "md5($salt.$pass) · mode 20", digits: 0 },
   { value: "sha1-pass-salt", label: "sha1($pass.$salt) · mode 110", digits: 0 },
@@ -116,6 +119,7 @@ function useRecoveryController(targetHash: string, onCaseCreated?: (caseId: stri
       const kdfSuggestion: Partial<Record<string, HashcatRawAlgorithmV1>> = {
         "$6$": "sha512crypt", "$1$": "md5crypt", "$apr1$": "md5crypt",
         "$2a$": "bcrypt", "$2b$": "bcrypt", "$2y$": "bcrypt",
+        "$P$": "phpass", "$H$": "phpass",
       };
       const match = Object.entries(kdfSuggestion).find(([prefix]) => hash.startsWith(prefix));
       if (match && match[1]) {

@@ -194,6 +194,7 @@ const PUBLIC_KATS: &[(u32, &str, &str)] = &[
     (3200, "U*U", "$2a$05$CCCCCCCCCCCCCCCCCCCCC.E5YPO9kmyuRGyh0XouQYb4YMJKvyOeW"),
     // Batch-2: salted digests + HMAC (independent Node-crypto vectors),
     // Windows auth (john the Ripper vectors) and sha256crypt (pwhash).
+    (400, "openwall", "$P$900000000m6YEJzWtTmNBBL4jypbHv1"),
     (10, "cyberdeck", "c51d5447beddf60e68604ca2dbf4e6ad:4242"),
     (20, "cyberdeck", "a944dd5c9a02c5bed3a4b175ac565d7c:4242"),
     (50, "cyberdeck", "dc5b5ad28f4dd280463a5319b976bd50:4242"),
@@ -205,6 +206,8 @@ const PUBLIC_KATS: &[(u32, &str, &str)] = &[
     (5500, "g3rg3g3rg3g3rg3", "a::b:1122334455667788:000000000000000000000000000000000000000000000000:BFCCAF26128EC95F9999C9792F49434267A1D9B0EF89BFFB"),
     (5600, "password", "NTLMV2TEST::WORKGROUP:1122334455667788:07659A550D5E9D02996DFD95C87EC1D5:0101000000000000006CF6385B74CA01B3610B02D99732DD000000000200120057004F0052004B00470052004F00550050000100200044004100540041002E00420049004E0043002D0053004500430055005200490000000000"),
     (7400, "cyberdeck-kat-2026", "$5$CyberDeckKAT$kGyqS./awuvI5h4KB95ES/o9w3pxHqKFF8aBBpvSGvD"),
+    (1500, "cyberdeck-descrypt-kat", "KySCHrKHoR6zc"),
+    (132, "cyberdeck", "3b2dc7d2b00deaec43445d9a53efa3108cf24926:kat42"),
 ];
 type Readiness = Result<Vec<u32>, String>;
 static READINESS_CACHE: OnceLock<Mutex<HashMap<PathBuf, Readiness>>> = OnceLock::new();
@@ -375,6 +378,7 @@ pub(super) fn validate_embedded_request(request: &RecoveryRequest) -> Result<u32
         "sha512" => 1700,
         "sha512crypt" => 1800,
         "bcrypt" => 3200,
+        "phpass" => 400,
         "md5-pass-salt" => 10,
         "md5-salt-pass" => 20,
         "hmac-md5" => 50,
@@ -386,6 +390,8 @@ pub(super) fn validate_embedded_request(request: &RecoveryRequest) -> Result<u32
         "netntlm-v1" => 5500,
         "netntlm-v2" => 5600,
         "sha256crypt" => 7400,
+        "descrypt" => 1500,
+        "mssql-2005" => 132,
         _ => return Err("hash mode not bundled for embedded Hashcat".into()),
     };
     match RecoveryTarget::parse(&request.algorithm, &request.target_hash)? {
@@ -649,7 +655,7 @@ mod tests {
     use super::*;
     #[test]
     fn every_public_native_mode_fixture_is_independently_verifiable_without_gpu() {
-        assert_eq!(PUBLIC_KATS.len(), 19);
+        assert_eq!(PUBLIC_KATS.len(), 22);
         for &(mode, word, hash) in PUBLIC_KATS {
             let algorithm = match mode {
                 0 => "md5",
@@ -659,7 +665,8 @@ mod tests {
                 1700 => "sha512",
                 // KDF fixtures are verified through the KDF verifier, which
                 // derives the family from the modular string itself.
-                500 | 1800 | 3200 | 2100 | 5500 | 5600 | 7400 => "kdf",
+                400 | 500 | 1500 | 1800 | 2100 | 3200 | 5500 | 5600 | 7400 => "kdf",
+                132 => "mssql-2005",
                 // Hint-driven composed targets: the wire shape is ambiguous.
                 10 => "md5-pass-salt",
                 20 => "md5-salt-pass",
