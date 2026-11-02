@@ -248,6 +248,128 @@ fn active_text_probe(stream: &mut TcpStream, probe: TextProbe) -> bool {
     false
 }
 
+/// Bounded, complete Memcached ASCII VERSION reply. The version string is
+/// remote-asserted; it is not authenticated software identity.
+pub(super) fn memcached_version_claim(reply: &[u8]) -> Option<String> {
+    let token = reply.strip_prefix(b"VERSION ")?.strip_suffix(b"\r\n")?;
+    if !(3..=64).contains(&token.len())
+        || !token.iter().any(u8::is_ascii_digit)
+        || !token
+            .iter()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(*b, b'.' | b'_' | b'-' | b'+'))
+    {
+        return None;
+    }
+    Some(format!("memcached/{}", String::from_utf8_lossy(token)))
+}
+
+/// Fixed, read-only protocol negotiation. Only configured candidate TCP
+/// ports are actively queried; arbitrary open ports are not sent credentials,
+/// commands, or stateful application requests.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SafeHandshake {
+    RedisPing,
+    PostgreSqlSslRequest,
+    Socks5Method,
+    MemcachedVersion,
+}
+impl SafeHandshake {
+    fn for_port(port: u16) -> Option<Self> {
+        match port {
+            6379 | 6380 => Some(Self::RedisPing),
+            5432 | 5433 => Some(Self::PostgreSqlSslRequest),
+            1080 | 1081 | 9050 | 9150 => Some(Self::Socks5Method),
+            11211 | 11212 => Some(Self::MemcachedVersion),
+            _ => None,
+        }
+    }
+    fn request(self) -> &'static [u8] {
+        match self {
+            Self::RedisPing => b"*1\r\n$4\r\nPING\r\n",
+            // Postgres SSLRequest: length 8, magic 80877103. No authentication.
+            Self::PostgreSqlSslRequest => &[0, 0, 0, 8, 4, 210, 22, 47],
+            // SOCKS5 method negotiation, no credentials or proxy CONNECT.
+            Self::Socks5Method => &[5, 1, 0],
+            Self::MemcachedVersion => b"version\r\n",
+        }
+    }
+    fn parse(self, reply: &[u8]) -> Option<(&'static str, &'static str)> {
+        match self {
+            Self::RedisPing if reply == b"+PONG\r\n" => {
+                Some(("redis", "RESP PING confirmed +PONG"))
+            }
+            Self::RedisPing if reply == b"-NOAUTH Authentication required.\r\n" => {
+                Some(("redis", "RESP PING confirmed authentication required"))
+            }
+            Self::PostgreSqlSslRequest if reply == b"S" => {
+                Some(("postgresql", "PostgreSQL SSLRequest returned SSL supported"))
+            }
+            Self::PostgreSqlSslRequest if reply == b"N" => Some((
+                "postgresql",
+                "PostgreSQL SSLRequest returned SSL unsupported",
+            )),
+            Self::Socks5Method if reply == [5, 0] => {
+                Some(("socks5", "SOCKS5 method negotiation selected no-auth"))
+            }
+            Self::Socks5Method if reply == [5, 255] => {
+                Some(("socks5", "SOCKS5 method negotiation rejected all methods"))
+            }
+            Self::MemcachedVersion if memcached_version_claim(reply).is_some() => {
+                Some(("memcached", "Memcached ASCII VERSION response"))
+            }
+            _ => None,
+        }
+    }
+}
+
+/// One bounded negotiation on the already authorized TCP connection.
+/// Total timeout applies to the entire reply, not once per byte. Fail closed
+/// for truncation, unrelated bytes, socket errors and oversized responses.
+fn active_safe_handshake(
+    stream: &mut TcpStream,
+    handshake: SafeHandshake,
+) -> Option<(&'static str, &'static str, Option<String>)> {
+    stream.set_write_timeout(Some(BANNER_TIMEOUT)).ok()?;
+    std::io::Write::write_all(stream, handshake.request()).ok()?;
+    let deadline = Instant::now() + BANNER_TIMEOUT;
+    let mut reply = [0u8; 64];
+    let mut used = 0usize;
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() || used == reply.len() {
+            return None;
+        }
+        stream.set_read_timeout(Some(remaining)).ok()?;
+        let n = match std::io::Read::read(stream, &mut reply[used..]) {
+            Ok(0) => return None,
+            Ok(n) => n,
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(_) => return None,
+        };
+        used += n;
+        if let Some((service, evidence)) = handshake.parse(&reply[..used]) {
+            let claim = if handshake == SafeHandshake::MemcachedVersion {
+                memcached_version_claim(&reply[..used])
+            } else {
+                None
+            };
+            return Some((service, evidence, claim));
+        }
+        // A single-byte PostgreSQL reply, two-byte SOCKS5 reply and complete
+        // CRLF-terminated Redis reply are the only accepted forms.
+        match handshake {
+            SafeHandshake::PostgreSqlSslRequest if used >= 1 => return None,
+            SafeHandshake::Socks5Method if used >= 2 => return None,
+            SafeHandshake::RedisPing | SafeHandshake::MemcachedVersion
+                if reply[..used].ends_with(b"\r\n") =>
+            {
+                return None
+            }
+            _ => {}
+        }
+    }
+}
+
 pub(super) fn well_known_service(port: u16) -> &'static str {
     match port {
         21 => "ftp",
@@ -261,10 +383,12 @@ pub(super) fn well_known_service(port: u16) -> &'static str {
         443 => "https",
         445 => "microsoft-ds",
         1433 => "ms-sql",
+        1080 | 1081 => "socks5",
         3306 => "mysql",
         3389 => "ms-wbt",
         5432 => "postgresql",
         6379 => "redis",
+        11211 | 11212 => "memcached",
         8080 => "http-proxy",
         8443 => "https-alt",
         9200 => "elasticsearch",
@@ -543,11 +667,14 @@ fn probe_observation_bounded(
             // Give unsolicited SSH/SMTP/FTP/etc greetings priority, including
             // when a non-DNS service is deliberately running on port 53.
             let tls_probe = matches!(port, 443 | 8443 | 993 | 995 | 465 | 990 | 636);
-            let _ = stream.set_read_timeout(Some(if dns_probe || tls_probe {
-                Duration::from_millis(80)
-            } else {
-                BANNER_TIMEOUT
-            }));
+            let safe_handshake = SafeHandshake::for_port(port);
+            let _ = stream.set_read_timeout(Some(
+                if dns_probe || tls_probe || safe_handshake.is_some() {
+                    Duration::from_millis(80)
+                } else {
+                    BANNER_TIMEOUT
+                },
+            ));
             let _ = stream.set_write_timeout(Some(BANNER_TIMEOUT));
             if matches!(port, 80 | 8080 | 8000 | 8888) {
                 let request =
@@ -594,6 +721,11 @@ fn probe_observation_bounded(
             } else {
                 None
             };
+            let verified_handshake = if !received_greeting {
+                safe_handshake.and_then(|probe| active_safe_handshake(&mut stream, probe))
+            } else {
+                None
+            };
             if let Some(probe) = verified_text {
                 obs.service = match probe {
                     TextProbe::SmtpEhlo => "smtp",
@@ -614,6 +746,11 @@ fn probe_observation_bounded(
                 obs.service = "dns".into();
                 obs.service_basis = "observed_response".into();
                 obs.banner = format!("DNS/TCP response to root NS query (RCODE {rcode})");
+            } else if let Some((service, evidence, claim)) = verified_handshake {
+                obs.service = service.into();
+                obs.service_basis = "observed_response".into();
+                obs.banner = evidence.into();
+                obs.remote_software_claim = claim;
             } else if let Some(name) =
                 verified_initial_service.or_else(|| observed_service(&obs.banner))
             {
@@ -657,6 +794,111 @@ pub(super) fn probe(host: IpAddr, port: u16) -> (String, String) {
 #[cfg(test)]
 mod evidence_tests {
     use super::*;
+
+    #[test]
+    fn safe_negotiations_validate_complete_exact_protocol_replies() {
+        let redis = SafeHandshake::RedisPing;
+        assert_eq!(redis.request(), b"*1\r\n$4\r\nPING\r\n");
+        assert_eq!(redis.parse(b"+PONG\r\n").unwrap().0, "redis");
+        assert!(redis
+            .parse(b"-NOAUTH Authentication required.\r\n")
+            .is_some());
+        for bytes in [
+            &b"+PONG\r"[..],
+            &b"+PONG\r\nmore"[..],
+            &b"-ERR other\r\n"[..],
+        ] {
+            assert!(redis.parse(bytes).is_none());
+        }
+        let memcached = SafeHandshake::MemcachedVersion;
+        assert_eq!(memcached.request(), b"version\r\n");
+        assert_eq!(
+            memcached.parse(b"VERSION 1.6.25\r\n").unwrap().0,
+            "memcached"
+        );
+        assert!(memcached.parse(b"VERSION hello\r\n").is_none());
+        assert!(memcached.parse(b"VERSION 1.6.25").is_none());
+        assert_eq!(
+            memcached_version_claim(b"VERSION 1.6.25\r\n").as_deref(),
+            Some("memcached/1.6.25")
+        );
+        assert_eq!(memcached_version_claim(b"VERSION 1.6.25\r\nEXTRA"), None);
+        let postgres = SafeHandshake::PostgreSqlSslRequest;
+        assert_eq!(postgres.request(), &[0, 0, 0, 8, 4, 210, 22, 47]);
+        assert_eq!(postgres.parse(b"S").unwrap().0, "postgresql");
+        assert_eq!(postgres.parse(b"N").unwrap().0, "postgresql");
+        for bytes in [&b""[..], &b"SS"[..], &b"X"[..]] {
+            assert!(postgres.parse(bytes).is_none());
+        }
+        let socks = SafeHandshake::Socks5Method;
+        assert_eq!(socks.request(), &[5, 1, 0]);
+        assert_eq!(socks.parse(&[5, 0]).unwrap().0, "socks5");
+        assert_eq!(socks.parse(&[5, 255]).unwrap().0, "socks5");
+        assert!(socks.parse(&[5]).is_none());
+        assert!(socks.parse(&[4, 0]).is_none());
+        assert!(socks.parse(&[5, 2]).is_none());
+        assert!(socks.parse(&[5, 0, 0]).is_none());
+        assert_eq!(SafeHandshake::for_port(6379), Some(redis));
+        assert_eq!(SafeHandshake::for_port(5432), Some(postgres));
+        assert_eq!(SafeHandshake::for_port(1080), Some(socks));
+        assert_eq!(SafeHandshake::for_port(443), None);
+    }
+
+    #[test]
+    fn redis_postgres_and_socks5_live_loopback_negotiations_are_correlated() {
+        use std::io::{Read, Write};
+        for (kind, reply, expected) in [
+            (SafeHandshake::RedisPing, &b"+PONG\r\n"[..], "redis"),
+            (SafeHandshake::PostgreSqlSslRequest, &b"N"[..], "postgresql"),
+            (SafeHandshake::Socks5Method, &b"\x05\xff"[..], "socks5"),
+            (
+                SafeHandshake::MemcachedVersion,
+                &b"VERSION 1.6.25\r\n"[..],
+                "memcached",
+            ),
+        ] {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let addr = listener.local_addr().unwrap();
+            let server = std::thread::spawn(move || {
+                let (mut socket, _) = listener.accept().unwrap();
+                socket
+                    .set_read_timeout(Some(Duration::from_secs(2)))
+                    .unwrap();
+                let mut message = vec![0; kind.request().len()];
+                socket.read_exact(&mut message).unwrap();
+                assert_eq!(message, kind.request());
+                socket.write_all(reply).unwrap();
+            });
+            let mut stream = TcpStream::connect(addr).unwrap();
+            let verified = active_safe_handshake(&mut stream, kind);
+            assert_eq!(verified.map(|v| v.0), Some(expected));
+            server.join().unwrap();
+        }
+    }
+
+    #[test]
+    fn mismatched_and_truncated_handshakes_do_not_claim_a_service() {
+        use std::io::{Read, Write};
+        for kind in [
+            SafeHandshake::RedisPing,
+            SafeHandshake::PostgreSqlSslRequest,
+            SafeHandshake::Socks5Method,
+            SafeHandshake::MemcachedVersion,
+        ] {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let addr = listener.local_addr().unwrap();
+            let server = std::thread::spawn(move || {
+                let (mut socket, _) = listener.accept().unwrap();
+                let mut message = vec![0; kind.request().len()];
+                socket.read_exact(&mut message).unwrap();
+                assert_eq!(message, kind.request());
+                socket.write_all(b"NO").unwrap();
+            });
+            let mut stream = TcpStream::connect(addr).unwrap();
+            assert!(active_safe_handshake(&mut stream, kind).is_none());
+            server.join().unwrap();
+        }
+    }
 
     #[test]
     fn binary_protocol_version_claims_are_evidence_based_and_bounded() {

@@ -37,6 +37,8 @@ pub use request_domain::parse_raw_request;
 mod active_body_application;
 #[path = "../application/active_injection.rs"]
 mod active_injection_application;
+#[path = "../application/auth_context.rs"]
+mod auth_context_application;
 #[path = "../application/active_query.rs"]
 mod active_query_application;
 #[path = "../application/assessment_jobs.rs"]
@@ -572,7 +574,7 @@ async fn authorize_pinned_assessment(
     session: &crate::features::shared::session::CaseSessionCtx,
     selected: &crate::features::shared::session::CaseSessionWire,
     pinned: &target_scope::PinnedTarget,
-    purpose: &'static str,
+    purpose: &str,
 ) -> Result<(), String> {
     use tauri_plugin_dialog::{DialogExt, MessageDialogButtons};
     let origin = pinned.url.origin().ascii_serialization();

@@ -11,6 +11,16 @@ import {
   type WebAssessmentJob,
 } from "./controller/assessment-jobs";
 
+function parseSessionHeaders(text: string): { name: string; value: string }[] {
+  return text.split("\n").map((line) => line.trim()).filter(Boolean).slice(0, 8).flatMap((line) => {
+    const separator = line.indexOf(":");
+    if (separator <= 0) return [];
+    const name = line.slice(0, separator).trim();
+    const value = line.slice(separator + 1).trim();
+    return name && value ? [{ name, value }] : [];
+  });
+}
+
 export function ScannerView() {
   const desktop = isDesktop();
   const wb = useWorkbench();
@@ -24,6 +34,10 @@ export function ScannerView() {
   // Volatile input, never written to workspace drafts or SQLite.
   const [postTemplate, setPostTemplate] = useState("");
   const [postRiskApproved, setPostRiskApproved] = useState(false);
+  // Volatile session context: never written to workspace drafts, cases or logs.
+  const [sessionOpen, setSessionOpen] = useState(false);
+  const [sessionCookie, setSessionCookie] = useState("");
+  const [sessionHeaders, setSessionHeaders] = useState("");
   const [busy, setBusy] = useState(false);
   const [saving, setSaving] = useState(false);
   const [savedCount, setSavedCount] = useState(0);
@@ -42,6 +56,7 @@ export function ScannerView() {
     context.current.revision++;
     setJob(null); setAuthorized(false); setSavedCount(0);
     setPostTemplate(""); setPostRiskApproved(false);
+    setSessionCookie(""); setSessionHeaders("");
     setBusy(false); setError(null);
   }, [caseId, caseSession.revision, normalized]);
 
@@ -69,6 +84,10 @@ export function ScannerView() {
     const post = kind === "active-form" || kind === "active-json";
     if (post && (!postRiskApproved || !postTemplate.trim())) return;
     const template = post ? postTemplate : undefined;
+    const sessionHeaderPairs = parseSessionHeaders(sessionHeaders);
+    const auth = sessionCookie.trim() || sessionHeaderPairs.length
+      ? { cookies: sessionCookie.trim() || null, headers: sessionHeaderPairs }
+      : undefined;
     const stamp = { ...context.current };
     setBusy(true); setSavedCount(0); setError(null); setJob(null);
     try {
@@ -81,7 +100,7 @@ export function ScannerView() {
         kind === "active-traversal" ? "Web file inclusion probe" :
         post ? "Web approved POST probe" : "Web scanner", async () => {
         const id = await startWebAssessment(kind, stamp.target, true, 2, template,
-          kind === "scanner" ? undefined : scanIntensity);
+          kind === "scanner" ? undefined : scanIntensity, auth);
         if (context.current.revision === stamp.revision) setJobId(id);
         return waitForWebAssessment(id, (current) => {
           if (context.current.revision === stamp.revision &&
@@ -171,6 +190,40 @@ export function ScannerView() {
     </label>
     <div className="border-b border-line px-2 py-1 text-[10px] text-fg-muted">
       Query probes send a baseline plus a bounded number of GET mutations according to intensity, skip credential/CSRF-like parameters, and report potential markup reflection—not confirmed executable XSS. The URL must contain query parameters; native approval and private-address scope are mandatory.
+    </div>
+    <div className="border-b border-line bg-panel px-2 py-1 text-[11px]">
+      <div className="flex flex-wrap items-center gap-2">
+        <ToolButton onClick={() => setSessionOpen((value) => !value)}>
+          {sessionOpen ? "Hide session context" : "Session context"}
+        </ToolButton>
+        <span className="text-fg-muted">
+          {sessionCookie.trim() || parseSessionHeaders(sessionHeaders).length
+            ? "Authenticated requests enabled for this target"
+            : "Optional authenticated requests"}
+        </span>
+      </div>
+      {sessionOpen && <div className="mt-2 space-y-2">
+        <textarea value={sessionCookie} disabled={running}
+          onChange={(e) => setSessionCookie(e.target.value.slice(0, 4096))}
+          aria-label="Session cookies"
+          placeholder="Cookie value, for example: session=abc123; theme=dark"
+          rows={2} spellCheck={false}
+          className="w-full resize-y rounded border border-line bg-panel px-2 py-1 font-mono text-[11px] text-fg" />
+        <textarea value={sessionHeaders} disabled={running}
+          onChange={(e) => setSessionHeaders(e.target.value.slice(0, 8192))}
+          aria-label="Session headers"
+          placeholder={"One header per line, for example:\nX-Lab-Role: operator"}
+          rows={2} spellCheck={false}
+          className="w-full resize-y rounded border border-line bg-panel px-2 py-1 font-mono text-[11px] text-fg" />
+        <div className="text-[10px] text-fg-muted">
+          Sent only to the approved pinned target, including every scanner, crawler and
+          parameter probe. Maximum 8 headers. Host, Content-Length, Transfer-Encoding,
+          Connection and Cookie headers are rejected; use the cookie field instead.
+          Values are never saved to the case, history or logs, and are cleared when the
+          target changes. If the baseline is rejected or a probe is redirected to a login
+          page, the review stops and reports it instead of continuing unauthenticated.
+        </div>
+      </div>}
     </div>
     <div className="border-b border-line bg-panel px-2 py-2 text-[11px]">
       <div className="flex flex-wrap items-center gap-2">

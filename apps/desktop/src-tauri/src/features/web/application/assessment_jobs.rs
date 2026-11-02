@@ -5,6 +5,7 @@ use super::{
     crawl_application, execute_case_scoped_assessment, passive_rules_application, scan_application,
     scan_domain, selected_history_grant, target_scope, webhistory, Finding, WebCtx,
 };
+use super::auth_context_application::AuthContext;
 use crate::features::forensics::ipc::evidence::EvidenceCtx;
 use crate::features::shared::session::{CaseSessionCtx, CaseSessionWire};
 use cyberdeck_storage::{ArtifactStore, HistoryCaptureGrant, NewFinding};
@@ -425,6 +426,33 @@ async fn run_cancellable<T>(
     }
 }
 
+/// Volatile operator-supplied session context for one authenticated target.
+/// No field is persisted, echoed in an error or written to a job view.
+#[derive(serde::Deserialize)]
+pub struct WebSessionHeaderWire {
+    name: String,
+    value: String,
+}
+
+#[derive(serde::Deserialize, Default)]
+pub struct WebSessionWire {
+    #[serde(default)]
+    cookies: Option<String>,
+    #[serde(default)]
+    headers: Vec<WebSessionHeaderWire>,
+}
+
+impl WebSessionWire {
+    fn into_context(self) -> Result<AuthContext, String> {
+        let headers = self
+            .headers
+            .into_iter()
+            .map(|header| (header.name, header.value))
+            .collect::<Vec<_>>();
+        AuthContext::new(self.cookies.as_deref(), &headers)
+    }
+}
+
 /// Native confirmation and authoritative case selection happen BEFORE the job
 /// is inserted. It continues in the Tauri runtime even if the React view unmounts.
 #[tauri::command]
@@ -457,7 +485,40 @@ pub async fn web_assessment_start_v2(
     app: AppHandle,
     session: State<'_, CaseSessionCtx>,
 ) -> Result<u64, String> {
+    web_assessment_start_v3(
+        kind,
+        target_url,
+        max_depth,
+        authorized,
+        probe_body,
+        scan_intensity,
+        None,
+        app,
+        session,
+    )
+    .await
+}
+
+/// Additive IPC: volatile operator session context for an authenticated
+/// target. Validated before the native dialog and attached only to the
+/// pinned client. Values never reach the job registry or a finding.
+#[tauri::command]
+pub async fn web_assessment_start_v3(
+    kind: String,
+    target_url: String,
+    max_depth: u8,
+    authorized: bool,
+    probe_body: Option<String>,
+    scan_intensity: Option<String>,
+    auth: Option<WebSessionWire>,
+    app: AppHandle,
+    session: State<'_, CaseSessionCtx>,
+) -> Result<u64, String> {
     scan_domain::require_authorization(authorized)?;
+    let auth = auth
+        .map(WebSessionWire::into_context)
+        .transpose()?
+        .unwrap_or_default();
     let kind = Kind::parse(&kind)?;
     if matches!(kind, Kind::Passive) {
         return Err("passive history scans require the protected offline entry point".into());
@@ -499,7 +560,7 @@ pub async fn web_assessment_start_v2(
         }
     };
     let selected = session.selected()?;
-    let pinned = target_scope::prepare_private_target(&target_url).await?;
+    let pinned = target_scope::prepare_private_target_with_auth(&target_url, &auth).await?;
     session.ensure(&selected)?;
     let purpose = match kind {
         Kind::ActiveQuery => "at most nine GET requests with inert HTML markup query probes",
@@ -511,7 +572,8 @@ pub async fn web_assessment_start_v2(
         Kind::Spider => "bounded same-origin GET discovery",
         Kind::Passive => return Err("passive mode does not send network requests".into()),
     };
-    authorize_pinned_assessment(app.clone(), &session, &selected, &pinned, purpose).await?;
+    let purpose = format!("{}{}", purpose, auth.summary());
+    authorize_pinned_assessment(app.clone(), &session, &selected, &pinned, &purpose).await?;
     let job = session.with_current_publication(&selected, || {
         registry()
             .lock()
@@ -579,6 +641,7 @@ pub async fn web_assessment_start_v2(
                     &pinned.client,
                     pinned.url.to_string(),
                     true,
+                    !auth.is_empty(),
                     &on_progress,
                 )
                 .await

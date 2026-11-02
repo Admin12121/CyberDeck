@@ -16,7 +16,7 @@ test("Crypto Recipes native allowlist tracks every actual Rust native operation"
   assert.ok(uiNative, "frontend native-operation allowlist not found");
   const ids = (str) => Array.from(str.matchAll(/"([a-z][a-z0-9_]*)"/g), (item) => item[1]).sort();
   assert.deepEqual(ids(uiNative), ids(rustNative));
-  assert.equal(ids(rustNative).length, 59);
+  assert.equal(ids(rustNative).length, 62);
 });
 
 test("Recovery V1 real route uses existing typed native calls and authorized reveal", () => {

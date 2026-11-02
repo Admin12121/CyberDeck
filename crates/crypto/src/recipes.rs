@@ -98,6 +98,9 @@ pub fn native_operation(id: &str) -> bool {
             | "extract_emails"
             | "extract_domains"
             | "jwt_decode"
+            | "normalize_unicode"
+            | "unix_to_datetime"
+            | "datetime_to_unix"
     )
 }
 
@@ -374,6 +377,9 @@ fn transform(op: &str, bytes: &[u8], param: Option<&str>) -> Result<Vec<u8>, Str
     }
     if op == "jwt_decode" {
         return crate::recipe_jwt::decode(bytes);
+    }
+    if crate::recipe_datetime::supports(op) {
+        return crate::recipe_datetime::apply(op, bytes, param);
     }
     match op {
         "to_base64" => Ok(STANDARD.encode(bytes).into_bytes()),

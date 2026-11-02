@@ -1,5 +1,6 @@
 //! Strict single-origin DNS scope, pinned at the HTTP connector.
 //! Only loopback/private IPs are allowed pending backend-owned public-target grants.
+use super::auth_context_application::AuthContext;
 use std::net::{IpAddr, SocketAddr};
 use std::time::Duration;
 
@@ -61,7 +62,11 @@ pub(super) fn vetted_answers(
     Ok(out)
 }
 
-fn configured_client(host: &str, sockets: &[SocketAddr]) -> Result<reqwest::Client, String> {
+fn configured_client(
+    host: &str,
+    sockets: &[SocketAddr],
+    auth: &AuthContext,
+) -> Result<reqwest::Client, String> {
     let mut builder = reqwest::Client::builder()
         .timeout(Duration::from_secs(15))
         .redirect(reqwest::redirect::Policy::none())
@@ -72,6 +77,10 @@ fn configured_client(host: &str, sockets: &[SocketAddr]) -> Result<reqwest::Clie
     if host.parse::<IpAddr>().is_err() {
         builder = builder.resolve_to_addrs(host, sockets);
     }
+    if !auth.is_empty() {
+        // Default headers apply to every request this pinned client makes.
+        builder = builder.default_headers(auth.header_map());
+    }
     builder
         .build()
         .map_err(|_| "failed to create scoped Web client".into())
@@ -81,6 +90,16 @@ fn configured_client(host: &str, sockets: &[SocketAddr]) -> Result<reqwest::Clie
 /// socket addresses are pinned into a fresh per-operation reqwest client.
 /// No shared pooled transport or auto redirects can re-resolve the hostname.
 pub(super) async fn prepare_private_target(text: &str) -> Result<PinnedTarget, String> {
+    prepare_private_target_with_auth(text, &AuthContext::default()).await
+}
+
+/// Same single-origin pinned transport, with volatile operator session
+/// context attached once as client default headers. Values never enter a
+/// URL, history entry, job snapshot, error or finding.
+pub(super) async fn prepare_private_target_with_auth(
+    text: &str,
+    auth: &AuthContext,
+) -> Result<PinnedTarget, String> {
     let url = parse_target(text)?;
     let host = url.host_str().ok_or("Web hostname missing")?;
     let normalized = host.trim_start_matches('[').trim_end_matches(']');
@@ -98,7 +117,7 @@ pub(super) async fn prepare_private_target(text: &str) -> Result<PinnedTarget, S
             vetted_answers(lookup)?
         }
     };
-    let client = configured_client(normalized, &addresses)?;
+    let client = configured_client(normalized, &addresses, auth)?;
     Ok(PinnedTarget {
         url,
         client,
@@ -137,6 +156,44 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn pinned_client_attaches_operator_session_context() {
+        tokio::time::timeout(Duration::from_secs(6), async {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let host = "session.cyberdeck.test";
+            let url = format!("http://{host}:{port}/fixture");
+            let sockets = vetted_answers([listener.local_addr().unwrap()]).unwrap();
+            let auth = AuthContext::new(
+                Some("sid=abc123; theme=dark"),
+                &[("X-Lab-Role".to_string(), "operator".to_string())],
+            )
+            .unwrap();
+            let client = configured_client(host, &sockets, &auth).unwrap();
+            let server = tokio::spawn(async move {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let (head, _) = crate::features::web::webtls::read_http_message(&mut socket)
+                    .await
+                    .unwrap();
+                let lowered = head.to_ascii_lowercase();
+                assert!(lowered.contains("cookie: sid=abc123; theme=dark"), "{head}");
+                assert!(lowered.contains("x-lab-role: operator"), "{head}");
+                socket
+                    .write_all(
+                        b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok",
+                    )
+                    .await
+                    .unwrap();
+            });
+            let resp = client.get(url).send().await.unwrap();
+            assert_eq!(resp.status(), reqwest::StatusCode::OK);
+            assert_eq!(resp.bytes().await.unwrap().as_ref(), b"ok");
+            server.await.unwrap();
+        })
+        .await
+        .expect("session fixture timed out");
+    }
+
+    #[tokio::test]
     async fn pinned_unresolvable_hostname_uses_validated_socket_and_host_header() {
         tokio::time::timeout(Duration::from_secs(6), async {
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -144,7 +201,7 @@ mod tests {
             let host = "nonexistent.cyberdeck.test";
             let url = format!("http://{host}:{port}/fixture");
             let sockets = vetted_answers([listener.local_addr().unwrap()]).unwrap();
-            let client = configured_client(host, &sockets).unwrap();
+            let client = configured_client(host, &sockets, &AuthContext::default()).unwrap();
             let server = tokio::spawn(async move {
                 let (mut socket, _) = listener.accept().await.unwrap();
                 let (head, _) = crate::features::web::webtls::read_http_message(&mut socket)

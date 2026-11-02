@@ -8,6 +8,7 @@ mod recipe_escape_parity;
 mod recipe_ioc_parity;
 mod recipe_ioc_extra;
 mod recipe_jwt;
+mod recipe_datetime;
 pub mod key_derivation;
 pub mod hkdf;
 pub mod recovery;

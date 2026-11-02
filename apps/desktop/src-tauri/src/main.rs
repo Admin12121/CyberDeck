@@ -171,6 +171,7 @@ fn main() {
             features::web::ipc::web::web_history_access_v1,
             features::web::ipc::web::assessment_jobs::web_assessment_start_v1,
             features::web::ipc::web::assessment_jobs::web_assessment_start_v2,
+            features::web::ipc::web::assessment_jobs::web_assessment_start_v3,
             features::web::ipc::web::assessment_jobs::web_assessment_status_v1,
             features::web::ipc::web::assessment_jobs::web_assessment_cancel_v1,
             // Backend-selected case/revision and completed native job only.

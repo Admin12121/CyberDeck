@@ -62,6 +62,56 @@ const SECURITY_HEADERS: &[(&str, &str)] = &[
     ("x-content-type-options", "X-Content-Type-Options"),
 ];
 
+/// Login-looking redirect targets. A redirect value is inspected only to
+/// decide whether the session still works; it is never stored or reported.
+const LOGIN_HINTS: &[&str] = &[
+    "login",
+    "signin",
+    "sign-in",
+    "logon",
+    "sso",
+    "auth/",
+    "session/new",
+    "account/login",
+];
+
+fn redirects_to_login(location: Option<&str>) -> bool {
+    let Some(location) = location else {
+        return false;
+    };
+    let lowered = location.to_ascii_lowercase();
+    LOGIN_HINTS.iter().any(|hint| lowered.contains(hint))
+}
+
+/// A rejected baseline proves the supplied session context is not valid for
+/// this origin: 401/403, or a redirect to a login surface.
+fn session_rejected(status: u16, location: Option<&str>) -> bool {
+    matches!(status, 401 | 403)
+        || (matches!(status, 301 | 302 | 303 | 307 | 308) && redirects_to_login(location))
+}
+
+fn session_rejected_finding(base: &str, status: u16) -> Finding {
+    Finding {
+        severity: "info".into(),
+        title: "authenticated session was rejected before probing".into(),
+        detail: "The approved target answered the baseline request with an authentication failure or a login redirect, so no probes were sent. Confirm the session cookie and header values are current and belong to this origin.".into(),
+        evidence: format!(
+            "Rule cd.session.rejected.v1; approved origin {base}; baseline HTTP {status}. No cookie, header or redirect target retained."
+        ),
+    }
+}
+
+fn session_stopped_finding(base: &str, requests: usize) -> Finding {
+    Finding {
+        severity: "info".into(),
+        title: "authenticated session appears to have expired mid-review".into(),
+        detail: "A probe was redirected to a login surface, so the remaining checks were skipped rather than run unauthenticated. Confirm the session lifetime and re-run with a fresh context.".into(),
+        evidence: format!(
+            "Rule cd.session.expired.v1; approved origin {base}; stopped after {requests} requests. No cookie, header or redirect target retained."
+        ),
+    }
+}
+
 /// Total bounded requests one review issues. Progress reporting and the
 /// localhost fixtures both derive from this single value.
 pub(super) fn planned_requests() -> usize {
@@ -98,7 +148,7 @@ pub(super) async fn run_scan(
     target_url: String,
     authorized: bool,
 ) -> Result<Vec<Finding>, String> {
-    run_scan_with_progress(client, target_url, authorized, &|_, _| {}).await
+    run_scan_with_progress(client, target_url, authorized, false, &|_, _| {}).await
 }
 
 /// Reports real HTTP attempts completed, not a synthetic elapsed percentage.
@@ -106,6 +156,7 @@ pub(super) async fn run_scan_with_progress(
     client: &reqwest::Client,
     target_url: String,
     authorized: bool,
+    authenticated: bool,
     on_progress: &impl Fn(usize, usize),
 ) -> Result<Vec<Finding>, String> {
     require_authorization(authorized)?;
@@ -131,8 +182,20 @@ pub(super) async fn run_scan_with_progress(
     let root = client.get(&base).timeout(PROBE_TIMEOUT).send().await.ok();
     let root_headers = root.as_ref().map(header_pairs);
     let root_status = root.as_ref().map(|response| response.status().as_u16());
+    let root_location = root
+        .as_ref()
+        .and_then(|response| response.headers().get(reqwest::header::LOCATION))
+        .and_then(|value| value.to_str().ok());
     done += 1;
     on_progress(done, total);
+    if authenticated {
+        if let Some(status) = root_status {
+            if session_rejected(status, root_location) {
+                on_progress(total, total);
+                return Ok(vec![session_rejected_finding(&base, status)]);
+            }
+        }
+    }
 
     if let (Some(headers), Some(status)) = (&root_headers, root_status) {
         // A 404/500 root is usually a fallback shell or an error page; policy
@@ -269,6 +332,14 @@ pub(super) async fn run_scan_with_progress(
             continue;
         };
         let status = response.status().as_u16();
+        let location = response
+            .headers()
+            .get(reqwest::header::LOCATION)
+            .and_then(|value| value.to_str().ok());
+        if authenticated && redirects_to_login(location) {
+            findings.push(session_stopped_finding(&base, done));
+            break;
+        }
         if status != 200 {
             continue;
         }
@@ -351,7 +422,7 @@ mod cors_probe_tests {
                 .redirect(reqwest::redirect::Policy::none()).no_proxy()
                 .build().unwrap();
             let progress = std::sync::Mutex::new(Vec::new());
-            let findings = run_scan_with_progress(&client, base.clone(), true, &|a,b| {
+            let findings = run_scan_with_progress(&client, base.clone(), true, false, &|a,b| {
                 progress.lock().unwrap().push((a,b));
             }).await.unwrap();
             let cors: Vec<_> = findings.iter()
@@ -365,5 +436,99 @@ mod cors_probe_tests {
             assert!(findings.iter().all(|f| !f.title.contains("missing security header")));
             server.await.unwrap();
         }).await.expect("scoped CORS fixture timed out");
+    }
+
+    #[test]
+    fn login_redirect_and_rejection_detection_is_bounded() {
+        assert!(redirects_to_login(Some("/login?next=/admin")));
+        assert!(redirects_to_login(Some("https://id.example.test/sso/start")));
+        assert!(redirects_to_login(Some("/account/login")));
+        assert!(!redirects_to_login(Some("/dashboard")));
+        assert!(!redirects_to_login(None));
+        assert!(session_rejected(401, None));
+        assert!(session_rejected(403, None));
+        assert!(session_rejected(302, Some("/signin")));
+        assert!(!session_rejected(302, Some("/home")));
+        assert!(!session_rejected(200, None));
+    }
+
+    #[tokio::test]
+    async fn authenticated_scan_stops_immediately_when_baseline_is_rejected() {
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let base = format!("http://{}", listener.local_addr().unwrap());
+            let server = tokio::spawn(async move {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let _ = crate::features::web::webtls::read_http_message(&mut stream)
+                    .await
+                    .unwrap();
+                stream
+                    .write_all(
+                        b"HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                    )
+                    .await
+                    .unwrap();
+            });
+            let client = reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(2))
+                .redirect(reqwest::redirect::Policy::none())
+                .no_proxy()
+                .build()
+                .unwrap();
+            let progress = std::sync::Mutex::new(Vec::new());
+            let findings = run_scan_with_progress(&client, base, true, true, &|a, b| {
+                progress.lock().unwrap().push((a, b));
+            })
+            .await
+            .unwrap();
+            server.await.unwrap();
+            assert_eq!(findings.len(), 1);
+            assert_eq!(findings[0].severity, "info");
+            assert!(findings[0].title.contains("session"));
+            let rendered = serde_json::to_string(&findings).unwrap();
+            assert!(!rendered.contains("sid="));
+            assert!(!rendered.contains("Authorization"));
+            assert_eq!(
+                progress.lock().unwrap().last().copied(),
+                Some((planned_requests(), planned_requests()))
+            );
+        })
+        .await
+        .expect("session rejection fixture timed out");
+    }
+
+    #[tokio::test]
+    async fn unauthenticated_review_never_reports_session_state() {
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let base = format!("http://{}", listener.local_addr().unwrap());
+            let server = tokio::spawn(async move {
+                for _ in 0..planned_requests() {
+                    let Ok((mut stream, _)) = listener.accept().await else {
+                        return;
+                    };
+                    let _ = crate::features::web::webtls::read_http_message(&mut stream).await;
+                    stream
+                        .write_all(
+                            b"HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                        )
+                        .await
+                        .unwrap();
+                }
+            });
+            let client = reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(2))
+                .redirect(reqwest::redirect::Policy::none())
+                .no_proxy()
+                .build()
+                .unwrap();
+            let findings = run_scan_with_progress(&client, base, true, false, &|_, _| {})
+                .await
+                .unwrap();
+            server.await.unwrap();
+            assert!(findings.iter().all(|finding| !finding.title.contains("session")));
+        })
+        .await
+        .expect("unauthenticated fixture timed out");
     }
 }

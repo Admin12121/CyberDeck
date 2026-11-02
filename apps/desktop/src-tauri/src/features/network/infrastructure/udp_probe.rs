@@ -14,6 +14,7 @@ const DNS_ROOT_NS: [u8; 5] = [0, 0, 2, 0, 1];
 enum UdpServiceProbe {
     Dns,
     Ntp,
+    Memcached,
     Generic,
 }
 
@@ -64,6 +65,29 @@ fn observed_now_ms() -> u64 {
         .unwrap_or(0)
 }
 
+/// Memcached's UDP framing includes a request ID, sequence and fragment count.
+/// Only a complete single-fragment response to our read-only VERSION command
+/// can be called observed evidence. Multi-fragment responses are not assembled.
+fn memcached_udp_request(request_id: u16) -> [u8; 17] {
+    let mut frame = [0u8; 17];
+    frame[..2].copy_from_slice(&request_id.to_be_bytes());
+    frame[4..6].copy_from_slice(&1u16.to_be_bytes()); // single UDP fragment
+    frame[8..].copy_from_slice(b"version\r\n");
+    frame
+}
+fn memcached_udp_reply(response: &[u8], request_id: u16) -> Option<String> {
+    if response.len() < 8
+        || response.len() > UDP_RESPONSE_LIMIT
+        || response[..2] != request_id.to_be_bytes()
+        || response[2..4] != [0, 0]
+        || response[4..6] != [0, 1]
+        || response[6..8] != [0, 0]
+    {
+        return None;
+    }
+    super::tcp_probe::memcached_version_claim(&response[8..])
+}
+
 /// Explicitly authorized, bounded single UDP datagram and response wait.
 /// ICMP-originated OS errors are not raw packet evidence; we report that
 /// provenance plainly and require a raw listener for future Nmap parity.
@@ -79,6 +103,7 @@ pub(super) fn probe_udp_observation_timed(
     let probe = match port {
         53 => UdpServiceProbe::Dns,
         123 => UdpServiceProbe::Ntp,
+        11211 | 11212 => UdpServiceProbe::Memcached,
         _ => UdpServiceProbe::Generic,
     };
     probe_udp_observation_bounded(host, port, probe, response_budget)
@@ -112,7 +137,7 @@ fn probe_udp_observation_bounded(
         retries: 0,
         os_error_code: None,
     };
-    let result = (|| -> std::io::Result<Option<(String, String)>> {
+    let result = (|| -> std::io::Result<Option<(String, String, Option<String>)>> {
         let local = if host.is_ipv4() {
             "0.0.0.0:0"
         } else {
@@ -137,9 +162,11 @@ fn probe_udp_observation_bounded(
                 .as_nanos() as u64)
                 ^ 0x6b27_5a11_730d_e295,
         );
+        let memcached = memcached_udp_request(id);
         let request: &[u8] = match probe {
             UdpServiceProbe::Dns => &dns,
             UdpServiceProbe::Ntp => &ntp,
+            UdpServiceProbe::Memcached => &memcached,
             UdpServiceProbe::Generic => &[], // one bounded empty datagram
         };
         socket.send(request)?;
@@ -150,31 +177,44 @@ fn probe_udp_observation_bounded(
                 (
                     "dns".into(),
                     format!("DNS/UDP matching root NS reply RCODE {rcode}"),
+                    None,
                 )
             }),
             UdpServiceProbe::Ntp if ntp_response_valid(&response[..length], &ntp) => Some((
                 "ntp".into(),
                 "NTP server reply matched originate timestamp".into(),
+                None,
             )),
-            UdpServiceProbe::Dns | UdpServiceProbe::Ntp => None,
+            UdpServiceProbe::Memcached => {
+                memcached_udp_reply(&response[..length], id).map(|claim| {
+                    (
+                        "memcached".into(),
+                        "Memcached UDP VERSION reply with matching request ID".into(),
+                        Some(claim),
+                    )
+                })
+            }
+            UdpServiceProbe::Ntp => None,
             UdpServiceProbe::Generic if length > 0 => Some((
                 "unknown".into(),
                 format!(
                     "UDP response received ({} bytes; application unverified)",
                     length
                 ),
+                None,
             )),
             UdpServiceProbe::Generic => None,
         };
         Ok(validated)
     })();
     match result {
-        Ok(Some((service, detail))) => {
+        Ok(Some((service, detail, claim))) => {
             observation.state = "open".into();
             observation.reason = "udp_correlated_response".into();
             observation.service = service;
             observation.service_basis = "observed_response".into();
             observation.banner = detail;
+            observation.remote_software_claim = claim;
         }
         Ok(None) => {
             observation.reason = "udp_invalid_or_unmatched_response".into();
@@ -210,6 +250,64 @@ fn probe_udp_observation_bounded(
 mod tests {
     use super::*;
     use std::io::ErrorKind;
+
+    #[test]
+    fn memcached_datagram_requires_exact_request_identity_and_single_fragment() {
+        let req = memcached_udp_request(0x1234);
+        assert_eq!(&req[..8], &[0x12, 0x34, 0, 0, 0, 1, 0, 0]);
+        assert_eq!(&req[8..], b"version\r\n");
+        let mut response = req[..8].to_vec();
+        response.extend_from_slice(b"VERSION 1.6.25\r\n");
+        assert_eq!(
+            memcached_udp_reply(&response, 0x1234).as_deref(),
+            Some("memcached/1.6.25")
+        );
+        let mut bad = response.clone();
+        bad[0] ^= 1;
+        assert_eq!(memcached_udp_reply(&bad, 0x1234), None);
+        bad = response.clone();
+        bad[2] = 1;
+        assert_eq!(memcached_udp_reply(&bad, 0x1234), None);
+        bad = response.clone();
+        bad[5] = 2;
+        assert_eq!(memcached_udp_reply(&bad, 0x1234), None);
+        bad = response.clone();
+        bad[8] = b'X';
+        assert_eq!(memcached_udp_reply(&bad, 0x1234), None);
+        assert_eq!(memcached_udp_reply(&response[..7], 0x1234), None);
+        assert_eq!(
+            memcached_udp_reply(&response[..response.len() - 1], 0x1234),
+            None
+        );
+    }
+
+    #[test]
+    fn memcached_udp_loopback_uses_actual_protocol_request_and_claim() {
+        let server = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let port = server.local_addr().unwrap().port();
+        let worker = std::thread::spawn(move || {
+            let mut req = [0u8; 64];
+            let (len, peer) = server.recv_from(&mut req).unwrap();
+            assert_eq!(len, 17);
+            assert_eq!(&req[8..len], b"version\r\n");
+            let mut answer = req[..8].to_vec();
+            answer.extend_from_slice(b"VERSION 1.6.25\r\n");
+            server.send_to(&answer, peer).unwrap();
+        });
+        let found = probe_udp_observation_inner(
+            "127.0.0.1".parse().unwrap(),
+            port,
+            UdpServiceProbe::Memcached,
+        );
+        worker.join().unwrap();
+        assert_eq!(found.state, "open");
+        assert_eq!(found.service, "memcached");
+        assert_eq!(found.service_basis, "observed_response");
+        assert_eq!(
+            found.remote_software_claim.as_deref(),
+            Some("memcached/1.6.25")
+        );
+    }
 
     #[test]
     fn dns_matched_identity_and_question_required() {

@@ -22,6 +22,17 @@ export interface WebPassiveFinding {
 /** Must match the fixed native catalog (`web_passive_rules_v1`). */
 const MAX_PASSIVE_RULES = 30;
 
+export interface WebSessionHeaderWire {
+  name: string;
+  value: string;
+}
+
+/** Volatile: validated by the backend and never persisted. */
+export interface WebSessionWire {
+  cookies: string | null;
+  headers: WebSessionHeaderWire[];
+}
+
 export interface WebAssessmentJob {
   job_id: number;
   kind: "scanner" | "spider" | "passive" | "active-query" | "active-form" | "active-json" | "active-sql" | "active-sql-boolean" | "active-traversal";
@@ -52,6 +63,7 @@ export async function startWebAssessment(
   kind: "scanner" | "spider" | "active-query" | "active-form" | "active-json" | "active-sql" | "active-sql-boolean" | "active-traversal",
   targetUrl: string, authorized: boolean, maxDepth = 2, probeBody?: string,
   scanIntensity?: "quick" | "standard" | "thorough",
+  auth?: WebSessionWire,
 ): Promise<number> {
   if (!isDesktop()) throw new Error("Web assessments require the native desktop runtime");
   if ((kind === "active-form" || kind === "active-json") &&
@@ -59,6 +71,10 @@ export async function startWebAssessment(
     throw new Error("Provide a bounded manual POST template");
   }
   const args = { kind, targetUrl, maxDepth, authorized, probeBody: probeBody ?? null };
+  if (auth) {
+    // Additive v3 IPC: volatile session context validated by the backend.
+    return invoke<number>("web_assessment_start_v3", { ...args, scanIntensity, auth });
+  }
   if (scanIntensity === undefined) {
     // Keep existing clients on the unchanged v1 IPC contract.
     return invoke<number>("web_assessment_start_v1", args);
