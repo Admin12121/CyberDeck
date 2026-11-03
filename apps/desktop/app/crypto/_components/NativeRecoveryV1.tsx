@@ -77,6 +77,7 @@ function useRecoveryController(targetHash: string, onCaseCreated?: (caseId: stri
   const [backend, setBackend] = useState("auto");
   const [attackMode, setAttackMode] = useState<"wordlist" | "mask">("wordlist");
   const [maskText, setMaskText] = useState("");
+  const [customCharsets, setCustomCharsets] = useState("");
   const [hashInput, setHashInput] = useState<RecoveryHashInputStatusV1 | null>(null);
   const [hashInputBusy, setHashInputBusy] = useState(false);
   const [engineChoice, setEngineChoice] = useState<"rust" | "hashcat">("rust");
@@ -106,10 +107,23 @@ function useRecoveryController(targetHash: string, onCaseCreated?: (caseId: stri
   const clearReveal = useCallback(() => setSecretHex(null), []);
   const hash = targetHash.trim();
   const hashcatMode = RUST_MODES.find((item) => item.value === hashcatAlgorithm)!;
-  // Modular KDF strings (bcrypt, argon2, scrypt, pbkdf2, yescrypt) run on the
-  // native CPU engine by default; the embedded core covers four of them when
-  // explicitly selected (phpass/md5crypt/sha512crypt/bcrypt).
-  const isKdfHash = hash.startsWith("$") && hash.length >= 8;
+  // Modular KDF strings run on the native CPU engine by default; the embedded
+  // core covers several of them when explicitly selected. Detection is strict:
+  // only known modular prefixes count, so unknown $-formats (pkzip2, ...)
+  // correctly land in the unsupported state instead of a wall of controls.
+  const KDF_PREFIXES = [
+    "$2a$", "$2b$", "$2y$", "$2x$", "$argon2", "$y$", "$7$", "$gy$", "$G$",
+    "$scrypt$", "$pbkdf2", "$6$", "$5$", "$1$", "$apr1$", "$sha1$", "$P$",
+    "$H$", "$NT$", "$DCC2$", "DCC2#", "M$", "$NETNTLM", "WPA*01*", "0x0100",
+    "0x0200",
+  ];
+  const isKdfHash =
+    (hash.startsWith("$") && KDF_PREFIXES.some((prefix) => hash.startsWith(prefix))) ||
+    hash.startsWith("WPA*01*") ||
+    hash.startsWith("0x0100") ||
+    hash.startsWith("0x0200") ||
+    hash.startsWith("DCC2#") ||
+    hash.startsWith("M$");
   const hexBody = hash.startsWith("*") ? hash.slice(1) : hash;
   const modularModeSelected = hashcatMode.digits === 0;
   const validHash = isKdfHash || modularModeSelected
@@ -351,7 +365,7 @@ function useRecoveryController(targetHash: string, onCaseCreated?: (caseId: stri
         max_candidates: maxCandidates, max_matches: maxMatches,
       };
       try {
-        const id = await recoveryMaskV1(request, maskText.trim(), () => {});
+        const id = await recoveryMaskV1(request, maskText.trim(), () => {}, customCharsets.trim() || undefined);
         if (scopeRef.current !== requestScope) return;
         currentJob = { scope: requestScope, id };
         setJobId(id);
@@ -527,7 +541,7 @@ function useRecoveryController(targetHash: string, onCaseCreated?: (caseId: stri
     discarded, revealing, pendingCancel, clearReveal, validHash,
     selectedWordlist, choosingWordlist, wordlistError, chooseWordlist,
     running: scopedJob && running, selectedDevice, deviceAvailable,
-    attackMode, setAttackMode, maskText, setMaskText,
+    attackMode, setAttackMode, maskText, setMaskText, customCharsets, setCustomCharsets,
     hashInput, hashInputBusy, importHashFile, importUnshadow,
     start, autoStart, autoDisabledReason, cancel, discard, reveal,
     disabledReason, progress: scopedJob ? progress : null, percent, hash, caseId, selection,
@@ -614,6 +628,15 @@ export function NativeRecoveryControls() {
         </div>
         {r.attackMode === "mask" ? (
           <div className="space-y-1.5">
+            <label className="block space-y-1">
+              <span className="text-[11px] text-fg-dim">Custom charsets · optional</span>
+              <input type="text" aria-label="Custom mask charsets"
+                value={r.customCharsets} maxLength={1200}
+                disabled={r.jobId !== null || r.busy}
+                onChange={(event) => { r.setCustomCharsets(event.target.value.slice(0, 1200)); r.clearReveal(); }}
+                placeholder="1=0123456789abcdef;2=ABC"
+                className="h-8 w-full rounded-md border border-line bg-app px-2 font-mono text-xs text-fg outline-none focus-visible:ring-1 focus-visible:ring-orange disabled:opacity-50" />
+            </label>
             <label className="block space-y-1">
               <span className="text-[11px] text-fg-dim">Mask pattern</span>
               <input type="text" aria-label="Recovery mask pattern"
@@ -780,9 +803,8 @@ export function NativeRecoveryControls() {
                 <div className="space-y-1">
                   <span className="text-[11px] text-fg-dim">Hash family</span>
                   <p className="rounded-md border border-line bg-app px-2 py-1.5 text-[11px] text-fg">
-                    Modular KDF hash · detected backend-side · CPU wordlist attack with a bounded budget
+                    Modular KDF · CPU
                   </p>
-                  <span className="text-[10px] text-fg-muted">Cost parameters come from the hash itself.</span>
                 </div>
               ) : (
                 <label className="block space-y-1">
@@ -829,7 +851,9 @@ export function NativeRecoveryControls() {
                 </label>
               )}
               {r.hashcatCapability && !r.hashcatCapability.available ? (
-                <p className="text-[10px] text-fg-muted">{r.hashcatCapability.detail}</p>
+                <p className="text-[10px] text-fg-muted">
+                  GPU engine not built (dev). See docs/crypto-review.md.
+                </p>
               ) : null}
             </div>
             <div className="space-y-1.5">

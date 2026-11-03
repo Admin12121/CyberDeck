@@ -518,6 +518,7 @@ pub fn execute_path_with_rules<P: FnMut(RecoveryProgressWire)>(
 pub fn execute_mask<P: FnMut(RecoveryProgressWire)>(
     request: &RecoveryRequest,
     mask: &str,
+    custom_charsets: &str,
     cancel: &RecoveryCancel,
     mut progress: P,
 ) -> Result<RecoveryRun, String> {
@@ -525,7 +526,21 @@ pub fn execute_mask<P: FnMut(RecoveryProgressWire)>(
         return Err("mask recovery runs on the native CPU backend only; select CPU".into());
     }
     validate_request(request)?;
-    let candidates = cyberdeck_crypto::recovery::MaskCandidates::parse(mask)?;
+    // Custom charset definitions: "1=chars;2=chars" (up to nine slots).
+    let mut custom: Vec<(u8, Vec<u8>)> = Vec::new();
+    for part in custom_charsets.split(';') {
+        let part = part.trim();
+        if part.is_empty() {
+            continue;
+        }
+        let (slot, set) = part.split_once('=').ok_or("charset definition must be N=chars")?;
+        let slot = slot.trim().parse::<u8>().map_err(|_| "charset slot must be 1-9")?;
+        if !(b'1'..=b'9').contains(&slot) || set.len() > 256 {
+            return Err("charset slot must be 1-9 with at most 256 ASCII bytes".into());
+        }
+        custom.push((slot, set.bytes().collect()));
+    }
+    let candidates = cyberdeck_crypto::recovery::MaskCandidates::parse_with_custom(mask, &custom)?;
     if candidates.total() == 0 {
         return Err("mask keyspace is empty".into());
     }

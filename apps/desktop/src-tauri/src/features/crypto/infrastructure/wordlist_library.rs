@@ -51,18 +51,11 @@ struct CatalogEntry {
 /// rockyou list is breach-release data redistributed by a standard mirror.
 const CATALOG: &[CatalogEntry] = &[
     CatalogEntry {
-        id: "seclists-top-100000",
-        name: "SecLists top 100,000 passwords",
-        source_url: "https://raw.githubusercontent.com/danielmiessler/SecLists/master/Passwords/Common-Credentials/10-million-password-list-top-100000.txt",
-        license_note: "MIT (SecLists)",
-        min_bytes: 700_000,
-    },
-    CatalogEntry {
         id: "seclists-top-1000000",
         name: "SecLists top 1,000,000 passwords",
-        source_url: "https://raw.githubusercontent.com/danielmiessler/SecLists/master/Passwords/Common-Credentials/10-million-password-list-top-1000000.txt",
+        source_url: "https://raw.githubusercontent.com/danielmiessler/SecLists/master/Passwords/Common-Credentials/Pwdb_top-1000000.txt",
         license_note: "MIT (SecLists)",
-        min_bytes: 7_000_000,
+        min_bytes: 8_000_000,
     },
     CatalogEntry {
         id: "rockyou",

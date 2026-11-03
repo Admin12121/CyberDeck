@@ -1208,7 +1208,7 @@ pub async fn recovery_autopilot_v1(
                 forward(labeled);
             };
             let result = if let Some(mask) = &stage.mask {
-                recovery_backend::execute_mask(&request, mask, &token, progress_with_stage)
+                recovery_backend::execute_mask(&request, mask, "", &token, progress_with_stage)
             } else if stage.engine == autopilot::StageEngine::Gpu {
                 // GPU stage: the embedded pinned core runs its own devices.
                 let path = library_wordlists::resolve(&worker_app, &stage.wordlist_id)?;
@@ -1372,6 +1372,7 @@ pub fn recovery_hash_status_v1(
 pub fn recovery_mask_v1(
     request: RecoveryRequest,
     mask: String,
+    custom_charsets: Option<String>,
     on_event: Channel<RecoveryEvent>,
     state: State<'_, RecoveryCtx>,
     session: State<'_, CaseSessionCtx>,
@@ -1393,9 +1394,13 @@ pub fn recovery_mask_v1(
                        forward: &mut (dyn FnMut(RecoveryProgressWire) + Send)|
           -> Result<RecoveryRun, String> {
         let _ = sink;
-        recovery_backend::execute_mask(&request, &mask, &worker_token, |progress| {
-            forward(progress)
-        })
+        recovery_backend::execute_mask(
+            &request,
+            &mask,
+            custom_charsets.as_deref().unwrap_or(""),
+            &worker_token,
+            |progress| forward(progress),
+        )
     };
     spawn_recovery_worker(registry, job_id, scope, token, emit_channel(on_event), worker);
     Ok(job_id)

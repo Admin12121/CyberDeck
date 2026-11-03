@@ -227,11 +227,15 @@ export async function recoveryMaskV1(
   request: RecoveryRequestV1,
   mask: string,
   onEvent: (event: RecoveryEventV1) => void,
+  customCharsets?: string,
 ): Promise<number> {
   if (!inTauri) throw new Error("Mask recovery requires the desktop runtime");
   const channel = new Channel<RecoveryEventV1>();
   channel.onmessage = onEvent;
-  return invoke<number>("recovery_mask_v1", { request, mask, onEvent: channel });
+  return invoke<number>("recovery_mask_v1", {
+    request, mask, onEvent: channel,
+    customCharsets: customCharsets || null,
+  });
 }
 
 export interface RecoveryHashInputStatusV1 {

@@ -93,6 +93,8 @@ if (mode === "--import") {
                       "01100", "02100", "05500", "05600", "07400", "01500", "00132", "01731"]) {
     add("src/modules/module_" + mode + ".c");
   }
+  // Shared module-common sources included verbatim by batch modules.
+  add("src/modules/blowfish_common.c");
   dirFiles("OpenCL", (name) =>
     /^m(00010|00020|00050|00060|00110|00120|01100|02100|05500|05600|07400|01500|00132|01731)[-_a-z0-9]*\.cl$/.test(name));
   for (const kernel of [
