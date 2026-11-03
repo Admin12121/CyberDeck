@@ -73,7 +73,11 @@ fn read_request(mut reader: impl Read) -> io::Result<Request> {
     } else {
         1400
     };
-    if !matches!(hash_mode, 0 | 100 | 1000 | 1400 | 1700) {
+    if !matches!(
+        hash_mode,
+        0 | 10 | 20 | 50 | 60 | 100 | 110 | 120 | 132 | 400 | 500 | 1000 | 1100 | 1400 | 1500
+        | 1700 | 1731 | 1800 | 2100 | 3200 | 5500 | 5600 | 7400
+    ) {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             "unsupported hash mode",
@@ -88,6 +92,7 @@ fn read_request(mut reader: impl Read) -> io::Result<Request> {
             "invalid work bounds",
         ));
     }
+    eprintln!("[wk] frame parsed");
     let request = Request {
         max_candidates,
         max_seconds,
@@ -154,9 +159,14 @@ fn native_failure(error: hashcat_ffi::NativeError) -> i32 {
 }
 
 fn run() -> Result<(), i32> {
+    eprintln!("[wk] frame read start");
     let request = read_request(io::stdin().lock()).map_err(|_| 10)?;
+    eprintln!("[wk] validating");
     validate_paths(&request).map_err(|_| 11)?;
+    eprintln!("[wk] validated");
+    eprintln!("[wk] calling create");
     let mut engine = hashcat_ffi::NativeHashcat::new().map_err(native_failure)?;
+    eprintln!("[wk] created");
     engine
         .prepare_mode(
             &request.root,

@@ -38,9 +38,12 @@ static void cd_setup_event (const u32 id, MAYBE_UNUSED hashcat_ctx_t *context,
                             MAYBE_UNUSED const void *buffer,
                             MAYBE_UNUSED const size_t length)
 {
-  snprintf (cd_last_event, sizeof (cd_last_event), "event 0x%08x hc_hash=%.60s hashfile=%.60s", id,
-            context != NULL && context->user_options_extra != NULL ? (context->user_options_extra->hc_hash ? context->user_options_extra->hc_hash : "NULL") : "no-ctx",
-            context != NULL && context->hashes != NULL ? (context->hashes->hashfile ? context->hashes->hashfile : "NULL") : "no-ctx");
+  fprintf (stderr, "[ev %08x] hc_hash=%s", id,
+           context->user_options_extra ? (context->user_options_extra->hc_hash ? context->user_options_extra->hc_hash : "NULL") : "no-extra");
+  fputc (10, stderr);
+  snprintf (cd_last_event, sizeof (cd_last_event), "event 0x%08x", id);
+  fputc (10, stderr);
+  snprintf (cd_last_event, sizeof (cd_last_event), "event 0x%08x", id);
   {
     char one[32];
     int n = snprintf (one, sizeof (one), "%08x ", id);
@@ -56,6 +59,14 @@ static void cd_setup_event (const u32 id, MAYBE_UNUSED hashcat_ctx_t *context,
     case EVENT_BACKEND_DEVICES_INIT_PRE:
     case EVENT_BACKEND_DEVICES_INIT_POST:
       __atomic_store_n (&cd_setup_phase, id, __ATOMIC_RELAXED);
+      break;
+    case EVENT_HASHLIST_PARSE_INPUT_PRE:
+    case EVENT_HASHLIST_PARSE_INPUT_POST:
+      fputs ("[cd-paths] hc_hash=", stderr);
+      fputs (context->user_options_extra->hc_hash, stderr);
+      fputs (" hashfile=", stderr);
+      fputs (context->hashes->hashfile, stderr);
+      fputc (10, stderr);
       break;
     case EVENT_LOG_WARNING:
     case EVENT_LOG_ERROR:
@@ -150,6 +161,8 @@ uint32_t cd_hashcat_last_setup_stage (cd_hashcat *handle)
 
 cd_hashcat *cd_hashcat_create (void)
 {
+  fputs ("[cd] create entered", stderr);
+  fputc (10, stderr);
   cd_hashcat *handle = (cd_hashcat *) calloc (1, sizeof (cd_hashcat));
   if (handle == NULL) return NULL;
 
@@ -205,6 +218,7 @@ int cd_hashcat_prepare_mode (
 {
   snprintf (cd_last_event, sizeof (cd_last_event), "prepare entered mode check");
   if (handle == NULL || handle->core == NULL || handle->session_attempted) return -1;
+  fputc (10, stderr);
   if (!handle->options_initialized) return -1;
   {
     FILE *probe = fopen (hash_file, "rb");
@@ -298,16 +312,45 @@ int cd_hashcat_prepare_mode (
   {
     return -41;
   }
+  {
+    const user_options_t *uo = handle->core->user_options;
+    const user_options_extra_t *uo2 = handle->core->user_options_extra;
+    fprintf (stderr, "[cd-opts] hc_argc=%d", uo->hc_argc);
+    for (int i = 0; i < (int) argc; i++)
+    {
+      fputs ("argv[", stderr);
+      fprintf (stderr, "%d", i);
+      fputs ("]=", stderr);
+      fputs (handle->fixed_options[i] ? handle->fixed_options[i] : "NULL", stderr);
+      fputc (10, stderr);
+    }
+    fputs (" extra hc_hash=", stderr);
+    fputs (uo2->hc_hash ? uo2->hc_hash : "NULL", stderr);
+    fputc (10, stderr);
+  }
   if (user_options_sanity (handle->core) != 0)
   {
     return -42;
   }
 
   handle->session_attempted = 1;
+  fputs ("[cd] calling session_init", stderr);
+  fputc (10, stderr);
   if (hashcat_session_init (handle->core, install_root, shared_root,
                             (int) argc, handle->fixed_options, comptime) != 0)
   {
     return -5;
+  }
+  fputs ("[cd] session_init OK", stderr);
+  fputc (10, stderr);
+  {
+    const user_options_extra_t *uo2 = handle->core->user_options_extra;
+    fputs ("[cd] post-init hc_hash=", stderr);
+    fputs (uo2->hc_hash ? uo2->hc_hash : "NULL", stderr);
+    fputc (10, stderr);
+    fputs ("[cd] post-init hc_argv0=", stderr);
+    fputs (uo2->hc_workv && uo2->hc_workc > 0 && uo2->hc_workv[0] ? uo2->hc_workv[0] : "NULL", stderr);
+    fputc (10, stderr);
   }
 
   return 0;
