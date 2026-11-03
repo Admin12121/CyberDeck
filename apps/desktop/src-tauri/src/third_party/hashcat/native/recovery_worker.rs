@@ -171,8 +171,22 @@ fn run() -> Result<(), i32> {
         .map_err(native_failure)?;
     match engine.execute() {
         Ok(0 | 1) => Ok(()), // completed with match or exhausted without match
-        Ok(_) => Err(40),
-        Err(error) => Err(native_failure(error)),
+        Ok(other) => {
+            eprintln!(
+                "diag: shim_version={} last_event={:?} trace={:?}",
+                hashcat_ffi::NativeHashcat::shim_version(),
+                hashcat_ffi::NativeHashcat::last_event(),
+                hashcat_ffi::NativeHashcat::event_trace()
+            );
+            Err(40 + (other as i32).abs().clamp(0, 50))
+        }
+        Err(error) => {
+            let event = hashcat_ffi::NativeHashcat::last_event();
+            if !event.trim().is_empty() {
+                eprintln!("hashcat: {}", event.trim_end());
+            }
+            Err(native_failure(error))
+        }
     }
 }
 

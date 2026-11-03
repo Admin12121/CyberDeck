@@ -29,10 +29,24 @@
  */
 static unsigned int cd_setup_phase = 0;
 
+static char cd_last_event[4096];
+static char cd_event_trace[2048];
+static char cd_last_log[4096];
+static char cd_first_log[2048];
+
 static void cd_setup_event (const u32 id, MAYBE_UNUSED hashcat_ctx_t *context,
                             MAYBE_UNUSED const void *buffer,
                             MAYBE_UNUSED const size_t length)
 {
+  snprintf (cd_last_event, sizeof (cd_last_event), "event 0x%08x hc_hash=%.60s hashfile=%.60s", id,
+            context != NULL && context->user_options_extra != NULL ? (context->user_options_extra->hc_hash ? context->user_options_extra->hc_hash : "NULL") : "no-ctx",
+            context != NULL && context->hashes != NULL ? (context->hashes->hashfile ? context->hashes->hashfile : "NULL") : "no-ctx");
+  {
+    char one[32];
+    int n = snprintf (one, sizeof (one), "%08x ", id);
+    size_t len = strlen (cd_event_trace);
+    if (len + n < sizeof (cd_event_trace)) { memcpy (cd_event_trace + len, one, n); cd_event_trace[len + n] = 0; }
+  }
   switch (id)
   {
     case EVENT_BRIDGES_INIT_PRE:
@@ -43,9 +57,49 @@ static void cd_setup_event (const u32 id, MAYBE_UNUSED hashcat_ctx_t *context,
     case EVENT_BACKEND_DEVICES_INIT_POST:
       __atomic_store_n (&cd_setup_phase, id, __ATOMIC_RELAXED);
       break;
+    case EVENT_LOG_WARNING:
+    case EVENT_LOG_ERROR:
+      /* Log events pass a NULL buffer: the rendered message lives in the
+       * event context's own buffer. Read it from there (same process). */
+      if (context != NULL && context->event_ctx != NULL)
+      {
+        const char *msg = context->event_ctx->msg_buf;
+        size_t copy = strnlen (msg, 2047);
+        memcpy (cd_last_log, msg, copy);
+        cd_last_log[copy] = 0;
+        if (cd_first_log[0] == 0 && copy > 0)
+        {
+          size_t fc = copy < sizeof (cd_first_log) - 1 ? copy : sizeof (cd_first_log) - 1;
+          memcpy (cd_first_log, msg, fc);
+          cd_first_log[fc] = 0;
+        }
+      }
+      break;
     default:
+      snprintf (cd_last_event, sizeof (cd_last_event), "last event id 0x%08x", id);
       break;
   }
+}
+
+const char *cd_hashcat_last_event (void)
+{
+  if (cd_first_log[0] && strcmp (cd_first_log, cd_last_log) != 0)
+  {
+    static char combined[8192];
+    snprintf (combined, sizeof (combined), "first: %s || last: %s", cd_first_log, cd_last_log);
+    return combined;
+  }
+  return cd_last_log[0] ? cd_last_log : cd_last_event;
+}
+
+const char *cd_hashcat_event_trace (void)
+{
+  return cd_event_trace;
+}
+
+int cd_hashcat_shim_version (void)
+{
+  return 42;
 }
 
 struct cd_hashcat
@@ -149,8 +203,32 @@ int cd_hashcat_prepare_mode (
     uint32_t device_id,
     uint32_t hash_mode)
 {
+  snprintf (cd_last_event, sizeof (cd_last_event), "prepare entered mode check");
   if (handle == NULL || handle->core == NULL || handle->session_attempted) return -1;
   if (!handle->options_initialized) return -1;
+  {
+    FILE *probe = fopen (hash_file, "rb");
+  {
+    FILE *probe = fopen (hash_file, "rb");
+    if (probe != NULL)
+    {
+      char head[80] = { 0 };
+      size_t n = fread (head, 1, sizeof (head) - 1, probe);
+      fclose (probe);
+      head[n] = 0;
+      fputs ("[cd-probe] hash_file readable: ", stderr);
+      fprintf (stderr, "%zu bytes: ", n);
+      fputs (head, stderr);
+      fputc (10, stderr);
+    }
+    else
+    {
+      fputs ("[cd-probe] hash_file UNREADABLE: ", stderr);
+      fputs (hash_file, stderr);
+      fputc (10, stderr);
+    }
+  }
+  }
   if (!validate_path (install_root) || !validate_path (shared_root)
       || !validate_path (hash_file) || !validate_path (wordlist_file)
       || !validate_path (temporary_outfile)) return -2;

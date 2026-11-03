@@ -45,6 +45,12 @@ unsafe extern "C" {
     ) -> c_int;
     fn cd_hashcat_execute(context: *mut c_void) -> c_int;
     fn cd_hashcat_quit(context: *mut c_void) -> c_int;
+    #[link_name = "cd_hashcat_last_event"]
+    fn cd_hashcat_last_event() -> *const c_char;
+    #[link_name = "cd_hashcat_shim_version"]
+    fn cd_hashcat_shim_version() -> i32;
+    #[link_name = "cd_hashcat_event_trace"]
+    fn cd_hashcat_event_trace() -> *const c_char;
     fn cd_hashcat_destroy(context: *mut c_void);
 }
 
@@ -212,6 +218,30 @@ impl NativeHashcat {
     }
 
     /// Cooperative Stop only; supervising process must force-kill if hung.
+    pub fn event_trace() -> String {
+        unsafe {
+            let ptr = cd_hashcat_event_trace();
+            if ptr.is_null() {
+                return String::new();
+            }
+            std::ffi::CStr::from_ptr(ptr).to_string_lossy().into_owned()
+        }
+    }
+
+    pub fn shim_version() -> i32 {
+        unsafe { cd_hashcat_shim_version() }
+    }
+
+    pub fn last_event() -> String {
+        unsafe {
+            let ptr = cd_hashcat_last_event();
+            if ptr.is_null() {
+                return String::new();
+            }
+            std::ffi::CStr::from_ptr(ptr).to_string_lossy().into_owned()
+        }
+    }
+
     pub fn request_quit(&mut self) -> Result<(), NativeError> {
         if self.state != InitState::Ready {
             return Err(NativeError::InvalidBound);

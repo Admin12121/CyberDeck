@@ -76,6 +76,11 @@ CD_HC_API int cd_hashcat_execute(cd_hashcat *context);
 /* Cooperative cancellation; the supervising worker may be killed on hang. */
 CD_HC_API int cd_hashcat_quit(cd_hashcat *context);
 
+/* Diagnostics: last captured event-log line and a shim build probe. */
+CD_HC_API const char *cd_hashcat_last_event(void);
+CD_HC_API int cd_hashcat_shim_version(void);
+CD_HC_API const char *cd_hashcat_event_trace(void);
+
 /* Idempotent cleanup of session and core. Not valid concurrently with execute. */
 CD_HC_API void cd_hashcat_destroy(cd_hashcat *context);
 

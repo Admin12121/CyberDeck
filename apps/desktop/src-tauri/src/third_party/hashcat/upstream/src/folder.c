@@ -457,6 +457,17 @@ int folder_early_dirs (MAYBE_UNUSED const char *install_folder, MAYBE_UNUSED con
 
 int folder_config_init (hashcat_ctx_t *hashcat_ctx, MAYBE_UNUSED const char *install_folder, MAYBE_UNUSED const char *shared_folder)
 {
+  /* CyberDeck: module DLLs import hashcat.dll from the install root;
+   * register the root and preload the core so plugins resolve it. */
+  #if defined (_WIN)
+  if (install_folder != NULL)
+  {
+    SetDllDirectoryA (install_folder);
+    char core_dll[HCBUFSIZ_TINY];
+    snprintf (core_dll, sizeof (core_dll), "%s%s", install_folder, "hashcat.dll");
+    LoadLibraryA (core_dll);
+  }
+  #endif
   folder_config_t *folder_config = hashcat_ctx->folder_config;
   const user_options_t *user_options = hashcat_ctx->user_options;
 

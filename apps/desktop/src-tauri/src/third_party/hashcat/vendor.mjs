@@ -61,7 +61,13 @@ if (mode === "--import") {
   dirFiles("include", (name) => name.endsWith(".h") || name.endsWith(".def"));
   // The complete host EMU object family uses almost all common inc_ sources,
   // not only the kernel for hash mode 1400.
-  dirFiles("OpenCL", (name) => /^inc_.*\.(?:h|cl)$/.test(name));
+  const bundledModePrefixes = ["00000", "00010", "00020", "00050", "00060", "00100", "00110", "00120", "00132", "00400", "00500", "01100", "01400", "01500", "01700", "01731", "01800", "02100", "03200", "05500", "05600", "07400"];
+  dirFiles("OpenCL", (name) => {
+    if (name.endsWith(".h")) return true;
+    if (!name.endsWith(".cl")) return false;
+    if (/^(inc_|shared|markov_)/.test(name)) return true;
+    return bundledModePrefixes.some((p) => name.startsWith("m" + p));
+  });
   // Raw digest modules: one kernel triplet per bundled mode.
   for (const mode of ["00000", "00100", "01000", "01400", "01700"]) {
     for (const id of ["a0", "a1", "a3"]) {
@@ -74,6 +80,7 @@ if (mode === "--import") {
   // Upstream source initialization requires this generic recipe kernel even
   // when the selected attack uses SHA-256 mode 1400.
   add("OpenCL/m04000-pure.cl");
+  dirFiles("OpenCL", (name) => name.startsWith("m04000"));
   // Upstream initializes its default module 00000 before switching to 1400.
   // It is a native bootstrap dependency, not an exposed CyberDeck mode.
   add("src/modules/module_00000.c");
@@ -95,6 +102,9 @@ if (mode === "--import") {
   }
   // Shared module-common sources included verbatim by batch modules.
   add("src/modules/blowfish_common.c");
+  // Candidate-feed plugins: the wordlist reader (and siblings) are loadable
+  // plugins in this hashcat; a wordlist attack cannot start without them.
+  dirFiles("src/feeds", (name) => name.endsWith(".c") || name.endsWith(".h"));
   dirFiles("OpenCL", (name) =>
     /^m(00010|00020|00050|00060|00110|00120|01100|02100|05500|05600|07400|01500|00132|01731)[-_a-z0-9]*\.cl$/.test(name));
   for (const kernel of [
@@ -119,13 +129,21 @@ if (mode === "--import") {
   add("docs/license_libs/OPENCL_HEADERS_LICENSE.txt");
   add("docs/license_libs/SSE2NEON_LICENSE.txt");
 
-  // No overwriting a local modification silently when re-importing.
+  // No overwriting a local modification silently when re-importing. A local
+  // file that already matches the pinned manifest (CyberDeck loader patches
+  // are part of the pinned provenance) is accepted as up to date.
+  const previous = (() => {
+    try { return JSON.parse(readFileSync(fileManifest, "utf8")); } catch { return { files: {} }; }
+  })();
   const paths = Array.from(entries).sort();
   for (const rel of paths) {
     const data = readFileSync(file(rel));
     const target = resolve(vendor, rel);
     if (existsSync(target) && hash(readFileSync(target)) !== hash(data)) {
-      throw new Error("local vendor differs; refusing destructive overwrite: " + rel);
+      const pinned = previous.files?.[rel];
+      if (!pinned || pinned.sha256 !== hash(readFileSync(target))) {
+        throw new Error("local vendor differs; refusing destructive overwrite: " + rel);
+      }
     }
   }
   for (const rel of paths) {
@@ -133,13 +151,33 @@ if (mode === "--import") {
     mkdirSync(dirname(target), { recursive: true });
     copyFileSync(file(rel), target);
   }
-  for (const rel of ["obj/.gitkeep", "modules/.gitkeep", "bridges/.gitkeep", "feeds/.gitkeep"]) {
-    const target = resolve(vendor, rel);
-    mkdirSync(dirname(target), { recursive: true });
-    if (!existsSync(target)) writeFileSync(target, "");
+  // CyberDeck loader patches, applied identically on every import so the
+  // manifest pins the patched bytes. (1) dynloader: resolve module-plugin
+  // dependencies from the plugin's own directory. (2) folder: register the
+  // install root and preload the shared core before plugins load.
+  const NL = String.fromCharCode(10);
+  {
+    const dyn = resolve(vendor, "src/dynloader.c");
+    let text = readFileSync(dyn, "utf8");
+    const dynAnchor = "hc_dynlib_t hc_dlopen (LPCSTR lpLibFileName)" + NL + "{" + NL + "  return LoadLibraryA (lpLibFileName);" + NL + "}";
+    const dynPatch = "hc_dynlib_t hc_dlopen (LPCSTR lpLibFileName)" + NL + "{" + NL + "  /* CyberDeck: module DLLs live in a subfolder and import hashcat.dll from" + NL + "   * the install root; resolve dependencies from the plugin's own folder. */" + NL + "  #if defined (_WIN)" + NL + "  return LoadLibraryExA (lpLibFileName, NULL, LOAD_WITH_ALTERED_SEARCH_PATH);" + NL + "  #else" + NL + "  return LoadLibraryA (lpLibFileName);" + NL + "  #endif" + NL + "}";
+    if (!text.includes("LoadLibraryExA")) {
+      if (!text.includes(dynAnchor)) throw new Error("dynloader anchor missing upstream");
+      writeFileSync(dyn, text.replace(dynAnchor, dynPatch));
+    }
+    const fold = resolve(vendor, "src/folder.c");
+    let ftext = readFileSync(fold, "utf8");
+    const foldAnchor = "int folder_config_init (hashcat_ctx_t *hashcat_ctx, MAYBE_UNUSED const char *install_folder, MAYBE_UNUSED const char *shared_folder)" + NL + "{";
+    const foldPatch = "int folder_config_init (hashcat_ctx_t *hashcat_ctx, MAYBE_UNUSED const char *install_folder, MAYBE_UNUSED const char *shared_folder)" + NL + "{" + NL + "  /* CyberDeck: module DLLs import hashcat.dll from the install root;" + NL + "   * register the root and preload the core so plugins resolve it. */" + NL + "  #if defined (_WIN)" + NL + "  if (install_folder != NULL)" + NL + "  {" + NL + "    SetDllDirectoryA (install_folder);" + NL + "    char core_dll[HCBUFSIZ_TINY];" + NL + '    snprintf (core_dll, sizeof (core_dll), "%s%s", install_folder, "hashcat.dll");' + NL + "    LoadLibraryA (core_dll);" + NL + "  }" + NL + "  #endif";
+    if (!ftext.includes("SetDllDirectoryA")) {
+      if (!ftext.includes(foldAnchor)) throw new Error("folder anchor missing upstream");
+      writeFileSync(fold, ftext.replace(foldAnchor, foldPatch));
+    }
   }
+  // Hash the PATCHED local vendor bytes: CyberDeck loader patches are part
+  // of the pinned provenance, applied identically on every import.
   const files = Object.fromEntries(paths.map((rel) => {
-    const data = readFileSync(file(rel));
+    const data = readFileSync(resolve(vendor, rel));
     return [rel, { sha256: hash(data), bytes: data.length }];
   }));
   writeFileSync(fileManifest, JSON.stringify({

@@ -1072,6 +1072,22 @@
       "sha256": "c5e0f32ae90c8a063c50aacb857fe263e90c564e424b8ab0a457a12f662dd0d4",
       "bytes": 14159
     },
+    "OpenCL/m04000_a0-pure.cl": {
+      "sha256": "5fb6ddd6352b6e9e5de718a2a0e76c1dee59296447a89994a2c7f43c1ae4fbf3",
+      "bytes": 6878
+    },
+    "OpenCL/m04000_a1-pure.cl": {
+      "sha256": "81a3e0a1bcb328cb06feec20cf44daefad101d09e661d05123f0a4d6a6ec7440",
+      "bytes": 10100
+    },
+    "OpenCL/m04000_a3-pure.cl": {
+      "sha256": "7b35bdc782ab1879c3689d56cc32fd9fb5dd7872eb2f14adf698887060110828",
+      "bytes": 10518
+    },
+    "OpenCL/m04000_a4-pure.cl": {
+      "sha256": "def64dbb234310159e8ab3f5021b9b14deb3c6172ab9d9a981af914f182e5032",
+      "bytes": 7636
+    },
     "OpenCL/m05500_a0-optimized.cl": {
       "sha256": "d7b76575fe22368bc808cf19499cef1f0c8fb1efa176ae462a1b6a54de4f0e06",
       "bytes": 14214
@@ -1135,6 +1151,18 @@
     "OpenCL/m07400-pure.cl": {
       "sha256": "b2834200641764ac503ed821af0e5a2b2daaab1db801df5c87ee1c9cdad6e381",
       "bytes": 7736
+    },
+    "OpenCL/markov_be.cl": {
+      "sha256": "c771eea5854e1e92e63fd7d27da30222c782d06c81970459a71fd34625db5dbb",
+      "bytes": 5085
+    },
+    "OpenCL/markov_le.cl": {
+      "sha256": "450d6450cf308c0d3074a16fb5fc0f19d156050a9266dd2ea66b90ee21a41edd",
+      "bytes": 5072
+    },
+    "OpenCL/shared.cl": {
+      "sha256": "7e90b15efc4a62f0b96739fff7e8cdc68ab649b61836c5d2d2bef4ec1cedafd6",
+      "bytes": 4799
     },
     "deps/OpenCL-Headers/CL/cl.h": {
       "sha256": "3c51949c38bf9bca6dbe919a1f60727bad1ef4a7a321c6d530f7502ddc1fd706",
@@ -1901,8 +1929,8 @@
       "bytes": 41316
     },
     "src/dynloader.c": {
-      "sha256": "246a46b2f3fdfc74013e235f12d88c9a90bbddfd5aaf2a1798368795a37a8fc7",
-      "bytes": 23845
+      "sha256": "77e4e618487deb4647e3750bba60601401734858c8d60d2f6c6d0ea82f7ad118",
+      "bytes": 24114
     },
     "src/emu_general.c": {
       "sha256": "3e3eab3bfa91c5f04dfaea428ffb9487e7d9f8d759015f2d3a47c29cd93e8e1a",
@@ -2236,13 +2264,69 @@
       "sha256": "44b72a064c863513540e594545dfb848036c776aaf4ee95076e66f343b6ebf50",
       "bytes": 68677
     },
+    "src/feeds/feed_association.c": {
+      "sha256": "f8baa37093c0c026691ccd991dab5c2669313bf1822397fb1cfc58fc63d55edf",
+      "bytes": 25323
+    },
+    "src/feeds/feed_error.h": {
+      "sha256": "837a49b76aaa855eec4aea78adfba3c27d891a685dd06d95bcff8459ad8e3850",
+      "bytes": 1226
+    },
+    "src/feeds/feed_hybrid.c": {
+      "sha256": "4b3948b93690fc405a4d041656c52f7ba6f44a2a178d60c1835c73f74dfd07bd",
+      "bytes": 16410
+    },
+    "src/feeds/feed_mask.c": {
+      "sha256": "5915a3563e10d13f8eac2e52bcb16749940a9a3a55e30eb8d2e915101064ee21",
+      "bytes": 3406
+    },
+    "src/feeds/feed_pcfg.c": {
+      "sha256": "3a15d722ae8450da59a4a27cd14871fe200f63a2f2ac2655097ca0268a34c958",
+      "bytes": 419206
+    },
+    "src/feeds/feed_random.c": {
+      "sha256": "7a2316f24bc02199bf3376b51b7c05724e4a28a8d1691f6d28a4551d19f7f568",
+      "bytes": 4610
+    },
+    "src/feeds/feed_stdin.c": {
+      "sha256": "76f73a46f3676eca5126d3aa2ddd000cb9ccbb72346d4fe33cdaafb5c1641410",
+      "bytes": 23090
+    },
+    "src/feeds/feed_table.c": {
+      "sha256": "4d99ee0bda7225d0ded6e03d8ec5c6b2cb9ffc0c435ccfe479948955072f00b3",
+      "bytes": 110389
+    },
+    "src/feeds/feed_wordlist.c": {
+      "sha256": "ee3e2ad037257bc6b1cdcae0f704940dc48f947b2d841f91404631dcabf0215f",
+      "bytes": 2959
+    },
+    "src/feeds/mask.c": {
+      "sha256": "6598fa72f742ca7206f172e141bd9eb04ea83880daf0caa51ac40d682ea272b8",
+      "bytes": 14896
+    },
+    "src/feeds/mmap_windows.c": {
+      "sha256": "9d16faa97d45483bf8fdfe505aaf529d022afc7a731f86c5dbf804231e46b51f",
+      "bytes": 1422
+    },
+    "src/feeds/seekdb.c": {
+      "sha256": "418df911f7bdea7d97cbc38755bf18204bc653ae25d2ed78a3aed8dee42cc2f4",
+      "bytes": 34138
+    },
+    "src/feeds/wordlist.c": {
+      "sha256": "6c867b124c01b800d63b20012a6857dd29c2c287a4b9b732598631accb5b2307",
+      "bytes": 35049
+    },
+    "src/feeds/wordlist.h": {
+      "sha256": "69e26cb9432156b1d4dd1c20fb53040f511f7f9c715f76cd210abb70381556fa",
+      "bytes": 3484
+    },
     "src/filehandling.c": {
       "sha256": "9db0f72a806b3cfb67add9d3a4a920b535af973003fdd91df3faebfd251fc63a",
       "bytes": 48966
     },
     "src/folder.c": {
-      "sha256": "b64ce5cbe433f2e9dffd7c027419735f6c20b2ecc68aa913bb54415686658330",
-      "bytes": 19456
+      "sha256": "b4ff617e1b3fccde448c9b0e172a84fe858268d216e8a6bd12fd098a6078b661",
+      "bytes": 19849
     },
     "src/generic.c": {
       "sha256": "2273ada0131e95a0ecf6c745aea4417c8af655ccd6ffec534a1c8bf2ac2a8309",

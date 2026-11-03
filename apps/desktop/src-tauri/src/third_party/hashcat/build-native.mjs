@@ -15,7 +15,7 @@
  * and bundle runtime/ beside the private recovery worker. The source/manifest
  * are shipped with the tracked repository, not downloaded at runtime.
  */
-import { readFileSync, copyFileSync, mkdirSync, cpSync, existsSync, statSync } from "node:fs";
+import { readFileSync, copyFileSync, mkdirSync, cpSync, existsSync, statSync, readdirSync } from "node:fs";
 import { dirname, resolve, join, sep, isAbsolute } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
@@ -149,7 +149,7 @@ function checked(executable, args, cwd) {
 const c = process.env.CC || (process.platform === "win32" ? "gcc" : "cc");
 checked(process.env.MAKE || "make",
   ["-j2", "PRODUCTION=1", "SHARED=1", "ENABLE_BRAIN=0", "ENABLE_CUBIN=0",
-   "MAINTAINER_MODE=1", library, ...modulePaths], build);
+   "MAINTAINER_MODE=1", library, "feeds", ...modulePaths], build);
 
 const includes = ["-I" + join(root, "native"), "-I" + join(build, "include"),
   "-I" + join(build, "OpenCL"), "-I" + join(build, "deps/OpenCL-Headers")];
@@ -192,6 +192,7 @@ for (const name of moduleNames) {
   copyFileSync(join(build, "modules", name), join(modeDir, name));
 }
 cpSync(join(build, "OpenCL"), join(runtime, "OpenCL"), { recursive: true });
+cpSync(join(build, "feeds"), join(runtime, "feeds"), { recursive: true });
 cpSync(join(build, "tunings"), join(runtime, "tunings"), { recursive: true });
 const licenses = join(runtime, "licenses");
 mkdirSync(licenses, { recursive: true });
@@ -202,6 +203,12 @@ copyFileSync(join(build, "deps/sse2neon/LICENSE"), join(licenses, "SSE2NEON.txt"
 cpSync(join(build, "docs/license_libs"), join(licenses, "upstream_notices"), { recursive: true });
 copyFileSync(manifestPath, join(runtime, "source-manifest.json"));
 copyFileSync(capabilityPath, join(runtime, "capability-manifest.json"));
+const feedLibs = existsSync(join(build, "feeds"))
+  ? readdirSync(join(build, "feeds")).filter((name) => name.endsWith(".dll") || name.endsWith(".so"))
+  : [];
+for (const name of feedLibs) {
+  copyFileSync(join(build, "feeds", name), join(runtime, "feeds", name));
+}
 for (const name of [library, shim, workerName, ...modulePaths, "source-manifest.json", "capability-manifest.json"]) {
   if (!statSync(join(runtime, name)).isFile()) throw new Error("package missing " + name);
 }

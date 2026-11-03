@@ -39,7 +39,13 @@ void hc_dynlib_harden_search_path (void)
 
 hc_dynlib_t hc_dlopen (LPCSTR lpLibFileName)
 {
+  /* CyberDeck: module DLLs live in a subfolder and import hashcat.dll from
+   * the install root; resolve dependencies from the plugin's own folder. */
+  #if defined (_WIN)
+  return LoadLibraryExA (lpLibFileName, NULL, LOAD_WITH_ALTERED_SEARCH_PATH);
+  #else
   return LoadLibraryA (lpLibFileName);
+  #endif
 }
 
 BOOL hc_dlclose (hc_dynlib_t hLibModule)
