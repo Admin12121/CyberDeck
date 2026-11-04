@@ -77,6 +77,7 @@ fn read_request(mut reader: impl Read) -> io::Result<Request> {
         hash_mode,
         0 | 10 | 20 | 50 | 60 | 100 | 110 | 120 | 132 | 400 | 500 | 1000 | 1100 | 1400 | 1500
         | 1700 | 1731 | 1800 | 2100 | 3200 | 5500 | 5600 | 7400
+        | 11600 | 13600 | 17200 | 17210
     ) {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,

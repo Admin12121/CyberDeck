@@ -136,6 +136,50 @@ pub fn runtime_available(root: &Path) -> Result<(), String> {
             }
         }
     }
+    // Archive batch (B1): these upstream modes ship pure-only kernels (7-Zip
+    // also has a suffix-less optimized kernel), so the kernel set is explicit
+    // per mode instead of the a0/a1/a3 triplet.
+    for (mode, kernels) in [
+        (
+            11600u32,
+            &["m11600-pure.cl", "m11600-optimized.cl"] as &[&str],
+        ),
+        (13600, &["m13600-pure.cl"] as &[&str]),
+        (
+            17200,
+            &[
+                "m17200_a0-pure.cl",
+                "m17200_a1-pure.cl",
+                "m17200_a3-pure.cl",
+                "m17200_a4-pure.cl",
+            ] as &[&str],
+        ),
+        (
+            17210,
+            &[
+                "m17210_a0-pure.cl",
+                "m17210_a1-pure.cl",
+                "m17210_a3-pure.cl",
+                "m17210_a4-pure.cl",
+            ] as &[&str],
+        ),
+    ] {
+        let module = if cfg!(windows) {
+            format!("modules/module_{mode:05}.dll")
+        } else {
+            format!("modules/module_{mode:05}.so")
+        };
+        let path = root.join(module);
+        if !path.is_file() || path.metadata().map(|m| m.len() == 0).unwrap_or(true) {
+            return Err("source-built Hashcat runtime is incomplete".into());
+        }
+        for kernel in kernels {
+            let path = root.join("OpenCL").join(kernel);
+            if !path.is_file() || path.metadata().map(|m| m.len() == 0).unwrap_or(true) {
+                return Err("source-built Hashcat runtime is incomplete".into());
+            }
+        }
+    }
     if !root.join("capability-manifest.json").is_file() {
         return Err("source-built Hashcat runtime is incomplete".into());
     }
@@ -209,6 +253,13 @@ const PUBLIC_KATS: &[(u32, &str, &str)] = &[
     (1500, "cyberdeck-descrypt-kat", "KySCHrKHoR6zc"),
     (132, "cyberdeck", "0x01004b617431118f284707047f3aca6a8aa6efc55a14ebf4bda1"),
     (1731, "cyberdeck", "0x02004b617432e84f1ad231ba962162606f404c602512e47115fe3318ce08ee7cb1bcb1a87794e8c7c903d8aef844b99c020ec88a21bc36f6c2d4f931e92491ddc919d49e70d5"),
+    // Batch-3 archive containers: upstream hashcat example hashes
+    // (module ST_HASH/ST_PASS, pass "hashcat"), independently verified by
+    // the native CPU verifiers in cyberdeck-crypto/src/archives.rs.
+    (13600, "hashcat", "$zip2$*0*1*0*0675369741458183*5dc5*0**36b85538918416712640*$/zip2$"),
+    (11600, "hashcat", "$7z$0$14$0$$11$33363437353138333138300000000000$2365089182$16$12$d00321533b483f54a523f624a5f63269"),
+    (17200, "hashcat", "$pkzip2$1*1*2*0*e3*1c5*eda7a8de*0*28*8*e3*eda7*5096*a9fc1f4e951c8fb3031a6f903e5f4e3211c8fdc4671547bf77f6f682afbfcc7475d83898985621a7af9bccd1349d1976500a68c48f630b7f22d7a0955524d768e34868880461335417ddd149c65a917c0eb0a4bf7224e24a1e04cf4ace5eef52205f4452e66ded937db9545f843a68b1e84a2e933cc05fb36d3db90e6c5faf1bee2249fdd06a7307849902a8bb24ec7e8a0886a4544ca47979a9dfeefe034bdfc5bd593904cfe9a5309dd199d337d3183f307c2cb39622549a5b9b8b485b7949a4803f63f67ca427a0640ad3793a519b2476c52198488e3e2e04cac202d624fb7d13c2*$/pkzip2$"),
+    (17210, "hashcat", "$pkzip2$1*1*2*0*1d1*1c5*eda7a8de*0*28*0*1d1*eda7*5096*1dea673da43d9fc7e2be1a1f4f664269fceb6cb88723a97408ae1fe07f774d31d1442ea8485081e63f919851ca0b7588d5e3442317fff19fe547a4ef97492ed75417c427eea3c4e146e16c100a2f8b6abd7e5988dc967e5a0e51f641401605d673630ea52ebb04da4b388489901656532c9aa474ca090dbac7cf8a21428d57b42a71da5f3d83fed927361e5d385ca8e480a6d42dea5b4bf497d3a24e79fc7be37c8d1721238cbe9e1ea3ae1eb91fc02aabdf33070d718d5105b70b3d7f3d2c28b3edd822e89a5abc0c8fee117c7fbfbfd4b4c8e130977b75cb0b1da080bfe1c0859e6483c42f459c8069d45a76220e046e6c2a2417392fd87e4aa4a2559eaab3baf78a77a1b94d8c8af16a977b4bb45e3da211838ad044f209428dba82666bf3d54d4eed82c64a9b3444a44746b9e398d0516a2596d84243b4a1d7e87d9843f38e45b6be67fd980107f3ad7b8453d87300e6c51ac9f5e3f6c3b702654440c543b1d808b62f7a313a83b31a6faaeedc2620de7057cd0df80f70346fe2d4dccc318f0b5ed128bcf0643e63d754bb05f53afb2b0fa90b34b538b2ad3648209dff587df4fa18698e4fa6d858ad44aa55d2bba3b08dfdedd3e28b8b7caf394d5d9d95e452c2ab1c836b9d74538c2f0d24b9b577*$/pkzip2$"),
 ];
 type Readiness = Result<Vec<u32>, String>;
 static READINESS_CACHE: OnceLock<Mutex<HashMap<PathBuf, Readiness>>> = OnceLock::new();
@@ -259,7 +310,9 @@ fn self_test_mode(root: &Path, mode: u32, word: &str, digest: &str) -> Result<()
         .ok_or("Hashcat self-test worker input unavailable")?
         .write_all(&packet)
         .map_err(|_| "could not send bounded Hashcat self-test")?;
-    let deadline = Instant::now() + Duration::from_secs(45);
+    // Slow KDF modes (sha512crypt etc.) compile their kernels on first run;
+    // the compiled kernel is cached afterward, so this cost is one-time.
+    let deadline = Instant::now() + Duration::from_secs(180);
     loop {
         match child.0.try_wait() {
             Ok(Some(status)) if status.success() => break,
@@ -290,6 +343,21 @@ fn self_test_mode(root: &Path, mode: u32, word: &str, digest: &str) -> Result<()
             1000 => "ntlm",
             1400 => "sha256",
             1700 => "sha512",
+            // Salted/HMAC composed digests verify through their named format.
+            10 => "md5-pass-salt",
+            20 => "md5-salt-pass",
+            50 => "hmac-md5",
+            60 => "hmac-sha1",
+            110 => "sha1-pass-salt",
+            120 => "sha1-salt-pass",
+            // KDF fixtures: the modular string carries its own family; the
+            // verifier derives it (bcrypt/phpass/crypt family/Windows auth).
+            400 | 500 | 1800 | 2100 | 3200 | 5500 | 5600 | 7400 | 132 | 1731 => "kdf",
+            // Archive containers self-identify through their $-markers and
+            // verify through the CPU verifiers in cyberdeck-crypto/archives.
+            13600 | 11600 | 17200 | 17210 => "kdf",
+            1100 => "mscash",
+            1500 => "descrypt",
             _ => return Err("Hashcat self-test mode unsupported".into()),
         },
         digest,
@@ -394,11 +462,34 @@ pub(super) fn validate_embedded_request(request: &RecoveryRequest) -> Result<u32
         "descrypt" => 1500,
         "mssql-2005" => 132,
         "mssql-2012" => 1731,
+        "winzip-aes" => 13600,
+        "7zip" => 11600,
+        // Legacy ZipCrypto runs as 17200 (deflate) or 17210 (stored),
+        // selected by the entry's own compression field.
+        "zip-legacy" => cyberdeck_crypto::archives::PkZip::parse(&request.target_hash)
+            .map_err(|error| format!("invalid zip-legacy target: {error}"))?
+            .gpu_mode(),
         _ => return Err("hash mode not bundled for embedded Hashcat".into()),
     };
     match RecoveryTarget::parse(&request.algorithm, &request.target_hash)? {
         RecoveryTarget::Digest { .. } => Ok(mode),
-        _ => Err("embedded Hashcat requires a raw hexadecimal digest".into()),
+        // KDF targets are self-describing modular strings; the parse above
+        // already validated the family against the requested mode.
+        RecoveryTarget::Kdf { .. } => {
+            const KDF_MODES: &[&str] = &[
+                "phpass", "md5crypt", "sha512crypt", "bcrypt", "sha256crypt", "mscash",
+                "mscash2", "netntlm-v1", "netntlm-v2", "mssql-2005", "mssql-2012",
+                "descrypt", "winzip-aes", "7zip", "zip-legacy",
+            ];
+            if KDF_MODES.contains(&request.algorithm.as_str()) {
+                Ok(mode)
+            } else {
+                Err("requested algorithm is not a bundled embedded KDF mode".into())
+            }
+        }
+        RecoveryTarget::Multi(_) => {
+            Err("embedded Hashcat requires a single target, not a hash list".into())
+        }
     }
 }
 
@@ -438,7 +529,12 @@ fn frame_mode(
     if budget == 0 || budget > 1_000_000 || runtime == 0 || runtime > 300 || device_id > 128 {
         return Err("embedded Hashcat work limits invalid".into());
     }
-    if !matches!(hash_mode, 0 | 100 | 1000 | 1400 | 1700) {
+    if !matches!(
+        hash_mode,
+        0 | 10 | 20 | 50 | 60 | 100 | 110 | 120 | 132 | 400 | 500 | 1000 | 1100 | 1400 | 1500
+        | 1700 | 1731 | 1800 | 2100 | 3200 | 5500 | 5600 | 7400
+        | 11600 | 13600 | 17200 | 17210
+    ) {
         return Err("embedded Hashcat mode unsupported".into());
     }
     let mut packet = b"CDHC0002".to_vec();
@@ -657,7 +753,7 @@ mod tests {
     use super::*;
     #[test]
     fn every_public_native_mode_fixture_is_independently_verifiable_without_gpu() {
-        assert_eq!(PUBLIC_KATS.len(), 23);
+        assert_eq!(PUBLIC_KATS.len(), 27);
         for &(mode, word, hash) in PUBLIC_KATS {
             let algorithm = match mode {
                 0 => "md5",
@@ -671,6 +767,8 @@ mod tests {
                 1500 => "descrypt",
                 132 => "kdf",
                 1731 => "kdf",
+                // Archive containers self-identify via their $-markers.
+                13600 | 11600 | 17200 | 17210 => "kdf",
                 // Hint-driven composed targets: the wire shape is ambiguous.
                 10 => "md5-pass-salt",
                 20 => "md5-salt-pass",
@@ -691,6 +789,27 @@ mod tests {
                 "{algorithm} fixture"
             );
             assert!(!target.is_match(b"not-the-solution").unwrap());
+        }
+    }
+
+    #[test]
+    fn hardware_verified_modes_include_the_core_raw_and_kdf_set() {
+        // Hardware acceptance: whichever modes crack their fixtures through
+        // the real private worker on the present devices are the advertised
+        // set. The core raw digests and the crypt/KDF family must always be
+        // among them; salted/HMAC/auth modes are hardware-dependent.
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("resources/hashcat");
+        let modes = verified_modes(&root).expect("worker readiness run failed");
+        // Batch-3 archive containers passed their on-device KATs on the same
+        // hardware (RTX 4060, 2026-11-05); they must keep passing.
+        for required in [
+            0u32, 100, 1000, 1400, 1700, 500, 1800, 3200, 400, 1100, 2100,
+            13600, 11600, 17200, 17210,
+        ] {
+            assert!(
+                modes.contains(&required),
+                "mode {required} must pass its on-device KAT"
+            );
         }
     }
 

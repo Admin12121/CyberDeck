@@ -11,6 +11,7 @@ gpu = ["dep:libloading"]
 
 [dependencies]
 aes-gcm = "0.10.3"
+aes = "0.8"
 argon2 = "0.5"
 base64 = "0.22"
 bcrypt = "0.15"

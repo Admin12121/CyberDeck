@@ -78,7 +78,10 @@ export type HashcatRawAlgorithmV1 =
   | "sha256crypt"
   | "descrypt"
   | "mssql-2005"
-  | "mssql-2012";
+  | "mssql-2012"
+  | "winzip-aes"
+  | "7zip"
+  | "zip-legacy";
 /** Native Rust CPU digest coverage (embedded Hashcat is raw 5 modes only). */
 export type RecoveryRawAlgorithmV1 =
   | HashcatRawAlgorithmV1

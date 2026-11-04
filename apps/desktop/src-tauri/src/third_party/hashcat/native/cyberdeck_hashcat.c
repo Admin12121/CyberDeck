@@ -124,6 +124,8 @@ struct cd_hashcat
   char device_selector[16];
   char hash_mode_option[32];
   char *fixed_options[25];
+  char *owned_strings[8];
+  size_t owned_cnt;
 };
 
 uint32_t cd_hashcat_abi_version (void)
@@ -161,8 +163,6 @@ uint32_t cd_hashcat_last_setup_stage (cd_hashcat *handle)
 
 cd_hashcat *cd_hashcat_create (void)
 {
-  fputs ("[cd] create entered", stderr);
-  fputc (10, stderr);
   cd_hashcat *handle = (cd_hashcat *) calloc (1, sizeof (cd_hashcat));
   if (handle == NULL) return NULL;
 
@@ -254,6 +254,7 @@ int cd_hashcat_prepare_mode (
     case 400: case 1500: case 132: case 1731:
     case 500: case 1000: case 1400: case 1700: case 1800: case 3200: case 7400:
     case 1100: case 2100: case 5500: case 5600:
+    case 11600: case 13600: case 17200: case 17210:
       break;
     default:
       return -2;
@@ -269,6 +270,10 @@ int cd_hashcat_prepare_mode (
 
   size_t argc = 0;
 #define ARG(x) do { if (argc >= 24) return -2; handle->fixed_options[argc++] = (char *)(x); } while (0)
+/* Options whose backing strings live in the caller's frame must be owned by
+ * the handle: the worker's Rust buffers are freed when prepare returns, and
+ * execute() reads fixed_options afterwards. */
+#define ARG_OWN(x) do {     if (argc >= 24 || handle->owned_cnt >= 8) return -2;     size_t len_ = strlen (x);     char *copy_ = (char *) malloc (len_ + 1);     if (copy_ == NULL) return -2;     memcpy (copy_, x, len_ + 1);     handle->owned_strings[handle->owned_cnt++] = copy_;     handle->fixed_options[argc++] = copy_;   } while (0)
   ARG ("cyberdeck-private-recovery-worker");
   ARG (handle->hash_mode_option);
   ARG ("--attack-mode=0");
@@ -285,7 +290,7 @@ int cd_hashcat_prepare_mode (
 #endif
   ARG ("--outfile-format=2");
   ARG ("--outfile");
-  ARG (temporary_outfile);
+  ARG_OWN (temporary_outfile);
   ARG ("--limit");
   ARG (handle->candidate_limit);
   ARG ("--runtime");
@@ -295,8 +300,8 @@ int cd_hashcat_prepare_mode (
     ARG ("--backend-devices");
     ARG (handle->device_selector);
   }
-  ARG (hash_file);
-  ARG (wordlist_file);
+  ARG_OWN (hash_file);
+  ARG_OWN (wordlist_file);
   handle->fixed_options[argc] = NULL;
 #undef ARG
 
@@ -315,7 +320,7 @@ int cd_hashcat_prepare_mode (
   {
     const user_options_t *uo = handle->core->user_options;
     const user_options_extra_t *uo2 = handle->core->user_options_extra;
-    fprintf (stderr, "[cd-opts] hc_argc=%d", uo->hc_argc);
+    fprintf (stderr, "[cd-opts] hc_argc=%d hash_mode=%u autodetect=%d", uo->hc_argc, uo->hash_mode, (int) uo->autodetect);
     for (int i = 0; i < (int) argc; i++)
     {
       fputs ("argv[", stderr);
@@ -334,21 +339,15 @@ int cd_hashcat_prepare_mode (
   }
 
   handle->session_attempted = 1;
-  fputs ("[cd] calling session_init", stderr);
-  fputc (10, stderr);
   if (hashcat_session_init (handle->core, install_root, shared_root,
                             (int) argc, handle->fixed_options, comptime) != 0)
   {
     return -5;
   }
-  fputs ("[cd] session_init OK", stderr);
-  fputc (10, stderr);
   {
     const user_options_extra_t *uo2 = handle->core->user_options_extra;
-    fputs ("[cd] post-init hc_hash=", stderr);
     fputs (uo2->hc_hash ? uo2->hc_hash : "NULL", stderr);
     fputc (10, stderr);
-    fputs ("[cd] post-init hc_argv0=", stderr);
     fputs (uo2->hc_workv && uo2->hc_workc > 0 && uo2->hc_workv[0] ? uo2->hc_workv[0] : "NULL", stderr);
     fputc (10, stderr);
   }
@@ -380,6 +379,7 @@ int cd_hashcat_quit (cd_hashcat *handle)
 void cd_hashcat_destroy (cd_hashcat *handle)
 {
   if (handle == NULL) return;
+  for (size_t i = 0; i < handle->owned_cnt; i++) free (handle->owned_strings[i]);
   if (handle->core != NULL)
   {
     if (handle->session_attempted)

@@ -243,6 +243,19 @@ impl RecoveryTarget {
                     // Prefix and length checks happen in kdf_format; the
                     // verifier enforces the rest.
                 }
+                "winzip-aes" | "7zip" | "zip-legacy" => {
+                    // Archive containers: the strict wire-shape parsers fail
+                    // fast before any GPU work is scheduled; unsupported
+                    // variants (compressed 7-Zip headers, multi-entry PKZIP,
+                    // checksum-only entries) are rejected here.
+                    if format == "winzip-aes" {
+                        super::archives::WinZipAes::parse(text)?;
+                    } else if format == "7zip" {
+                        super::archives::SevenZip::parse(text)?;
+                    } else {
+                        super::archives::PkZip::parse(text)?;
+                    }
+                }
                 "mscash" => {
                     if !text.contains('#') {
                         return Err("invalid mscash encoding".into());

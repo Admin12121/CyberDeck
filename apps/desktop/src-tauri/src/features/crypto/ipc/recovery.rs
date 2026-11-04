@@ -848,6 +848,11 @@ fn bundled_hashcat_modes() -> Vec<EmbeddedHashcatMode> {
         ("descrypt", 1500, 0),
         ("mssql-2005", 132, 0),
         ("mssql-2012", 1731, 0),
+        // Batch-3 archive containers.
+        ("winzip-aes", 13600, 0),
+        ("7zip", 11600, 0),
+        ("zip-legacy", 17200, 0),
+        ("zip-legacy", 17210, 0),
     ]
     .into_iter()
     .map(|(algorithm, mode, digest_hex_length)| EmbeddedHashcatMode {

@@ -692,6 +692,7 @@ dependencies = [
 name = "cyberdeck-crypto"
 version = "0.1.0"
 dependencies = [
+ "aes",
  "aes-gcm",
  "argon2",
  "base64 0.22.1",

@@ -20,6 +20,7 @@ pub mod unix_crypt;
 pub mod legacy_digests;
 pub mod shadow;
 pub mod windows_auth;
+pub mod archives;
 
 use base64::Engine as _;
 use hmac::{Hmac, Mac};
@@ -266,6 +267,12 @@ pub fn kdf_format(hash: &str) -> Option<&'static str> {
         Some("mssql-2012")
     } else if hash.starts_with("0x0100") && hash.len() == 54 {
         Some("mssql-2005")
+    } else if hash.starts_with("$zip2$") && hash.ends_with("$/zip2$") {
+        Some("winzip-aes")
+    } else if hash.starts_with("$7z$") {
+        Some("7zip")
+    } else if hash.starts_with("$pkzip2$") || hash.starts_with("$pkzip$") {
+        Some("zip-legacy")
     } else if hash.starts_with("WPA*01*") {
         Some("wpa-pmkid")
     } else if hash.starts_with("$NETNTLMv2$") {
@@ -390,6 +397,20 @@ pub fn verify_kdf_format(format: &str, hash: &str, candidate: &str) -> Result<bo
         "netntlm-v1" => windows_auth::verify_netntlmv1(hash, candidate),
         "wpa-pmkid" => windows_auth::verify_wpa_pmkid(hash, candidate),
         "netntlm-v2" => windows_auth::verify_netntlmv2(hash, candidate),
+        // Archive containers (format batch B1): the parsed wire form carries
+        // its own key-derivation parameters and check bytes.
+        "winzip-aes" => {
+            let parsed = archives::WinZipAes::parse(hash)?;
+            parsed.verify(candidate)
+        }
+        "7zip" => {
+            let parsed = archives::SevenZip::parse(hash)?;
+            parsed.verify(candidate)
+        }
+        "zip-legacy" => {
+            let parsed = archives::PkZip::parse(hash)?;
+            parsed.verify(candidate)
+        }
         // Composed salted/HMAC digests carry an explicit algorithm hint; the
         // encoded form is "digest:salt" with the salt taken after the first
         // colon (hashcat wire shape).

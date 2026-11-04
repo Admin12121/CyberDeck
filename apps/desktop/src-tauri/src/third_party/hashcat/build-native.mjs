@@ -29,7 +29,7 @@ const capabilities = JSON.parse(readFileSync(capabilityPath, "utf8"));
 if (capabilities.schema !== 1 ||
     capabilities.source_commit !== "1994b513b550edfe3e7fcaa1103759a9343e57a4" ||
     capabilities.abi_version !== 4 ||
-    capabilities.hash_modes.map(x => x.id).join(",") !== "0,10,20,50,60,100,110,120,132,400,500,1000,1100,1400,1500,1700,1731,1800,2100,3200,5500,5600,7400") {
+    capabilities.hash_modes.map(x => x.id).join(",") !== "0,10,20,50,60,100,110,120,132,400,500,1000,1100,1400,1500,1700,1731,1800,2100,3200,5500,5600,7400,11600,13600,17200,17210") {
   throw new Error("embedded Hashcat capability manifest conflicts with pinned C/worker contract");
 }
 const argIndex = process.argv.indexOf("--out");
@@ -117,6 +117,11 @@ const supportedModes = [
   { id: 1500, algorithm: "descrypt" },
   { id: 1731, algorithm: "mssql-2012" },
   { id: 132, algorithm: "mssql-2005" },
+  // Batch-3 archive containers (one algorithm, mode chosen by entry shape).
+  { id: 11600, algorithm: "7zip" },
+  { id: 13600, algorithm: "winzip-aes" },
+  { id: 17200, algorithm: "zip-legacy" },
+  { id: 17210, algorithm: "zip-legacy" },
 ];
 const moduleNames = supportedModes.map(({ id }) =>
   "module_" + String(id).padStart(5, "0") +

@@ -61,7 +61,7 @@ if (mode === "--import") {
   dirFiles("include", (name) => name.endsWith(".h") || name.endsWith(".def"));
   // The complete host EMU object family uses almost all common inc_ sources,
   // not only the kernel for hash mode 1400.
-  const bundledModePrefixes = ["00000", "00010", "00020", "00050", "00060", "00100", "00110", "00120", "00132", "00400", "00500", "01100", "01400", "01500", "01700", "01731", "01800", "02100", "03200", "05500", "05600", "07400"];
+  const bundledModePrefixes = ["00000", "00010", "00020", "00050", "00060", "00100", "00110", "00120", "00132", "00400", "00500", "01100", "01400", "01500", "01700", "01731", "01800", "02100", "03200", "05500", "05600", "07400", "11600", "13600", "17200", "17210"];
   dirFiles("OpenCL", (name) => {
     if (name.endsWith(".h")) return true;
     if (!name.endsWith(".cl")) return false;
@@ -100,6 +100,11 @@ if (mode === "--import") {
                       "01100", "02100", "05500", "05600", "07400", "01500", "00132", "01731"]) {
     add("src/modules/module_" + mode + ".c");
   }
+  // Batch-3 archive containers: WinZip AES (13600), 7-Zip (11600) and PKZIP
+  // legacy ZipCrypto (17200/17210).
+  for (const mode of ["11600", "13600", "17200", "17210"]) {
+    add("src/modules/module_" + mode + ".c");
+  }
   // Shared module-common sources included verbatim by batch modules.
   add("src/modules/blowfish_common.c");
   // Candidate-feed plugins: the wordlist reader (and siblings) are loadable
@@ -107,6 +112,10 @@ if (mode === "--import") {
   dirFiles("src/feeds", (name) => name.endsWith(".c") || name.endsWith(".h"));
   dirFiles("OpenCL", (name) =>
     /^m(00010|00020|00050|00060|00110|00120|01100|02100|05500|05600|07400|01500|00132|01731)[-_a-z0-9]*\.cl$/.test(name));
+  // Batch-3 archive kernels: WinZip and PKZIP are pure-only; 7-Zip also has
+  // the suffix-less optimized kernel.
+  dirFiles("OpenCL", (name) =>
+    /^m(11600|13600|17200|17210)[-a-z0-9_]*\.cl$/.test(name));
   for (const kernel of [
     "OpenCL/m00400-optimized.cl",
     "OpenCL/m00500-optimized.cl",
@@ -187,8 +196,8 @@ if (mode === "--import") {
     version: "v8.0.0-development",
     build: "SHARED=1 PRODUCTION=1 ENABLE_BRAIN=0 ENABLE_CUBIN=0; module_00000 bootstrap + module_01400",
     supportedModesPlanned: [1400],
-    includes: ["C core Makefile object closure", "all public and internal C headers", "host EMU kernel includes", "SHA-256 kernels and amplifiers", "batch-1 KDF kernels (phpass/md5crypt/sha512crypt/bcrypt)", "OpenCL headers", "sse2neon compatibility", "runtime tunings", "licenses"],
-    excludes: ["standalone hashcat CLI", "hash modules beyond the bundled batch-1 set (0,100,400,500,1000,1400,1700,1800,3200)", "other mode kernels", "Python", "FPGA", "unused bridges and feeds", "docs/examples/test suites"],
+    includes: ["C core Makefile object closure", "all public and internal C headers", "host EMU kernel includes", "SHA-256 kernels and amplifiers", "batch-1 KDF kernels (phpass/md5crypt/sha512crypt/bcrypt)", "batch-3 archive kernels (7z/WinZip/PKZIP)", "OpenCL headers", "sse2neon compatibility", "runtime tunings", "licenses"],
+    excludes: ["standalone hashcat CLI", "hash modules beyond the bundled batch-3 set (0,10,20,50,60,100,110,120,132,400,500,1000,1100,1400,1500,1700,1731,1800,2100,3200,5500,5600,7400,11600,13600,17200,17210)", "other mode kernels", "Python", "FPGA", "unused bridges and feeds", "docs/examples/test suites"],
     files,
   }, null, 2) + "\n");
   console.log("Imported " + paths.length + " pinned source and license files (" + core.length + " C core objects).");

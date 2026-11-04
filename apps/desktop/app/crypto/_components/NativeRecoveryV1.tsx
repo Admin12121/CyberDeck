@@ -48,6 +48,9 @@ const EMBEDDED_MODES: readonly { value: HashcatRawAlgorithmV1; label: string; di
   { value: "mscash2", label: "mscash2 / DCC2 · mode 2100", digits: 0 },
   { value: "netntlm-v1", label: "NetNTLMv1 · mode 5500", digits: 0 },
   { value: "netntlm-v2", label: "NetNTLMv2 · mode 5600", digits: 0 },
+  { value: "winzip-aes", label: "WinZip AES ($zip2$) · mode 13600", digits: 0 },
+  { value: "7zip", label: "7-Zip ($7z$) · mode 11600", digits: 0 },
+  { value: "zip-legacy", label: "ZIP legacy (ZipCrypto) · modes 17200/17210", digits: 0 },
 ];
 const RUST_MODES: readonly { value: RecoveryRawAlgorithmV1; label: string; digits: number }[] = [
   ...EMBEDDED_MODES,
@@ -115,7 +118,7 @@ function useRecoveryController(targetHash: string, onCaseCreated?: (caseId: stri
     "$2a$", "$2b$", "$2y$", "$2x$", "$argon2", "$y$", "$7$", "$gy$", "$G$",
     "$scrypt$", "$pbkdf2", "$6$", "$5$", "$1$", "$apr1$", "$sha1$", "$P$",
     "$H$", "$NT$", "$DCC2$", "DCC2#", "M$", "$NETNTLM", "WPA*01*", "0x0100",
-    "0x0200",
+    "0x0200", "$zip2$", "$7z$", "$pkzip2$", "$pkzip$",
   ];
   const isKdfHash =
     (hash.startsWith("$") && KDF_PREFIXES.some((prefix) => hash.startsWith(prefix))) ||
@@ -137,6 +140,7 @@ function useRecoveryController(targetHash: string, onCaseCreated?: (caseId: stri
         "$6$": "sha512crypt", "$1$": "md5crypt", "$apr1$": "md5crypt",
         "$2a$": "bcrypt", "$2b$": "bcrypt", "$2y$": "bcrypt",
         "$P$": "phpass", "$H$": "phpass",
+        "$zip2$": "winzip-aes", "$7z$": "7zip", "$pkzip2$": "zip-legacy", "$pkzip$": "zip-legacy",
       };
       const match = Object.entries(kdfSuggestion).find(([prefix]) => hash.startsWith(prefix));
       if (match && match[1]) {

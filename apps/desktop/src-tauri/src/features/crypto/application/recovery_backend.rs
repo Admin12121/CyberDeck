@@ -362,6 +362,16 @@ pub(super) fn embedded_result(
                 "descrypt" => "embedded_hashcat_01500",
                 "mssql-2005" => "embedded_hashcat_00132",
                 "mssql-2012" => "embedded_hashcat_01731",
+                "winzip-aes" => "embedded_hashcat_13600",
+                "7zip" => "embedded_hashcat_11600",
+                // Mode chosen by the entry's compression field (17200/17210).
+                "zip-legacy" => {
+                    match cyberdeck_crypto::archives::PkZip::parse(&request.target_hash) {
+                        Ok(parsed) if parsed.gpu_mode() == 17200 => "embedded_hashcat_17200",
+                        Ok(_) => "embedded_hashcat_17210",
+                        Err(_) => "embedded_hashcat_unsupported",
+                    }
+                }
                 _ => "embedded_hashcat_unsupported",
             }
             .into(),
