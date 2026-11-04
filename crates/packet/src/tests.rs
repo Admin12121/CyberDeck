@@ -697,3 +697,108 @@ fn native_tcp_options_reach_packet_details_without_claiming_os_family() {
         .iter()
         .any(|l| l.label == "TCP maximum segment size"));
 }
+
+// --- ICMP / ICMPv6 dissection --------------------------------------------------
+
+fn ipv4_icmp_frame(icmp_body: &[u8]) -> Vec<u8> {
+    let mut f = vec![0xff; 6];
+    f.extend_from_slice(&[0x02, 0x00, 0x00, 0x00, 0x00, 0x01]);
+    f.extend_from_slice(&0x0800u16.to_be_bytes());
+    f.push(0x45);
+    f.push(0x00);
+    f.extend_from_slice(&((20 + icmp_body.len()) as u16).to_be_bytes());
+    f.extend_from_slice(&[0, 0, 0, 0]);
+    f.push(64);
+    f.push(1); // ICMP
+    f.extend_from_slice(&[0, 0]);
+    f.extend_from_slice(&[192, 168, 1, 24]);
+    f.extend_from_slice(&[10, 0, 0, 42]);
+    f.extend_from_slice(icmp_body);
+    f
+}
+
+fn ipv6_icmp_frame(next_header: u8, icmp_body: &[u8]) -> Vec<u8> {
+    let mut f = vec![0xff; 6];
+    f.extend_from_slice(&[0x02, 0x00, 0x00, 0x00, 0x00, 0x01]);
+    f.extend_from_slice(&0x86ddu16.to_be_bytes());
+    f.push(0x60); // version 6 + traffic class
+    f.extend_from_slice(&[0, 0, 0]); // rest of traffic class + flow label
+    f.extend_from_slice(&(icmp_body.len() as u16).to_be_bytes()); // payload length
+    f.push(next_header);
+    f.push(64); // hop limit
+    f.extend_from_slice(&[0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
+    f.extend_from_slice(&[0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2]);
+    f.extend_from_slice(icmp_body);
+    f
+}
+
+#[test]
+fn icmp_echo_request_reports_identifier_sequence_and_payload_size() {
+    let mut body = vec![8, 0, 0, 0]; // echo request, code 0
+    body.extend_from_slice(&0x1a2bu16.to_be_bytes());
+    body.extend_from_slice(&7u16.to_be_bytes());
+    body.extend_from_slice(&[0xde, 0xad, 0xbe, 0xef]);
+    let d = dissect(1, &ipv4_icmp_frame(&body));
+    assert_eq!(d.protocol, "ICMP");
+    assert!(d.info.contains("Echo Request"));
+    assert!(d.layers.iter().any(|l| l.label == "identifier" && l.value == "0x1a2b"));
+    assert!(d.layers.iter().any(|l| l.label == "sequence" && l.value == "7"));
+    assert!(d.layers.iter().any(|l| l.label == "echo payload" && l.value == "4 byte(s), not decoded"));
+}
+
+#[test]
+fn icmp_destination_unreachable_names_port_and_counts_quoted_bytes() {
+    let mut body = vec![3, 3, 0, 0]; // dest unreachable, port unreachable
+    body.extend_from_slice(&[0; 4]); // unused
+    body.extend_from_slice(&[0x45; 12]); // quoted header bytes
+    let d = dissect(1, &ipv4_icmp_frame(&body));
+    assert!(d.info.contains("Port unreachable"));
+    assert!(d.layers.iter().any(|l| l.label == "quoted datagram" && l.value.contains("12 byte(s)")));
+}
+
+#[test]
+fn icmp_neighbor_solicitation_exposes_target_and_link_layer_option() {
+    let mut body = vec![135, 0, 0, 0]; // NS
+    body.extend_from_slice(&[0, 0, 0, 0]); // reserved
+    body.extend_from_slice(&[0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 9]); // target
+    body.push(1); // source link-layer address option
+    body.push(1); // length 1 unit = 8 octets (header + 6-byte MAC)
+    body.extend_from_slice(&[0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]);
+    let frame = ipv6_icmp_frame(58, &body);
+    let d = dissect(1, &frame);
+    assert_eq!(d.protocol, "ICMPv6");
+    assert!(d.info.contains("Neighbor Solicitation"));
+    assert!(d.layers.iter().any(|l| l.label == "target address" && l.value == "2001:db8::9"));
+    assert!(d.layers.iter().any(|l| l.label == "Source Link-Layer Address" && l.value == "aa:bb:cc:dd:ee:ff"));
+}
+
+#[test]
+fn icmp_neighbor_advertisement_flags_and_truncated_options_stay_bounded() {
+    let mut body = vec![136, 0, 0, 0]; // NA
+    body.push(0xe0); // router + solicited + override
+    body.extend_from_slice(&[0, 0, 0]); // reserved rest
+    body.extend_from_slice(&[0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 9]);
+    body.push(2); // target link-layer option with a length that overruns
+    body.push(40);
+    body.extend_from_slice(&[0x11, 0x22, 0x33]);
+    let frame = ipv6_icmp_frame(58, &body);
+    let d = dissect(1, &frame);
+    assert!(d.info.contains("Neighbor Advertisement"));
+    assert!(d.layers.iter().any(|l| l.label == "advertisement flags"
+        && l.value == "router=true solicited=true override=true"));
+    assert!(d.layers.iter().any(|l| l.label == "ND option warning"));
+    // A malformed option never removes the address layers already decoded.
+    assert!(d.layers.iter().any(|l| l.label == "target address"));
+}
+
+#[test]
+fn icmp_truncated_headers_degrade_without_panicking() {
+    // One trailing byte is a valid IPv4 datagram with a 1-byte ICMP body.
+    let d4 = dissect(101, &[0x45, 0, 0, 21, 0, 0, 0, 0, 64, 1, 0, 0, 1, 2, 3, 4, 5, 6, 7, 8, 8]);
+    assert_eq!(d4.protocol, "ICMP");
+    assert!(d4.info.contains("Echo Request"));
+    // A 1-byte ICMPv6 body cannot carry the 4-byte fixed header.
+    let d6 = dissect(1, &ipv6_icmp_frame(58, &[136]));
+    assert_eq!(d6.protocol, "ICMPv6");
+    assert!(d6.info.contains("truncated"));
+}

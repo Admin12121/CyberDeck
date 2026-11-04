@@ -27,10 +27,16 @@ import {
   SAMPLE_PACKETS,
   conversationsOf,
   detailTree,
+  endpointsOf,
+  filterErrorOf,
+  ioSeriesOf,
   matchesFilter,
+  protocolHierarchy,
   protocolStats,
   sampleFrameBytes,
   type DetailNode,
+  type HierarchyNode,
+  type IoBucket,
 } from "./model";
 
 type DisplayPacket = PcapPacketWire & { sample?: boolean };
@@ -66,7 +72,7 @@ function ImportedCaptureView() {
   const [packetScrollTop, setPacketScrollTop] = useState(0);
   const packetScrollRef = useRef<HTMLDivElement>(null);
   const [selected, setSelected] = useState(0);
-  const [tab, setTab] = useWorkspaceDraft<"packets" | "conversations" | "statistics" | "streams">(wb.caseId, "network", "packet-view", "packets");
+  const [tab, setTab] = useWorkspaceDraft<"packets" | "conversations" | "endpoints" | "hierarchy" | "io" | "statistics" | "streams">(wb.caseId, "network", "packet-view", "packets");
   const [packetBytes, setPacketBytes] = useState<{ frameIndex: number; data: HexResponseWire } | null>(null);
   // null: details and bytes share the row evenly; dragging pins px.
   const [detailsWidth, setDetailsWidth] = useState<number | null>(null);
@@ -136,11 +142,19 @@ function ImportedCaptureView() {
     }
   };
 
+  // §5.1: display-filter syntax is validated visibly. An invalid filter keeps
+  // the unfiltered list on screen (Wireshark behavior) instead of emptying it
+  // while the user is mid-edit.
+  const filterProblem = useMemo(() => filterErrorOf(filter), [filter]);
   const filtered = useMemo(() => {
     const q = filter.trim();
-    if (!q) return packets;
+    if (!q || filterProblem) return packets;
     return packets.filter((p) => matchesFilter(p, q));
-  }, [packets, filter]);
+  }, [packets, filter, filterProblem]);
+  const endpoints = useMemo(() => endpointsOf(filtered), [filtered]);
+  const hierarchy = useMemo(() => protocolHierarchy(filtered), [filtered]);
+  const ioBuckets = useMemo(() => ioSeriesOf(filtered), [filtered]);
+  const hierarchyBytes = useMemo(() => filtered.reduce((sum, item) => sum + item.length, 0), [filtered]);
 
   const current = filtered.find((p) => p.index === selected) ?? filtered[0];
   // A bounded virtual window keeps large PCAPs responsive without dropping rows.
@@ -234,6 +248,14 @@ function ImportedCaptureView() {
       {openError ? (
         <div className="border-b border-err/50 bg-err/10 px-2 py-1 font-mono text-[10px] text-err">{openError}</div>
       ) : null}
+      {filterProblem ? (
+        <div className="border-b border-warn/40 bg-warn/10 px-2 py-1 font-mono text-[10px] text-warn" role="status" aria-label="Display filter syntax error">
+          {"filter syntax: "}
+          {filterProblem.message}
+          {" · at character "}
+          {filterProblem.position + 1}
+        </div>
+      ) : null}
       {capture?.malformed_tail ? (
         <div className="border-b border-warn/40 bg-warn/10 px-2 py-1 font-mono text-[10px] text-warn">
           capture has a malformed trailing record; packets before it loaded
@@ -284,6 +306,66 @@ function ImportedCaptureView() {
                 ) : null}
               </tbody>
             </table>
+          ) : tab === "endpoints" ? (
+            <table className="data-table">
+              <thead>
+                <tr>
+                  <th>Address</th>
+                  <th className="w-24">Family</th>
+                  <th className="w-16">Packets</th>
+                  <th className="w-24">Bytes</th>
+                </tr>
+              </thead>
+              <tbody>
+                {endpoints.map((e) => (
+                  <tr key={`${e.family}:${e.address}`}>
+                    <td>
+                      <button type="button"
+                        className="w-full rounded-sm px-1 py-0.5 text-left font-mono text-[11px] hover:bg-selected focus-visible:outline focus-visible:outline-1 focus-visible:outline-ring"
+                        title={`Filter for address ${e.address}`}
+                        aria-label={`Filter packets for address ${e.address}`}
+                        onClick={() => {
+                          if (e.family === "ip4") setFilter(`ip.addr == ${e.address}`);
+                          else if (e.family === "ip6") setFilter(`ipv6.addr == ${e.address}`);
+                          else setFilter(`eth.addr == ${e.address}`);
+                          setTab("packets");
+                        }}>
+                        {e.address}
+                      </button>
+                    </td>
+                    <td className="text-fg-muted">{e.family === "ip4" ? "IPv4" : e.family === "ip6" ? "IPv6" : "Ethernet"}</td>
+                    <td>{e.packets}</td>
+                    <td>{e.bytes}</td>
+                  </tr>
+                ))}
+                {endpoints.length === 0 ? (
+                  <tr><td colSpan={4} className="text-center text-fg-muted">no endpoints in the current view</td></tr>
+                ) : null}
+              </tbody>
+            </table>
+          ) : tab === "hierarchy" ? (
+            <div className="p-1">
+              <table className="data-table">
+                <thead>
+                  <tr>
+                    <th>Protocol</th>
+                    <th className="w-16">Packets</th>
+                    <th className="w-24">Bytes</th>
+                    <th>Share of bytes</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {hierarchy.map((node) => (
+                    <HierarchyRows key={node.protocol} node={node} depth={0} totalBytes={hierarchyBytes} />
+                  ))}
+                  {hierarchy.length === 0 ? (
+                    <tr><td colSpan={4} className="text-center text-fg-muted">no protocols in the current view</td></tr>
+                  ) : null}
+                </tbody>
+              </table>
+            </div>
+          ) : tab === "io" ? (
+            <IoGraphView buckets={ioBuckets} />
           ) : tab === "statistics" ? (
             <table className="data-table">
               <thead>
@@ -375,15 +457,76 @@ function ImportedCaptureView() {
               ) : null}
             </div>}
       />
-      <WorkspaceTabs items={["packets", "conversations", "statistics", "streams"] as const}
+      <WorkspaceTabs items={["packets", "conversations", "endpoints", "hierarchy", "io", "statistics", "streams"] as const}
         active={tab} onChange={setTab} placement="bottom" ariaLabel="Packet investigation views" />
       </div>
     </div>
   );
 }
 
-function DetailBranch({ node, depth }: { node: DetailNode; depth: number }) {
-  const [open, setOpen] = useState(depth < 2);
+// ------------------------------------------------------ protocol hierarchy ---
+
+/** One row per hierarchy node, indented by depth; children follow their parent. */
+function HierarchyRows({ node, depth, totalBytes }: { node: HierarchyNode; depth: number; totalBytes: number }) {
+  const share = totalBytes > 0 ? Math.round((node.bytes / totalBytes) * 100) : 0;
+  return (
+    <>
+      <tr>
+        <td>
+          <span style={{ paddingLeft: depth * 14 }} className="font-mono text-[11px] text-fg">
+            {depth > 0 ? "└ " : ""}{node.protocol}
+          </span>
+        </td>
+        <td>{node.packets}</td>
+        <td>{node.bytes}</td>
+        <td>
+          <div className="h-1.5 w-full max-w-48 border border-line bg-app">
+            <div className="h-full bg-blue" style={{ width: `${share}%` }} />
+          </div>
+        </td>
+      </tr>
+      {node.children.map((child) => (
+        <HierarchyRows key={`${node.protocol}/${child.protocol}`} node={child} depth={depth + 1} totalBytes={totalBytes} />
+      ))}
+    </>
+  );
+}
+
+// --------------------------------------------------------------- io graph ----
+
+/**
+ * Time-bucketed packets-per-bucket bar chart over the current (filtered)
+ * view. Pure CSS bars keep the Dark Matter palette; each bar carries a
+ * tooltip with its window, packet count and byte volume.
+ */
+function IoGraphView({ buckets }: { buckets: IoBucket[] }) {
+  if (buckets.length === 0) {
+    return <EmptyState title="No packets to graph" detail="Open a capture or relax the display filter." />;
+  }
+  const maxPackets = Math.max(...buckets.map((b) => b.packets), 1);
+  const span = Math.max(buckets[buckets.length - 1].fromMs - buckets[0].fromMs, 1);
+  return (
+    <div className="flex h-full min-h-0 flex-col p-2">
+      <p className="mb-1 font-mono text-[10px] text-fg-muted">
+        packets per bucket over {(span / 1000).toFixed(3)} s · peak {maxPackets} · total {buckets.reduce((s, b) => s + b.packets, 0)}
+      </p>
+      <div className="flex min-h-0 flex-1 items-end gap-px" role="img" aria-label="Packets per time bucket">
+        {buckets.map((b, i) => (
+          <div key={i}
+            className="min-w-[2px] flex-1 bg-orange/80 hover:bg-orange"
+            style={{ height: `${Math.max((b.packets / maxPackets) * 100, b.packets > 0 ? 3 : 0)}%` }}
+            title={`t=+${(b.fromMs / 1000).toFixed(3)} s · ${b.packets} packets · ${b.bytes} bytes`} />
+        ))}
+      </div>
+      <div className="mt-1 flex justify-between font-mono text-[10px] text-fg-muted">
+        <span>+{(buckets[0].fromMs / 1000).toFixed(3)} s</span>
+        <span>+{((buckets[buckets.length - 1].fromMs + span / buckets.length) / 1000).toFixed(3)} s</span>
+      </div>
+    </div>
+  );
+}
+
+function DetailBranch({ node, depth }: { node: DetailNode; depth: number }) {  const [open, setOpen] = useState(depth < 2);
   const hasChildren = Boolean(node.children?.length);
   return (
     <div style={{ paddingLeft: depth * 12 }}>

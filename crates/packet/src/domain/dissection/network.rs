@@ -78,21 +78,11 @@ pub(super) fn dissect_ipv4(payload: &[u8], parent_layers: &[Layer]) -> Dissected
         ),
         17 => dissect_udp(transport, &source, &destination, layers),
         1 => {
-            let info = format!(
-                "ICMP type={} code={}",
-                transport.first().copied().unwrap_or(0),
-                transport.get(1).copied().unwrap_or(0)
-            );
+            let dissected = super::icmp::dissect_icmpv4(transport, layers);
             Dissected {
                 source,
                 destination,
-                protocol: "ICMP".to_string(),
-                info,
-                color_hint: color_for("ICMP"),
-                layers,
-                stream_id: None,
-                tcp: None,
-                payload: transport.to_vec(),
+                ..dissected
             }
         }
         other => {
@@ -228,21 +218,11 @@ pub(super) fn dissect_ipv6(payload: &[u8], parent_layers: &[Layer]) -> Dissected
         6 => dissect_tcp(transport, &source, &destination, transport.len(), layers),
         17 => dissect_udp(transport, &source, &destination, layers),
         58 => {
-            let info = format!(
-                "ICMPv6 type={} code={}",
-                transport.first().copied().unwrap_or(0),
-                transport.get(1).copied().unwrap_or(0),
-            );
+            let dissected = super::icmp::dissect_icmpv6(transport, layers);
             Dissected {
                 source,
                 destination,
-                protocol: "ICMPv6".into(),
-                info,
-                color_hint: color_for("ICMP"),
-                layers,
-                stream_id: None,
-                tcp: None,
-                payload: transport.to_vec(),
+                ..dissected
             }
         }
         other => Dissected {

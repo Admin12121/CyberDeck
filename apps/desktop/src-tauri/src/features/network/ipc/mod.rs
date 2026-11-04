@@ -5,3 +5,7 @@ pub mod netscan;
 pub mod operation_gate;
 pub mod syn_scan;
 pub mod pcap;
+pub mod scan_depth;
+pub mod pcap_export;
+pub mod network_lab;
+pub mod scan_insights;

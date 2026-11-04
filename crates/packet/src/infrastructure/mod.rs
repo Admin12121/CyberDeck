@@ -8,3 +8,4 @@ pub mod windows_capture;
 pub mod windows_interfaces;
 // Versioned native receive protocol remains platform-neutral for hostile-record fixtures.
 pub mod windows_capture_wire;
+pub mod bpf_capture;

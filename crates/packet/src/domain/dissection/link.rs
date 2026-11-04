@@ -2,7 +2,7 @@
 use super::network::{dissect_ipv4, dissect_ipv6};
 use crate::{Dissected, Layer};
 
-fn mac_to_string(bytes: &[u8]) -> String {
+pub(super) fn mac_to_string(bytes: &[u8]) -> String {
     // One bounded output allocation instead of six formatted strings plus a Vec.
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut text = String::with_capacity(bytes.len().saturating_mul(3).saturating_sub(1));

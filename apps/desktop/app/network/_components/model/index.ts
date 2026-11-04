@@ -130,46 +130,21 @@ export interface FilterPacket {
 }
 
 /**
- * Minimal display-filter language, evaluated over dissected layers:
- *   protocol names (tcp, udp, dns, http, tls, arp, icmp)
- *   ip.addr == 10.0.0.1 · tcp.port == 443 · udp.port == 53
- *   frame.len == N
- * Conditions combine with `and`.
+ * Display-filter language v2 lives in display-filter.ts: a real tokenizer +
+ * parser supporting and/or/not, parentheses, ordering operators, `contains`,
+ * tcp/udp port and flag fields, eth/ip/ipv6 address fields and visible syntax
+ * validation. Re-exported here for the views.
  */
-export function matchesFilter(p: FilterPacket, filter: string): boolean {
-  const conditions = filter
-    .toLowerCase()
-    .split(/\s+and\s+/)
-    .map((c) => c.trim())
-    .filter(Boolean);
-  if (conditions.length === 0) return true;
-  const proto = p.protocol.toLowerCase();
-  const layerValue = (label: string) =>
-    p.layers.find((l) => l.label.toLowerCase() === label)?.value ?? "";
-
-  return conditions.every((cond) => {
-    const eq = cond.match(/^(ip\.addr|tcp\.port|udp\.port|frame\.len)\s*==\s*(\S+)$/);
-    if (eq) {
-      const [, field, value] = eq;
-      switch (field) {
-        case "ip.addr":
-          return p.source === value || p.destination === value;
-        case "tcp.port":
-          return proto === "tcp" || proto === "http" || proto === "tls"
-            ? layerValue("source port") === value || layerValue("destination port") === value
-            : false;
-        case "udp.port":
-          return proto === "udp" || proto === "dns"
-            ? layerValue("source port") === value || layerValue("destination port") === value
-            : false;
-        case "frame.len":
-          return String(p.length) === value;
-      }
-    }
-    if (cond === "ip") return p.source.includes(".") && !p.source.includes(":");
-    return proto.includes(cond) || p.info.toLowerCase().includes(cond);
-  });
-}
+export {
+  matchesFilter,
+  parseDisplayFilter,
+  filterErrorOf,
+  KNOWN_FILTER_FIELDS,
+  KNOWN_PROTOCOL_TOKENS,
+  type DisplayFilter,
+  type InvalidFilter,
+  type FilterPositionedError,
+} from "./display-filter.ts";
 
 export interface Conversation {
   endpoints: [string, string];
@@ -206,4 +181,158 @@ export function protocolStats(packets: FilterPacket[]): ProtocolStat[] {
     map.set(p.protocol, entry);
   }
   return [...map.values()].sort((a, b) => b.packets - a.packets);
+}
+
+// --- protocol hierarchy, endpoints, IO graph (§5.1 statistics) ----------------
+
+/**
+ * Wireshark-style protocol hierarchy: every row contributes a protocol chain
+ * derived from the actual dissection layer labels, so an HTTP row counts as
+ * Ethernet → IPv4 → TCP → HTTP instead of a flat "HTTP" total. Label mapping
+ * is bounded to what the Rust dissector emits today; unknown labels are
+ * ignored rather than guessed.
+ */
+function protocolChainOf(p: FilterPacket): string[] {
+  const labels = new Set(p.layers.map((l) => l.label.toLowerCase()));
+  const chain: string[] = [];
+  const push = (name: string) => {
+    if (!chain.includes(name)) chain.push(name);
+  };
+  if (labels.has("ethernet ii") || labels.has("linux cooked capture")) push("eth");
+  if (labels.has("address resolution protocol")) {
+    push("arp");
+    return chain;
+  }
+  if (labels.has("internet protocol version 4")) push("ip");
+  if (labels.has("internet protocol version 6")) push("ipv6");
+  const family = protocolFamilyOf(p.protocol);
+  if (family === "tcp" || labels.has("transmission control protocol")) push("tcp");
+  if (family === "udp" || labels.has("user datagram protocol")) push("udp");
+  if (family === "icmp" || p.protocol.toLowerCase().startsWith("icmpv6")) push(p.protocol.toLowerCase().startsWith("icmpv6") ? "icmpv6" : "icmp");
+  const leaf = p.protocol.toLowerCase();
+  if (!["tcp", "udp", "ip", "ipv6", "icmp", "icmpv6"].includes(leaf) && !(leaf.startsWith("ip-") || leaf.startsWith("ipv6-") || leaf.startsWith("ipv4-") || leaf.endsWith("-truncated"))) {
+    push(leaf);
+  }
+  return chain;
+}
+
+function protocolFamilyOf(protocol: string): string {
+  const lower = protocol.toLowerCase();
+  if (["tcp", "http", "tls", "ssh", "smtp"].includes(lower) || lower.startsWith("tlsv")) return "tcp";
+  if (["udp", "dns", "dhcp", "ntp", "stun", "mdns", "llmnr"].includes(lower)) return "udp";
+  if (lower === "icmp" || lower === "icmpv6") return "icmp";
+  return lower;
+}
+
+export interface HierarchyNode {
+  protocol: string;
+  packets: number;
+  bytes: number;
+  children: HierarchyNode[];
+}
+
+/** Aggregation uses maps keyed by protocol name; output converts to arrays. */
+type HierarchyLevel = Map<string, { packets: number; bytes: number; children: HierarchyLevel }>;
+
+export function protocolHierarchy(packets: FilterPacket[]): HierarchyNode[] {
+  const roots: HierarchyLevel = new Map();
+  const sortLevel = (level: HierarchyLevel): HierarchyNode[] =>
+    [...level.entries()]
+      .map(([protocol, agg]) => ({
+        protocol,
+        packets: agg.packets,
+        bytes: agg.bytes,
+        children: sortLevel(agg.children),
+      }))
+      .sort((a, b) => b.packets - a.packets);
+  for (const p of packets) {
+    let level = roots;
+    for (const name of protocolChainOf(p)) {
+      let entry = level.get(name);
+      if (!entry) {
+        entry = { packets: 0, bytes: 0, children: new Map() };
+        level.set(name, entry);
+      }
+      entry.packets += 1;
+      entry.bytes += p.length;
+      level = entry.children;
+    }
+  }
+  return sortLevel(roots);
+}
+
+export interface EndpointStat {
+  address: string;
+  /** mac | ip4 | ip6 — Wireshark's endpoint tabs split by address family. */
+  family: "mac" | "ip4" | "ip6";
+  packets: number;
+  bytes: number;
+}
+
+function endpointFamily(address: string): EndpointStat["family"] | null {
+  if (/^[0-9a-f]{2}(?::[0-9a-f]{2}){5}$/i.test(address)) return "mac";
+  if (address.includes(":")) return address.includes("::") || /^([0-9a-f]{1,4}:){2,}[0-9a-f]*$/i.test(address) ? "ip6" : null;
+  if (address.includes(".")) return /^\d{1,3}(\.\d{1,3}){3}$/.test(address) ? "ip4" : null;
+  return null;
+}
+
+/** MAC endpoints come from the Ethernet II layer value "src → dst". */
+export function endpointsOf(packets: FilterPacket[]): EndpointStat[] {
+  const map = new Map<string, EndpointStat>();
+  const record = (address: string, bytes: number) => {
+    const family = endpointFamily(address);
+    if (!family) return;
+    const entry = map.get(address) ?? { address, family, packets: 0, bytes: 0 };
+    entry.packets += 1;
+    entry.bytes += bytes;
+    map.set(address, entry);
+  };
+  for (const p of packets) {
+    const ethernet = p.layers.find((l) => l.label.toLowerCase() === "ethernet ii")?.value ?? "";
+    const [srcMac, dstMac] = ethernet.split(" → ");
+    if (srcMac && dstMac) {
+      record(srcMac, p.length);
+      record(dstMac, p.length);
+    }
+    record(p.source, p.length);
+    record(p.destination, p.length);
+  }
+  const familyOrder: Record<EndpointStat["family"], number> = { ip4: 0, ip6: 1, mac: 2 };
+  return [...map.values()].sort(
+    (a, b) => familyOrder[a.family] - familyOrder[b.family] || b.packets - a.packets,
+  );
+}
+
+export interface IoBucket {
+  /** Bucket start in ms relative to the first packet. */
+  fromMs: number;
+  packets: number;
+  bytes: number;
+}
+
+/**
+ * Time-bucketed series for the IO graph. Buckets span the capture's own time
+ * range; an empty or single-instant capture yields one bucket so the graph
+ * never divides by zero.
+ */
+export function ioSeriesOf(packets: FilterPacket[], bucketCount = 60): IoBucket[] {
+  if (packets.length === 0) return [];
+  const times = packets.map((p) => (p as { time_ms?: number }).time_ms ?? 0);
+  const min = Math.min(...times);
+  const max = Math.max(...times);
+  const span = Math.max(max - min, 1);
+  const count = Math.max(1, Math.min(bucketCount, 240));
+  const width = span / count;
+  const buckets: IoBucket[] = Array.from({ length: count }, (_, i) => ({
+    fromMs: min + i * width,
+    packets: 0,
+    bytes: 0,
+  }));
+  for (const p of packets) {
+    const time = (p as { time_ms?: number }).time_ms ?? min;
+    const index = Math.min(count - 1, Math.max(0, Math.floor((time - min) / width)));
+    buckets[index].packets += 1;
+    buckets[index].bytes += p.length;
+  }
+  return buckets;
 }

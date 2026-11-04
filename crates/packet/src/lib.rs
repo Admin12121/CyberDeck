@@ -2,6 +2,8 @@
 //! Guard rails: length fields validated, malformed tails flagged.
 
 pub mod active_arp;
+pub mod active_scan_types;
+pub mod arp_watch;
 pub mod active_echo;
 pub mod active_echo6;
 pub mod active_ndp;
@@ -12,6 +14,7 @@ pub mod dns;
 pub mod domain;
 pub mod fragments;
 pub mod infrastructure;
+pub mod pcap_write;
 pub mod inventory;
 pub mod live;
 pub mod scan_packets;

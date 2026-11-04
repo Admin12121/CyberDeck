@@ -14,16 +14,27 @@ test("Statistics protocol actions populate display filter and open Packets", () 
   assert.match(source, /aria-label=\{\x60Show \$\{stat\.protocol\} packets\x60\}/);
 });
 
-test("Stats protocol filters select actual dissected packets across protocol names", () => {
+test("Stats protocol filters follow display-filter v2 family semantics", () => {
   const packets = [
     { source: "192.0.2.1", destination: "192.0.2.2", protocol: "HTTP", info: "GET /", length: 128, layers: [] },
     { source: "192.0.2.1", destination: "192.0.2.2", protocol: "TLSv1.3", info: "Application Data", length: 350, layers: [] },
     { source: "192.0.2.2", destination: "192.0.2.1", protocol: "SSH", info: "Key exchange", length: 214, layers: [] },
     { source: "192.0.2.2", destination: "192.0.2.1", protocol: "TCP", info: "ACK", length: 66, layers: [] },
   ];
+  // Display-filter v2 gives bare protocol tokens Wireshark semantics: transport
+  // tokens (tcp, udp, ip, ipv6) match their whole family — everything riding on
+  // that transport — while application names (http, ssh, tlsv1.3) stay pinned
+  // to their own display protocol.
+  const expected = {
+    "http": ["HTTP"],
+    "tlsv1.3": ["TLSv1.3"],
+    "ssh": ["SSH"],
+    "tcp": ["HTTP", "TLSv1.3", "SSH", "TCP"],
+  };
   for (const stat of protocolStats(packets)) {
-    const result = packets.filter((packet) => matchesFilter(packet, stat.protocol.toLowerCase()));
-    assert.equal(result.length, stat.packets);
-    assert.ok(result.every((packet) => packet.protocol === stat.protocol));
+    const filter = stat.protocol.toLowerCase();
+    const result = packets.filter((packet) => matchesFilter(packet, filter));
+    assert.deepEqual(result.map((p) => p.protocol).sort(), [...expected[filter]].sort(),
+      `filter "${filter}" selected the wrong protocol set`);
   }
 });
