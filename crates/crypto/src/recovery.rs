@@ -256,6 +256,29 @@ impl RecoveryTarget {
                         super::archives::PkZip::parse(text)?;
                     }
                 }
+                "office-97-2003" | "office-2007" | "office-2013" | "pdf-1.1-1.3"
+                | "pdf-1.4-1.6" => {
+                    // Document containers (batch B2): same fail-fast shape
+                    // validation; unsupported revisions and key sizes are
+                    // rejected at parse time.
+                    match format {
+                        "office-97-2003" => {
+                            super::documents::Office97::parse(text)?;
+                        }
+                        "office-2007" => {
+                            super::documents::Office2007::parse(text)?;
+                        }
+                        "office-2013" => {
+                            super::documents::Office2013::parse(text)?;
+                        }
+                        "pdf-1.1-1.3" => {
+                            super::documents::PdfR2::parse(text)?;
+                        }
+                        _ => {
+                            super::documents::PdfR34::parse(text)?;
+                        }
+                    }
+                }
                 "mscash" => {
                     if !text.contains('#') {
                         return Err("invalid mscash encoding".into());

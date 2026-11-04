@@ -48,6 +48,11 @@ const EMBEDDED_MODES: readonly { value: HashcatRawAlgorithmV1; label: string; di
   { value: "mscash2", label: "mscash2 / DCC2 · mode 2100", digits: 0 },
   { value: "netntlm-v1", label: "NetNTLMv1 · mode 5500", digits: 0 },
   { value: "netntlm-v2", label: "NetNTLMv2 · mode 5600", digits: 0 },
+  { value: "office-97-2003", label: "MS Office 97/2003 ($oldoffice$) · mode 9700", digits: 0 },
+  { value: "office-2007", label: "MS Office 2007 ($office$) · mode 9400", digits: 0 },
+  { value: "office-2013", label: "MS Office 2013 ($office$) · mode 9600", digits: 0 },
+  { value: "pdf-1.1-1.3", label: "PDF 1.1-1.3 ($pdf$ R2) · mode 10400", digits: 0 },
+  { value: "pdf-1.4-1.6", label: "PDF 1.4-1.6 ($pdf$ R3/R4) · mode 10500", digits: 0 },
   { value: "winzip-aes", label: "WinZip AES ($zip2$) · mode 13600", digits: 0 },
   { value: "7zip", label: "7-Zip ($7z$) · mode 11600", digits: 0 },
   { value: "zip-legacy", label: "ZIP legacy (ZipCrypto) · modes 17200/17210", digits: 0 },
@@ -119,6 +124,7 @@ function useRecoveryController(targetHash: string, onCaseCreated?: (caseId: stri
     "$scrypt$", "$pbkdf2", "$6$", "$5$", "$1$", "$apr1$", "$sha1$", "$P$",
     "$H$", "$NT$", "$DCC2$", "DCC2#", "M$", "$NETNTLM", "WPA*01*", "0x0100",
     "0x0200", "$zip2$", "$7z$", "$pkzip2$", "$pkzip$",
+    "$oldoffice$", "$office$", "$pdf$",
   ];
   const isKdfHash =
     (hash.startsWith("$") && KDF_PREFIXES.some((prefix) => hash.startsWith(prefix))) ||
@@ -141,6 +147,7 @@ function useRecoveryController(targetHash: string, onCaseCreated?: (caseId: stri
         "$2a$": "bcrypt", "$2b$": "bcrypt", "$2y$": "bcrypt",
         "$P$": "phpass", "$H$": "phpass",
         "$zip2$": "winzip-aes", "$7z$": "7zip", "$pkzip2$": "zip-legacy", "$pkzip$": "zip-legacy",
+        "$oldoffice$": "office-97-2003", "$office$": "office-2007", "$pdf$": "pdf-1.1-1.3",
       };
       const match = Object.entries(kdfSuggestion).find(([prefix]) => hash.startsWith(prefix));
       if (match && match[1]) {

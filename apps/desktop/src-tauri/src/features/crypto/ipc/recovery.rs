@@ -848,6 +848,12 @@ fn bundled_hashcat_modes() -> Vec<EmbeddedHashcatMode> {
         ("descrypt", 1500, 0),
         ("mssql-2005", 132, 0),
         ("mssql-2012", 1731, 0),
+        // Batch-4 documents (MS Office and PDF).
+        ("office-97-2003", 9700, 0),
+        ("office-2007", 9400, 0),
+        ("office-2013", 9600, 0),
+        ("pdf-1.1-1.3", 10400, 0),
+        ("pdf-1.4-1.6", 10500, 0),
         // Batch-3 archive containers.
         ("winzip-aes", 13600, 0),
         ("7zip", 11600, 0),

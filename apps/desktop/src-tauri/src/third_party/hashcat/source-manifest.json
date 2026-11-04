@@ -1153,6 +1153,50 @@
       "sha256": "b2834200641764ac503ed821af0e5a2b2daaab1db801df5c87ee1c9cdad6e381",
       "bytes": 7736
     },
+    "OpenCL/m09400-pure.cl": {
+      "sha256": "5fb4dca7dab3e0995932b42cf69b0f9e9883f39476602b6b24afc059770c9ed5",
+      "bytes": 8720
+    },
+    "OpenCL/m09600-pure.cl": {
+      "sha256": "8b7a205d83824957975b92731f440e334137f2a8a94627444510a6b9fd1a0adb",
+      "bytes": 10410
+    },
+    "OpenCL/m09700_a0-optimized.cl": {
+      "sha256": "6b3a8e5c0e2fa6e9cc12c5544d5c8ef67d99c0939ac7232c86587b6d5fa23fe4",
+      "bytes": 15454
+    },
+    "OpenCL/m09700_a1-optimized.cl": {
+      "sha256": "f19ff7653fdff13e7f7741283bed082ea4e0a50c27c190e85a2de4b605625cd0",
+      "bytes": 22227
+    },
+    "OpenCL/m09700_a3-optimized.cl": {
+      "sha256": "8cffd25ca890ffbdc7b1b545f195438947e4a068d4786d10b5cf0f787a9d0f36",
+      "bytes": 31401
+    },
+    "OpenCL/m09700_a4-optimized.cl": {
+      "sha256": "2d81de973c5917fae52a2f995a81f4a6d0bfd09c88b8449d16ac201b6b007116",
+      "bytes": 11460
+    },
+    "OpenCL/m10400_a0-optimized.cl": {
+      "sha256": "30df8af3755d2d91c92a5d1af9a30ad7d7a2c37e7b39682b7456532ee13418d4",
+      "bytes": 8360
+    },
+    "OpenCL/m10400_a1-optimized.cl": {
+      "sha256": "1f4bf3bf78ec0d7bbc4e9c35457b2379589d5e3c5c33ccd58c4aa229f1d4b735",
+      "bytes": 14899
+    },
+    "OpenCL/m10400_a3-optimized.cl": {
+      "sha256": "d64a82b3d8d61c304e5b6b806d8fb713e852f764b6f8064c5c2dd5a94a647d05",
+      "bytes": 14381
+    },
+    "OpenCL/m10400_a4-optimized.cl": {
+      "sha256": "a9fecb2ce35956c92d8646d1ca0951b19c1ba41a457af6a825c6709977febcb9",
+      "bytes": 3867
+    },
+    "OpenCL/m10500-pure.cl": {
+      "sha256": "6d5b36d204ba3a7f104f67d3b2f0f61554bb09de048c1ae58fcab5c305294644",
+      "bytes": 8692
+    },
     "OpenCL/m11600-optimized.cl": {
       "sha256": "00ecf94c6fe7c57b4bd09bb1636c0edcc8ec220f7837c68b04985c73b7d68721",
       "bytes": 5560
@@ -2548,6 +2592,26 @@
     "src/modules/module_07400.c": {
       "sha256": "f4863c9499a55611953bd7c12ba1f4895a5a3672dc5eee4e027b8d2f344a3f66",
       "bytes": 19869
+    },
+    "src/modules/module_09400.c": {
+      "sha256": "f3de109826f506e79dbfb49af3f402ed4b87309448917906eb9475a29b344342",
+      "bytes": 17055
+    },
+    "src/modules/module_09600.c": {
+      "sha256": "50c6484b5fcff97422d9b9a44de42d2ba1849381ceb95795627354801286eea8",
+      "bytes": 19707
+    },
+    "src/modules/module_09700.c": {
+      "sha256": "57407444b9dd5d5ac7648d4e84ab38cfeeebe7c7dd7cc672a7d225ea6c676e7c",
+      "bytes": 17377
+    },
+    "src/modules/module_10400.c": {
+      "sha256": "4bcf3c706150b215cd6615e7a447600a0e6ccdd5d3b42cf2ec8ad9dfb891dd2f",
+      "bytes": 19098
+    },
+    "src/modules/module_10500.c": {
+      "sha256": "0dbc64a100a687d1e10d795ef6228dea0051cad84384223b753f336f5123785f",
+      "bytes": 23823
     },
     "src/modules/module_11600.c": {
       "sha256": "7696f2dd48a5f1d3a17dc21bbea3e991a53d85881ffe46f2f6e7b0b58ce93b87",

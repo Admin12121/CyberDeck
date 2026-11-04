@@ -139,7 +139,30 @@ pub fn runtime_available(root: &Path) -> Result<(), String> {
     // Archive batch (B1): these upstream modes ship pure-only kernels (7-Zip
     // also has a suffix-less optimized kernel), so the kernel set is explicit
     // per mode instead of the a0/a1/a3 triplet.
+    // Document batch (B2): Office 2007/2013 and PDF 1.4-1.6 are pure-only;
+    // oldoffice and PDF 1.1-1.3 ship optimized-only kernel families.
     for (mode, kernels) in [
+        (9400u32, &["m09400-pure.cl"] as &[&str]),
+        (9600, &["m09600-pure.cl"] as &[&str]),
+        (
+            9700,
+            &[
+                "m09700_a0-optimized.cl",
+                "m09700_a1-optimized.cl",
+                "m09700_a3-optimized.cl",
+                "m09700_a4-optimized.cl",
+            ] as &[&str],
+        ),
+        (
+            10400,
+            &[
+                "m10400_a0-optimized.cl",
+                "m10400_a1-optimized.cl",
+                "m10400_a3-optimized.cl",
+                "m10400_a4-optimized.cl",
+            ] as &[&str],
+        ),
+        (10500, &["m10500-pure.cl"] as &[&str]),
         (
             11600u32,
             &["m11600-pure.cl", "m11600-optimized.cl"] as &[&str],
@@ -260,7 +283,14 @@ const PUBLIC_KATS: &[(u32, &str, &str)] = &[
     (11600, "hashcat", "$7z$0$14$0$$11$33363437353138333138300000000000$2365089182$16$12$d00321533b483f54a523f624a5f63269"),
     (17200, "hashcat", "$pkzip2$1*1*2*0*e3*1c5*eda7a8de*0*28*8*e3*eda7*5096*a9fc1f4e951c8fb3031a6f903e5f4e3211c8fdc4671547bf77f6f682afbfcc7475d83898985621a7af9bccd1349d1976500a68c48f630b7f22d7a0955524d768e34868880461335417ddd149c65a917c0eb0a4bf7224e24a1e04cf4ace5eef52205f4452e66ded937db9545f843a68b1e84a2e933cc05fb36d3db90e6c5faf1bee2249fdd06a7307849902a8bb24ec7e8a0886a4544ca47979a9dfeefe034bdfc5bd593904cfe9a5309dd199d337d3183f307c2cb39622549a5b9b8b485b7949a4803f63f67ca427a0640ad3793a519b2476c52198488e3e2e04cac202d624fb7d13c2*$/pkzip2$"),
     (17210, "hashcat", "$pkzip2$1*1*2*0*1d1*1c5*eda7a8de*0*28*0*1d1*eda7*5096*1dea673da43d9fc7e2be1a1f4f664269fceb6cb88723a97408ae1fe07f774d31d1442ea8485081e63f919851ca0b7588d5e3442317fff19fe547a4ef97492ed75417c427eea3c4e146e16c100a2f8b6abd7e5988dc967e5a0e51f641401605d673630ea52ebb04da4b388489901656532c9aa474ca090dbac7cf8a21428d57b42a71da5f3d83fed927361e5d385ca8e480a6d42dea5b4bf497d3a24e79fc7be37c8d1721238cbe9e1ea3ae1eb91fc02aabdf33070d718d5105b70b3d7f3d2c28b3edd822e89a5abc0c8fee117c7fbfbfd4b4c8e130977b75cb0b1da080bfe1c0859e6483c42f459c8069d45a76220e046e6c2a2417392fd87e4aa4a2559eaab3baf78a77a1b94d8c8af16a977b4bb45e3da211838ad044f209428dba82666bf3d54d4eed82c64a9b3444a44746b9e398d0516a2596d84243b4a1d7e87d9843f38e45b6be67fd980107f3ad7b8453d87300e6c51ac9f5e3f6c3b702654440c543b1d808b62f7a313a83b31a6faaeedc2620de7057cd0df80f70346fe2d4dccc318f0b5ed128bcf0643e63d754bb05f53afb2b0fa90b34b538b2ad3648209dff587df4fa18698e4fa6d858ad44aa55d2bba3b08dfdedd3e28b8b7caf394d5d9d95e452c2ab1c836b9d74538c2f0d24b9b577*$/pkzip2$"),
-];
+    // Batch-4 documents: upstream hashcat example hashes
+    // (module ST_HASH/ST_PASS, pass "hashcat"), independently verified by
+    // the native CPU verifiers in cyberdeck-crypto/src/documents.rs.
+    (9700, "hashcat", "$oldoffice$0*55045061647456688860411218030058*e7e24d163fbd743992d4b8892bf3f2f7*493410dbc832557d3fe1870ace8397e2"),
+    (9400, "hashcat", "$office$*2007*20*128*16*18410007331073848057180885845227*944c70a5ee6e5ab2a6a86ff54b5f621a*e6650f1f2630c27fd8fc0f5e56e2e01f99784b9f"),
+    (9600, "hashcat", "$office$*2013*100000*256*16*67805436882475302087847656644837*0c392d3b9ca889656d1e615c54f9f3c9*612b79e33b96322c3253fc8a0f314463cd76bc4efe1352f7efffca0f374f7e4b"),
+    (10400, "hashcat", "$pdf$1*2*40*-1*0*16*01221086741440841668371056103222*32*27c3fecef6d46a78eb61b8b4dbc690f5f8a2912bbb9afc842c12d79481568b74*32*0000000000000000000000000000000000000000000000000000000000000000"),
+    (10500, "hashcat", "$pdf$2*3*128*-4*1*16*62888255846156252261477183186121*32*6879919b1afd520bd3b7dbcc0868a0a500000000000000000000000000000000*32*0000000000000000000000000000000000000000000000000000000000000000"),];
 type Readiness = Result<Vec<u32>, String>;
 static READINESS_CACHE: OnceLock<Mutex<HashMap<PathBuf, Readiness>>> = OnceLock::new();
 
@@ -356,6 +386,8 @@ fn self_test_mode(root: &Path, mode: u32, word: &str, digest: &str) -> Result<()
             // Archive containers self-identify through their $-markers and
             // verify through the CPU verifiers in cyberdeck-crypto/archives.
             13600 | 11600 | 17200 | 17210 => "kdf",
+            // Document containers verify through cyberdeck-crypto/documents.
+            9700 | 9400 | 9600 | 10400 | 10500 => "kdf",
             1100 => "mscash",
             1500 => "descrypt",
             _ => return Err("Hashcat self-test mode unsupported".into()),
@@ -462,6 +494,11 @@ pub(super) fn validate_embedded_request(request: &RecoveryRequest) -> Result<u32
         "descrypt" => 1500,
         "mssql-2005" => 132,
         "mssql-2012" => 1731,
+        "office-97-2003" => 9700,
+        "office-2007" => 9400,
+        "office-2013" => 9600,
+        "pdf-1.1-1.3" => 10400,
+        "pdf-1.4-1.6" => 10500,
         "winzip-aes" => 13600,
         "7zip" => 11600,
         // Legacy ZipCrypto runs as 17200 (deflate) or 17210 (stored),
@@ -480,6 +517,8 @@ pub(super) fn validate_embedded_request(request: &RecoveryRequest) -> Result<u32
                 "phpass", "md5crypt", "sha512crypt", "bcrypt", "sha256crypt", "mscash",
                 "mscash2", "netntlm-v1", "netntlm-v2", "mssql-2005", "mssql-2012",
                 "descrypt", "winzip-aes", "7zip", "zip-legacy",
+                "office-97-2003", "office-2007", "office-2013", "pdf-1.1-1.3",
+                "pdf-1.4-1.6",
             ];
             if KDF_MODES.contains(&request.algorithm.as_str()) {
                 Ok(mode)
@@ -534,6 +573,7 @@ fn frame_mode(
         0 | 10 | 20 | 50 | 60 | 100 | 110 | 120 | 132 | 400 | 500 | 1000 | 1100 | 1400 | 1500
         | 1700 | 1731 | 1800 | 2100 | 3200 | 5500 | 5600 | 7400
         | 11600 | 13600 | 17200 | 17210
+        | 9400 | 9600 | 9700 | 10400 | 10500
     ) {
         return Err("embedded Hashcat mode unsupported".into());
     }
@@ -753,7 +793,7 @@ mod tests {
     use super::*;
     #[test]
     fn every_public_native_mode_fixture_is_independently_verifiable_without_gpu() {
-        assert_eq!(PUBLIC_KATS.len(), 27);
+        assert_eq!(PUBLIC_KATS.len(), 32);
         for &(mode, word, hash) in PUBLIC_KATS {
             let algorithm = match mode {
                 0 => "md5",
@@ -769,6 +809,8 @@ mod tests {
                 1731 => "kdf",
                 // Archive containers self-identify via their $-markers.
                 13600 | 11600 | 17200 | 17210 => "kdf",
+                // Document containers likewise.
+                9700 | 9400 | 9600 | 10400 | 10500 => "kdf",
                 // Hint-driven composed targets: the wire shape is ambiguous.
                 10 => "md5-pass-salt",
                 20 => "md5-salt-pass",
@@ -804,7 +846,7 @@ mod tests {
         // hardware (RTX 4060, 2026-11-05); they must keep passing.
         for required in [
             0u32, 100, 1000, 1400, 1700, 500, 1800, 3200, 400, 1100, 2100,
-            13600, 11600, 17200, 17210,
+            13600, 11600, 17200, 17210, 9700, 9400, 9600, 10400, 10500,
         ] {
             assert!(
                 modes.contains(&required),

@@ -226,6 +226,51 @@
       "desktop_routed": true
     },
     {
+      "id": 9400,
+      "algorithm": "office-2007",
+      "digest_hex_length": 0,
+      "source_build": true,
+      "desktop_available": false,
+      "hardware_verified": false,
+      "desktop_routed": true
+    },
+    {
+      "id": 9600,
+      "algorithm": "office-2013",
+      "digest_hex_length": 0,
+      "source_build": true,
+      "desktop_available": false,
+      "hardware_verified": false,
+      "desktop_routed": true
+    },
+    {
+      "id": 9700,
+      "algorithm": "office-97-2003",
+      "digest_hex_length": 0,
+      "source_build": true,
+      "desktop_available": false,
+      "hardware_verified": false,
+      "desktop_routed": true
+    },
+    {
+      "id": 10400,
+      "algorithm": "pdf-1.1-1.3",
+      "digest_hex_length": 0,
+      "source_build": true,
+      "desktop_available": false,
+      "hardware_verified": false,
+      "desktop_routed": true
+    },
+    {
+      "id": 10500,
+      "algorithm": "pdf-1.4-1.6",
+      "digest_hex_length": 0,
+      "source_build": true,
+      "desktop_available": false,
+      "hardware_verified": false,
+      "desktop_routed": true
+    },
+    {
       "id": 11600,
       "algorithm": "7zip",
       "digest_hex_length": 0,

@@ -21,6 +21,7 @@ pub mod legacy_digests;
 pub mod shadow;
 pub mod windows_auth;
 pub mod archives;
+pub mod documents;
 
 use base64::Engine as _;
 use hmac::{Hmac, Mac};
@@ -273,6 +274,16 @@ pub fn kdf_format(hash: &str) -> Option<&'static str> {
         Some("7zip")
     } else if hash.starts_with("$pkzip2$") || hash.starts_with("$pkzip$") {
         Some("zip-legacy")
+    } else if hash.starts_with("$oldoffice$") {
+        Some("office-97-2003")
+    } else if hash.starts_with("$office$*2007*") {
+        Some("office-2007")
+    } else if hash.starts_with("$office$*2013*") {
+        Some("office-2013")
+    } else if hash.starts_with("$pdf$1*2*40*") {
+        Some("pdf-1.1-1.3")
+    } else if hash.starts_with("$pdf$2*3*128*") || hash.starts_with("$pdf$4*4*128*") {
+        Some("pdf-1.4-1.6")
     } else if hash.starts_with("WPA*01*") {
         Some("wpa-pmkid")
     } else if hash.starts_with("$NETNTLMv2$") {
@@ -409,6 +420,27 @@ pub fn verify_kdf_format(format: &str, hash: &str, candidate: &str) -> Result<bo
         }
         "zip-legacy" => {
             let parsed = archives::PkZip::parse(hash)?;
+            parsed.verify(candidate)
+        }
+        // Document containers (format batch B2).
+        "office-97-2003" => {
+            let parsed = documents::Office97::parse(hash)?;
+            parsed.verify(candidate)
+        }
+        "office-2007" => {
+            let parsed = documents::Office2007::parse(hash)?;
+            parsed.verify(candidate)
+        }
+        "office-2013" => {
+            let parsed = documents::Office2013::parse(hash)?;
+            parsed.verify(candidate)
+        }
+        "pdf-1.1-1.3" => {
+            let parsed = documents::PdfR2::parse(hash)?;
+            parsed.verify(candidate)
+        }
+        "pdf-1.4-1.6" => {
+            let parsed = documents::PdfR34::parse(hash)?;
             parsed.verify(candidate)
         }
         // Composed salted/HMAC digests carry an explicit algorithm hint; the

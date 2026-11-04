@@ -362,6 +362,11 @@ pub(super) fn embedded_result(
                 "descrypt" => "embedded_hashcat_01500",
                 "mssql-2005" => "embedded_hashcat_00132",
                 "mssql-2012" => "embedded_hashcat_01731",
+                "office-97-2003" => "embedded_hashcat_09700",
+                "office-2007" => "embedded_hashcat_09400",
+                "office-2013" => "embedded_hashcat_09600",
+                "pdf-1.1-1.3" => "embedded_hashcat_10400",
+                "pdf-1.4-1.6" => "embedded_hashcat_10500",
                 "winzip-aes" => "embedded_hashcat_13600",
                 "7zip" => "embedded_hashcat_11600",
                 // Mode chosen by the entry's compression field (17200/17210).

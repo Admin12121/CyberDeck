@@ -61,7 +61,7 @@ if (mode === "--import") {
   dirFiles("include", (name) => name.endsWith(".h") || name.endsWith(".def"));
   // The complete host EMU object family uses almost all common inc_ sources,
   // not only the kernel for hash mode 1400.
-  const bundledModePrefixes = ["00000", "00010", "00020", "00050", "00060", "00100", "00110", "00120", "00132", "00400", "00500", "01100", "01400", "01500", "01700", "01731", "01800", "02100", "03200", "05500", "05600", "07400", "11600", "13600", "17200", "17210"];
+  const bundledModePrefixes = ["00000", "00010", "00020", "00050", "00060", "00100", "00110", "00120", "00132", "00400", "00500", "01100", "01400", "01500", "01700", "01731", "01800", "02100", "03200", "05500", "05600", "07400", "11600", "13600", "17200", "17210", "09400", "09600", "09700", "10400", "10500"];
   dirFiles("OpenCL", (name) => {
     if (name.endsWith(".h")) return true;
     if (!name.endsWith(".cl")) return false;
@@ -105,6 +105,11 @@ if (mode === "--import") {
   for (const mode of ["11600", "13600", "17200", "17210"]) {
     add("src/modules/module_" + mode + ".c");
   }
+  // Batch-4 documents: MS Office 97/2003 MD5+RC4 (9700), Office 2007 (9400),
+  // Office 2013 (9600), PDF 1.1-1.3 (10400) and PDF 1.4-1.6 (10500).
+  for (const mode of ["09400", "09600", "09700", "10400", "10500"]) {
+    add("src/modules/module_" + mode + ".c");
+  }
   // Shared module-common sources included verbatim by batch modules.
   add("src/modules/blowfish_common.c");
   // Candidate-feed plugins: the wordlist reader (and siblings) are loadable
@@ -116,6 +121,10 @@ if (mode === "--import") {
   // the suffix-less optimized kernel.
   dirFiles("OpenCL", (name) =>
     /^m(11600|13600|17200|17210)[-a-z0-9_]*\.cl$/.test(name));
+  // Batch-4 document kernels: Office 2007/2013 and PDF 1.4-1.6 are pure-only;
+  // oldoffice and PDF 1.1-1.3 ship optimized-only kernel families.
+  dirFiles("OpenCL", (name) =>
+    /^m(09400|09600|09700|10400|10500)[-a-z0-9_]*\.cl$/.test(name));
   for (const kernel of [
     "OpenCL/m00400-optimized.cl",
     "OpenCL/m00500-optimized.cl",

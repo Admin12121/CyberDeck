@@ -15,8 +15,8 @@ test("Normal desktop build owns version-pinned C/shim/Rust-worker source graph",
   assert.ok(build.includes('tauri_build::build()'));
   assert.ok(build.includes('"--install"'));
   assert.equal(manifest.commit, "1994b513b550edfe3e7fcaa1103759a9343e57a4");
-  // Vendored set grows with each bundled-mode batch (batch-3 archives added).
-  assert.equal(Object.keys(manifest.files).length, 680);
+  // Vendored set grows with each bundled-mode batch (batch-4 documents added).
+  assert.equal(Object.keys(manifest.files).length, 696);
   assert.ok(manifest.files["src/modules/module_00000.c"], "upstream startup dependency must be pinned");
   assert.ok(manifest.files["src/modules/module_01400.c"], "SHA-256 selected mode must be pinned");
   assert.ok(manifest.files["src/modules/module_01000.c"], "NTLM module must be pinned to upstream");
@@ -27,7 +27,7 @@ test("Normal desktop build owns version-pinned C/shim/Rust-worker source graph",
 
   assert.ok(manifest.files["OpenCL/m04000-pure.cl"], "required upstream startup kernel must be pinned");
   const caps = JSON.parse(read(hc + "/capability-manifest.json"));
-  assert.deepEqual(caps.hash_modes.map(({id}) => id), [0,10,20,50,60,100,110,120,132,400,500,1000,1100,1400,1500,1700,1731,1800,2100,3200,5500,5600,7400,11600,13600,17200,17210]);
+  assert.deepEqual(caps.hash_modes.map(({id}) => id), [0,10,20,50,60,100,110,120,132,400,500,1000,1100,1400,1500,1700,1731,1800,2100,3200,5500,5600,7400,9400,9600,9700,10400,10500,11600,13600,17200,17210]);
   assert.ok(caps.hash_modes.every(({hardware_verified}) => hardware_verified === false));
   assert.ok(caps.attack_modes.every(({id}) => id === 0), "only wordlist currently worker-connected");
   assert.ok(native.includes('modulePaths'), "every selected module must be compiled");

@@ -81,7 +81,12 @@ export type HashcatRawAlgorithmV1 =
   | "mssql-2012"
   | "winzip-aes"
   | "7zip"
-  | "zip-legacy";
+  | "zip-legacy"
+  | "office-97-2003"
+  | "office-2007"
+  | "office-2013"
+  | "pdf-1.1-1.3"
+  | "pdf-1.4-1.6";
 /** Native Rust CPU digest coverage (embedded Hashcat is raw 5 modes only). */
 export type RecoveryRawAlgorithmV1 =
   | HashcatRawAlgorithmV1

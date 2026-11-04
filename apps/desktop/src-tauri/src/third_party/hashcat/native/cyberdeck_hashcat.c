@@ -254,6 +254,7 @@ int cd_hashcat_prepare_mode (
     case 400: case 1500: case 132: case 1731:
     case 500: case 1000: case 1400: case 1700: case 1800: case 3200: case 7400:
     case 1100: case 2100: case 5500: case 5600:
+    case 9400: case 9600: case 9700: case 10400: case 10500:
     case 11600: case 13600: case 17200: case 17210:
       break;
     default:
