@@ -15,6 +15,7 @@ export type ToolId =
   | "network.packet"
   | "network.lab"
   | "network.scan"
+  | "network.insights"
   | "web.studio"
   | "reverse.workbench"
   | "forensics.findings"
@@ -86,6 +87,12 @@ export const CATEGORIES: CategoryDescriptor[] = [
         category: "network",
         label: "Scanning",
         hint: "Target + profile + results: host/port discovery and assessment engines behind one job model (Zenmap-style)",
+      },
+      {
+        id: "network.insights",
+        category: "network",
+        label: "Insights",
+        hint: "ndiff-style scan comparison and topology projection over completed native scan sessions (read-only)",
       },
     ],
   },

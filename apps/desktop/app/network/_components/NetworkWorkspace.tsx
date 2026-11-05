@@ -3,6 +3,7 @@
 import { PacketStudioView } from "./PacketStudioView";
 import { NetworkLabView } from "./NetworkLabView";
 import { ScanView } from "./ScanView";
+import { ScanInsightsView } from "./ScanInsightsView";
 import type { ToolId } from "@state/tool-registry";
 
 export function NetworkWorkspace({ tool }: { tool: ToolId }) {
@@ -14,6 +15,7 @@ export function NetworkWorkspace({ tool }: { tool: ToolId }) {
       <div className={show("network.packet")}><PacketStudioView /></div>
       <div className={show("network.lab")}><NetworkLabView /></div>
       <div className={show("network.scan")}><ScanView /></div>
+      <div className={show("network.insights")}><ScanInsightsView /></div>
       </div>
     </div>
   );
