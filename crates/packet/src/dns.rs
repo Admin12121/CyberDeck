@@ -165,6 +165,28 @@ fn decode_rdata(packet: &[u8], start: usize, end: usize, kind: u16) -> Option<St
             }
             Some(format!("{priority} {name}"))
         }
+        33 if bytes.len() >= 6 => {
+            // SRV: priority, weight, port, then the target name.
+            let priority = read_u16(packet, start)?;
+            let weight = read_u16(packet, start + 2)?;
+            let port = read_u16(packet, start + 4)?;
+            let (name, consumed) = read_dns_name(packet, start + 6)?;
+            if consumed > end {
+                return None;
+            }
+            Some(format!("{priority} {weight} {port} {name}"))
+        }
+        6 if bytes.len() >= 20 => {
+            // SOA: two names, then serial/refresh/retry/expire/minimum timers.
+            let (mname, after_mname) = read_dns_name(packet, start)?;
+            let (rname, after_rname) = read_dns_name(packet, after_mname)?;
+            if after_rname + 20 > end {
+                return None;
+            }
+            let serial = read_u32(packet, after_rname)?;
+            let minimum = read_u32(packet, after_rname + 16)?;
+            Some(format!("{mname} {rname} serial={serial} minimum={minimum}s"))
+        }
         16 => {
             let mut pos = 0usize;
             let mut parts = Vec::new();
@@ -337,6 +359,31 @@ mod tests {
             parse_dns(&mx).unwrap().answer_records[0].value,
             "10 mail.example.com"
         );
+    }
+
+    #[test]
+    fn parses_srv_and_soa_answers() {
+        // SRV: priority 5, weight 10, port 8080, target via compression pointer.
+        let srv = response_prefix(33, 30, b"\x00\x05\x00\x0a\x1f\x90\x03srv\xc0\x0c");
+        let srv_dns = parse_dns(&srv).unwrap();
+        assert_eq!(srv_dns.answer_records[0].value, "5 10 8080 srv.example.com");
+        // SOA: mname ns.example.com, rname hostmaster.example.com, then five
+        // 32-bit timers (serial 2024010101, minimum 300).
+        let mut soa_rdata = b"\x02ns\xc0\x0c\x0ahostmaster\xc0\x0c".to_vec();
+        soa_rdata.extend_from_slice(&2024010101u32.to_be_bytes());
+        soa_rdata.extend_from_slice(&7200u32.to_be_bytes());
+        soa_rdata.extend_from_slice(&900u32.to_be_bytes());
+        soa_rdata.extend_from_slice(&1209600u32.to_be_bytes());
+        soa_rdata.extend_from_slice(&300u32.to_be_bytes());
+        let soa = response_prefix(6, 3600, &soa_rdata);
+        let soa_dns = parse_dns(&soa).unwrap();
+        let value = &soa_dns.answer_records[0].value;
+        assert!(value.starts_with("ns.example.com hostmaster.example.com"));
+        assert!(value.contains("serial=2024010101"));
+        assert!(value.contains("minimum=300s"));
+        // Truncated SOA rdata is refused rather than decoded partially.
+        let short = response_prefix(6, 3600, &soa_rdata[..soa_rdata.len() - 2]);
+        assert!(parse_dns(&short).is_none());
     }
 
     #[test]

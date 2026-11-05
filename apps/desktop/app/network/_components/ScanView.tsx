@@ -40,12 +40,81 @@ import {
 import { useWorkbench, useWorkbenchCase } from "@state/workbench";
 import { AuthorizedCaseAction } from "@/app/_components/AuthorizedCaseAction";
 import { useWorkspaceDraft } from "@state/workspace-sessions";
+import { invoke, Channel } from "@tauri-apps/api/core";
 
 const PORT_PRESETS = [
   { value: "top25", label: "Top 25 ports" },
   { value: "top100", label: "Top 100 ports" },
   { value: "1-1024", label: "Well known (1-1024)" },
 ];
+
+// --- scan-depth slice: raw scan types + service probes ------------------------
+// Typed local wrappers for the scan-depth commands. The canonical clients live
+// in lib/ipc.ts; these stay module-private so the view works before that
+// centralization lands. Same shape as the existing netscan_* clients above.
+
+type StealthScanTypeWire = "fin" | "null" | "xmas" | "ack" | "window";
+const STEALTH_SCAN_TYPES: { value: StealthScanTypeWire; label: string }[] = [
+  { value: "fin", label: "TCP FIN" },
+  { value: "null", label: "TCP NULL" },
+  { value: "xmas", label: "TCP Xmas" },
+  { value: "ack", label: "TCP ACK" },
+  { value: "window", label: "TCP Window" },
+];
+
+interface StealthFindingWire {
+  host: string;
+  port: number;
+  scan: string;
+  state: "open" | "closed" | "unfiltered" | "filtered" | "open_filtered";
+  reason: string;
+  elapsed_ms: number;
+}
+
+async function netscanStealthStartV1(
+  scanType: StealthScanTypeWire,
+  targets: string,
+  ports: string,
+  authorized: boolean,
+  caseId: string,
+  interfaceName: string,
+  onProgress?: (p: ScanProgressWire) => void,
+): Promise<StealthFindingWire[]> {
+  if (!isDesktop()) throw new Error("Raw scan types require the desktop runtime");
+  const channel = new Channel<ScanProgressWire>();
+  if (onProgress) channel.onmessage = onProgress;
+  return invoke<StealthFindingWire[]>("netscan_stealth_start_v1", {
+    scanType, targets, ports, authorized, caseId, interfaceName, onProgress: channel,
+  });
+}
+
+async function netscanStealthStopV1(): Promise<boolean> {
+  if (!isDesktop()) throw new Error("Raw scan cancellation requires the desktop runtime");
+  return invoke<boolean>("netscan_stealth_stop_v1", {});
+}
+
+interface ServiceProbeResultWire {
+  host: string;
+  port: number;
+  service_claim: string;
+  basis: "banner" | "probe_response" | "none";
+  confidence: "high" | "medium" | "low";
+  probe_used: string;
+  soft_match: boolean;
+  raw_excerpt_trimmed: string;
+  remote_software_claim: string | null;
+  elapsed_ms: number;
+}
+
+async function netscanServiceProbeV1(
+  host: string,
+  port: number,
+  authorized: boolean,
+  caseId: string,
+): Promise<ServiceProbeResultWire> {
+  if (!isDesktop()) throw new Error("Service probing requires the desktop runtime");
+  return invoke<ServiceProbeResultWire>("netscan_service_probe_v1", { host, port, authorized, caseId });
+}
 
 export function ScanView() {
   const desktop = isDesktop();
@@ -103,6 +172,14 @@ export function ScanView() {
   const [synFamily, setSynFamily] = useState<"IPv4" | "IPv6">("IPv4");
   const [synProgress, setSynProgress] = useState<ScanProgressWire | null>(null);
   const [synFindings, setSynFindings] = useState<SynFindingWire[] | null>(null);
+  const [stealthType, setStealthType] = useWorkspaceDraft<StealthScanTypeWire>(
+    wb.caseId, "network", "scan-depth-type", "fin",
+  );
+  const [stealthBusy, setStealthBusy] = useState(false);
+  const [stealthProgress, setStealthProgress] = useState<ScanProgressWire | null>(null);
+  const [stealthFindings, setStealthFindings] = useState<StealthFindingWire[] | null>(null);
+  const [probeBusy, setProbeBusy] = useState<string | null>(null);
+  const [probeResults, setProbeResults] = useState<Record<string, ServiceProbeResultWire>>({});
   const [arpNeighbors, setArpNeighbors] = useState<ArpNeighborWire[] | null>(null);
   const [observationPage, setObservationPage] = useState<ScanObservationPageWire | null>(null);
   const [observationOffset, setObservationOffset] = useState(0);
@@ -110,7 +187,7 @@ export function ScanView() {
   const [status, setStatus] = useState<NetscanStatusWire>({ running: false, results: 0, saved_findings: 0, save_error: null });
   // One case-scoped active operation at a time. Stop buttons remain enabled.
   const networkBusy = running || status.running || discoveryBusy || arpBusy ||
-    ndpBusy || icmpBusy || synBusy || traceBusy;
+    ndpBusy || icmpBusy || synBusy || traceBusy || stealthBusy || probeBusy !== null;
   // Native status/results now enforce the selected case generation on every read.
   const activeCase = useRef(identity);
   activeCase.current = identity;
@@ -140,6 +217,11 @@ export function ScanView() {
     setSynFamily("IPv4");
     setSynFindings(null);
     setSynProgress(null);
+    setStealthBusy(false);
+    setStealthFindings(null);
+    setStealthProgress(null);
+    setProbeBusy(null);
+    setProbeResults({});
     setObservationPage(null);
     setObservationOffset(0);
     setProgress(null);
@@ -304,6 +386,59 @@ export function ScanView() {
     catch (err) { setError(err instanceof Error ? err.message : String(err)); }
   };
 
+  // Raw FIN/NULL/Xmas/ACK/Window scan (Linux only). Mirrors the raw SYN flow:
+  // authorization checkbox, saved case, backend native confirmation, progress
+  // channel and a stop button that stays reachable for the whole run.
+  const runStealth = async () => {
+    if (networkBusy) return;
+    if (!desktop || revision === null || !authorized || !arpInterface ||
+      stealthBusy || synBusy || arpBusy || ndpBusy || icmpBusy || traceBusy ||
+      status.running || running) return;
+    const key = identity;
+    setError(null);
+    setStealthBusy(true);
+    setStealthFindings(null);
+    setStealthProgress({ tried: 0, total: 0, percent: 0 });
+    try {
+      const rows = await netscanStealthStartV1(stealthType, target, ports, true, wb.caseId, arpInterface, (p) => {
+        if (activeCase.current === key) setStealthProgress(p);
+      });
+      if (activeCase.current === key) setStealthFindings(rows);
+    } catch (err) {
+      if (activeCase.current === key) setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      if (activeCase.current === key) {
+        setStealthBusy(false);
+        setStealthProgress(null);
+      }
+    }
+  };
+  const stopStealth = async () => {
+    try { await netscanStealthStopV1(); }
+    catch (err) { setError(err instanceof Error ? err.message : String(err)); }
+  };
+
+  // Bounded service probe of ONE observed open port. Results are keyed by
+  // host:port and rendered as basis badges next to the row.
+  const probeService = async (host: string, port: number) => {
+    if (networkBusy) return;
+    if (!desktop || revision === null || !authorized) return;
+    const key = identity;
+    const rowKey = host + ":" + port;
+    setError(null);
+    setProbeBusy(rowKey);
+    try {
+      const result = await netscanServiceProbeV1(host, port, true, wb.caseId);
+      if (activeCase.current === key) {
+        setProbeResults((previous) => ({ ...previous, [rowKey]: result }));
+      }
+    } catch (err) {
+      if (activeCase.current === key) setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      if (activeCase.current === key) setProbeBusy(null);
+    }
+  };
+
   const discoverArp = async () => {
     if (networkBusy) return;
     if (!desktop || revision === null || !authorized || !arpInterface
@@ -427,6 +562,42 @@ export function ScanView() {
 
   const openCount = observationPage?.open ?? results.filter((r) => r.state === "open").length;
   const observedCount = observationPage?.total ?? results.length;
+
+  // One Probe cell shared by both table branches: a per-host "probe service"
+  // button on open rows, then the result as an evidence-basis badge. Claims
+  // are always labeled as unverified remote assertions.
+  const probeCell = (host: string, port: number, open: boolean) => {
+    if (!open) return <td className="text-fg-muted">—</td>;
+    const rowKey = host + ":" + port;
+    const result = probeResults[rowKey];
+    if (probeBusy === rowKey) {
+      return <td className="text-fg-muted">probing…</td>;
+    }
+    if (result) {
+      const tone = result.confidence === "high" ? "text-ok"
+        : result.confidence === "medium" ? "text-orange" : "text-fg-muted";
+      return (
+        <td className={tone} title={"basis: " + result.basis + " · probe: " + result.probe_used +
+          (result.raw_excerpt_trimmed ? " · excerpt: " + result.raw_excerpt_trimmed : "")}>
+          {result.basis === "none" ? "no claim" : result.service_claim + " · " + result.basis}
+          {result.remote_software_claim ? (
+            <span className="text-fg-muted" title="Unverified software identity claimed by the remote server">
+              {" "}· claims {result.remote_software_claim}
+            </span>
+          ) : null}
+        </td>
+      );
+    }
+    return (
+      <td>
+        <ToolButton onClick={() => void probeService(host, port)}
+          disabled={networkBusy || !desktop || revision === null || !authorized}
+          title="Bounded service probe: banner read plus protocol probes of this open port; every claim is an unverified remote assertion">
+          probe service
+        </ToolButton>
+      </td>
+    );
+  };
 
   const exportResults = async (format: "json" | "csv") => {
     if (results.length === 0) return;
@@ -555,7 +726,7 @@ export function ScanView() {
                     Trace IPv4
                   </ToolButton>
                 )}
-                <span className="text-xs text-fg-muted">TCP/UDP scans do not require the capture driver. ARP, NDP and raw SYN are Linux-only.</span>
+                <span className="text-xs text-fg-muted">TCP/UDP scans do not require the capture driver. ARP, NDP, raw SYN and raw FIN/NULL/Xmas/ACK/Window scan types are Linux-only.</span>
                 {arpInterfaces.length === 0 && <span role="status" className="text-xs text-fg-muted">
                   No active IPv4 source adapter. TCP/UDP scans remain available above.
                 </span>}
@@ -665,11 +836,41 @@ export function ScanView() {
                   SYN {synProgress.tried}/{synProgress.total} · {synProgress.percent}%
                 </span>
               ) : null}
+              <span className="font-mono text-[10px] uppercase text-fg-muted">raw depth</span>
+              <Select
+                value={stealthType}
+                onChange={(value) => setStealthType(value as StealthScanTypeWire)}
+                options={STEALTH_SCAN_TYPES}
+                ariaLabel="Raw scan type"
+                className="w-36"
+              />
+              {stealthBusy ? (
+                <ToolButton tone="danger" onClick={() => void stopStealth()}
+                  title="Stop the case-authorized raw FIN/NULL/Xmas/ACK/Window scan">
+                  <Square size={11} /> Stop raw
+                </ToolButton>
+              ) : (
+                <ToolButton onClick={() => void runStealth()}
+                  disabled={!desktop || !authorized || networkBusy || revision === null || !arpInterface ||
+                    !target.trim() || !ports.trim() || running || status.running}
+                  title="Linux only: FIN/NULL/Xmas/ACK/Window flag probes with documented reply semantics; requires CAP_NET_RAW, a selected interface, a saved case and native confirmation">
+                  <Play size={11} /> Raw depth
+                </ToolButton>
+              )}
+              <span className="font-mono text-[10px] text-fg-muted">
+                Raw scan types require Linux · silence means the documented default state, not proof
+              </span>
+              {stealthProgress ? (
+                <span className="font-mono text-[10px] text-fg-muted">
+                  {stealthType} {stealthProgress.tried}/{stealthProgress.total} · {stealthProgress.percent}%
+                </span>
+              ) : null}
             </div>
             ) : (
               <div role="status" className="border-t border-line p-3 text-xs text-fg-muted">
                 Native raw probes and ICMP are not available on this platform.
-                TCP/UDP connect scans remain supported. {capabilities?.capture_detail ?? "Reading native capabilities…"}
+                Raw FIN/NULL/Xmas/ACK/Window scan types require Linux. TCP/UDP connect
+                scans remain supported. {capabilities?.capture_detail ?? "Reading native capabilities…"}
               </div>
             )}
           </Pane>
@@ -707,6 +908,7 @@ export function ScanView() {
                     <th>Banner</th>
                     <th>Reason / evidence</th>
                     <th>Elapsed</th>
+                    <th className="w-32">Probe</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -721,6 +923,7 @@ export function ScanView() {
                         <td className="truncate text-fg-muted" title={r.banner}>{r.banner || "—"}</td>
                         <td className="text-fg-muted" title={"Method: " + r.method + "; attempts: " + r.attempts + "; retries: " + r.retries + "; OS error: " + (r.os_error_code ?? "n/a")}>{r.reason}</td>
                         <td>{r.elapsed_ms} ms</td>
+                        {probeCell(r.host, r.port, r.state === "open")}
                       </tr>
                     ))
                     : results.map((r, i) => (
@@ -732,6 +935,7 @@ export function ScanView() {
                         <td className="text-orange">{r.service}</td>
                         <td className="truncate text-fg-muted" title={r.banner}>{r.banner}</td>
                         <td>—</td><td>—</td>
+                        {probeCell(r.host, r.port, r.state === "open")}
                       </tr>
                     ))}
                 </tbody>
@@ -770,6 +974,23 @@ export function ScanView() {
                     {r.host}:{r.port} · {r.state} · {r.reason} · {r.elapsed_ms} ms
                   </div>
                 ))}
+              </div>
+            </div>
+          ) : null}
+          {stealthFindings !== null ? (
+            <div className="border-t border-line p-2 text-[10px] text-fg-muted">
+              <div className="mb-1 font-semibold text-fg">
+                Raw {stealthType} scan: {stealthFindings.length} observations · {stealthFindings.filter((r) => r.state === "open").length} open · {stealthFindings.filter((r) => r.state === "open_filtered").length} open|filtered
+              </div>
+              <div className="max-h-36 overflow-y-auto font-mono">
+                {stealthFindings.map((r) => (
+                  <div key={r.host + ":" + r.port + ":" + r.scan}>
+                    {r.host}:{r.port} · {r.scan} · {r.state} · {r.reason} · {r.elapsed_ms} ms
+                  </div>
+                ))}
+              </div>
+              <div className="text-fg-muted">
+                States classify one probe each; FIN/NULL/Xmas silence is open|filtered and ACK/Window silence is filtered by definition.
               </div>
             </div>
           ) : null}

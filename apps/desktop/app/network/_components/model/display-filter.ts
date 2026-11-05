@@ -262,6 +262,7 @@ export const KNOWN_FILTER_FIELDS = [
   "tcp.port", "tcp.srcport", "tcp.dstport",
   "tcp.flags.syn", "tcp.flags.ack", "tcp.flags.fin", "tcp.flags.rst", "tcp.flags.psh", "tcp.flags.urg",
   "udp.port", "udp.srcport", "udp.dstport",
+  "http.host",
   "info",
 ] as const;
 
@@ -408,6 +409,10 @@ function evaluateField(p: FilterPacket, field: string, op: CompareOp, raw: strin
       if (op === "==") return set === wanted;
       if (op === "!=") return set !== wanted;
       return false;
+    }
+    case "http.host": {
+      if (protocolFamily(p.protocol) !== "tcp") return false;
+      return compareString(layerOf(p, "HTTP Host"), op, raw);
     }
     case "info":
       return compareString(p.info, op, raw);

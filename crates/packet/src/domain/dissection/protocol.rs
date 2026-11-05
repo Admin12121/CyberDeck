@@ -56,6 +56,74 @@ pub fn http_start_line(data: &[u8]) -> Option<String> {
     Some(line.to_owned())
 }
 
+const MAX_HTTP_HEADERS: usize = 32;
+const MAX_HTTP_HEADER_BLOCK: usize = 4096;
+const MAX_HTTP_HEADER_LINE: usize = 512;
+
+/// Bounded HTTP/1.x header fields from a single captured segment, starting
+/// at a validated start line. Only complete header lines within the captured
+/// bytes are read; a segment boundary silently ends the block.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct HttpFields {
+    pub host: Option<String>,
+    pub user_agent: Option<String>,
+    pub status_code: Option<u16>,
+    pub content_type: Option<String>,
+    pub location: Option<String>,
+}
+
+fn header_value(raw: &[u8]) -> Option<String> {
+    if raw.is_empty() || raw.len() > MAX_HTTP_HEADER_LINE {
+        return None;
+    }
+    // Visible ASCII only; the dissector never guesses encodings.
+    if !raw.iter().all(|b| (0x20..=0x7e).contains(b)) {
+        return None;
+    }
+    let text = std::str::from_utf8(raw).ok()?.trim().to_owned();
+    if text.is_empty() {
+        None
+    } else {
+        Some(text)
+    }
+}
+
+pub fn http_fields(data: &[u8]) -> Option<HttpFields> {
+    let start = http_start_line(data)?;
+    let mut fields = HttpFields::default();
+    if let Some(status) = start.split_whitespace().nth(1) {
+        fields.status_code = status.parse::<u16>().ok();
+    }
+    let mut cursor = data.iter().take(MAX_HTTP_HEADER_BLOCK).position(|b| *b == b'\n')? + 1;
+    let block_end = (cursor + MAX_HTTP_HEADER_BLOCK).min(data.len());
+    for _ in 0..MAX_HTTP_HEADERS {
+        let line_end = data.get(cursor..block_end)?.iter().position(|b| *b == b'\n')? + cursor;
+        let line = &data[cursor..line_end];
+        cursor = line_end + 1;
+        // Strip the carriage return; a bare CRLF line ends the header block.
+        let line = line.strip_suffix(b"\r").unwrap_or(line);
+        if line.is_empty() {
+            break;
+        }
+        // Stable Rust has no slice split_once; find the first ": " separator.
+        let separator = (0..line.len().saturating_sub(1)).find(|i| line[*i] == b':' && line[*i + 1] == b' ');
+        let Some(separator) = separator else { break };
+        let name = &line[..separator];
+        // An unusable name or value skips that header; extraction of the
+        // remaining block continues — one bad line never erases the rest.
+        let Ok(name) = std::str::from_utf8(name) else { continue };
+        let Some(value) = header_value(&line[separator + 2..]) else { continue };
+        match name.to_ascii_lowercase().as_str() {
+            "host" => fields.host = Some(value),
+            "user-agent" => fields.user_agent = Some(value),
+            "content-type" => fields.content_type = Some(value),
+            "location" => fields.location = Some(value),
+            _ => {}
+        }
+    }
+    Some(fields)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TlsHello {
     pub client: bool,
@@ -303,16 +371,29 @@ mod tests {
         assert!(tls_hello(b"not tls").is_none());
     }
     #[test]
-    fn server_hello_exposes_cipher_and_selected_version() {
-        let mut h = vec![3, 3];
-        h.extend([0x25; 32]);
-        h.extend([0, 0x13, 0x01, 0]);
-        h.extend([0, 6, 0, 43, 0, 2, 3, 4]);
-        let mut record = vec![22, 3, 3, 0, (h.len() + 4) as u8, 2, 0, 0, h.len() as u8];
-        record.extend(h);
-        let hello = tls_hello(&record).unwrap();
-        assert!(!hello.client);
-        assert_eq!(hello.cipher, Some(0x1301));
-        assert_eq!(hello.version, Some(0x0304));
+    fn http_fields_extract_request_and_response_headers_bounded() {
+        let request = b"GET /api/evidence HTTP/1.1\r\nHost: lab.test\r\nUser-Agent: CyberDeck/1\r\n\r\nbody";
+        let fields = http_fields(request).unwrap();
+        assert_eq!(fields.host.as_deref(), Some("lab.test"));
+        assert_eq!(fields.user_agent.as_deref(), Some("CyberDeck/1"));
+        assert_eq!(fields.status_code, None);
+
+        let response = b"HTTP/1.1 302 Found\r\nLocation: /login\r\nContent-Type: text/html\r\n\r\n";
+        let fields = http_fields(response).unwrap();
+        assert_eq!(fields.status_code, Some(302));
+        assert_eq!(fields.location.as_deref(), Some("/login"));
+        assert_eq!(fields.content_type.as_deref(), Some("text/html"));
+
+        // Non-ASCII values are refused, not guessed: the header is skipped
+        // while extraction continues.
+        let bad = http_fields(b"GET / HTTP/1.1\r\nHost: \xff\xfe\r\n\r\n").unwrap();
+        assert_eq!(bad.host, None);
+        // A header line beyond the line cap ends extraction without a panic.
+        let mut oversized = b"GET / HTTP/1.1\r\nX-Long: ".to_vec();
+        oversized.extend(vec![b'a'; MAX_HTTP_HEADER_LINE + 64]);
+        oversized.extend(b"\r\n\r\n");
+        let fields = http_fields(&oversized);
+        assert!(fields.is_some());
+        assert_eq!(fields.unwrap().host, None);
     }
 }

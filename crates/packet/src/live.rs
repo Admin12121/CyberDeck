@@ -34,7 +34,7 @@ pub struct CaptureError {
 }
 
 impl CaptureError {
-    fn new(code: CaptureErrorCode, message: impl Into<String>) -> Self {
+    pub(crate) fn new(code: CaptureErrorCode, message: impl Into<String>) -> Self {
         Self {
             code,
             message: message.into(),
@@ -76,11 +76,21 @@ pub fn discover_interfaces() -> Result<Vec<CaptureInterface>, CaptureError> {
     crate::infrastructure::windows_interfaces::discover()
 }
 
-#[cfg(all(not(target_os = "linux"), not(target_os = "windows")))]
+/// macOS interface discovery via getifaddrs; unprivileged like /sys/class/net.
+#[cfg(target_os = "macos")]
+pub fn discover_interfaces() -> Result<Vec<CaptureInterface>, CaptureError> {
+    crate::infrastructure::bpf_capture::discover_interfaces()
+}
+
+#[cfg(all(
+    not(target_os = "linux"),
+    not(target_os = "windows"),
+    not(target_os = "macos")
+))]
 pub fn discover_interfaces() -> Result<Vec<CaptureInterface>, CaptureError> {
     Err(CaptureError::new(
         CaptureErrorCode::UnsupportedPlatform,
-        "native live capture is currently supported only on Linux",
+        "native live capture is currently supported only on Linux and macOS",
     ))
 }
 
@@ -125,7 +135,9 @@ fn discover_from(root: &std::path::Path) -> Result<Vec<CaptureInterface>, Captur
     Ok(interfaces)
 }
 
-fn valid_name(name: &str) -> bool {
+/// Shared interface-name validation: platform backends (including the macOS
+/// BPF discovery) must apply the same strictness before names cross IPC.
+pub(crate) fn valid_name(name: &str) -> bool {
     !name.is_empty()
         && name.len() <= 15
         && name
@@ -475,7 +487,37 @@ pub fn probe_windows_capture() -> Result<(), CaptureError> {
     crate::infrastructure::windows_capture::probe_driver()
 }
 
-#[cfg(not(target_os = "linux"))]
+/// macOS routes through this pre-registered session entry point (the
+/// name predates macOS support); the BPF backend honors the identical
+/// bounded engine, caps and progress contract as the Linux path.
+#[cfg(target_os = "macos")]
+pub fn capture_linux_with_progress(
+    interface_name: &str,
+    limits: &CaptureLimits,
+    cancel: &AtomicBool,
+    progress: impl FnMut(CaptureProgress),
+) -> Result<CaptureResult, CaptureError> {
+    capture_macos_with_progress(interface_name, limits, cancel, progress)
+}
+
+/// Explicit macOS BPF (/dev/bpf) entry point for platform-aware callers.
+/// Passive receive only: no frames are ever sent or injected.
+#[cfg(target_os = "macos")]
+pub fn capture_macos_with_progress(
+    interface_name: &str,
+    limits: &CaptureLimits,
+    cancel: &AtomicBool,
+    progress: impl FnMut(CaptureProgress),
+) -> Result<CaptureResult, CaptureError> {
+    crate::infrastructure::bpf_capture::capture_with_progress(
+        interface_name,
+        limits,
+        cancel,
+        progress,
+    )
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 pub fn capture_linux_with_progress(
     _interface_name: &str,
     _limits: &CaptureLimits,
@@ -484,7 +526,7 @@ pub fn capture_linux_with_progress(
 ) -> Result<CaptureResult, CaptureError> {
     Err(CaptureError::new(
         CaptureErrorCode::UnsupportedPlatform,
-        "native live capture is currently supported only on Linux (Windows Npcap/macOS BPF not implemented)",
+        "native live capture is currently supported only on Linux and macOS",
     ))
 }
 

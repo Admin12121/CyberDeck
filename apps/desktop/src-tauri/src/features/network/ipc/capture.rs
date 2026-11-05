@@ -141,10 +141,23 @@ pub fn runtime_capabilities() -> NetworkRuntimeCapabilitiesWire {
             capture_detail: "Linux AF_PACKET support exists; CAP_NET_RAW and interface permission are checked on Start".into(),
         };
     }
-    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
+    #[cfg(target_os = "macos")]
+    {
+        return NetworkRuntimeCapabilitiesWire {
+            platform: "macos",
+            tcp_connect: true, udp: true,
+            ipv4_echo: false, ipv4_trace: false,
+            linux_on_link: false,
+            // BPF is part of the macOS kernel; presence is universal. What
+            // gates capture is device permission on /dev/bpf*, checked on Start.
+            capture_backend_present: true,
+            capture_detail: "macOS BPF capture support exists; requires BPF access — run with appropriate privileges (root or read/write access to /dev/bpf*, e.g. access_bpf membership); checked on Start".into(),
+        };
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))]
     {
         NetworkRuntimeCapabilitiesWire {
-            platform: if cfg!(target_os = "macos") { "macos" } else { "unsupported" },
+            platform: "unsupported",
             tcp_connect: true, udp: true,
             ipv4_echo: false, ipv4_trace: false,
             linux_on_link: false, capture_backend_present: false,
@@ -180,6 +193,13 @@ mod capability_policy_tests {
         }
         #[cfg(not(any(target_os = "windows", target_os = "linux")))]
         assert!(!caps.linux_on_link && !caps.ipv4_echo);
+        #[cfg(target_os = "macos")]
+        {
+            assert_eq!(caps.platform, "macos");
+            assert!(caps.capture_backend_present);
+            assert!(caps.capture_detail.contains("BPF"));
+            assert!(caps.capture_detail.contains("privileges"));
+        }
     }
 }
 
@@ -190,7 +210,11 @@ pub fn capture_interfaces_v1() -> Result<Vec<CaptureInterfaceWire>, String> {
     let support = live::probe_windows_capture().map_err(|e| e.message);
     #[cfg(target_os = "linux")]
     let support: Result<(), String> = Ok(());
-    #[cfg(not(any(target_os = "windows", target_os = "linux")))]
+    // Mirrors Linux: BPF device permission (root or /dev/bpf* access) is
+    // enforced on Start, not by hiding interfaces from unprivileged users.
+    #[cfg(target_os = "macos")]
+    let support: Result<(), String> = Ok(());
+    #[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "macos")))]
     let support: Result<(), String> = Err("native Ethernet capture unsupported on this OS".into());
     Ok(interfaces
         .into_iter()

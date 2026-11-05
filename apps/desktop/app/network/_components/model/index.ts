@@ -45,6 +45,9 @@ export const SAMPLE_PACKETS: PacketRow[] = [
   { no: 8, timeOffsetMs: 140, source: "10.0.0.42", destination: "192.168.1.24", protocol: "TCP", length: 1514, info: "443 → 49812 [ACK] Seq=5032 Ack=518 Win=131712 Len=1460", colorHint: "tcp" },
   { no: 9, timeOffsetMs: 420, source: "192.168.1.24", destination: "10.0.0.80", protocol: "HTTP", length: 512, info: "GET /api/evidence HTTP/1.1 (plaintext lab host)", colorHint: "http" },
   { no: 10, timeOffsetMs: 438, source: "10.0.0.80", destination: "192.168.1.24", protocol: "HTTP", length: 1440, info: "HTTP/1.1 200 OK (application/json)", colorHint: "http" },
+  { no: 11, timeOffsetMs: 511, source: "192.168.1.24", destination: "1.1.1.1", protocol: "ICMP", length: 84, info: "ICMP Echo Request (code 0)", colorHint: "icmp" },
+  { no: 12, timeOffsetMs: 523, source: "1.1.1.1", destination: "192.168.1.24", protocol: "ICMP", length: 84, info: "ICMP Echo Reply (code 0)", colorHint: "icmp" },
+  { no: 13, timeOffsetMs: 540, source: "fe80::24", destination: "fe80::1", protocol: "ICMPv6", length: 78, info: "ICMPv6 Neighbor Solicitation (code 0)", colorHint: "icmp" },
 ];
 
 export const PROTOCOL_COLORS: Record<string, string> = {
@@ -98,6 +101,30 @@ export function detailTree(packet: PacketRow): DetailNode[] {
   }
   if (packet.protocol === "HTTP") {
     base.push({ label: "Hypertext Transfer Protocol", value: packet.info, children: [{ label: "line-based text", value: packet.info }] });
+  }
+  if (packet.protocol === "ICMP") {
+    // Demo rows mirror the labels the native dissector emits for ICMP.
+    base.push({
+      label: "Internet Control Message Protocol",
+      value: packet.info,
+      children: [
+        { label: "type", value: packet.info.includes("Reply") ? "0" : "8" },
+        { label: "code", value: "0" },
+        { label: "identifier", value: "0x1a2b" },
+        { label: "sequence", value: String(packet.no - 10) },
+      ],
+    });
+  }
+  if (packet.protocol === "ICMPv6") {
+    base.push({
+      label: "Internet Control Message Protocol v6",
+      value: packet.info,
+      children: [
+        { label: "type", value: "135" },
+        { label: "code", value: "0" },
+        { label: "target address", value: "fe80::1" },
+      ],
+    });
   }
   base.push({ label: "Payload / reassembled bytes", value: "arc 2: dissector engine" });
   return base;

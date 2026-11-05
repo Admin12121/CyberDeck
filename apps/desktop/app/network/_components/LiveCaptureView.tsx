@@ -59,6 +59,7 @@ export function LiveCaptureView({ presentation = "full", onCaptureStarted, onRet
   const [nativePlatform, setNativePlatform] = useState<"windows" | "linux" | "macos" | "unsupported" | null>(null);
   const [nativeCaptureStatus, setNativeCaptureStatus] = useState<string | null>(null);
   const windowsHost = nativePlatform === "windows";
+  const macosHost = nativePlatform === "macos";
   useEffect(() => {
     if (!desktop) return;
     let live = true;
@@ -315,6 +316,11 @@ export function LiveCaptureView({ presentation = "full", onCaptureStarted, onRet
                 {devices.length ? `${eligible.length} available · ${devices.length} found` : "Interfaces"}
               </span>
             )}
+          {desktop && macosHost && (
+            <span title="Native macOS capture opens the kernel BPF device (/dev/bpf*). Start requires root privileges or read/write access to /dev/bpf* (for example the access_bpf group); without them Start fails with a permission error.">
+              <Chip tone="orange">BPF privileges required</Chip>
+            </span>
+          )}
           </div>
           {desktop && (
             <Button size="xs" variant="ghost" onClick={() => void discover()}
@@ -396,7 +402,7 @@ export function LiveCaptureView({ presentation = "full", onCaptureStarted, onRet
           )}
           {desktop && (
             <Button variant="ghost" size="icon" aria-label="Capture permissions and limitations"
-              title="Native Linux capture requires case consent and CAP_NET_RAW. Windows native adapter discovery is available but full-fidelity Ethernet frame capture is pending an independent driver/host test.">
+              title="Native Linux capture requires case consent and CAP_NET_RAW. macOS native capture requires BPF (/dev/bpf*) access — run with appropriate privileges. Windows native adapter discovery is available but full-fidelity Ethernet frame capture is pending an independent driver/host test.">
               <Info size={14} aria-hidden="true" />
             </Button>
           )}
@@ -448,7 +454,7 @@ export function LiveCaptureView({ presentation = "full", onCaptureStarted, onRet
           </ToolButton>
         ) : (
           <ToolButton tone="primary" onClick={() => void start()} disabled={!canStart}
-            title="Requires a saved case, explicit native confirmation and OS capture permissions; Windows also requires the independently signed CyberDeck capture driver">
+            title="Requires a saved case, explicit native confirmation and OS capture permissions; macOS requires BPF device privileges (/dev/bpf*); Windows also requires the independently signed CyberDeck capture driver">
             <Play size={12} /> {working ? "Confirming…" : "Start Capture"}
           </ToolButton>
         )}

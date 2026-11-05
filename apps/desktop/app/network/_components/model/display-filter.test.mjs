@@ -142,6 +142,25 @@ test("quoted values survive spaces for string fields", () => {
   assert.equal(matchesFilter(tlsRow, "info contains \"client hello\""), true); // case-insensitive contains
 });
 
+test("http.host reads the HTTP Host layer from tcp-family rows only", () => {
+  const httpRow = {
+    source: "192.168.1.24", destination: "10.0.0.80", protocol: "HTTP", length: 512,
+    info: "GET / HTTP/1.1",
+    layers: [
+      { label: "HTTP Host", value: "lab.test" },
+      { label: "source port", value: "49813" },
+      { label: "destination port", value: "80" },
+    ],
+  };
+  assert.equal(matchesFilter(httpRow, "http.host == lab.test"), true);
+  assert.equal(matchesFilter(httpRow, "http.host == other.test"), false);
+  assert.equal(matchesFilter(httpRow, "http.host contains lab"), true);
+  // UDP-family rows never carry an HTTP host.
+  assert.equal(matchesFilter(dnsRow, "http.host == lab.test"), false);
+  // Filter bar validation knows the field.
+  assert.equal(filterErrorOf("http.host == lab.test"), null);
+});
+
 // --- protocol hierarchy --------------------------------------------------------
 
 const httpRow = {
