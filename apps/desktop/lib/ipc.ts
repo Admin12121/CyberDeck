@@ -1109,6 +1109,82 @@ export async function pcapCaseFollowStreamV1(
   return invoke<StreamTranscriptWire>("pcap_case_follow_stream_v1", { artifactId, streamId });
 }
 
+// --- Network Lab (Ettercap-inspired mode, passive/defensive arc) -------------
+// Wire types mirror crates/packet/src/arp_watch.rs and
+// features/network/ipc/network_lab.rs; field names are the serde names.
+
+export interface NetworkLabMacClaimWire {
+  mac: string;
+  claims: number;
+  first_seen_ms: number;
+  last_seen_ms: number;
+}
+
+export type NetworkLabFindingKindWire =
+  | "ip_impersonation"
+  | "gateway_impersonation"
+  | "gratuitous_burst";
+
+export type NetworkLabSeverityWire = "critical" | "warning";
+
+export interface NetworkLabFindingWire {
+  kind: NetworkLabFindingKindWire;
+  ip: string;
+  macs: NetworkLabMacClaimWire[];
+  first_seen_ms: number;
+  last_seen_ms: number;
+  severity: NetworkLabSeverityWire;
+  detail: string;
+}
+
+export interface NetworkLabHostWire {
+  ip: string;
+  mac_claims: NetworkLabMacClaimWire[];
+  first_seen_ms: number;
+  last_seen_ms: number;
+  impersonated: boolean;
+}
+
+export interface NetworkLabAnalysisWire {
+  arp_frame_count: number;
+  observation_count: number;
+  router_ip: string | null;
+  findings: NetworkLabFindingWire[];
+  hosts: NetworkLabHostWire[];
+}
+
+export interface NetworkLabScopeWire {
+  targets_t1: string[];
+  targets_t2: string[];
+  authorized: boolean;
+}
+
+/** Passive analysis of the currently opened capture; transmits nothing. */
+export async function networkLabAnalyzePcapV1(
+  routerIp: string | null,
+): Promise<NetworkLabAnalysisWire> {
+  if (!inTauri) throw new Error("Network Lab analysis requires the desktop runtime");
+  return invoke<NetworkLabAnalysisWire>("network_lab_analyze_pcap_v1", { routerIp });
+}
+
+export async function networkLabSetScopeV1(
+  targetsT1: string[],
+  targetsT2: string[],
+  authorized: boolean,
+): Promise<NetworkLabScopeWire> {
+  if (!inTauri) throw new Error("Setting a lab scope requires the desktop runtime");
+  return invoke<NetworkLabScopeWire>("network_lab_set_scope_v1", {
+    targetsT1,
+    targetsT2,
+    authorized,
+  });
+}
+
+export async function networkLabScopeV1(): Promise<NetworkLabScopeWire> {
+  if (!inTauri) throw new Error("Lab scope status requires the desktop runtime");
+  return invoke<NetworkLabScopeWire>("network_lab_scope_v1", {});
+}
+
 // --- recovery + file digests --------------------------------------------------
 
 export interface CrackMatchWire {

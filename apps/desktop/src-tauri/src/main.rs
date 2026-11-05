@@ -39,6 +39,7 @@ fn main() {
         .manage(features::network::ipc::pcap::PcapCtx {
             current: std::sync::Mutex::new(None),
         })
+        .manage(features::network::ipc::network_lab::NetworkLabCtx::default())
         .manage(features::web::ipc::web::WebCtx {
             proxy_running: std::sync::atomic::AtomicBool::new(false),
             proxy_port: std::sync::atomic::AtomicU16::new(8080),
@@ -130,6 +131,9 @@ fn main() {
             features::network::ipc::pcap::pcap_case_packet_bytes_v1,
             features::network::ipc::pcap::pcap_case_follow_stream_v1,
             features::network::ipc::pcap::pcap_follow_stream,
+            features::network::ipc::network_lab::network_lab_analyze_pcap_v1,
+            features::network::ipc::network_lab::network_lab_set_scope_v1,
+            features::network::ipc::network_lab::network_lab_scope_v1,
             features::network::ipc::capture::capture_interfaces_v1,
             features::network::ipc::capture::network_runtime_capabilities_v1,
             features::network::ipc::capture::capture_start_v1,
