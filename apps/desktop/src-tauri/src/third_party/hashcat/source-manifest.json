@@ -2812,6 +2812,14 @@
     "tunings/Modules_default.hctune": {
       "sha256": "29a37b2aee01ac162aaa79f027d983741fcf77bfe97d09c20a4d5077ecd9aaad",
       "bytes": 17487
+    },
+    "src/ext_metal.m": {
+      "bytes": 107485,
+      "sha256": "3dffe5fe9d48b577479f6f31932255940a7ae68be2b7b7ed7bf73a6bee94ca02"
+    },
+    "src/ext_iokit.m": {
+      "bytes": 15074,
+      "sha256": "458361019a724aa55c133f746efc9ed4e9a63ad159bb9aef35c9c39c40a69d99"
     }
   }
 }

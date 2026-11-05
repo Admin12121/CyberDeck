@@ -222,8 +222,6 @@ int cd_hashcat_prepare_mode (
   if (!handle->options_initialized) return -1;
   {
     FILE *probe = fopen (hash_file, "rb");
-  {
-    FILE *probe = fopen (hash_file, "rb");
     if (probe != NULL)
     {
       char head[80] = { 0 };
@@ -241,7 +239,6 @@ int cd_hashcat_prepare_mode (
       fputs (hash_file, stderr);
       fputc (10, stderr);
     }
-  }
   }
   if (!validate_path (install_root) || !validate_path (shared_root)
       || !validate_path (hash_file) || !validate_path (wordlist_file)

@@ -25,7 +25,7 @@ reference/
 # local scratch
 tmp/
 
-docs/
+/docs/
 .web-bridge-targets/
 target-agent-*
 # obsolete agent-specific Hashcat native build cache (production uses src-tauri third_party)
