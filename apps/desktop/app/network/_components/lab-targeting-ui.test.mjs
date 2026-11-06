@@ -36,7 +36,9 @@ test("sweep button is scope-constrained: labeled Target 1 ∪ Target 2 in its to
     );
   assert.ok(button, "ARP sweep button missing");
   assert.match(button[0], /!desktop/, "sweep must be desktop-gated");
-  assert.match(button[0], /!authorized/, "sweep must require the authorization checkbox");
+  // No auth checkbox (user directive): the native confirmation dialog on
+  // sweep start is the acknowledgment.
+  assert.doesNotMatch(button[0], /!authorized/);
   assert.match(button[0], /sweepBlock !== null/, "sweep must be blocked without a set scope");
   assert.match(button[0], /!sweepInterface/, "sweep must require a selected interface");
   // The tooltip states the scope constraint honestly.
@@ -54,7 +56,7 @@ test("sweep UI reports why it is blocked and reuses the alert surface for refusa
 });
 
 test("sweep progress and stop run through the channel and results render in the findings-table area", () => {
-  assert.match(viewSource, /networkLabArpSweepV1\(sweepInterface, authorized, caseId/);
+  assert.match(viewSource, /networkLabArpSweepV1\(sweepInterface, true, caseId/);
   assert.match(viewSource, /setSweepProgress\(progress\)/);
   assert.match(viewSource, /networkLabArpSweepStopV1\(\)/);
   assert.match(viewSource, /Stop sweep/);

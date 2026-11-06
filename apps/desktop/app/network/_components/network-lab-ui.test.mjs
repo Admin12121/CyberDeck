@@ -66,14 +66,12 @@ test("lab scope controls exist and the set-scope action is authorization-gated",
   assert.match(viewSource, /Target 2/);
   assert.match(viewSource, /aria-label="Target 1 scope: IP or CIDR entries separated by commas or newlines"/);
   assert.match(viewSource, /aria-label="Target 2 scope: IP or CIDR entries separated by commas or newlines"/);
-  // Authorization checkbox drives the button; the visible label is one short
-  // sentence and the full legal wording lives in the InfoTip.
-  assert.match(viewSource, /checked=\{authorized\}/);
-  assert.match(viewSource, /I am authorized to assess this scope/);
-  assert.match(viewSource, /capped at 64 entries per target group and held in memory only/);
+  // User directive: no on-screen auth checkbox — the native dialog on the
+  // gated sweep is the acknowledgment; scope calls pass authorized: true.
+  assert.doesNotMatch(viewSource, /I am authorized to assess this scope/);
+  assert.doesNotMatch(viewSource, /checked=\{authorized\}/);
   const setScopeButton = /<ToolButton[^>]*tone="primary"[^>]*>[\s\S]*?Set scope/.exec(viewSource);
   assert.ok(setScopeButton, "Set scope button missing");
-  assert.match(setScopeButton[0], /!authorized/);
   assert.match(viewSource, /networkLabSetScopeV1\(/);
   // The scope chip reflects the persisted-in-memory state.
   assert.match(viewSource, /scopeSummary\(scope\)/);

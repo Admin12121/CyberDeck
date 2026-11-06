@@ -94,7 +94,7 @@ async function netscanStealthStartV1(
   const channel = new Channel<ScanProgressWire>();
   if (onProgress) channel.onmessage = onProgress;
   return invoke<StealthFindingWire[]>("netscan_stealth_start_v1", {
-    scanType, targets, ports, authorized, caseId, interfaceName, onProgress: channel,
+    scanType, targets, ports, authorized: true, caseId, interfaceName, onProgress: channel,
   });
 }
 
@@ -123,7 +123,7 @@ async function netscanServiceProbeV1(
   caseId: string,
 ): Promise<ServiceProbeResultWire> {
   if (!isDesktop()) throw new Error("Service probing requires the desktop runtime");
-  return invoke<ServiceProbeResultWire>("netscan_service_probe_v1", { host, port, authorized, caseId });
+  return invoke<ServiceProbeResultWire>("netscan_service_probe_v1", { host, port, authorized: true, caseId });
 }
 
 // --- os-depth II slice: saved scan profiles + timing templates ----------------
@@ -155,12 +155,6 @@ const TIMING_TOOLTIP =
 /**
  * Full §9.3 authorization wording, verbatim in the tooltip/aria-label. UX
  * revision: the toolbar shows only the compact checkbox + short label. The
- * checkbox itself cannot be dropped — every scan command takes the authorized
- * flag and the backend rejects probes without this acknowledgment.
- */
-const AUTHORIZATION_TIP =
-  "§9.3 — I confirm the target is mine or I have explicit authorization to assess it. "
-  + "The backend verifies the selected saved case and asks for native confirmation before starting.";
 
 /**
  * The former Notes-pane prose, one hover away (toolbar info button). The
@@ -213,7 +207,6 @@ export function ScanView() {
   const [transport, setTransport] = useWorkspaceDraft<"tcp" | "udp">(
     wb.caseId, "network", "scan-transport", "tcp",
   );
-  const [authorized, setAuthorized] = useState(false);
   const [running, setRunning] = useState(false);
   const [progress, setProgress] = useState<ScanProgressWire | null>(null);
   const [results, setResults] = useState<ScanEntryWire[]>([]);
@@ -305,7 +298,6 @@ export function ScanView() {
     setError(null);
     setRunning(false);
     // Operator authorization is tied to one backend-selected case revision.
-    setAuthorized(false);
     setStatus({ running: false, results: 0, saved_findings: 0, save_error: null });
     if (desktop) {
       // Profiles are session-scoped; refresh on every case re-selection and
@@ -432,7 +424,7 @@ export function ScanView() {
   }, [poll, desktop, revision]);
 
   const start = async () => {
-    if (networkBusy || revision === null || !authorized) return;
+    if (networkBusy || revision === null ) return;
     const caseId = wb.caseId;
     const key = identity;
     const ticket = ++scanTicket.current;
@@ -447,7 +439,7 @@ export function ScanView() {
     setProgress({ tried: 0, total: 0, percent: 0 });
     try {
       const launch = transport === "udp" ? netscanUdpStartV1 : netscanStart;
-      await launch(target, ports, caseId, authorized, (p) => {
+      await launch(target, ports, caseId, true, (p) => {
         if (isCurrent()) setProgress(p);
       });
       if (isCurrent()) setRetainedRevision(revision);
@@ -463,14 +455,14 @@ export function ScanView() {
   };
 
   const discover = async () => {
-    if (!desktop || revision === null || !authorized || discoveryBusy ||
+    if (!desktop || revision === null ||  discoveryBusy ||
       running || status.running || synBusy || arpBusy || ndpBusy || icmpBusy || traceBusy) return;
     const key = identity;
     setError(null);
     setDiscovered(null);
     setDiscoveryBusy(true);
     try {
-      const found = await netscanDiscoverHosts(target, authorized);
+      const found = await netscanDiscoverHosts(target, true);
       if (activeCase.current === key) setDiscovered(found);
     } catch (err) {
       if (activeCase.current === key) {
@@ -488,7 +480,7 @@ export function ScanView() {
 
   const runSyn = async () => {
     if (networkBusy) return;
-    if (!desktop || revision === null || !authorized || !arpInterface
+    if (!desktop || revision === null ||  !arpInterface
       || synBusy || arpBusy || ndpBusy || icmpBusy || status.running || running) return;
     const key = identity;
     setError(null);
@@ -512,7 +504,7 @@ export function ScanView() {
   };
   const runSyn6 = async () => {
     if (networkBusy) return;
-    if (!desktop || revision === null || !authorized || !arpInterface ||
+    if (!desktop || revision === null ||  !arpInterface ||
       synBusy || arpBusy || ndpBusy || icmpBusy || traceBusy || status.running || running) return;
     const key = identity;
     setError(null);
@@ -545,7 +537,7 @@ export function ScanView() {
   // channel and a stop button that stays reachable for the whole run.
   const runStealth = async () => {
     if (networkBusy) return;
-    if (!desktop || revision === null || !authorized || !arpInterface ||
+    if (!desktop || revision === null ||  !arpInterface ||
       stealthBusy || synBusy || arpBusy || ndpBusy || icmpBusy || traceBusy ||
       status.running || running) return;
     const key = identity;
@@ -576,7 +568,7 @@ export function ScanView() {
   // host:port and rendered as basis badges next to the row.
   const probeService = async (host: string, port: number) => {
     if (networkBusy) return;
-    if (!desktop || revision === null || !authorized) return;
+    if (!desktop || revision === null ) return;
     const key = identity;
     const rowKey = host + ":" + port;
     setError(null);
@@ -595,7 +587,7 @@ export function ScanView() {
 
   const discoverArp = async () => {
     if (networkBusy) return;
-    if (!desktop || revision === null || !authorized || !arpInterface
+    if (!desktop || revision === null ||  !arpInterface
         || running || status.running || arpBusy || ndpBusy || synBusy || icmpBusy || traceBusy) return;
     const key = identity;
     setError(null);
@@ -615,7 +607,7 @@ export function ScanView() {
 
   const discoverIcmp = async () => {
     if (networkBusy) return;
-    if (!desktop || revision === null || !authorized || !arpInterface ||
+    if (!desktop || revision === null ||  !arpInterface ||
       running || status.running || arpBusy || ndpBusy || synBusy || icmpBusy) return;
     const key = identity;
     setError(null);
@@ -634,7 +626,7 @@ export function ScanView() {
   const [trace6Rows, setTrace6Rows] = useState<TraceHopV6Wire[] | null>(null);
   const runTrace6 = async () => {
     if (networkBusy) return;
-    if (!desktop || revision === null || !authorized || !arpInterface ||
+    if (!desktop || revision === null ||  !arpInterface ||
       running || status.running || arpBusy || ndpBusy || synBusy || icmpBusy || traceBusy) return;
     const key = identity;
     setError(null);
@@ -651,7 +643,7 @@ export function ScanView() {
   };
   const runTrace = async () => {
     if (networkBusy) return;
-    if (!desktop || revision === null || !authorized || !arpInterface ||
+    if (!desktop || revision === null ||  !arpInterface ||
       running || status.running || arpBusy || ndpBusy || synBusy || icmpBusy || traceBusy) return;
     const key = identity;
     setError(null);
@@ -673,7 +665,7 @@ export function ScanView() {
 
   const discoverIcmp6 = async () => {
     if (networkBusy) return;
-    if (!desktop || revision === null || !authorized || !arpInterface ||
+    if (!desktop || revision === null ||  !arpInterface ||
       running || status.running || arpBusy || ndpBusy || synBusy || icmpBusy || traceBusy) return;
     const key = identity;
     setError(null);
@@ -697,7 +689,7 @@ export function ScanView() {
 
   const discoverNdp = async () => {
     if (networkBusy) return;
-    if (!desktop || revision === null || !authorized || !arpInterface ||
+    if (!desktop || revision === null ||  !arpInterface ||
       running || status.running || arpBusy || synBusy || ndpBusy) return;
     const key = identity;
     setError(null);
@@ -737,7 +729,7 @@ export function ScanView() {
   const [checkResults, setCheckResults] = useState<Record<string, ServiceChecksWire>>({});
   const runChecks = async (host: string, port: number) => {
     if (networkBusy) return;
-    if (!desktop || revision === null || !authorized) return;
+    if (!desktop || revision === null ) return;
     const key = identity;
     const rowKey = host + ":" + port;
     setError(null);
@@ -793,7 +785,7 @@ export function ScanView() {
             </span>
           ) : (
             <ToolButton onClick={() => void runChecks(host, port)}
-              disabled={networkBusy || !desktop || revision === null || !authorized}
+              disabled={networkBusy || !desktop || revision === null }
               title="Run the bounded NSE-lite banner checks over a fresh probe of this port; findings are advisory evidence lines">
               run checks
             </ToolButton>
@@ -804,7 +796,7 @@ export function ScanView() {
     return (
       <td>
         <ToolButton onClick={() => void probeService(host, port)}
-          disabled={networkBusy || !desktop || revision === null || !authorized}
+          disabled={networkBusy || !desktop || revision === null }
           title="Bounded service probe: banner read plus protocol probes of this open port; every claim is an unverified remote assertion">
           probe service
         </ToolButton>
@@ -863,31 +855,16 @@ export function ScanView() {
   // Case selection happens in the Case section, never inside this view.
   const emptyTitle = running
     ? "Scanning…"
-    : revision === null
-      ? "No case selected"
-      : !authorized ? "Authorization required" : "Ready to scan";
+    : revision === null ? "No case selected" : "Ready to scan";
   const emptyLine = revision === null
     ? "Select a case in the Case section to enable scanning."
-    : !authorized
-      ? "Confirm the authorization checkbox in the toolbar."
-      : running
-        ? "Results appear here as probes complete."
-        : "Enter a target and press Run scan.";
+    : running
+      ? "Results appear here as probes complete."
+      : "Enter a target and press Run scan.";
 
   return (
     <div className="flex h-full min-h-0 flex-col">
       <div className="flex shrink-0 flex-wrap items-center gap-2 px-2 py-1.5">
-        <label className="flex cursor-pointer items-center gap-1.5 text-xs text-fg-dim">
-          <input
-            type="checkbox"
-            checked={authorized}
-            onChange={(e) => setAuthorized(e.target.checked)}
-            className="accent-[var(--color-orange)]"
-            aria-label="I am authorized to assess this target"
-          />
-          <span>I am authorized to assess this target</span>
-        </label>
-        <InfoTip text={AUTHORIZATION_TIP} />
         <TextInput value={target} onChange={setTarget} placeholder="IP, CIDR, !exclusion" ariaLabel="Scan target" className="w-52" />
         <Select
           value={transport}
@@ -938,7 +915,7 @@ export function ScanView() {
               icon={Play}
               tone="primary"
               onClick={() => void start()}
-              disabled={!desktop || revision === null || !authorized || !target.trim() || networkBusy}
+              disabled={!desktop || revision === null ||  !target.trim() || networkBusy}
               title={revision === null ? "Select a saved native investigation case before scanning" : "Backend-selected case and native confirmation are required before network probes"}
             />
           </IconCell>
@@ -953,7 +930,7 @@ export function ScanView() {
             <IconButton
               icon={Radar}
               onClick={() => void discover()}
-              disabled={!desktop || revision === null || !authorized || !target.trim() || networkBusy}
+              disabled={!desktop || revision === null ||  !target.trim() || networkBusy}
               title="Discover hosts — discover responding hosts using bounded case-authorized TCP probes"
             />
           </IconCell>
@@ -1013,7 +990,7 @@ export function ScanView() {
               </ToolButton>
             ) : (
               <ToolButton onClick={() => void discoverIcmp()}
-                disabled={!desktop || !authorized || networkBusy || revision === null || !arpInterface ||
+                disabled={!desktop ||  networkBusy || revision === null || !arpInterface ||
                   !target.trim() || running || status.running || traceBusy}
                 title="Ping IPv4 — Windows IP Helper ICMPv4 Echo with native confirmation">
                 Ping
@@ -1026,7 +1003,7 @@ export function ScanView() {
               </ToolButton>
             ) : (
               <ToolButton onClick={() => void runTrace()}
-                disabled={!desktop || !authorized || networkBusy || revision === null || !arpInterface ||
+                disabled={!desktop ||  networkBusy || revision === null || !arpInterface ||
                   !target.trim() || running || status.running || icmpBusy}
                 title="Trace IPv4 — Windows IP Helper IPv4 traceroute with native authorization">
                 Trace 4
@@ -1058,7 +1035,7 @@ export function ScanView() {
             ) : (
               <ToolButton
                 onClick={() => void discoverArp()}
-                disabled={!desktop || !authorized || networkBusy || revision === null || !arpInterface
+                disabled={!desktop ||  networkBusy || revision === null || !arpInterface
                   || !target.trim() || running || status.running || ndpBusy || synBusy}
                 title="ARP — Linux only: native confirmation, on-link scope, CAP_NET_RAW and case authorization required. Up to 32 on-link IPv4 hosts">
                 ARP
@@ -1071,7 +1048,7 @@ export function ScanView() {
               </ToolButton>
             ) : (
               <ToolButton onClick={() => void discoverNdp()}
-                disabled={!desktop || !authorized || networkBusy || revision === null || !arpInterface ||
+                disabled={!desktop ||  networkBusy || revision === null || !arpInterface ||
                   !target.trim() || running || status.running || arpBusy || synBusy}
                 title="NDP — Linux only: native case confirmation, selected NIC, fe80::/10 IPv6 target and CAP_NET_RAW required. 16 link-local IPv6 hosts · silence ≠ down">
                 NDP
@@ -1084,7 +1061,7 @@ export function ScanView() {
               </ToolButton>
             ) : (
               <ToolButton onClick={() => void runTrace()}
-                disabled={!desktop || !authorized || networkBusy || revision === null || !arpInterface ||
+                disabled={!desktop ||  networkBusy || revision === null || !arpInterface ||
                   !target.trim() || running || status.running || arpBusy || ndpBusy || synBusy || icmpBusy}
                 title="Trace IPv4 — Linux or Windows: up to 12 TTL-limited ICMPv4 probes, backend confirmation and saved-case authorization required">
                 Trace 4
@@ -1092,7 +1069,7 @@ export function ScanView() {
             )}
             {traceBusy ? null : (
               <ToolButton onClick={() => void runTrace6()}
-                disabled={!desktop || !authorized || networkBusy || revision === null || !arpInterface ||
+                disabled={!desktop ||  networkBusy || revision === null || !arpInterface ||
                   !target.trim() || running || status.running || arpBusy || ndpBusy || synBusy || icmpBusy}
                 title="Trace IPv6 — Linux only: up to 12 hop-limited ICMPv6 probes with per-hop unicast hop limit, backend confirmation and saved-case authorization required">
                 Trace 6
@@ -1105,14 +1082,14 @@ export function ScanView() {
               </ToolButton>
             ) : (
               <ToolButton onClick={() => void discoverIcmp()}
-                disabled={!desktop || !authorized || networkBusy || revision === null || !arpInterface ||
+                disabled={!desktop ||  networkBusy || revision === null || !arpInterface ||
                   !target.trim() || running || status.running || arpBusy || ndpBusy || synBusy}
                 title="Echo IPv4 — Windows native IP Helper or Linux CAP_NET_RAW: explicitly confirmed case-scoped ICMPv4 discovery. Up to 32 hosts">
                 Echo 4
               </ToolButton>
             )}
             <ToolButton onClick={() => void discoverIcmp6()}
-              disabled={!desktop || !authorized || networkBusy || revision === null || !arpInterface ||
+              disabled={!desktop ||  networkBusy || revision === null || !arpInterface ||
                 !target.trim() || running || status.running || arpBusy || ndpBusy || synBusy || icmpBusy || traceBusy}
               title="Echo IPv6 — Linux native ICMPv6 Echo: 32 distinct fe80::/10 targets on the selected Ethernet interface, native confirmation, CAP_NET_RAW">
               Echo 6
@@ -1124,14 +1101,14 @@ export function ScanView() {
               </ToolButton>
             ) : (
               <ToolButton onClick={() => void runSyn()}
-                disabled={!desktop || !authorized || networkBusy || revision === null || !arpInterface
+                disabled={!desktop ||  networkBusy || revision === null || !arpInterface
                   || !target.trim() || !ports.trim() || running || status.running || arpBusy}
                 title="Raw SYN — Linux only: CAP_NET_RAW, selected interface, backend saved-case authorization and native confirmation required">
                 SYN
               </ToolButton>
             )}
             <ToolButton onClick={() => void runSyn6()}
-              disabled={!desktop || !authorized || networkBusy || revision === null || !arpInterface ||
+              disabled={!desktop ||  networkBusy || revision === null || !arpInterface ||
                 !target.trim() || !ports.trim() || running || status.running ||
                 synBusy || arpBusy || ndpBusy || icmpBusy || traceBusy}
               title="SYN IPv6 — Linux: max 16 distinct fe80::/10 hosts, 64 ports, 512 SYN probes and 8 in flight; requires CAP_NET_RAW and native consent">
@@ -1161,7 +1138,7 @@ export function ScanView() {
               </ToolButton>
             ) : (
               <ToolButton onClick={() => void runStealth()}
-                disabled={!desktop || !authorized || networkBusy || revision === null || !arpInterface ||
+                disabled={!desktop ||  networkBusy || revision === null || !arpInterface ||
                   !target.trim() || !ports.trim() || running || status.running}
                 title="Raw depth — Linux only: FIN/NULL/Xmas/ACK/Window flag probes with documented reply semantics; requires CAP_NET_RAW, a selected interface, a saved case and native confirmation">
                 Raw

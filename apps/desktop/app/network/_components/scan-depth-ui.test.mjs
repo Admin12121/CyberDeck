@@ -69,16 +69,23 @@ test("raw scan types carry the explicit Linux platform note", () => {
   assert.match(scanViewSource, /title=\{platformNote\}/);
 });
 
-test("authorization is one compact toolbar checkbox with the full wording in a tooltip", () => {
-  // The backend requires the authorized flag on every scan command, so the
-  // checkbox stays; the §9.3 wording survives verbatim in the InfoTip text.
-  assert.match(scanViewSource, /aria-label="I am authorized to assess this target"/);
-  assert.match(scanViewSource, /I am authorized to assess this target/);
-  assert.match(
-    scanViewSource,
-    /I confirm the target is mine or I have explicit authorization to assess it/,
+test("authorization is the native confirmation dialog — no on-screen checkbox", () => {
+  // User directive: the checkbox was redundant chrome — the native Yes/No
+  // dialog at scan start carries the full §9.3 wording and is the actual
+  // gate, so every scan call passes authorized: true.
+  assert.doesNotMatch(scanViewSource, /I am authorized to assess this target/);
+  assert.doesNotMatch(scanViewSource, /AUTHORIZATION_TIP/);
+  // The §9.3 wording survives in the native confirmation prompt.
+  // The full acknowledgment wording lives in the backend's native
+  // confirmation prompt (commands.rs) — the frontend has no checkbox left.
+  const backendSource = read(
+    "../../../src-tauri/src/features/network/ipc/commands.rs",
+    "utf8",
   );
-  assert.match(scanViewSource, /<InfoTip text=\{AUTHORIZATION_TIP\} \/>/);
+  assert.match(
+    backendSource,
+    /Only test systems you are permitted to assess/,
+  );
   // No full-width authorization section and no in-view case management.
   assert.ok(!/Authorization \(§9\.3\)/.test(scanViewSource));
   assert.ok(!/AuthorizedCaseAction/.test(scanViewSource));
@@ -89,13 +96,13 @@ test("authorization is one compact toolbar checkbox with the full wording in a t
 test("stealth and service-probe flows are gated behind authorization and a saved case", () => {
   const stealthBody = /const runStealth = async \(\) => \{([\s\S]*?)\n  \};/.exec(scanViewSource);
   assert.ok(stealthBody, "runStealth handler missing");
-  assert.match(stealthBody[1], /!authorized/);
+  assert.match(stealthBody[1], /netscanStealthStartV1\(stealthType, target, ports, true, wb\.caseId/);
   assert.match(stealthBody[1], /revision === null/);
   assert.match(stealthBody[1], /netscanStealthStartV1\(/);
   assert.match(stealthBody[1], /wb\.caseId/);
   const probeBody = /const probeService = async \(host: string, port: number\) => \{([\s\S]*?)\n  \};/.exec(scanViewSource);
   assert.ok(probeBody, "probeService handler missing");
-  assert.match(probeBody[1], /!authorized/);
+  assert.match(probeBody[1], /netscanServiceProbeV1\(host, port, true, wb\.caseId\)/);
   assert.match(probeBody[1], /revision === null/);
   assert.match(probeBody[1], /netscanServiceProbeV1\(/);
   // Both clients pass the saved-case id so the backend can reject stale UI state.

@@ -137,7 +137,6 @@ export function NetworkLabView() {
   const [routerIp, setRouterIp] = useState("");
   const [targetsT1, setTargetsT1] = useState("");
   const [targetsT2, setTargetsT2] = useState("");
-  const [authorized, setAuthorized] = useState(false);
   const [scope, setScope] = useState<NetworkLabScopeWire | null>(null);
   const [scopeBusy, setScopeBusy] = useState(false);
   const [scopeError, setScopeError] = useState<string | null>(null);
@@ -456,7 +455,7 @@ export function NetworkLabView() {
       const wire = await networkLabSetScopeV1(
         parseScopeEntries(targetsT1),
         parseScopeEntries(targetsT2),
-        authorized,
+        true,
       );
       setScope(wire);
     } catch (err) {
@@ -503,7 +502,7 @@ export function NetworkLabView() {
     setSweepError(null);
     setSweepProgress(null);
     try {
-      const rows = await networkLabArpSweepV1(sweepInterface, authorized, caseId, (progress) => {
+      const rows = await networkLabArpSweepV1(sweepInterface, true, caseId, (progress) => {
         if (isCurrent()) setSweepProgress(progress);
       });
       if (!isCurrent()) return;
@@ -530,20 +529,11 @@ export function NetworkLabView() {
         <section aria-label="Lab scope" className="flex min-h-0 flex-1 flex-col">
           <div className={TOOLBAR_ROW}>
             {railPills}
-            <label className="flex items-center gap-1.5 text-xs text-fg-dim">
-              <input
-                type="checkbox"
-                checked={authorized}
-                onChange={(event) => setAuthorized(event.target.checked)}
-                className="accent-[var(--color-orange)]"
-              />
-              <span>I am authorized to assess this scope</span>
-            </label>
             <InfoTip text="I confirm this lab scope is mine or I have explicit authorization to assess it. The scope is validated, capped at 64 entries per target group and held in memory only." />
             <ToolButton
               tone="primary"
               onClick={() => void applyScope()}
-              disabled={!desktop || !authorized || scopeBusy}
+              disabled={!desktop ||  scopeBusy}
               title="Validate and store the lab scope in memory; requires the authorization checkbox"
             >
               Set scope
@@ -573,7 +563,7 @@ export function NetworkLabView() {
               <ToolButton
                 tone="primary"
                 onClick={() => void runSweep()}
-                disabled={!desktop || !authorized || !sweepInterface || sweepBlock !== null}
+                disabled={!desktop ||  !sweepInterface || sweepBlock !== null}
                 title="Linux only: ARP sweep (Target 1 ∪ Target 2) probes ONLY the IPv4 targets resolved from the saved lab scope, at most 32 probes at 10/s, native confirmation and CAP_NET_RAW required; refuses anything outside the declared scope"
               >
                 Sweep
