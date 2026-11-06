@@ -115,16 +115,15 @@ test("the two-session hint is a StatusStrip item shown only when fewer than 2 se
   assert.match(viewSource, /nodes · \$\{topology\.edges\.length\} edges/);
 });
 
-test("case gate is a compact one-liner with working create and choose actions", () => {
-  assert.match(viewSource, /Select or create an investigation case/);
+test("case gate is a pointer line only — no case management here (user directive)", () => {
+  // Cases are managed in the Case section; the view shows ONE muted line.
+  assert.match(viewSource, /No case selected — pick one in the Case section/);
   assert.match(viewSource, /Waiting for the selected investigation/);
-  // Buttons stay functional: native case create + the cases chooser route.
-  assert.match(viewSource, /caseCreate\(/);
-  assert.match(viewSource, /router\.push\("\/cases"\)/);
-  assert.match(viewSource, /"Create case"/);
-  assert.match(viewSource, /Choose existing/);
-  // The two-sentence rationale lives in the gate's InfoTip.
-  assert.match(viewSource, /requires a saved case so results, permissions and evidence stay isolated/);
+  assert.doesNotMatch(viewSource, /Create case/);
+  assert.doesNotMatch(viewSource, /Choose existing/);
+  assert.doesNotMatch(viewSource, /caseCreate\(/);
+  // The rationale lives in the gate's InfoTip, not on screen.
+  assert.match(viewSource, /Cases are managed in the Case section, not here/);
   // No stacked section gate anymore.
   assert.doesNotMatch(viewSource, /AuthorizedCaseAction/);
   assert.match(viewSource, /revision === null \? <CaseGate activity="Scan insights" \/> : null/);
