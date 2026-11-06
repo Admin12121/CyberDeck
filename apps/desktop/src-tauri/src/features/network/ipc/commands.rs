@@ -313,11 +313,98 @@ pub(super) fn stop(ctx: State<'_, ScanCtx>) {
 pub(super) fn history(
     ctx: State<'_, ScanCtx>,
     selected: State<'_, CaseSessionCtx>,
+    evidence: State<'_, EvidenceCtx>,
 ) -> Vec<ScanHistoryItem> {
     if !ctx.visible_for(&selected) {
         return Vec::new();
     }
-    ctx.history.lock().expect("scan history poisoned").clone()
+    let memory = ctx.history.lock().expect("scan history poisoned").clone();
+    if !memory.is_empty() {
+        return memory;
+    }
+    // Session memory is process-lifetime only. When it is empty (fresh app
+    // start, case re-selected) the history rebuilds from the scan findings
+    // this case already persisted, so completed scans stay visible across
+    // restarts. Hydrated sessions are capped and never re-scan.
+    match hydrate_history(&selected, &evidence) {
+        Ok(hydrated) if !hydrated.is_empty() => {
+            // Keep future in-memory scan ids unique against the restored ones.
+            if let Some(max_id) = hydrated.iter().map(|item| item.id).max() {
+                ctx.next_id.fetch_max(max_id + 1, Ordering::Relaxed);
+            }
+            ctx.history
+                .lock()
+                .expect("scan history poisoned")
+                .extend(hydrated);
+            ctx.history.lock().expect("scan history poisoned").clone()
+        }
+        _ => memory,
+    }
+}
+
+/// Rebuild bounded scan sessions from persisted network findings. Findings
+/// carry "Scan #{scan_id}" in their details, so grouping by that number and
+/// counting distinct hosts/open states reconstructs the summary lines the
+/// in-memory history would have shown. Bounded: latest 64 sessions, at most
+/// 2048 findings read per source.
+fn hydrate_history(
+    selected: &CaseSessionCtx,
+    evidence: &EvidenceCtx,
+) -> Result<Vec<ScanHistoryItem>, String> {
+    let scope = selected.selected()?;
+    let Some(case_id) = scope.case_id.clone() else {
+        return Ok(Vec::new());
+    };
+    if case_id == "scratchpad" || case_id.is_empty() {
+        return Ok(Vec::new());
+    }
+    let store = evidence.store.lock().map_err(|_| "case store unavailable")?;
+    let findings = store.list_findings(&case_id)?;
+    drop(store);
+    let mut sessions: std::collections::BTreeMap<u64, ScanHistoryItem> = std::collections::BTreeMap::new();
+    let mut hosts_seen: std::collections::HashMap<u64, std::collections::BTreeSet<String>> =
+        std::collections::HashMap::new();
+    let mut open_ports: std::collections::HashMap<u64, usize> = std::collections::HashMap::new();
+    let mut read = 0usize;
+    for finding in findings.iter().rev() {
+        if read >= 2048 || sessions.len() >= 64 {
+            break;
+        }
+        if finding.source != "network.tcp" && finding.source != "network.udp" {
+            continue;
+        }
+        let Some(id) = parse_scan_id(&finding.details) else {
+            continue;
+        };
+        read += 1;
+        let entry = sessions.entry(id).or_insert_with(|| ScanHistoryItem {
+            id,
+            targets: "hydrated from case findings".into(),
+            ports: if finding.source == "network.udp" { "udp" } else { "tcp" }.into(),
+            hosts_scanned: 0,
+            open_ports: 0,
+            duration_ms: 0,
+            at_ms: finding.created_ms.max(0) as u64,
+        });
+        // Observation findings: "<PROTO> <STATE> <host>:<port>"
+        let mut parts = finding.title.split_whitespace();
+        if let (Some(_proto), Some(state), Some(hostport)) =
+            (parts.next(), parts.next(), parts.next())
+        {
+            let seen = hosts_seen.entry(id).or_default();
+            if let Some((host, _port)) = hostport.split_once(':') {
+                seen.insert(host.to_string());
+            }
+            if state == "Open" {
+                *open_ports.entry(id).or_insert(0) += 1;
+            }
+            entry.hosts_scanned = seen.len();
+            entry.open_ports = open_ports.get(&id).copied().unwrap_or(0);
+        }
+    }
+    let mut hydrated: Vec<ScanHistoryItem> = sessions.into_values().collect();
+    hydrated.sort_by(|a, b| b.at_ms.cmp(&a.at_ms));
+    Ok(hydrated)
 }
 
 pub(super) fn export(
@@ -501,5 +588,30 @@ mod scope_tests {
         let selected = CaseSessionCtx::default();
         selected.select(&store, "scratchpad").unwrap();
         assert!(selected_scan_scope(&selected, "scratchpad").is_err());
+    }
+}
+
+/// Extract the scan session number from an observation finding's details
+/// ("Authorized TCP scan #12\nHost: ..."). Pure so hydration rules are
+/// testable without a store.
+fn parse_scan_id(details: &str) -> Option<u64> {
+    let rest = details.split("Scan #").nth(1)?;
+    let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+    digits.parse::<u64>().ok()
+}
+
+#[cfg(test)]
+mod history_hydration_tests {
+    use super::parse_scan_id;
+
+    #[test]
+    fn scan_id_parses_from_observation_details_and_refuses_noise() {
+        let details = "Authorized TCP scan #42\nHost: 10.0.0.1\nPort: 443";
+        assert_eq!(parse_scan_id(details), Some(42));
+        assert_eq!(parse_scan_id("Authorized UDP scan #7: summary"), Some(7));
+        assert_eq!(parse_scan_id("no session marker here"), None);
+        assert_eq!(parse_scan_id("Scan #"), None);
+        // A finding whose first "Scan #" match is not numeric still yields None.
+        assert_eq!(parse_scan_id("Scan #abc and later Scan #9"), None);
     }
 }

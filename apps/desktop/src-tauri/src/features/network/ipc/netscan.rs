@@ -160,8 +160,9 @@ pub fn netscan_stop(ctx: State<'_, ScanCtx>) {
 pub fn netscan_history(
     ctx: State<'_, ScanCtx>,
     selected: State<'_, CaseSessionCtx>,
+    evidence: State<'_, EvidenceCtx>,
 ) -> Vec<ScanHistoryItem> {
-    scan_commands::history(ctx, selected)
+    scan_commands::history(ctx, selected, evidence)
 }
 
 #[tauri::command]
