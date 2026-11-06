@@ -1,7 +1,8 @@
 "use client";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { ChevronRight, FolderOpen } from "lucide-react";
+import { ChevronRight, CornerUpLeft, Download, FileDown, FolderOpen } from "lucide-react";
 import { Chip, EmptyState, TextInput, ToolButton, WorkspaceTabs } from "@ds/panes";
+import { IconButton } from "@ds/compact";
 import { hexDump } from "@lib/hex";
 import {
   isDesktop,
@@ -282,34 +283,18 @@ function ImportedCaptureView() {
       </div>
       <div className={screen === "offline" ? "flex min-h-0 flex-1 flex-col" : "hidden"}>
         <div className="cd-workspace-toolbar shrink-0 items-center gap-2 px-2">
-        <ToolButton onClick={() => setScreen("welcome")} title="Return to capture file and interface selection">
-          Capture
-        </ToolButton>
-        <ToolButton
-          onClick={() => void openCapture()}
-          disabled={!desktop || opening}
-          title={desktop ? "Open a PCAP or PCAPNG capture using the native Rust parser" : "Opening captures requires the desktop runtime"}
-        >
-          <FolderOpen size={11} /> {opening ? "opening…" : "Open…"}
-        </ToolButton>
-        <ToolButton
-          onClick={() => void exportView("pcap")}
-          disabled={!capture || exporting || !savedCaseReady}
+        <IconButton icon={CornerUpLeft} onClick={() => setScreen("welcome")}
+          title="Return to capture file and interface selection" />
+        <IconButton icon={FolderOpen} onClick={() => void openCapture()} disabled={!desktop || opening}
+          title={desktop ? "Open a PCAP or PCAPNG capture using the native Rust parser" : "Opening captures requires the desktop runtime"} />
+        <IconButton icon={Download} onClick={() => void exportView("pcap")} disabled={!capture || exporting || !savedCaseReady}
           title={!capture
-            ? "Open a capture to export its filtered view"
+            ? "Export view → case (PCAP): open a capture first"
             : savedCaseReady
-              ? "Persist the currently filtered packets as an immutable classic-PCAP case artifact"
-              : "Select a saved case to export the view into"}
-        >
-          {exporting ? "exporting…" : "Export view → case (PCAP)"}
-        </ToolButton>
-        <ToolButton
-          onClick={() => void exportView("pcapng")}
-          disabled={!capture || exporting || !savedCaseReady}
-          title="Export the currently filtered packets as a PCAPNG case artifact (native writer, round-trips through the bundled reader)"
-        >
-          {exporting ? "exporting…" : "Export view → case (PCAPNG)"}
-        </ToolButton>
+              ? "Export view → case (PCAP): persist the filtered packets as an immutable classic-PCAP case artifact"
+              : "Export view → case (PCAP): select a saved case first"} />
+        <IconButton icon={FileDown} onClick={() => void exportView("pcapng")} disabled={!capture || exporting || !savedCaseReady}
+          title="Export view → case (PCAPNG): native writer, round-trips through the bundled reader" />
         {exportResult ? (
           <Chip tone="ok">
             {exportResult.packet_count} pkts → case · {shortArtifactId(exportResult.artifact_id)}
@@ -341,8 +326,8 @@ function ImportedCaptureView() {
         </div>
       ) : null}
       {capture?.malformed_tail ? (
-        <div className="border-b border-warn/40 bg-warn/10 px-2 py-1 font-mono text-[10px] text-warn">
-          capture has a malformed trailing record; packets before it loaded
+        <div className="border-b border-warn/40 bg-warn/10 px-2 py-0.5 text-[10px] text-warn">
+          malformed trailing record — earlier packets loaded
         </div>
       ) : null}
       {reassembly && showReassembly ? (

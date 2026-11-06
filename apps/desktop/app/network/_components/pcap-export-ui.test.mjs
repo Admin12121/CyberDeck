@@ -37,17 +37,19 @@ const pcapWriteSource = readFileSync(
 // ------------------------------------------------- export view -> case -------
 
 test("offline toolbar carries the Export view -> case control, gated and busy-labeled", () => {
-  assert.match(studioSource, /Export view → case/);
+  assert.match(studioSource, /Export view → case/); // survives in tooltips
+  assert.match(studioSource, /icon={Download}/);
+  assert.match(studioSource, /icon={FileDown}/);
   // Disabled without an opened capture, while a request is in flight, and
   // without a saved selected case (artifact destination).
   assert.match(
     studioSource,
     /disabled=\{!capture \|\| exporting \|\| !savedCaseReady\}/,
   );
-  assert.match(studioSource, /"Export view → case \(PCAP\)"/);
-  assert.match(studioSource, /"Export view → case \(PCAPNG\)"/);
+  assert.match(studioSource, /Export view → case \(PCAP\): persist the filtered packets/);
+  assert.match(studioSource, /Export view → case \(PCAPNG\): native writer/);
   // The honest reason is visible via the tooltip for each disabled state.
-  assert.match(studioSource, /Select a saved case to export the view into/);
+  assert.match(studioSource, /select a saved case first/);
   assert.match(studioSource, /Open a capture to export its filtered view/);
 });
 
