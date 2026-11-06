@@ -28,6 +28,13 @@ import {
   networkLabLiveStatusV1,
   type LabLiveStatusWire,
 } from "@lib/network-lab-live-ipc";
+import {
+  dnsFindingKindLabel,
+  formatAnswerSet,
+  networkLabDnsMonitorV1,
+  questionTypeLabel,
+  type DnsMonitorWire,
+} from "./network-lab-dns-ipc";
 import { useWorkbench } from "@state/workbench";
 import {
   networkLabAnalyzePcapV1,
@@ -58,6 +65,11 @@ export function NetworkLabView() {
   // state like every other capture-derived view value.
   const [timeline, setTimeline] = useState<LabEventsWire | null>(null);
   const [timelineBusy, setTimelineBusy] = useState(false);
+  // Passive DNS-response monitor (dns-spoofing counterpart): per-run result
+  // state over the opened capture, same lifecycle as the ARP analysis.
+  const [dnsResult, setDnsResult] = useState<DnsMonitorWire | null>(null);
+  const [dnsBusy, setDnsBusy] = useState(false);
+  const [dnsError, setDnsError] = useState<string | null>(null);
   // Live source: the lab either derives over the opened capture or
   // SUBSCRIBES to Packet Studio's running capture session (one capture,
   // many modules). It never starts or stops a capture of its own.
@@ -98,10 +110,13 @@ export function NetworkLabView() {
     openSequence.current += 1;
     setCapture(null);
     setAnalysis(null);
+    setDnsResult(null);
     setOpening(false);
     setAnalyzing(false);
+    setDnsBusy(false);
     setOpenError(null);
     setAnalysisError(null);
+    setDnsError(null);
     // A case switch revokes the capture session's ownership on the backend,
     // so the live subscription is meaningless: stop polling and drop the
     // stale status instead of letting it render against the new revision.
@@ -185,6 +200,7 @@ export function NetworkLabView() {
       // Findings from the previous capture would be stale the moment the
       // backend cache is replaced, so they never survive an open.
       setAnalysis(null);
+      setDnsResult(null);
       return wire;
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -223,6 +239,22 @@ export function NetworkLabView() {
     }
   };
 
+  // Passive DNS-response monitoring: reads the opened capture only (same
+  // read-only gate as the timeline derivation), never transmits anything.
+  const runDnsMonitor = async () => {
+    if (!capture) return;
+    setDnsBusy(true);
+    setDnsError(null);
+    try {
+      const wire = await networkLabDnsMonitorV1();
+      setDnsResult(wire);
+    } catch (err) {
+      setDnsError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setDnsBusy(false);
+    }
+  };
+
   const applyScope = async () => {
     setScopeBusy(true);
     setScopeError(null);
@@ -249,10 +281,10 @@ export function NetworkLabView() {
         >
           <div className="space-y-2 p-3 text-xs leading-relaxed text-fg-dim">
             <p>
-              Ettercap-inspired lab mode inside Packet Studio: unified host inventory and passive
-              ARP anomaly analysis over already-captured frames. The lab reads captures and never
-              transmits packets; scope entries are IP/CIDR strings held in memory only and are never
-              persisted (Master Plan §5.1).
+              Ettercap-inspired lab mode inside Packet Studio: unified host inventory, passive ARP
+              anomaly analysis and passive DNS-response monitoring over already-captured frames.
+              The lab reads captures and never transmits packets; scope entries are IP/CIDR strings
+              held in memory only and are never persisted (Master Plan §5.1).
             </p>
           </div>
         </Pane>
@@ -560,6 +592,36 @@ export function NetworkLabView() {
               </div>
             ) : null}
             <TimelineTable wire={displayTimeline} />
+
+            {/* DNS monitor: passive response analysis over the opened capture
+                (dns-spoofing counterpart). Read-only, same capture gate as
+                the timeline derivation above. */}
+            <div className="border-t border-line pt-3">
+              <div className="flex flex-wrap items-center gap-2 pb-2">
+                <span className="font-medium uppercase tracking-wider text-fg-muted">
+                  DNS monitor
+                </span>
+                <ToolButton
+                  tone="primary"
+                  disabled={!desktop || !capture || dnsBusy}
+                  title={
+                    capture
+                      ? "Run the passive DNS-response monitor over the opened capture: answer inconsistencies, loopback/link-local answer targets and NXDOMAIN injection"
+                      : "Open a capture first — the DNS monitor reads the opened capture"
+                  }
+                  onClick={() => void runDnsMonitor()}
+                >
+                  <Radar size={11} /> {dnsBusy ? "analyzing…" : "Analyze DNS responses"}
+                </ToolButton>
+                <DnsMonitorChips wire={dnsResult} />
+              </div>
+              {dnsError ? (
+                <div role="alert" className="border-b border-err/50 bg-err/10 px-3 py-1 font-mono text-[10px] text-err">
+                  {dnsError}
+                </div>
+              ) : null}
+              <DnsFindingsTable wire={dnsResult} />
+            </div>
           </div>
         </Pane>
 
@@ -672,5 +734,87 @@ function TimelineRow({ event }: { event: LabEventWire }) {
       <td className="font-mono text-[11px]">{event.subject}</td>
       <td className="text-fg-muted">{event.detail}</td>
     </tr>
+  );
+}
+
+/** Count chips for the passive DNS monitor; honest about the 128-finding cap. */
+export function DnsMonitorChips({ wire }: { wire: DnsMonitorWire | null }) {
+  if (!wire) return <Chip>no DNS analysis yet</Chip>;
+  return (
+    <>
+      <Chip tone="ok">{wire.observations_seen} DNS messages</Chip>
+      <Chip tone="ok">{wire.queried_names} names</Chip>
+      {wire.findings.length > 0 ? (
+        <Chip tone="err">{wire.findings.length} DNS indicator{wire.findings.length === 1 ? "" : "s"}</Chip>
+      ) : null}
+      {wire.findings.length >= 128 ? <Chip tone="muted">findings capped at 128</Chip> : null}
+    </>
+  );
+}
+
+/**
+ * Findings table for the passive DNS-response monitor. Baseline vs later
+ * answer sets are shown side by side so an interception is readable at a
+ * glance; the zero-state is honest about what a silent run means.
+ */
+export function DnsFindingsTable({ wire }: { wire: DnsMonitorWire | null }) {
+  if (!wire) return null;
+  if (wire.observations_seen === 0) {
+    return (
+      <p className="text-xs text-fg-muted">
+        no parseable DNS messages in this capture — the monitor needs UDP port 53 traffic with
+        well-formed queries or answers
+      </p>
+    );
+  }
+  if (wire.findings.length === 0) {
+    return (
+      <p className="text-xs text-fg-muted">
+        no DNS interception indicators in this capture — {wire.observations_seen} DNS message
+        {wire.observations_seen === 1 ? "" : "s"} across {wire.queried_names} name
+        {wire.queried_names === 1 ? "" : "s"} showed stable answer sets, no local-address targets
+        and no NXDOMAIN flips
+      </p>
+    );
+  }
+  return (
+    <div className="max-h-64 overflow-auto">
+      <table className="data-table">
+        <thead>
+          <tr>
+            <th className="w-36">Kind</th>
+            <th className="w-48">Question</th>
+            <th>Baseline answer set</th>
+            <th>Later answer set</th>
+            <th className="w-24">First seen</th>
+            <th className="w-24">Last seen</th>
+            <th>Evidence</th>
+          </tr>
+        </thead>
+        <tbody>
+          {wire.findings.map((finding, index) => (
+            <tr key={`${finding.kind}-${finding.question_name}-${finding.question_type}-${index}`}>
+              <td>
+                <Chip tone={finding.kind === "suspicious_target" ? "orange" : "err"}>
+                  {dnsFindingKindLabel(finding.kind)}
+                </Chip>
+              </td>
+              <td className="font-mono text-[11px]">
+                {finding.question_name} · {questionTypeLabel(finding.question_type)}
+              </td>
+              <td className="font-mono text-[11px] text-fg-dim" title={formatAnswerSet(finding.baseline)}>
+                {formatAnswerSet(finding.baseline)}
+              </td>
+              <td className="font-mono text-[11px] text-fg-dim" title={formatAnswerSet(finding.later)}>
+                {formatAnswerSet(finding.later)}
+              </td>
+              <td>{formatSeenMs(finding.first_seen_ms)}</td>
+              <td>{formatSeenMs(finding.last_seen_ms)}</td>
+              <td className="text-fg-muted">{finding.detail}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
   );
 }
