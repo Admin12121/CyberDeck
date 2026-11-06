@@ -8,6 +8,8 @@
  */
 import type { LucideIcon } from "lucide-react";
 import { Info } from "lucide-react";
+import { Tooltip, TooltipPopup, TooltipTrigger } from "@/components/ui/tooltip";
+import { Frame, FrameHeader, FramePanel, FrameTitle, FrameFooter } from "@/components/ui/frame";
 import type { ReactNode } from "react";
 
 import { Chip } from "./panes";
@@ -93,18 +95,25 @@ export function SectionHeader({
   );
 }
 
-/** Info tooltip: keeps long explanations one hover away instead of on screen. */
+/** Info tooltip (coss): keeps long explanations one hover away, not on screen. */
 export function InfoTip({ text }: { text: string }) {
   return (
-    <span
-      tabIndex={0}
-      role="note"
-      aria-label={text}
-      title={text}
-      className="inline-flex cursor-help items-center text-fg-muted hover:text-fg-dim focus-visible:outline focus-visible:outline-1 focus-visible:outline-ring"
-    >
-      <Info size={12} strokeWidth={1.5} />
-    </span>
+    <Tooltip>
+      <TooltipTrigger
+        render={(props) => (
+          <span
+            {...props}
+            tabIndex={0}
+            role="note"
+            aria-label={text}
+            className="inline-flex cursor-help items-center text-fg-muted hover:text-fg-dim focus-visible:outline focus-visible:outline-1 focus-visible:outline-ring"
+          >
+            <Info size={12} strokeWidth={1.5} />
+          </span>
+        )}
+      />
+      <TooltipPopup className="max-w-sm text-xs leading-relaxed">{text}</TooltipPopup>
+    </Tooltip>
   );
 }
 
@@ -163,6 +172,41 @@ export function StatusStrip({ items }: { items: readonly ({ label: string; tone?
           {item.label}
         </Chip>
       ))}
+    </div>
+  );
+}
+
+/**
+ * Centered full-height empty-state card (coss Frame): frame → frame header →
+ * frame panel, exactly the structure the user asked for. The surrounding
+ * viewport is the card's canvas — controls stay at top, the card centers in
+ * the remaining space.
+ */
+export function EmptyCard({
+  icon: Icon,
+  title,
+  children,
+  footer,
+}: {
+  icon: LucideIcon;
+  title: string;
+  children?: ReactNode;
+  footer?: ReactNode;
+}) {
+  return (
+    <div className="flex min-h-0 flex-1 items-center justify-center p-6">
+      <Frame className="w-full max-w-md">
+        <FrameHeader>
+          <span className="inline-flex items-center gap-2">
+            <Icon size={16} strokeWidth={1.5} className="text-fg-muted" />
+            <FrameTitle>{title}</FrameTitle>
+          </span>
+        </FrameHeader>
+        <FramePanel>
+          {children ? <div className="text-xs leading-relaxed text-fg-muted">{children}</div> : null}
+        </FramePanel>
+        {footer ? <FrameFooter>{footer}</FrameFooter> : null}
+      </Frame>
     </div>
   );
 }
