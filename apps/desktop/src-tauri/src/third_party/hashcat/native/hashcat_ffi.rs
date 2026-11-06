@@ -44,6 +44,14 @@ unsafe extern "C" {
         device_id: u32,
     ) -> c_int;
     fn cd_hashcat_execute(context: *mut c_void) -> c_int;
+    fn cd_hashcat_execute_async(context: *mut c_void) -> c_int;
+    fn cd_hashcat_poll_status(
+        context: *mut c_void,
+        tried: *mut u64,
+        budget: *mut u64,
+        cracked: *mut u32,
+    ) -> c_int;
+    fn cd_hashcat_execute_finish(context: *mut c_void, timeout_ms: u32) -> c_int;
     fn cd_hashcat_quit(context: *mut c_void) -> c_int;
     #[link_name = "cd_hashcat_last_event"]
     fn cd_hashcat_last_event() -> *const c_char;
@@ -153,7 +161,7 @@ impl NativeHashcat {
             || runtime_seconds == 0
             || runtime_seconds > MAX_RUNTIME_SECONDS
             || device_id > 128
-            || !matches!(hash_mode, 0 | 10 | 20 | 50 | 60 | 100 | 110 | 120 | 132 | 400 | 1500 | 1731 | 500 | 1000 | 1400 | 1700 | 1800 | 3200 | 7400 | 1100 | 2100 | 5500 | 5600 | 11600 | 13600 | 17200 | 17210 | 9400 | 9600 | 9700 | 10400 | 10500 | 11300 | 13400 | 15600 | 15700)
+            || !matches!(hash_mode, 0 | 10 | 20 | 50 | 60 | 100 | 110 | 120 | 132 | 400 | 1500 | 1731 | 500 | 1000 | 1400 | 1700 | 1800 | 3200 | 7400 | 1100 | 2100 | 5500 | 5600 | 11600 | 13600 | 17200 | 17210 | 9400 | 9600 | 9700 | 10400 | 10500 | 11300 | 13400 | 15600 | 15700 | 13100 | 18200 | 22100)
         {
             return Err(NativeError::InvalidBound);
         }
@@ -215,6 +223,63 @@ impl NativeHashcat {
             return Err(NativeError::InvalidBound);
         }
         Ok(unsafe { cd_hashcat_execute(self.handle.as_ptr()) })
+    }
+
+    /// Asynchronous form of execute(): starts the same session on a
+    /// shim-owned thread and returns immediately. While it runs, the shim
+    /// thread self-reports aggregate progress; poll_status() reads those
+    /// snapshots and execute_finish() collects the final status. Exactly one
+    /// execute per context, either form.
+    pub fn execute_async(&mut self) -> Result<(), NativeError> {
+        if self.state != InitState::Ready {
+            return Err(NativeError::InvalidBound);
+        }
+        let status = unsafe { cd_hashcat_execute_async(self.handle.as_ptr()) };
+        if status == 0 {
+            Ok(())
+        } else {
+            Err(NativeError::Native(status))
+        }
+    }
+
+    /// Latest aggregate progress of the asynchronous session as
+    /// (tried, budget, cracked): tried is upstream's words-done total summed
+    /// over salts, budget is the prepare-time candidate limit (the operator
+    /// bound, not a hashcat-derived total), cracked counts target digests
+    /// cracked so far. Ok(None) while the session has reported nothing yet or
+    /// has finished; never carries candidate, hash or device names.
+    pub fn poll_status(&mut self) -> Result<Option<(u64, u64, u32)>, NativeError> {
+        if self.state != InitState::Ready {
+            return Err(NativeError::InvalidBound);
+        }
+        let mut tried = 0u64;
+        let mut budget = 0u64;
+        let mut cracked = 0u32;
+        let status = unsafe {
+            cd_hashcat_poll_status(self.handle.as_ptr(), &mut tried, &mut budget, &mut cracked)
+        };
+        match status {
+            1 => Ok(Some((tried, budget, cracked))),
+            0 => Ok(None),
+            other => Err(NativeError::Native(other)),
+        }
+    }
+
+    /// Waits for the asynchronous session and returns the same status code
+    /// execute() would have. timeout_ms bounds the wait (0 waits without
+    /// bound). Err(Native(-2)) means the timeout expired with the session
+    /// still running and the call may be repeated; Err(Native(-1)) is shim
+    /// misuse (no asynchronous session), not a session result.
+    pub fn execute_finish(&mut self, timeout_ms: u32) -> Result<i32, NativeError> {
+        if self.state != InitState::Ready {
+            return Err(NativeError::InvalidBound);
+        }
+        let status = unsafe { cd_hashcat_execute_finish(self.handle.as_ptr(), timeout_ms) };
+        if status == -1 || status == -2 {
+            Err(NativeError::Native(status))
+        } else {
+            Ok(status)
+        }
     }
 
     /// Cooperative Stop only; supervising process must force-kill if hung.

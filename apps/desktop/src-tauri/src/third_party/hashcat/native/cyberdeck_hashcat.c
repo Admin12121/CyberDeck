@@ -17,6 +17,7 @@
 
 #include "common.h"
 #include "types.h"
+#include "thread.h"
 #include "hashcat.h"
 #include "user_options.h"
 #include "module_options.h"
@@ -113,6 +114,13 @@ int cd_hashcat_shim_version (void)
   return 42;
 }
 
+/* Self-report cadence of the async execute thread. It snapshots aggregate
+ * progress counters into pinned handle fields so cd_hashcat_poll_status()
+ * never touches the running context itself. The look-ahead granularity only
+ * guards the short window before the first snapshot pins. */
+#define CD_PROGRESS_INTERVAL_MS 200
+#define CD_PROGRESS_LOOKAHEAD_MS 20
+
 struct cd_hashcat
 {
   hashcat_ctx_t *core;
@@ -126,7 +134,162 @@ struct cd_hashcat
   char *fixed_options[25];
   char *owned_strings[8];
   size_t owned_cnt;
+
+  /* Asynchronous execution. All fields below are written by the execute
+   * thread and read by the caller thread through __atomic operations.
+   * progress_budget is fixed at prepare time and never mutated again. */
+  u64 progress_budget;   /* prepare-time candidate limit (operator bound)   */
+  u64 progress_tried;    /* words done, sum over salts (upstream progress)  */
+  u32 progress_cracked;  /* target digests cracked this session             */
+  int progress_snapshot; /* 1 once at least one snapshot has been pinned    */
+  int execute_used;      /* 1 once any execute (sync or async) has started  */
+  int async_started;     /* 1 from execute_async until the thread is joined */
+  int async_finished;    /* 1 as the execute thread's last action           */
+  int async_joined;      /* 1 once execute_finish has joined the thread     */
+  int session_done;      /* 1 once the inner session thread has returned    */
+  int async_status;      /* hashcat_session_execute return code             */
+  hc_thread_t async_thread;
 };
+
+static void cd_millisleep (unsigned int milliseconds)
+{
+  #if defined (_WIN)
+  Sleep (milliseconds);
+  #else
+  struct timespec pause;
+  pause.tv_sec = (time_t) (milliseconds / 1000u);
+  pause.tv_nsec = (long) (milliseconds % 1000u) * 1000000L;
+  nanosleep (&pause, NULL);
+  #endif
+}
+
+/* Aggregate progress only: word counts and cracked-digest counts. Never the
+ * guess, hash target, device names or any other string the status carries. */
+static void cd_progress_snapshot (cd_hashcat *handle)
+{
+  status_ctx_t *status_ctx = handle->core->status_ctx;
+
+  if (status_ctx == NULL) return;
+
+  /* The same lock upstream holds around every status snapshot, including its
+   * own final capture. While accessible is true the run's progress arrays and
+   * the hashes are alive; teardown happens later and takes this lock first. */
+  hc_thread_mutex_lock (status_ctx->mux_display);
+
+  if (status_ctx->accessible)
+  {
+    const hashes_t *hashes = handle->core->hashes;
+
+    if (hashes != NULL && status_ctx->words_progress_done != NULL)
+    {
+      u64 tried = 0;
+
+      for (u32 salt_pos = 0; salt_pos < hashes->salts_cnt; salt_pos++)
+      {
+        tried += status_ctx->words_progress_done[salt_pos];
+      }
+
+      __atomic_store_n (&handle->progress_tried, tried, __ATOMIC_RELAXED);
+      __atomic_store_n (&handle->progress_cracked, hashes->digests_done, __ATOMIC_RELAXED);
+      __atomic_store_n (&handle->progress_snapshot, 1, __ATOMIC_RELAXED);
+    }
+  }
+
+  hc_thread_mutex_unlock (status_ctx->mux_display);
+}
+
+static void cd_progress_final_snapshot (cd_hashcat *handle)
+{
+  status_ctx_t *status_ctx = handle->core->status_ctx;
+
+  if (status_ctx == NULL || status_ctx->hashcat_status_final == NULL) return;
+
+  hc_thread_mutex_lock (status_ctx->mux_display);
+
+  /* After the run the upstream final capture holds the true totals. The
+   * strings inside it stay owned by the context and are never read here. */
+  if (status_ctx->accessible == false && status_ctx->hashcat_status_final->msec_running > 0)
+  {
+    __atomic_store_n (&handle->progress_tried, status_ctx->hashcat_status_final->progress_done, __ATOMIC_RELAXED);
+    __atomic_store_n (&handle->progress_cracked, status_ctx->hashcat_status_final->digests_done, __ATOMIC_RELAXED);
+    __atomic_store_n (&handle->progress_snapshot, 1, __ATOMIC_RELAXED);
+  }
+
+  hc_thread_mutex_unlock (status_ctx->mux_display);
+}
+
+static HC_THREAD_FUNC cd_session_thread (void *p)
+{
+  cd_hashcat *handle = (cd_hashcat *) p;
+
+  const int status = hashcat_session_execute (handle->core);
+
+  __atomic_store_n (&handle->async_status, status, __ATOMIC_RELEASE);
+  __atomic_store_n (&handle->session_done, 1, __ATOMIC_RELEASE);
+
+  #if defined (_WIN)
+  return 0;
+  #else
+  return NULL;
+  #endif
+}
+
+/* Runs the same blocking session path as cd_hashcat_execute, on a session
+ * thread it starts, and self-reports aggregate progress every 200 ms while
+ * that session is live. */
+static HC_THREAD_FUNC cd_exec_thread (void *p)
+{
+  cd_hashcat *handle = (cd_hashcat *) p;
+
+  hc_thread_t session;
+
+  if (hc_thread_create_ok (session, cd_session_thread, handle))
+  {
+    /* Before upstream has a readable status (its live window opens only when
+     * the cracker starts, after the whole backend setup) the honest
+     * aggregates are zero: nothing tried, nothing cracked, budget as pinned
+     * at prepare time. Pinning this once means a poller sees a valid frame
+     * for the whole session lifetime, not just inside the crack window. */
+    __atomic_store_n (&handle->progress_tried, 0, __ATOMIC_RELAXED);
+    __atomic_store_n (&handle->progress_cracked, 0, __ATOMIC_RELAXED);
+    __atomic_store_n (&handle->progress_snapshot, 1, __ATOMIC_RELAXED);
+
+    int live_seen = 0;
+
+    while (__atomic_load_n (&handle->session_done, __ATOMIC_ACQUIRE) == 0)
+    {
+      /* 20 ms look-ahead until the first live snapshot: a short attack can
+       * open and close the accessible window between two slow ticks. The
+       * flag read is a relaxed load; the lock is only taken when the run is
+       * actually live. Afterwards the design cadence applies. */
+      cd_millisleep (live_seen ? CD_PROGRESS_INTERVAL_MS : CD_PROGRESS_LOOKAHEAD_MS);
+      if (__atomic_load_n (&handle->session_done, __ATOMIC_ACQUIRE) != 0) break;
+
+      status_ctx_t *status_ctx = handle->core->status_ctx;
+      if (status_ctx == NULL) continue;
+      if (__atomic_load_n (&status_ctx->accessible, __ATOMIC_RELAXED) == false) continue;
+
+      cd_progress_snapshot (handle);
+      live_seen = 1;
+    }
+
+    hc_thread_join (session);
+
+    cd_progress_final_snapshot (handle);
+  }
+  else
+  {
+    __atomic_store_n (&handle->async_status, -1, __ATOMIC_RELEASE);
+  }
+
+  __atomic_store_n (&handle->async_finished, 1, __ATOMIC_RELEASE);
+
+  #if defined (_WIN)
+  return 0;
+  #else
+  return NULL;
+  #endif
+}
 
 uint32_t cd_hashcat_abi_version (void)
 {
@@ -253,6 +416,7 @@ int cd_hashcat_prepare_mode (
     case 1100: case 2100: case 5500: case 5600:
     case 9400: case 9600: case 9700: case 10400: case 10500:
     case 11300: case 13400: case 15600: case 15700:
+    case 13100: case 18200: case 22100:
     case 11600: case 13600: case 17200: case 17210:
       break;
     default:
@@ -262,6 +426,9 @@ int cd_hashcat_prepare_mode (
 
   snprintf (handle->candidate_limit, sizeof (handle->candidate_limit), "%llu",
             (unsigned long long) max_candidates);
+  /* Pinned once, before any thread exists: the operator's candidate bound the
+   * progress frames report as the budget side of tried/budget. */
+  __atomic_store_n (&handle->progress_budget, max_candidates, __ATOMIC_RELAXED);
   snprintf (handle->runtime_limit, sizeof (handle->runtime_limit), "%u",
             (unsigned int) runtime_seconds);
   snprintf (handle->device_selector, sizeof (handle->device_selector), "%u",
@@ -366,7 +533,93 @@ int cd_hashcat_prepare_sha256 (
 int cd_hashcat_execute (cd_hashcat *handle)
 {
   if (handle == NULL || !handle->session_attempted) return -1;
+
+  /* Exactly one execute per context: neither form may run twice, and the two
+   * forms are mutually exclusive. */
+  int expected = 0;
+  if (__atomic_compare_exchange_n (&handle->execute_used, &expected, 1,
+                                   0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE) == false)
+  {
+    return -1;
+  }
+
   return hashcat_session_execute (handle->core);
+}
+
+int cd_hashcat_execute_async (cd_hashcat *handle)
+{
+  if (handle == NULL || !handle->session_attempted) return -1;
+
+  int expected = 0;
+  if (__atomic_compare_exchange_n (&handle->execute_used, &expected, 1,
+                                   0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE) == false)
+  {
+    return -1; /* an execute (async or synchronous) already ran on this context */
+  }
+
+  if (hc_thread_create_ok (handle->async_thread, cd_exec_thread, handle) == false)
+  {
+    __atomic_store_n (&handle->execute_used, 0, __ATOMIC_RELEASE);
+    return -1;
+  }
+
+  /* Published for poll_status/execute_finish; the new thread reads none of
+   * the handle's atomic flags before async_finished/async_status. */
+  __atomic_store_n (&handle->async_started, 1, __ATOMIC_RELEASE);
+
+  return 0;
+}
+
+int cd_hashcat_poll_status (cd_hashcat *handle, uint64_t *tried, uint64_t *budget, uint32_t *cracked)
+{
+  if (handle == NULL || !handle->session_attempted) return -1;
+
+  /* Reads pinned snapshot fields only; the execute thread is the sole writer
+   * and the sole caller of upstream status on the shared context. */
+  if (__atomic_load_n (&handle->async_started, __ATOMIC_ACQUIRE) == 0) return 0;
+  if (__atomic_load_n (&handle->async_finished, __ATOMIC_ACQUIRE) != 0) return 0;
+  if (__atomic_load_n (&handle->progress_snapshot, __ATOMIC_ACQUIRE) == 0) return 0;
+
+  if (tried)   *tried   = __atomic_load_n (&handle->progress_tried, __ATOMIC_ACQUIRE);
+  if (budget)  *budget  = __atomic_load_n (&handle->progress_budget, __ATOMIC_ACQUIRE);
+  if (cracked) *cracked = __atomic_load_n (&handle->progress_cracked, __ATOMIC_ACQUIRE);
+  return 1;
+}
+
+int cd_hashcat_execute_finish (cd_hashcat *handle, uint32_t timeout_ms)
+{
+  if (handle == NULL || !handle->session_attempted) return -1;
+  if (__atomic_load_n (&handle->async_started, __ATOMIC_ACQUIRE) == 0) return -1;
+
+  if (__atomic_load_n (&handle->async_joined, __ATOMIC_ACQUIRE) == 0)
+  {
+    #if defined (_WIN)
+    const DWORD waited = WaitForSingleObject (handle->async_thread,
+                                              timeout_ms ? (DWORD) timeout_ms : INFINITE);
+    if (waited == WAIT_TIMEOUT) return -2; /* still running; may be called again */
+    if (waited != WAIT_OBJECT_0) return -1;
+    #else
+    uint32_t waited_ms = 0;
+
+    while (__atomic_load_n (&handle->async_finished, __ATOMIC_ACQUIRE) == 0)
+    {
+      if (timeout_ms != 0 && waited_ms >= timeout_ms) return -2; /* still running */
+      cd_millisleep (20);
+      waited_ms += 20;
+    }
+    #endif
+
+    /* The thread sets async_finished as its last action; the join completes
+     * the happens-before chain for every store it made, snapshots included. */
+    int expected = 0;
+    if (__atomic_compare_exchange_n (&handle->async_joined, &expected, 1,
+                                     0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
+    {
+      hc_thread_join (handle->async_thread);
+    }
+  }
+
+  return __atomic_load_n (&handle->async_status, __ATOMIC_ACQUIRE);
 }
 
 int cd_hashcat_quit (cd_hashcat *handle)

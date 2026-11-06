@@ -298,6 +298,20 @@ impl RecoveryTarget {
                         }
                     }
                 }
+                "bitlocker" => {
+                    // Disk encryption (batch B4): fail-fast shape
+                    // validation, pinned iteration count.
+                    super::bitlocker::BitLocker::parse(text)?;
+                }
+                "kerberos-tgs-rep" | "kerberos-as-rep" => {
+                    // Kerberos etype 23 (batch B4): fail-fast shape
+                    // validation for both wire formats.
+                    if format == "kerberos-tgs-rep" {
+                        super::kerberos::KerberosTgsRep::parse(text)?;
+                    } else {
+                        super::kerberos::KerberosAsRep::parse(text)?;
+                    }
+                }
                 "mscash" => {
                     if !text.contains('#') {
                         return Err("invalid mscash encoding".into());

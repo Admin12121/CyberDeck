@@ -848,6 +848,10 @@ fn bundled_hashcat_modes() -> Vec<EmbeddedHashcatMode> {
         ("descrypt", 1500, 0),
         ("mssql-2005", 132, 0),
         ("mssql-2012", 1731, 0),
+        // Batch-6 Kerberos etype 23 + BitLocker.
+        ("kerberos-tgs-rep", 13100, 0),
+        ("kerberos-as-rep", 18200, 0),
+        ("bitlocker", 22100, 0),
         // Batch-5 wallets (KeePass, Bitcoin, Ethereum).
         ("bitcoin", 11300, 0),
         ("keepass", 13400, 0),
@@ -898,9 +902,25 @@ fn hashcat_resource_root(app: &AppHandle) -> Result<PathBuf, String> {
     Err("embedded Hashcat native runtime not packaged".into())
 }
 
+/// Resolve the persisted readiness cache location for the bundled Hashcat
+/// runtime. Any failure to resolve or create the cache directory returns
+/// None, which silently degrades verified_modes_cached to the synchronous
+/// sweep path — persistence must never break the KAT gate.
+fn hashcat_readiness_cache_path(app: &AppHandle) -> Option<PathBuf> {
+    let path = app
+        .path()
+        .app_cache_dir()
+        .ok()?
+        .join("embedded-hashcat-verified.json");
+    std::fs::create_dir_all(path.parent()?).ok()?;
+    Some(path)
+}
+
 /// Source presence or an OpenCL loader alone must NOT offer a non-working
 /// Hashcat option in the UI. A fixed, public, supervised known-answer test is
 /// required for EACH enabled raw mode; it runs off the Tauri UI dispatcher.
+/// Findings are disk-persisted under a runtime fingerprint so a repeated
+/// capabilities query is instant while a background KAT refresh re-validates.
 #[tauri::command]
 pub async fn recovery_hashcat_capabilities_v1(app: AppHandle) -> EmbeddedHashcatCapability {
     let standard = |detail: String| EmbeddedHashcatCapability {
@@ -914,9 +934,11 @@ pub async fn recovery_hashcat_capabilities_v1(app: AppHandle) -> EmbeddedHashcat
         Ok(root) => root,
         Err(error) => return standard(error),
     };
-    let supported =
-        tauri::async_runtime::spawn_blocking(move || embedded_hashcat::verified_modes(&runtime))
-            .await;
+    let cache_path = hashcat_readiness_cache_path(&app);
+    let supported = tauri::async_runtime::spawn_blocking(move || {
+        embedded_hashcat::verified_modes_cached(&runtime, cache_path.as_deref())
+    })
+    .await;
     match supported {
         Ok(Ok(modes)) => {
             let catalog = bundled_hashcat_modes()

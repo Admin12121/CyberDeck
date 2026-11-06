@@ -24,13 +24,17 @@ import {
   type RecoveryJobStatusV1, type RecoveryRequestV1, type HashcatRawAlgorithmV1, type RecoveryRawAlgorithmV1, type HashcatWordlistPresetV1,
 } from "@lib/ipc";
 
-const EMBEDDED_MODES: readonly { value: HashcatRawAlgorithmV1; label: string; digits: number }[] = [
-  { value: "md5", label: "MD5 · mode 0", digits: 32 },
-  { value: "sha1", label: "SHA-1 · mode 100", digits: 40 },
+/** `pwMax` marks modes whose upstream optimized kernels reject longer
+ * candidates; absent means no advertised kernel cap. Rendered only here for
+ * the embedded-Hashcat selector, never as a claim about the Rust CPU engine.
+ */
+const EMBEDDED_MODES: readonly { value: HashcatRawAlgorithmV1; label: string; digits: number; pwMax?: number | null }[] = [
+  { value: "md5", label: "MD5 · mode 0", digits: 32, pwMax: 32 },
+  { value: "sha1", label: "SHA-1 · mode 100", digits: 40, pwMax: 32 },
   { value: "md5crypt", label: "md5crypt $1$/$apr1$ · mode 500", digits: 0 },
-  { value: "ntlm", label: "NTLM · mode 1000", digits: 32 },
-  { value: "sha256", label: "SHA-256 · mode 1400", digits: 64 },
-  { value: "sha512", label: "SHA-512 · mode 1700", digits: 128 },
+  { value: "ntlm", label: "NTLM · mode 1000", digits: 32, pwMax: 32 },
+  { value: "sha256", label: "SHA-256 · mode 1400", digits: 64, pwMax: 32 },
+  { value: "sha512", label: "SHA-512 · mode 1700", digits: 128, pwMax: 32 },
   { value: "sha512crypt", label: "sha512crypt $6$ · mode 1800", digits: 0 },
   { value: "bcrypt", label: "bcrypt $2*$ · mode 3200", digits: 0 },
   { value: "sha256crypt", label: "sha256crypt $5$ · mode 7400", digits: 0 },
@@ -48,20 +52,23 @@ const EMBEDDED_MODES: readonly { value: HashcatRawAlgorithmV1; label: string; di
   { value: "mscash2", label: "mscash2 / DCC2 · mode 2100", digits: 0 },
   { value: "netntlm-v1", label: "NetNTLMv1 · mode 5500", digits: 0 },
   { value: "netntlm-v2", label: "NetNTLMv2 · mode 5600", digits: 0 },
+  { value: "kerberos-tgs-rep", label: "Kerberos TGS-REP etype 23 ($krb5tgs$) · mode 13100", digits: 0, pwMax: 32 },
+  { value: "kerberos-as-rep", label: "Kerberos AS-REP etype 23 ($krb5asrep$) · mode 18200", digits: 0, pwMax: 32 },
+  { value: "bitlocker", label: "BitLocker ($bitlocker$) · mode 22100", digits: 0 },
   { value: "bitcoin", label: "Bitcoin wallet.dat · mode 11300", digits: 0 },
   { value: "keepass", label: "KeePass (KDBX v2/v3) · mode 13400", digits: 0 },
   { value: "ethereum-pbkdf2", label: "Ethereum wallet (PBKDF2) · mode 15600", digits: 0 },
   { value: "ethereum-scrypt", label: "Ethereum wallet (scrypt) · mode 15700", digits: 0 },
-  { value: "office-97-2003", label: "MS Office 97/2003 ($oldoffice$) · mode 9700", digits: 0 },
+  { value: "office-97-2003", label: "MS Office 97/2003 ($oldoffice$) · mode 9700", digits: 0, pwMax: 32 },
   { value: "office-2007", label: "MS Office 2007 ($office$) · mode 9400", digits: 0 },
   { value: "office-2013", label: "MS Office 2013 ($office$) · mode 9600", digits: 0 },
-  { value: "pdf-1.1-1.3", label: "PDF 1.1-1.3 ($pdf$ R2) · mode 10400", digits: 0 },
+  { value: "pdf-1.1-1.3", label: "PDF 1.1-1.3 ($pdf$ R2) · mode 10400", digits: 0, pwMax: 32 },
   { value: "pdf-1.4-1.6", label: "PDF 1.4-1.6 ($pdf$ R3/R4) · mode 10500", digits: 0 },
   { value: "winzip-aes", label: "WinZip AES ($zip2$) · mode 13600", digits: 0 },
   { value: "7zip", label: "7-Zip ($7z$) · mode 11600", digits: 0 },
   { value: "zip-legacy", label: "ZIP legacy (ZipCrypto) · modes 17200/17210", digits: 0 },
 ];
-const RUST_MODES: readonly { value: RecoveryRawAlgorithmV1; label: string; digits: number }[] = [
+const RUST_MODES: readonly { value: RecoveryRawAlgorithmV1; label: string; digits: number; pwMax?: number | null }[] = [
   ...EMBEDDED_MODES,
   { value: "sha3_256", label: "SHA3-256 · CPU", digits: 64 },
   { value: "sha3_512", label: "SHA3-512 · CPU", digits: 128 },
@@ -129,6 +136,7 @@ function useRecoveryController(targetHash: string, onCaseCreated?: (caseId: stri
     "$H$", "$NT$", "$DCC2$", "DCC2#", "M$", "$NETNTLM", "WPA*01*", "0x0100",
     "0x0200", "$zip2$", "$7z$", "$pkzip2$", "$pkzip$",
     "$oldoffice$", "$office$", "$pdf$", "$bitcoin$", "$keepass$", "$ethwallet$",
+    "$krb5tgs$", "$krb5asrep$", "$bitlocker$",
   ];
   const isKdfHash =
     (hash.startsWith("$") && KDF_PREFIXES.some((prefix) => hash.startsWith(prefix))) ||
@@ -153,6 +161,7 @@ function useRecoveryController(targetHash: string, onCaseCreated?: (caseId: stri
         "$zip2$": "winzip-aes", "$7z$": "7zip", "$pkzip2$": "zip-legacy", "$pkzip$": "zip-legacy",
         "$oldoffice$": "office-97-2003", "$office$": "office-2007", "$pdf$": "pdf-1.1-1.3",
         "$bitcoin$": "bitcoin", "$keepass$": "keepass",
+        "$krb5tgs$": "kerberos-tgs-rep", "$krb5asrep$": "kerberos-as-rep", "$bitlocker$": "bitlocker",
       };
       const match = Object.entries(kdfSuggestion).find(([prefix]) => hash.startsWith(prefix));
       if (match && match[1]) {
@@ -842,6 +851,13 @@ export function NativeRecoveryControls() {
                     ).map(({value, label}) => ({value, label}))}
                     className="w-full" />
                   <span className="text-[10px] text-fg-muted">MD5, NTLM and MD4 share 32 hex digits.</span>
+                  {r.engineChoice === "hashcat" && r.hashcatMode.pwMax ? (
+                    <span className="block text-[10px] text-fg-muted"
+                      title={"This mode's upstream optimized kernel skips candidates longer than " +
+                        r.hashcatMode.pwMax + " characters; longer wordlist entries are not tested."}>
+                      Optimized kernel tests candidates up to {r.hashcatMode.pwMax} characters (upstream kernel limit).
+                    </span>
+                  ) : null}
                 </label>
               )}
               {r.engineChoice === "hashcat" && (

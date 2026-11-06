@@ -73,6 +73,42 @@ CD_HC_API int cd_hashcat_prepare_sha256(
 /* Execute synchronously. This call must run in a dedicated isolated worker. */
 CD_HC_API int cd_hashcat_execute(cd_hashcat *context);
 
+/*
+ * Asynchronous alternative to cd_hashcat_execute(). Starts the same session
+ * path on a shim-owned thread and returns 0 once it is running, -1 when the
+ * context is invalid or an execute (either form) already ran: exactly one
+ * execute per context, and cd_hashcat_destroy() still requires that no
+ * session is in flight (join with cd_hashcat_execute_finish() first).
+ *
+ * While the session runs, the execute thread self-reports aggregate progress
+ * counters into pinned snapshot fields every 200 ms; it is the only caller of
+ * upstream status on the shared context, so cd_hashcat_poll_status() never
+ * touches the live run itself. Counters are aggregate numbers only — word
+ * counts and cracked-digest counts, never candidate bytes, hashes or names.
+ */
+CD_HC_API int cd_hashcat_execute_async(cd_hashcat *context);
+
+/*
+ * Snapshot reader for the asynchronous form. Returns 1 and fills the out
+ * parameters (NULL tolerated) from the latest self-reported snapshot while
+ * the session is running and has reported at least once: tried is upstream's
+ * words-done total summed over salts, budget is the prepare-time candidate
+ * limit (the operator bound, not a hashcat-derived total — a multi-hash
+ * target can legitimately let tried exceed it), cracked is the number of
+ * target digests cracked so far. Returns 0 when there is nothing to report
+ * yet (session starting up) or the session has finished; -1 on invalid use
+ * (no context, no prepared session).
+ */
+CD_HC_API int cd_hashcat_poll_status(cd_hashcat *context, uint64_t *tried, uint64_t *budget, uint32_t *cracked);
+
+/*
+ * Waits for the asynchronous session thread and returns the same status code
+ * the synchronous cd_hashcat_execute() would have. timeout_ms bounds the
+ * wait (0 waits without bound); -2 means the timeout expired with the session
+ * still running, and the call may be repeated. Joins the thread exactly once.
+ */
+CD_HC_API int cd_hashcat_execute_finish(cd_hashcat *context, uint32_t timeout_ms);
+
 /* Cooperative cancellation; the supervising worker may be killed on hang. */
 CD_HC_API int cd_hashcat_quit(cd_hashcat *context);
 

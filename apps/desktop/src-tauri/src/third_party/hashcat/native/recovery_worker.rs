@@ -6,14 +6,18 @@
 #[path = "hashcat_ffi.rs"]
 mod hashcat_ffi;
 
-use std::io::{self, Read};
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 const MAGIC: &[u8; 8] = b"CDHC0001";
 const MAGIC_MULTI_MODE: &[u8; 8] = b"CDHC0002";
+const MAGIC_PROGRESS: &[u8; 8] = b"CDHC0003";
 const MAX_PATH: usize = 4096;
 const MAX_CANDIDATES: u64 = 1_000_000;
 const MAX_SECONDS: u32 = 300;
+/// Progress frames are emitted at this cadence while a native session runs.
+const PROGRESS_INTERVAL_MS: u32 = 500;
 
 struct Request {
     max_candidates: u64,
@@ -80,6 +84,7 @@ fn read_request(mut reader: impl Read) -> io::Result<Request> {
         | 11600 | 13600 | 17200 | 17210
         | 9400 | 9600 | 9700 | 10400 | 10500
         | 11300 | 13400 | 15600 | 15700
+        | 13100 | 18200 | 22100
     ) {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -161,6 +166,22 @@ fn native_failure(error: hashcat_ffi::NativeError) -> i32 {
     }
 }
 
+/// CDHC0003 progress frame: 8 ASCII magic bytes + u64 tried + u64 budget +
+/// u32 cracked, little-endian. Aggregate counters only, never candidate,
+/// hash or device data. One unbuffered write per frame; failures are
+/// tolerated silently because the supervising process may run stdout=null.
+fn write_progress_frame(tried: u64, budget: u64, cracked: u32) {
+    let mut frame = [0u8; 28];
+    frame[..8].copy_from_slice(MAGIC_PROGRESS);
+    frame[8..16].copy_from_slice(&tried.to_le_bytes());
+    frame[16..24].copy_from_slice(&budget.to_le_bytes());
+    frame[24..28].copy_from_slice(&cracked.to_le_bytes());
+    let stdout = io::stdout();
+    let mut handle = stdout.lock();
+    let _ = handle.write_all(&frame);
+    let _ = handle.flush();
+}
+
 fn run() -> Result<(), i32> {
     eprintln!("[wk] frame read start");
     let request = read_request(io::stdin().lock()).map_err(|_| 10)?;
@@ -182,23 +203,32 @@ fn run() -> Result<(), i32> {
             request.hash_mode,
         )
         .map_err(native_failure)?;
-    match engine.execute() {
-        Ok(0 | 1) => Ok(()), // completed with match or exhausted without match
-        Ok(other) => {
+    engine.execute_async().map_err(native_failure)?;
+    // The bounded finish wait doubles as the poll cadence: while the session
+    // still runs after each interval, report the latest self-reported
+    // snapshot as a CDHC0003 frame, then wait again.
+    let final_status = loop {
+        match engine.execute_finish(PROGRESS_INTERVAL_MS) {
+            Ok(status) => break status,
+            Err(hashcat_ffi::NativeError::Native(-2)) => {
+                if let Ok(Some((tried, budget, cracked))) = engine.poll_status() {
+                    write_progress_frame(tried, budget, cracked);
+                }
+            }
+            Err(hashcat_ffi::NativeError::Native(-1)) => break -1,
+            Err(error) => return Err(native_failure(error)),
+        }
+    };
+    match final_status {
+        0 | 1 => Ok(()), // completed with match or exhausted without match
+        other => {
             eprintln!(
                 "diag: shim_version={} last_event={:?} trace={:?}",
                 hashcat_ffi::NativeHashcat::shim_version(),
                 hashcat_ffi::NativeHashcat::last_event(),
                 hashcat_ffi::NativeHashcat::event_trace()
             );
-            Err(40 + (other as i32).abs().clamp(0, 50))
-        }
-        Err(error) => {
-            let event = hashcat_ffi::NativeHashcat::last_event();
-            if !event.trim().is_empty() {
-                eprintln!("hashcat: {}", event.trim_end());
-            }
-            Err(native_failure(error))
+            Err(40 + other.abs().clamp(0, 50))
         }
     }
 }

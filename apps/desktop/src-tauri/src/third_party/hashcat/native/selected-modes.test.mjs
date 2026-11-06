@@ -23,6 +23,25 @@ const ARCHIVE_KERNELS = {
   13400: ["m13400-pure.cl"],
   15600: ["m15600-pure.cl"],
   15700: ["m15700-pure.cl"],
+  13100: [
+    "m13100_a0-optimized.cl",
+    "m13100_a1-optimized.cl",
+    "m13100_a3-optimized.cl",
+    "m13100_a0-pure.cl",
+    "m13100_a1-pure.cl",
+    "m13100_a3-pure.cl",
+    "m13100_a4-pure.cl",
+  ],
+  18200: [
+    "m18200_a0-optimized.cl",
+    "m18200_a1-optimized.cl",
+    "m18200_a3-optimized.cl",
+    "m18200_a0-pure.cl",
+    "m18200_a1-pure.cl",
+    "m18200_a3-pure.cl",
+    "m18200_a4-pure.cl",
+  ],
+  22100: ["m22100-pure.cl"],
 };
 
 test("only approved pinned module+kernel sources are bundled", () => {
@@ -32,7 +51,7 @@ test("only approved pinned module+kernel sources are bundled", () => {
   assert.equal(manifest.commit, supported.source_commit);
   assert.equal(supported.abi_version, 4);
   assert.deepEqual(supported.hash_modes.map(m => m.id),
-    [0, 10, 20, 50, 60, 100, 110, 120, 132, 400, 500, 1000, 1100, 1400, 1500, 1700, 1731, 1800, 2100, 3200, 5500, 5600, 7400, 9400, 9600, 9700, 10400, 10500, 11300, 11600, 13400, 13600, 15600, 15700, 17200, 17210]);
+    [0, 10, 20, 50, 60, 100, 110, 120, 132, 400, 500, 1000, 1100, 1400, 1500, 1700, 1731, 1800, 2100, 3200, 5500, 5600, 7400, 9400, 9600, 9700, 10400, 10500, 11300, 11600, 13100, 13400, 13600, 15600, 15700, 17200, 17210, 18200, 22100]);
   for (const m of supported.hash_modes) {
     assert.ok(manifest.files["src/modules/module_" + String(m.id).padStart(5, "0") + ".c"],
       "missing module " + m.id);
@@ -57,7 +76,7 @@ test("the C shim, FFI and worker use the same bounded selected-mode contract", (
   const ffi = read("native/hashcat_ffi.rs");
   const worker = read("native/recovery_worker.rs");
   const supervisor = read("../../features/crypto/application/embedded_hashcat.rs");
-  const modes = "0 | 10 | 20 | 50 | 60 | 100 | 110 | 120 | 132 | 400 | 1500 | 1731 | 500 | 1000 | 1400 | 1700 | 1800 | 3200 | 7400 | 1100 | 2100 | 5500 | 5600 | 11600 | 13600 | 17200 | 17210 | 9400 | 9600 | 9700 | 10400 | 10500 | 11300 | 13400 | 15600 | 15700";
+  const modes = "0 | 10 | 20 | 50 | 60 | 100 | 110 | 120 | 132 | 400 | 1500 | 1731 | 500 | 1000 | 1400 | 1700 | 1800 | 3200 | 7400 | 1100 | 2100 | 5500 | 5600 | 11600 | 13600 | 17200 | 17210 | 9400 | 9600 | 9700 | 10400 | 10500 | 11300 | 13400 | 15600 | 15700 | 13100 | 18200 | 22100";
   assert.match(c, /case 11600: case 13600: case 17200: case 17210:/);
   for (const mode of modes.split(" | ")) {
     const boundary = new RegExp("\\b" + mode + "\\b");

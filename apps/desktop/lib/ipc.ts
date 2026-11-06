@@ -90,7 +90,10 @@ export type HashcatRawAlgorithmV1 =
   | "bitcoin"
   | "keepass"
   | "ethereum-pbkdf2"
-  | "ethereum-scrypt";
+  | "ethereum-scrypt"
+  | "kerberos-tgs-rep"
+  | "kerberos-as-rep"
+  | "bitlocker";
 /** Native Rust CPU digest coverage (embedded Hashcat is raw 5 modes only). */
 export type RecoveryRawAlgorithmV1 =
   | HashcatRawAlgorithmV1
