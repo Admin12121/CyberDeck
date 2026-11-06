@@ -2,6 +2,7 @@
 use super::link::{color_for, empty_frame};
 use super::protocol;
 use super::protocol::HttpFields;
+use super::{http2, quic};
 use crate::{dns, Dissected, Layer, TcpMeta};
 
 fn well_known_name(proto: u8, src_port: u16, dst_port: u16) -> &'static str {
@@ -85,6 +86,15 @@ pub(super) fn dissect_tcp(
     let stream_id = Some(format!("tcp|{}|{}", endpoints[0], endpoints[1]));
     // Passive application parsing looks only at bytes in the captured frame.
     // A split TCP segment cannot be claimed as a complete HTTP/TLS message.
+    if http2::is_http2_preface(&payload) {
+        if let Some(dissected) = http2::dissect_http2(&payload, layers.clone()) {
+            return Dissected {
+                source: source.to_string(),
+                destination: destination.to_string(),
+                ..dissected
+            };
+        }
+    }
     let http = protocol::http_start_line(&payload);
     let tls = protocol::tls_hello(&payload);
     let protocol = if http.is_some() {
@@ -102,21 +112,42 @@ pub(super) fn dissect_tcp(
         // Header fields come from the same captured segment as the start
         // line; a segment boundary ends extraction without inventing data.
         if let Some(fields) = protocol::http_fields(&payload) {
-            let HttpFields { host, user_agent, status_code, content_type, location } = fields;
+            let HttpFields {
+                host,
+                user_agent,
+                status_code,
+                content_type,
+                location,
+            } = fields;
             if let Some(host) = host {
-                layers.push(Layer { label: "HTTP Host".into(), value: host });
+                layers.push(Layer {
+                    label: "HTTP Host".into(),
+                    value: host,
+                });
             }
             if let Some(agent) = user_agent {
-                layers.push(Layer { label: "HTTP User-Agent".into(), value: agent });
+                layers.push(Layer {
+                    label: "HTTP User-Agent".into(),
+                    value: agent,
+                });
             }
             if let Some(code) = status_code {
-                layers.push(Layer { label: "HTTP status".into(), value: code.to_string() });
+                layers.push(Layer {
+                    label: "HTTP status".into(),
+                    value: code.to_string(),
+                });
             }
             if let Some(kind) = content_type {
-                layers.push(Layer { label: "HTTP Content-Type".into(), value: kind });
+                layers.push(Layer {
+                    label: "HTTP Content-Type".into(),
+                    value: kind,
+                });
             }
             if let Some(target) = location {
-                layers.push(Layer { label: "HTTP Location".into(), value: target });
+                layers.push(Layer {
+                    label: "HTTP Location".into(),
+                    value: target,
+                });
             }
         }
     }
@@ -267,6 +298,31 @@ pub(super) fn dissect_udp(
     let service = well_known_name(17, src_port, dst_port);
     let protocol = if service.is_empty() { "UDP" } else { service };
     let mut info = format!("{src_port} → {dst_port} Len={}", length.saturating_sub(8));
+    // QUIC rides on UDP/443; the bounded header dissector replaces the
+    // plain-UDP projection. Dispatch after the UDP length checks so the
+    // dissector only ever sees the declared datagram payload — never
+    // Ethernet padding or bytes beyond the length field — and keep the
+    // UDP evidence layers in front of the QUIC layers like DNS/STUN rows.
+    if src_port == 443 || dst_port == 443 {
+        layers.push(Layer {
+            label: "User Datagram Protocol".into(),
+            value: info.clone(),
+        });
+        layers.push(Layer {
+            label: "source port".into(),
+            value: src_port.to_string(),
+        });
+        layers.push(Layer {
+            label: "destination port".into(),
+            value: dst_port.to_string(),
+        });
+        let dissected = quic::dissect_quic(&payload, layers);
+        return Dissected {
+            source: source.to_string(),
+            destination: destination.to_string(),
+            ..dissected
+        };
+    }
     let decoded_service = if matches!(src_port, 67 | 68) || matches!(dst_port, 67 | 68) {
         super::udp_services::dhcp(&payload)
     } else if src_port == 123 || dst_port == 123 {

@@ -12,7 +12,11 @@ import {
   netscanNdpStopV1,
   netscanIcmpDiscoverV1,
   netscanIcmp6DiscoverV1,
+  netscanServiceChecksV1,
   netscanTraceIpv4V1,
+  type ServiceChecksWire,
+  netscanTraceIpv6V1,
+  type TraceHopV6Wire,
   netscanIcmpStopV1,
   netscanSynStartV1,
   netscanSyn6StartV1,
@@ -252,6 +256,7 @@ export function ScanView() {
     setIcmpFamily("IPv4");
     setIcmpRows(null);
     setTraceRows(null);
+    setTrace6Rows(null);
     setTraceBusy(false);
     setSynBusy(false);
     setSynFamily("IPv4");
@@ -593,6 +598,24 @@ export function ScanView() {
       if (activeCase.current === key) setIcmpBusy(false);
     }
   };
+  const [trace6Rows, setTrace6Rows] = useState<TraceHopV6Wire[] | null>(null);
+  const runTrace6 = async () => {
+    if (networkBusy) return;
+    if (!desktop || revision === null || !authorized || !arpInterface ||
+      running || status.running || arpBusy || ndpBusy || synBusy || icmpBusy || traceBusy) return;
+    const key = identity;
+    setError(null);
+    setTrace6Rows(null);
+    setTraceBusy(true);
+    try {
+      const rows = await netscanTraceIpv6V1(target, arpInterface, 12, true);
+      if (activeCase.current === key) setTrace6Rows(rows);
+    } catch (err) {
+      if (activeCase.current === key) setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      if (activeCase.current === key) setTraceBusy(false);
+    }
+  };
   const runTrace = async () => {
     if (networkBusy) return;
     if (!desktop || revision === null || !authorized || !arpInterface ||
@@ -676,6 +699,28 @@ export function ScanView() {
     }
   };
 
+  // NSE-lite: run the bounded banner-check registry over one probed open
+  // port. Findings are advisory evidence lines, never verdicts.
+  const [checkResults, setCheckResults] = useState<Record<string, ServiceChecksWire>>({});
+  const runChecks = async (host: string, port: number) => {
+    if (networkBusy) return;
+    if (!desktop || revision === null || !authorized) return;
+    const key = identity;
+    const rowKey = host + ":" + port;
+    setError(null);
+    setProbeBusy(rowKey);
+    try {
+      const wire = await netscanServiceChecksV1(host, port, true, wb.caseId);
+      if (activeCase.current === key) {
+        setCheckResults((previous) => ({ ...previous, [rowKey]: wire }));
+      }
+    } catch (err) {
+      if (activeCase.current === key) setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      if (activeCase.current === key) setProbeBusy(null);
+    }
+  };
+
   const openCount = observationPage?.open ?? results.filter((r) => r.state === "open").length;
   const observedCount = observationPage?.total ?? results.length;
 
@@ -692,6 +737,7 @@ export function ScanView() {
     if (result) {
       const tone = result.confidence === "high" ? "text-ok"
         : result.confidence === "medium" ? "text-orange" : "text-fg-muted";
+      const checks = checkResults[rowKey];
       return (
         <td className={tone} title={"basis: " + result.basis + " · probe: " + result.probe_used +
           (result.raw_excerpt_trimmed ? " · excerpt: " + result.raw_excerpt_trimmed : "")}>
@@ -701,6 +747,24 @@ export function ScanView() {
               {" "}· claims {result.remote_software_claim}
             </span>
           ) : null}
+          {checks ? (
+            <span className="block font-mono text-[10px] text-fg-muted">
+              {checks.findings.length === 0
+                ? "checks: none fired"
+                : checks.findings.map((f) => (
+                    <span key={f.check} className="block"
+                      title={f.severity + " · " + f.evidence}>
+                      check {f.check} ({f.severity})
+                    </span>
+                  ))}
+            </span>
+          ) : (
+            <ToolButton onClick={() => void runChecks(host, port)}
+              disabled={networkBusy || !desktop || revision === null || !authorized}
+              title="Run the bounded NSE-lite banner checks over a fresh probe of this port; findings are advisory evidence lines">
+              run checks
+            </ToolButton>
+          )}
         </td>
       );
     }
@@ -957,6 +1021,14 @@ export function ScanView() {
                   Trace IPv4
                 </ToolButton>
               )}
+              {traceBusy ? null : (
+                <ToolButton onClick={() => void runTrace6()}
+                  disabled={!desktop || !authorized || networkBusy || revision === null || !arpInterface ||
+                    !target.trim() || running || status.running || arpBusy || ndpBusy || synBusy || icmpBusy}
+                  title="Linux only: up to 12 hop-limited ICMPv6 probes with per-hop unicast hop limit, backend confirmation and saved-case authorization required">
+                  Trace IPv6
+                </ToolButton>
+              )}
               {icmpBusy ? (
                 <ToolButton tone="danger" onClick={() => void stopIcmp()}>
                   <Square size={11} /> Stop ICMP
@@ -1158,6 +1230,19 @@ export function ScanView() {
               <div className="text-fg-muted">
                 States classify one probe each; FIN/NULL/Xmas silence is open|filtered and ACK/Window silence is filtered by definition.
               </div>
+            </div>
+          ) : null}
+          {trace6Rows !== null ? (
+            <div>
+              <p className="font-mono text-[10px] text-fg-muted">
+                Native IPv6 ICMPv6 route trace: {trace6Rows.length} observed hop-limit steps
+              </p>
+              {trace6Rows.map((hop) => (
+                <p key={hop.hop} className="font-mono text-[11px]">
+                  hop {hop.hop}: {hop.responder ?? "no response"}
+                  {hop.reached ? " — destination reached" : ""} ({hop.elapsed_ms} ms, {hop.reason})
+                </p>
+              ))}
             </div>
           ) : null}
           {traceRows !== null ? (

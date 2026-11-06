@@ -69,19 +69,17 @@ pub fn detect_target(target_hash: &str) -> Result<Detection, String> {
                 other => other,
             }],
             kdf: true,
-            detail: format!("KDF hash detected ({format}); CPU wordlist attack with a bounded candidate budget"),
+            detail: format!(
+                "KDF hash detected ({format}); CPU wordlist attack with a bounded candidate budget"
+            ),
         });
     }
     let is_mysql5 = text.starts_with('*') && text.len() == 41;
     let is_hex = !text.is_empty()
         && text.len() % 2 == 0
-        && text
-            .bytes()
-            .all(|byte| byte.is_ascii_hexdigit());
+        && text.bytes().all(|byte| byte.is_ascii_hexdigit());
     if !is_hex && !is_mysql5 {
-        return Err(
-            "target is neither a known modular hash nor a hexadecimal digest".into(),
-        );
+        return Err("target is neither a known modular hash nor a hexadecimal digest".into());
     }
     let algorithms: &[&'static str] = if is_mysql5 {
         &["mysql5"]
@@ -157,7 +155,11 @@ pub fn build_plan(
             engine,
             label: format!(
                 "{wordlist_name} wordlist as {algorithm} ({})",
-                if engine == StageEngine::Gpu { "GPU" } else { "CPU" }
+                if engine == StageEngine::Gpu {
+                    "GPU"
+                } else {
+                    "CPU"
+                }
             ),
         });
     }
@@ -225,8 +227,10 @@ mod tests {
             detect_target("$2a$10$N9qo8uLOickgx2ZMRZoMyeIjZAgcfl7p92ldGxad68LJZdL17lhWy").unwrap();
         assert!(detection.kdf);
         assert_eq!(detection.algorithms, vec!["bcrypt"]);
-        let yes =
-            detect_target("$y$j9T$T34kP0d0sF1IBASj4klp/1$CsTfhJK8YT9fXGSbIf3jFaDffkRq0VXfGbGj68cG0R9").unwrap();
+        let yes = detect_target(
+            "$y$j9T$T34kP0d0sF1IBASj4klp/1$CsTfhJK8YT9fXGSbIf3jFaDffkRq0VXfGbGj68cG0R9",
+        )
+        .unwrap();
         assert!(yes.kdf);
         assert_eq!(yes.algorithms, vec!["yescrypt"]);
     }
@@ -270,10 +274,8 @@ mod tests {
 
     #[test]
     fn kdf_plan_never_receives_rule_stages() {
-        let detection = detect_target(
-            "$2a$10$N9qo8uLOickgx2ZMRZoMyeIjZAgcfl7p92ldGxad68LJZdL17lhWy",
-        )
-        .unwrap();
+        let detection =
+            detect_target("$2a$10$N9qo8uLOickgx2ZMRZoMyeIjZAgcfl7p92ldGxad68LJZdL17lhWy").unwrap();
         let plan = build_plan(
             &detection,
             &wordlists(&["rockyou", "cyberdeck-common"]),

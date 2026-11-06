@@ -160,9 +160,7 @@ fn other_scan_active(
 ) -> bool {
     tcp.running.load(Ordering::Acquire)
         || arp.is_running()
-        || app
-            .state::<Arc<super::icmp_echo::EchoCtx>>()
-            .is_running()
+        || app.state::<Arc<super::icmp_echo::EchoCtx>>().is_running()
 }
 
 // ---------------------------------------------------------------------------
@@ -191,8 +189,18 @@ pub async fn netscan_stealth_start_v1(
     #[cfg(not(target_os = "linux"))]
     {
         let _ = (
-            scan_type, targets, ports, case_id, interface_name, on_progress, app, session,
-            evidence, tcp, arp, ctx,
+            scan_type,
+            targets,
+            ports,
+            case_id,
+            interface_name,
+            on_progress,
+            app,
+            session,
+            evidence,
+            tcp,
+            arp,
+            ctx,
         );
         return Err("raw FIN/NULL/Xmas/ACK/Window scan types require Linux CAP_NET_RAW".into());
     }
@@ -202,9 +210,8 @@ pub async fn netscan_stealth_start_v1(
             scan_ipv4_depth, DepthErrorCode, ScanKind, MAX_DEPTH_HOSTS, MAX_DEPTH_PORTS,
             MAX_DEPTH_PROBES,
         };
-        let kind = ScanKind::parse(scan_type.trim().to_ascii_lowercase().as_str()).ok_or_else(|| {
-            "scan_type must be one of: fin, null, xmas, ack, window".to_string()
-        })?;
+        let kind = ScanKind::parse(scan_type.trim().to_ascii_lowercase().as_str())
+            .ok_or_else(|| "scan_type must be one of: fin, null, xmas, ack, window".to_string())?;
         let (scope, verified_case) = scoped_case(&session, &case_id)?;
         if other_scan_active(&app, &tcp, &arp) {
             return Err("stop other active network scans before starting a raw scan type".into());
@@ -372,10 +379,7 @@ pub fn netscan_stealth_stop_v1(
     ctx: State<'_, Arc<StealthScanCtx>>,
 ) -> Result<bool, String> {
     let (scope, _) = selected_saved_case(&session)?;
-    let owner = ctx
-        .owner
-        .lock()
-        .map_err(|_| "raw scan owner unavailable")?;
+    let owner = ctx.owner.lock().map_err(|_| "raw scan owner unavailable")?;
     if owner.as_ref() != Some(&scope) {
         return Err("raw scan belongs to another case revision".into());
     }
@@ -389,10 +393,7 @@ pub fn netscan_stealth_status_v1(
     ctx: State<'_, Arc<StealthScanCtx>>,
 ) -> Result<bool, String> {
     let (scope, _) = selected_saved_case(&session)?;
-    let owner = ctx
-        .owner
-        .lock()
-        .map_err(|_| "raw scan owner unavailable")?;
+    let owner = ctx.owner.lock().map_err(|_| "raw scan owner unavailable")?;
     Ok(owner.as_ref() == Some(&scope) && ctx.is_running())
 }
 
@@ -489,10 +490,7 @@ fn run_registry(
         let excerpt = sanitize_excerpt(&response);
         if let Some(found) = classify_service_response(*probe, &response) {
             let full = !found.soft;
-            if best
-                .as_ref()
-                .is_none_or(|(_, prior, _)| prior.soft && full)
-            {
+            if best.as_ref().is_none_or(|(_, prior, _)| prior.soft && full) {
                 best = Some((*probe, found, excerpt));
             }
             if full {
@@ -609,4 +607,75 @@ pub async fn netscan_service_probe_v1(
     }
     ctx.record(result.clone());
     Ok(result)
+}
+
+// --- NSE-lite: bounded banner-based service checks ---------------------------
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ServiceCheckFindingWire {
+    pub check: String,
+    pub severity: String,
+    pub evidence: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ServiceChecksWire {
+    pub host: String,
+    pub port: u16,
+    pub service_claim: String,
+    pub probe_used: String,
+    pub findings: Vec<ServiceCheckFindingWire>,
+}
+
+/// Run the bounded check registry over a live probe of one host:port. The
+/// probe reuses the same user-mode machinery as `netscan_service_probe_v1`
+/// (same timeouts, same random nonce discipline, same registry); the check
+/// pass itself is pure and never opens sockets. Authorization and saved-case
+/// gating match the probe command exactly.
+#[tauri::command]
+pub async fn netscan_service_checks_v1(
+    host: String,
+    port: u16,
+    authorized: bool,
+    case_id: String,
+    session: State<'_, CaseSessionCtx>,
+    evidence: State<'_, EvidenceCtx>,
+    gate: State<'_, Arc<super::operation_gate::NetworkOperationGate>>,
+    ctx: State<'_, Arc<ProbeCtx>>,
+) -> Result<ServiceChecksWire, String> {
+    let probe = netscan_service_probe_v1(
+        host.clone(),
+        port,
+        authorized,
+        case_id,
+        session,
+        evidence,
+        gate,
+        ctx,
+    )
+    .await?;
+    // The registry classifies the raw excerpt; an excerpt that the probe
+    // stage could not capture yields no findings rather than guesses.
+    let findings = cyberdeck_packet::service_checks::evaluate(
+        &probe.service_claim,
+        port,
+        &probe.raw_excerpt_trimmed,
+    )
+    .into_iter()
+    .map(|finding| ServiceCheckFindingWire {
+        check: finding.check.to_string(),
+        severity: serde_json::to_value(finding.severity)
+            .ok()
+            .and_then(|value| value.as_str().map(str::to_string))
+            .unwrap_or_else(|| "info".to_string()),
+        evidence: finding.evidence,
+    })
+    .collect();
+    Ok(ServiceChecksWire {
+        host: probe.host,
+        port: probe.port,
+        service_claim: probe.service_claim,
+        probe_used: probe.probe_used.to_string(),
+        findings,
+    })
 }

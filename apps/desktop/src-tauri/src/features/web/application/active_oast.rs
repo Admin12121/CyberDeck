@@ -127,11 +127,7 @@ impl OastCollector {
     pub(super) async fn wait(&self, token: &str, timeout: Duration) -> bool {
         let deadline = tokio::time::Instant::now() + timeout;
         loop {
-            if self
-                .seen
-                .lock()
-                .is_ok_and(|seen| seen.contains(token))
-            {
+            if self.seen.lock().is_ok_and(|seen| seen.contains(token)) {
                 return true;
             }
             if tokio::time::Instant::now() >= deadline {
@@ -373,9 +369,11 @@ mod tests {
             .write_all(b"GET /favicon.ico HTTP/1.1\r\nHost: collector\r\nConnection: close\r\n\r\n")
             .await
             .unwrap();
-        assert!(!collector
-            .wait(&fresh_token(9, 1), Duration::from_millis(300))
-            .await);
+        assert!(
+            !collector
+                .wait(&fresh_token(9, 1), Duration::from_millis(300))
+                .await
+        );
     }
 
     #[tokio::test]

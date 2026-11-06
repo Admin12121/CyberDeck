@@ -3,8 +3,8 @@
 //! rule engine. No frontend-supplied paths are accepted; only manifest ids.
 use serde::Serialize;
 use std::io::BufReader;
-use tauri::Manager;
 use std::path::PathBuf;
+use tauri::Manager;
 
 const MAX_MANIFEST_BYTES: u64 = 1 << 20;
 
@@ -50,8 +50,7 @@ fn manifest_from_json(bytes: &[u8]) -> Result<Manifest, String> {
 
 fn bundled_rules_root(dev_root: PathBuf) -> Result<PathBuf, String> {
     let manifest = dev_root.join("rules-manifest.json");
-    let bytes = std::fs::read(&manifest)
-        .map_err(|_| "bundled rule library manifest is missing")?;
+    let bytes = std::fs::read(&manifest).map_err(|_| "bundled rule library manifest is missing")?;
     if bytes.len() as u64 > MAX_MANIFEST_BYTES {
         return Err("bundled rule manifest exceeds sanity size".into());
     }
@@ -101,7 +100,11 @@ pub fn list(app: &tauri::AppHandle) -> Result<Vec<RuleSetEntry>, String> {
 /// Load a rule set by manifest id. The file is re-hashed on every load so a
 /// tampered resource directory can never feed rules to a live session.
 pub fn load(app: &tauri::AppHandle, id: &str) -> Result<LoadedRuleSet, String> {
-    if id.len() > 64 || !id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_') {
+    if id.len() > 64
+        || !id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+    {
         return Err("invalid rule set id".into());
     }
     let root = resource_root(app)?;
@@ -121,13 +124,17 @@ pub fn load(app: &tauri::AppHandle, id: &str) -> Result<LoadedRuleSet, String> {
     }
     let data = std::fs::read(&path).map_err(|_| "bundled rule set is missing")?;
     let digest = sha256_hex(&data);
-    if !constant_time_eq(digest.as_bytes(), entry.sha256.to_ascii_lowercase().as_bytes()) {
+    if !constant_time_eq(
+        digest.as_bytes(),
+        entry.sha256.to_ascii_lowercase().as_bytes(),
+    ) {
         return Err("bundled rule set failed integrity verification".into());
     }
     if data.len() as u64 != entry.size_bytes {
         return Err("bundled rule set size does not match the manifest".into());
     }
-    let parsed = cyberdeck_crypto::recovery::parse_rule_file_tolerant(BufReader::new(data.as_slice()))?;
+    let parsed =
+        cyberdeck_crypto::recovery::parse_rule_file_tolerant(BufReader::new(data.as_slice()))?;
     Ok(LoadedRuleSet {
         id: entry.id.clone(),
         rules: parsed.rules,
@@ -145,7 +152,11 @@ fn sha256_hex(data: &[u8]) -> String {
 /// Resolve a bundled rule set to its verified file path (for engine
 /// sidecars that consume rule files directly). The file is re-hashed first.
 pub fn resolve_rules_path(app: &tauri::AppHandle, id: &str) -> Result<PathBuf, String> {
-    if id.len() > 64 || !id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_') {
+    if id.len() > 64
+        || !id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+    {
         return Err("invalid rule set id".into());
     }
     let root = resource_root(app)?;
@@ -157,7 +168,10 @@ pub fn resolve_rules_path(app: &tauri::AppHandle, id: &str) -> Result<PathBuf, S
         .iter()
         .find(|rule| rule.id == id)
         .ok_or_else(|| "unknown rule set".to_string())?;
-    if entry.file.contains('/') || entry.file.contains(std::path::MAIN_SEPARATOR) || entry.file.contains("..") {
+    if entry.file.contains('/')
+        || entry.file.contains(std::path::MAIN_SEPARATOR)
+        || entry.file.contains("..")
+    {
         return Err("invalid rule set file name".into());
     }
     let path = root.join(&entry.file);
@@ -198,7 +212,9 @@ mod tests {
         assert!(!"../../etc/passwd"
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_'));
-        assert!("best66".bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_'));
+        assert!("best66"
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_'));
     }
 
     #[test]
@@ -245,15 +261,25 @@ mod tests {
         let manifest = manifest_from_json(&bytes).unwrap();
         for entry in &manifest.rules {
             let data = std::fs::read(dev.join(&entry.file)).unwrap();
-            let parsed = cyberdeck_crypto::recovery::parse_rule_file_tolerant(
-                BufReader::new(data.as_slice()),
-            )
+            let parsed = cyberdeck_crypto::recovery::parse_rule_file_tolerant(BufReader::new(
+                data.as_slice(),
+            ))
             .unwrap_or_else(|e| panic!("{} failed to parse: {e}", entry.file));
-            assert_eq!(parsed.rules.len() as u64, entry.rule_count, "{}", entry.file);
+            assert_eq!(
+                parsed.rules.len() as u64,
+                entry.rule_count,
+                "{}",
+                entry.file
+            );
             // dive.rule ships two lines with truncated escape sequences
             // upstream; they are counted, never silently applied.
             let max_skipped = if entry.id == "dive" { 2 } else { 0 };
-            assert!(parsed.skipped <= max_skipped, "{}: {}", entry.file, parsed.skipped);
+            assert!(
+                parsed.skipped <= max_skipped,
+                "{}: {}",
+                entry.file,
+                parsed.skipped
+            );
         }
     }
 }

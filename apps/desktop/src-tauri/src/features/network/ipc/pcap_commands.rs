@@ -1,7 +1,7 @@
 //! Capture IPC adapters; stable command macros remain in pcap.rs.
 use super::{
-    capture_file, capture_service, hex_format, pcap_wire::reassembly_summary, pcap_wire::wire_packet,
-    PcapCtx, PcapOpenWire,
+    capture_file, capture_service, hex_format, pcap_wire::reassembly_summary,
+    pcap_wire::wire_packet, PcapCtx, PcapOpenWire,
 };
 use crate::features::forensics::ipc::evidence::HexResponse;
 use tauri::{AppHandle, State};

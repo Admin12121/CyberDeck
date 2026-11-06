@@ -41,12 +41,12 @@ mod active_body_application;
 mod active_injection_application;
 #[path = "../application/active_oast.rs"]
 mod active_oast_application;
-#[path = "../application/auth_context.rs"]
-mod auth_context_application;
 #[path = "../application/active_query.rs"]
 mod active_query_application;
 #[path = "../application/assessment_jobs.rs"]
 pub(crate) mod assessment_jobs;
+#[path = "../application/auth_context.rs"]
+mod auth_context_application;
 #[path = "../infrastructure/client.rs"]
 mod client_infrastructure;
 #[path = "../application/crawl.rs"]

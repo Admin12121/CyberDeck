@@ -741,9 +741,18 @@ fn icmp_echo_request_reports_identifier_sequence_and_payload_size() {
     let d = dissect(1, &ipv4_icmp_frame(&body));
     assert_eq!(d.protocol, "ICMP");
     assert!(d.info.contains("Echo Request"));
-    assert!(d.layers.iter().any(|l| l.label == "identifier" && l.value == "0x1a2b"));
-    assert!(d.layers.iter().any(|l| l.label == "sequence" && l.value == "7"));
-    assert!(d.layers.iter().any(|l| l.label == "echo payload" && l.value == "4 byte(s), not decoded"));
+    assert!(d
+        .layers
+        .iter()
+        .any(|l| l.label == "identifier" && l.value == "0x1a2b"));
+    assert!(d
+        .layers
+        .iter()
+        .any(|l| l.label == "sequence" && l.value == "7"));
+    assert!(d
+        .layers
+        .iter()
+        .any(|l| l.label == "echo payload" && l.value == "4 byte(s), not decoded"));
 }
 
 #[test]
@@ -753,7 +762,10 @@ fn icmp_destination_unreachable_names_port_and_counts_quoted_bytes() {
     body.extend_from_slice(&[0x45; 12]); // quoted header bytes
     let d = dissect(1, &ipv4_icmp_frame(&body));
     assert!(d.info.contains("Port unreachable"));
-    assert!(d.layers.iter().any(|l| l.label == "quoted datagram" && l.value.contains("12 byte(s)")));
+    assert!(d
+        .layers
+        .iter()
+        .any(|l| l.label == "quoted datagram" && l.value.contains("12 byte(s)")));
 }
 
 #[test]
@@ -768,8 +780,14 @@ fn icmp_neighbor_solicitation_exposes_target_and_link_layer_option() {
     let d = dissect(1, &frame);
     assert_eq!(d.protocol, "ICMPv6");
     assert!(d.info.contains("Neighbor Solicitation"));
-    assert!(d.layers.iter().any(|l| l.label == "target address" && l.value == "2001:db8::9"));
-    assert!(d.layers.iter().any(|l| l.label == "Source Link-Layer Address" && l.value == "aa:bb:cc:dd:ee:ff"));
+    assert!(d
+        .layers
+        .iter()
+        .any(|l| l.label == "target address" && l.value == "2001:db8::9"));
+    assert!(d
+        .layers
+        .iter()
+        .any(|l| l.label == "Source Link-Layer Address" && l.value == "aa:bb:cc:dd:ee:ff"));
 }
 
 #[test]
@@ -794,7 +812,12 @@ fn icmp_neighbor_advertisement_flags_and_truncated_options_stay_bounded() {
 #[test]
 fn icmp_truncated_headers_degrade_without_panicking() {
     // One trailing byte is a valid IPv4 datagram with a 1-byte ICMP body.
-    let d4 = dissect(101, &[0x45, 0, 0, 21, 0, 0, 0, 0, 64, 1, 0, 0, 1, 2, 3, 4, 5, 6, 7, 8, 8]);
+    let d4 = dissect(
+        101,
+        &[
+            0x45, 0, 0, 21, 0, 0, 0, 0, 64, 1, 0, 0, 1, 2, 3, 4, 5, 6, 7, 8, 8,
+        ],
+    );
     assert_eq!(d4.protocol, "ICMP");
     assert!(d4.info.contains("Echo Request"));
     // A 1-byte ICMPv6 body cannot carry the 4-byte fixed header.

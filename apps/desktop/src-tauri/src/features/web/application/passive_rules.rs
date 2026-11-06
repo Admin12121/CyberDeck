@@ -845,9 +845,7 @@ pub(super) fn analyze(o: &Observation, rules: &[&str]) -> Vec<PassiveFinding> {
         out.push(finding(o, &RULES[COOKIE_PREFIX],
             "A cookie with a security prefix omits a required Secure, Path=/ or host-only attribute. Browsers reject such a cookie; its name and value are withheld."));
     }
-    if enabled(COOKIE_LONG_LIVED)
-        && o.cookies.iter().any(|cookie| cookie.long_lived_session)
-    {
+    if enabled(COOKIE_LONG_LIVED) && o.cookies.iter().any(|cookie| cookie.long_lived_session) {
         out.push(finding(o, &RULES[COOKIE_LONG_LIVED],
             "A session-like cookie declares Max-Age beyond 30 days. Confirm the retention period matches the authentication policy."));
     }
@@ -890,11 +888,17 @@ mod tests {
         let enabled = RULES.iter().map(|x| x.id).collect::<Vec<_>>();
         let alerts = analyze(&o, &enabled);
         assert!(alerts.iter().any(|f| f.rule_id == RULES[CSP_MISSING].id));
-        assert!(alerts.iter().any(|f| f.rule_id == RULES[NOSNIFF_MISSING].id));
+        assert!(alerts
+            .iter()
+            .any(|f| f.rule_id == RULES[NOSNIFF_MISSING].id));
         assert!(alerts.iter().any(|f| f.rule_id == RULES[HSTS_MISSING].id));
-        assert!(alerts.iter().any(|f| f.rule_id == RULES[COOKIE_SAMESITE].id));
+        assert!(alerts
+            .iter()
+            .any(|f| f.rule_id == RULES[COOKIE_SAMESITE].id));
         assert!(alerts.iter().any(|f| f.rule_id == RULES[COOKIE_SECURE].id));
-        assert!(alerts.iter().any(|f| f.rule_id == RULES[COOKIE_HTTPONLY].id));
+        assert!(alerts
+            .iter()
+            .any(|f| f.rule_id == RULES[COOKIE_HTTPONLY].id));
         let serialized = serde_json::to_string(&alerts).unwrap();
         assert!(!serialized.contains("TOPSECRET"));
         assert!(!serialized.contains("session="));
@@ -1111,7 +1115,12 @@ mod tests {
             ("access-control-allow-origin".into(), "*".into()),
             ("x-secret".into(), "DO_NOT_LEAK".into()),
         ];
-        let o = observe(44, "https://private.invalid/?token=DO_NOT_LEAK", 200, &headers);
+        let o = observe(
+            44,
+            "https://private.invalid/?token=DO_NOT_LEAK",
+            200,
+            &headers,
+        );
         let alerts = analyze(&o, &enabled);
         for rule in [
             CSP_UNSAFE_INLINE,
@@ -1130,10 +1139,17 @@ mod tests {
             );
         }
         let rendered = serde_json::to_string(&alerts).unwrap();
-        for secret in ["SECRET_PRODUCT", "SECRET_FRAMEWORK", "DO_NOT_LEAK", "private.invalid"] {
+        for secret in [
+            "SECRET_PRODUCT",
+            "SECRET_FRAMEWORK",
+            "DO_NOT_LEAK",
+            "private.invalid",
+        ] {
             assert!(!rendered.contains(secret));
         }
-        assert!(!alerts.iter().any(|f| f.rule_id == RULES[CSP_UNSAFE_EVAL].id));
+        assert!(!alerts
+            .iter()
+            .any(|f| f.rule_id == RULES[CSP_UNSAFE_EVAL].id));
         let invalid = observe(
             45,
             "https://private.invalid/",
@@ -1173,7 +1189,13 @@ mod tests {
             .iter()
             .any(|f| f.rule_id == RULES[COOKIE_LONG_LIVED].id));
         let rendered = serde_json::to_string(&alerts).unwrap();
-        for secret in ["SECRET_VALUE", "OTHER_SECRET", "__Host-", "__Secure-", "example.test"] {
+        for secret in [
+            "SECRET_VALUE",
+            "OTHER_SECRET",
+            "__Host-",
+            "__Secure-",
+            "example.test",
+        ] {
             assert!(!rendered.contains(secret), "leaked {secret}");
         }
         let compliant = observe(

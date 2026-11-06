@@ -250,8 +250,8 @@ const TCP_FAMILY = ["tcp", "http", "tls", "ssh", "smtp"];
 const UDP_FAMILY = ["udp", "dns", "dhcp", "ntp", "stun", "mdns", "llmnr"];
 
 export const KNOWN_PROTOCOL_TOKENS = [
-  "tcp", "udp", "http", "tls", "dns", "dhcp", "ntp", "stun", "mdns", "llmnr",
-  "arp", "icmp", "icmpv6", "ipv6", "ip", "eth", "ssh", "smtp",
+  "tcp", "udp", "http", "http2", "tls", "dns", "dhcp", "ntp", "stun", "mdns", "llmnr",
+  "arp", "icmp", "icmpv6", "ipv6", "ip", "eth", "ssh", "smtp", "quic",
 ] as const;
 
 export const KNOWN_FILTER_FIELDS = [

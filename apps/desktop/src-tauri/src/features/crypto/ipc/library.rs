@@ -70,10 +70,9 @@ pub async fn wordlist_library_use_v1(
     }
     let before = session.selected()?;
     state.with_active(&session, |_, _| Ok(()))?;
-    let resolved =
-        tokio::task::spawn_blocking(move || wordlist_library::resolve(&app, &id))
-            .await
-            .map_err(|_| "library lookup failed".to_string())??;
+    let resolved = tokio::task::spawn_blocking(move || wordlist_library::resolve(&app, &id))
+        .await
+        .map_err(|_| "library lookup failed".to_string())??;
     session.ensure(&before)?;
     let (name, size_bytes) = wordlist_library::inspect_resolved(&resolved)?;
     let info = RecoveryWordlistInfo {
@@ -113,8 +112,10 @@ pub async fn unshadow_v1(app: AppHandle) -> Result<String, String> {
     let shadow_text = std::fs::read_to_string(&shadow.0)
         .map_err(|_| "shadow file is not readable UTF-8 text".to_string())?;
     let merged = cyberdeck_crypto::shadow::unshadow(&passwd_text, &shadow_text)?;
-    Ok(merged.join("
-"))
+    Ok(merged.join(
+        "
+",
+    ))
 }
 
 #[tauri::command]

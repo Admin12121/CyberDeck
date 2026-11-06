@@ -1198,6 +1198,60 @@ export async function networkLabScopeV1(): Promise<NetworkLabScopeWire> {
   return invoke<NetworkLabScopeWire>("network_lab_scope_v1", {});
 }
 
+// --- Network Lab live event timeline (Bettercap-mode, passive) ---------------
+// Wire types mirror crates/packet/src/lab_events.rs LabEventsWire.
+
+export type LabEventKindWire = "new_host" | "new_service" | "arp_conflict" | "gateway_changed";
+
+export interface LabEventWire {
+  timestamp_ms: number;
+  kind: LabEventKindWire;
+  subject: string;
+  detail: string;
+}
+
+export interface LabEventsWire {
+  events: LabEventWire[];
+  new_hosts: number;
+  new_services: number;
+  conflicts: number;
+  gateway_changes: number;
+  truncated: boolean;
+}
+
+/** Passive timeline over the opened capture; transmits nothing. */
+export async function networkLabEventsV1(routerIp: string | null): Promise<LabEventsWire> {
+  if (!inTauri) throw new Error("Lab events require the desktop runtime");
+  return invoke<LabEventsWire>("network_lab_events_v1", { routerIp });
+}
+
+// --- Network Lab passive DNS-response monitor (Bettercap-mode) ---------------
+// Wire types mirror crates/packet/src/dns_monitor.rs and network_lab.rs.
+
+export type DnsFindingKindWire =
+  | "answer_inconsistency" | "suspicious_target" | "nxdomain_injection";
+export interface DnsAnswerSetWire { values: string[]; seen_ms: number; }
+export interface DnsFindingWire {
+  kind: DnsFindingKindWire;
+  question_name: string;
+  question_type: number;
+  baseline: DnsAnswerSetWire | null;
+  later: DnsAnswerSetWire | null;
+  first_seen_ms: number;
+  last_seen_ms: number;
+  detail: string;
+}
+export interface DnsMonitorWire {
+  observations_seen: number;
+  findings: DnsFindingWire[];
+  queried_names: number;
+}
+/** Passive DNS-response monitoring over the opened capture; transmits nothing. */
+export async function networkLabDnsMonitorV1(): Promise<DnsMonitorWire> {
+  if (!inTauri) throw new Error("DNS monitoring requires the desktop runtime");
+  return invoke<DnsMonitorWire>("network_lab_dns_monitor_v1", {});
+}
+
 // --- Packet Studio export view -> case ---------------------------------------
 // Wire types mirror features/network/ipc/pcap_export.rs and pcap_wire.rs.
 
@@ -1860,6 +1914,62 @@ export async function netscanTraceIpv4V1(
 ): Promise<TraceHopWire[]> {
   if (!inTauri) throw new Error("Native IPv4 route tracing requires the desktop runtime");
   return invoke<TraceHopWire[]>("netscan_trace_ipv4_v1", { target, interfaceName, maxHops, authorized });
+}
+
+export interface TraceHopV6Wire {
+  hop: number;
+  responder: string | null;
+  reached: boolean;
+  reason: string;
+  elapsed_ms: number;
+}
+
+/** Scoped, operator-confirmed IPv6 ICMPv6 traceroute (Linux, raw socket). */
+// --- NSE-lite: bounded banner-based service checks ---------------------------
+
+export interface ServiceCheckFindingWire {
+  check: string;
+  severity: string;
+  evidence: string;
+}
+
+export interface ServiceChecksWire {
+  host: string;
+  port: number;
+  service_claim: string;
+  probe_used: string;
+  findings: ServiceCheckFindingWire[];
+}
+
+/** Registry pass over a live probe of one service; transmits nothing itself. */
+export async function netscanServiceChecksV1(
+  host: string,
+  port: number,
+  authorized: boolean,
+  caseId: string,
+): Promise<ServiceChecksWire> {
+  if (!inTauri) throw new Error("service checks require the desktop runtime");
+  return invoke<ServiceChecksWire>("netscan_service_checks_v1", {
+    host,
+    port,
+    authorized,
+    caseId,
+  });
+}
+
+export async function netscanTraceIpv6V1(
+  target: string,
+  interfaceName: string,
+  maxHops: number,
+  authorized: boolean,
+): Promise<TraceHopV6Wire[]> {
+  if (!inTauri) throw new Error("IPv6 traceroute requires the desktop runtime");
+  return invoke<TraceHopV6Wire[]>("netscan_trace_ipv6_v1", {
+    target,
+    interfaceName,
+    maxHops,
+    authorized,
+  });
 }
 
 export interface IcmpObservationWire {

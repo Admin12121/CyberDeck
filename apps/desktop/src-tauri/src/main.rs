@@ -136,6 +136,8 @@ fn main() {
             features::network::ipc::network_lab::network_lab_analyze_pcap_v1,
             features::network::ipc::network_lab::network_lab_set_scope_v1,
             features::network::ipc::network_lab::network_lab_scope_v1,
+            features::network::ipc::network_lab::network_lab_events_v1,
+            features::network::ipc::network_lab::network_lab_dns_monitor_v1,
             features::network::ipc::pcap_export::pcap_export_view_v1,
             features::network::ipc::pcap_export::pcap_export_view_ng_v1,
             features::network::ipc::os_hints_ipc::capture_os_hints_v1,
@@ -246,10 +248,12 @@ fn main() {
             features::network::ipc::icmp_echo::netscan_icmp_status_v1,
             features::network::ipc::icmp_echo::netscan_trace_ipv4_v1,
             features::network::ipc::icmp_echo::netscan_icmp6_discover_v1,
+            features::network::ipc::icmp_echo::netscan_trace_ipv6_v1,
             features::network::ipc::scan_depth::netscan_stealth_start_v1,
             features::network::ipc::scan_depth::netscan_stealth_stop_v1,
             features::network::ipc::scan_depth::netscan_stealth_status_v1,
             features::network::ipc::scan_depth::netscan_service_probe_v1,
+            features::network::ipc::scan_depth::netscan_service_checks_v1,
         ])
         .run(tauri::generate_context!())
         .expect("CyberDeck desktop runtime failed to start");

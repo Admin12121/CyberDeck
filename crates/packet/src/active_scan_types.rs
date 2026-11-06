@@ -13,7 +13,7 @@
 //! Silence is classified as the documented default, never as affirmative
 //! evidence. Every plan is bounded (hosts, ports, probes, per-probe timeout)
 //! and every send requires an upstream authorization gate that the caller owns.
-use std::net::{Ipv4Addr, IpAddr};
+use std::net::{IpAddr, Ipv4Addr};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
@@ -289,7 +289,13 @@ pub fn ipv4_tcp_scan_probe(
         identification,
         hop_limit,
     ));
-    let mut tcp = tcp_probe_header(local_port, target_port, initial_sequence, kind.tcp_flags(), 1024);
+    let mut tcp = tcp_probe_header(
+        local_port,
+        target_port,
+        initial_sequence,
+        kind.tcp_flags(),
+        1024,
+    );
     let mut pseudo = [0u8; 12];
     pseudo[..4].copy_from_slice(&source.octets());
     pseudo[4..8].copy_from_slice(&target.octets());
@@ -418,8 +424,7 @@ pub fn classify_frame(kind: ScanKind, frame: &[u8], probe: &ProbeKey) -> Option<
     if ip[9] == 6 {
         // TCP response must come from the probed target to our probe socket.
         if IpAddr::V4(Ipv4Addr::new(ip[12], ip[13], ip[14], ip[15])) != IpAddr::V4(probe.target)
-            || IpAddr::V4(Ipv4Addr::new(ip[16], ip[17], ip[18], ip[19]))
-                != IpAddr::V4(probe.local)
+            || IpAddr::V4(Ipv4Addr::new(ip[16], ip[17], ip[18], ip[19])) != IpAddr::V4(probe.local)
             || body.len() < 20
         {
             return None;
@@ -618,7 +623,8 @@ pub fn run_flag_probe_plan(
                     ));
                 }
                 let remaining = PROBE_TIMEOUT.saturating_sub(started.elapsed());
-                let received = link.receive_frame(&mut frame_buffer, remaining.min(Duration::from_millis(50)))?;
+                let received = link
+                    .receive_frame(&mut frame_buffer, remaining.min(Duration::from_millis(50)))?;
                 if cancelled(stop, scope_active) {
                     return Err(DepthScanError::new(
                         DepthErrorCode::Cancelled,
@@ -711,11 +717,27 @@ pub fn scan_ipv4_depth(
 ) -> Result<Vec<DepthFinding>, DepthScanError> {
     #[cfg(target_os = "linux")]
     {
-        linux::scan(interface_name, kind, hosts, ports, stop, scope_active, progress)
+        linux::scan(
+            interface_name,
+            kind,
+            hosts,
+            ports,
+            stop,
+            scope_active,
+            progress,
+        )
     }
     #[cfg(not(target_os = "linux"))]
     {
-        let _ = (interface_name, kind, hosts, ports, stop, scope_active, progress);
+        let _ = (
+            interface_name,
+            kind,
+            hosts,
+            ports,
+            stop,
+            scope_active,
+            progress,
+        );
         Err(DepthScanError::new(
             DepthErrorCode::Unsupported,
             "raw FIN/NULL/Xmas/ACK/Window scanning requires Linux CAP_NET_RAW",
@@ -832,7 +854,9 @@ mod linux {
         if unsafe { ioctl(fd.0, SIOCGIFADDR, (&raw mut request).cast()) } < 0 {
             return Err(err("verify selected interface IPv4"));
         }
-        let octets: [u8; 4] = request.payload[4..8].try_into().expect("fixed ifreq layout");
+        let octets: [u8; 4] = request.payload[4..8]
+            .try_into()
+            .expect("fixed ifreq layout");
         let address = Ipv4Addr::from(octets);
         if address.is_unspecified() || address.is_multicast() || address.is_broadcast() {
             return Err(DepthScanError::new(
@@ -958,8 +982,14 @@ mod linux {
             if ready == 0 || pfd.revents & POLLIN == 0 {
                 return Ok(None);
             }
-            let received =
-                unsafe { recv(self.receive_fd.0, buffer.as_mut_ptr().cast(), buffer.len(), 0) };
+            let received = unsafe {
+                recv(
+                    self.receive_fd.0,
+                    buffer.as_mut_ptr().cast(),
+                    buffer.len(),
+                    0,
+                )
+            };
             if received < 0 {
                 if io::Error::last_os_error().kind() == io::ErrorKind::Interrupted {
                     return Ok(None);
@@ -983,7 +1013,9 @@ mod linux {
         progress: &(impl Fn(usize, usize) + Sync),
     ) -> Result<Vec<DepthFinding>, DepthScanError> {
         let mut link = LinuxProbeLink::open(interface_name)?;
-        run_flag_probe_plan(&mut link, kind, MTU_BUDGET, hosts, ports, stop, scope, progress)
+        run_flag_probe_plan(
+            &mut link, kind, MTU_BUDGET, hosts, ports, stop, scope, progress,
+        )
     }
 }
 
@@ -1056,7 +1088,9 @@ pub fn probe_payload(probe: ServiceProbe, nonce: &[u8; 32]) -> Vec<u8> {
         ServiceProbe::HttpGet => b"GET / HTTP/1.0\r\n\r\n".to_vec(),
         ServiceProbe::HttpOptions => b"OPTIONS / HTTP/1.0\r\n\r\n".to_vec(),
         ServiceProbe::RedisPing => b"*1\r\n$4\r\nPING\r\n".to_vec(),
-        ServiceProbe::DnsVersionBind => dns_version_bind_query(u16::from_be_bytes([nonce[0], nonce[1]])).to_vec(),
+        ServiceProbe::DnsVersionBind => {
+            dns_version_bind_query(u16::from_be_bytes([nonce[0], nonce[1]])).to_vec()
+        }
         ServiceProbe::TlsHello => tls_client_hello(nonce),
     }
 }
@@ -1069,7 +1103,7 @@ pub fn dns_version_bind_query(id: u16) -> [u8; 32] {
     query[2..4].copy_from_slice(&id.to_be_bytes());
     query[4..6].copy_from_slice(&0x0100u16.to_be_bytes()); // recursion desired
     query[6..8].copy_from_slice(&1u16.to_be_bytes()); // one question
-    // 07 "version" 04 "bind" 00, type TXT (0x0010), class CHAOS (0x0003)
+                                                      // 07 "version" 04 "bind" 00, type TXT (0x0010), class CHAOS (0x0003)
     query[12] = 7;
     query[13..20].copy_from_slice(b"version");
     query[20] = 4;
@@ -1262,10 +1296,7 @@ fn certificate_subject_cn(cert: &[u8]) -> Option<String> {
             let tag = cert[cursor + 5];
             if tag == 0x0c || tag == 0x13 || tag == 0x1a {
                 let length = usize::from(cert[cursor + 6]);
-                if length > 0
-                    && cursor + 7 + length <= cert.len()
-                    && length <= MAX_SERVICE_CLAIM
-                {
+                if length > 0 && cursor + 7 + length <= cert.len() && length <= MAX_SERVICE_CLAIM {
                     if let Some(claim) = sanitize_claim(&cert[cursor + 7..cursor + 7 + length]) {
                         found = Some(claim);
                     }
@@ -1298,8 +1329,8 @@ fn tls_certificate_after_server_hello(response: &[u8]) -> Option<String> {
         let mut inner = body_start;
         while inner + 4 <= body_end {
             let hand_type = response[inner];
-            let length =
-                usize::from(response[inner + 1]) << 16 | usize::from(be16(&response[inner + 2..inner + 4])?);
+            let length = usize::from(response[inner + 1]) << 16
+                | usize::from(be16(&response[inner + 2..inner + 4])?);
             let start = inner + 4;
             let end = start.checked_add(length)?;
             if end > body_end {
@@ -1349,7 +1380,9 @@ pub fn classify_service_response(probe: ServiceProbe, response: &[u8]) -> Option
                     .iter()
                     .position(|&b| b == b'-')
                     .map(|i| &rest[i + 1..])
-                    .map(|token| &token[..token.iter().position(|&b| b == b' ').unwrap_or(token.len())])
+                    .map(|token| {
+                        &token[..token.iter().position(|&b| b == b' ').unwrap_or(token.len())]
+                    })
                     .and_then(sanitize_claim);
                 return Some(ServiceMatch {
                     service: "ssh",
@@ -1466,9 +1499,7 @@ pub fn classify_service_response(probe: ServiceProbe, response: &[u8]) -> Option
 
 fn classify_dns_version_bind(response: &[u8]) -> Option<ServiceMatch> {
     // Strip the DNS-over-TCP length prefix when present.
-    let dns = if response.len() >= 14
-        && usize::from(be16(&response[..2])?) == response.len() - 2
-    {
+    let dns = if response.len() >= 14 && usize::from(be16(&response[..2])?) == response.len() - 2 {
         &response[2..]
     } else {
         response
@@ -1501,7 +1532,11 @@ fn classify_dns_version_bind(response: &[u8]) -> Option<ServiceMatch> {
         let r#type = be16(&dns[cursor..cursor + 2])?;
         let class = be16(&dns[cursor + 2..cursor + 4])?;
         let rdlength = usize::from(be16(&dns[cursor + 8..cursor + 10])?);
-        if r#type == 0x0010 && class == 0x0003 && rdlength >= 1 && cursor + 10 + rdlength <= dns.len() {
+        if r#type == 0x0010
+            && class == 0x0003
+            && rdlength >= 1
+            && cursor + 10 + rdlength <= dns.len()
+        {
             let rdata = &dns[cursor + 10..cursor + 10 + rdlength];
             let text_len = usize::from(rdata[0]);
             if text_len > 0 && 1 + text_len <= rdata.len() {
@@ -1550,7 +1585,13 @@ mod tests {
     fn flag_probe_headers_and_both_checksums_are_correct() {
         let local = ip4("192.0.2.1");
         let target = ip4("192.0.2.2");
-        for kind in [ScanKind::Fin, ScanKind::Null, ScanKind::Xmas, ScanKind::Ack, ScanKind::Window] {
+        for kind in [
+            ScanKind::Fin,
+            ScanKind::Null,
+            ScanKind::Xmas,
+            ScanKind::Ack,
+            ScanKind::Window,
+        ] {
             let packet = ipv4_tcp_scan_probe(local, target, 40000, 443, kind, 0x11223344, 7, 64)
                 .expect("valid probe");
             assert_eq!(packet.len(), 40);
@@ -1732,7 +1773,13 @@ mod tests {
             ScanKind::Window,
         ] {
             assert_eq!(
-                classify_reply(kind, Some(ProbeReply::IcmpUnreachable { icmp_kind: 3, code: 1 })),
+                classify_reply(
+                    kind,
+                    Some(ProbeReply::IcmpUnreachable {
+                        icmp_kind: 3,
+                        code: 1
+                    })
+                ),
                 PortState::Filtered
             );
         }
@@ -1766,7 +1813,10 @@ mod tests {
         synack[20 + 13] = 0x12;
         assert_eq!(classify_frame(ScanKind::Fin, &synack, &key), None);
         // Wrong ports and truncated frames are refused.
-        assert_eq!(classify_frame(ScanKind::Fin, &rst_frame(0)[..30], &key), None);
+        assert_eq!(
+            classify_frame(ScanKind::Fin, &rst_frame(0)[..30], &key),
+            None
+        );
         let mut wrong_ports = rst_frame(0);
         wrong_ports[20 + 1] = 0x00; // reply source port 443 -> 256
         assert_eq!(classify_frame(ScanKind::Fin, &wrong_ports, &key), None);
@@ -1842,7 +1892,11 @@ mod tests {
         let mut tcp = vec![0u8; 20];
         tcp[0..2].copy_from_slice(&sent[22..24]); // reply src = probe dst port
         tcp[2..4].copy_from_slice(&sent[20..22]); // reply dst = probe src port
-        tcp[8..12].copy_from_slice(&u32::from_be_bytes(sent[28..32].try_into().expect("seq")).wrapping_add(1).to_be_bytes());
+        tcp[8..12].copy_from_slice(
+            &u32::from_be_bytes(sent[28..32].try_into().expect("seq"))
+                .wrapping_add(1)
+                .to_be_bytes(),
+        );
         tcp[12] = 0x50;
         tcp[13] = 0x04 | 0x10; // RST+ACK
         tcp[14..16].copy_from_slice(&window.to_be_bytes());
@@ -1959,7 +2013,13 @@ mod tests {
 
     #[test]
     fn icmp_unreachable_classifies_every_kind_as_filtered() {
-        for kind in [ScanKind::Fin, ScanKind::Null, ScanKind::Xmas, ScanKind::Ack, ScanKind::Window] {
+        for kind in [
+            ScanKind::Fin,
+            ScanKind::Null,
+            ScanKind::Xmas,
+            ScanKind::Ack,
+            ScanKind::Window,
+        ] {
             let mut link = FixtureLink {
                 respond: Box::new(|sent| Some(icmp_unreachable_reply_to(sent))),
                 replies: Default::default(),
@@ -2002,7 +2062,10 @@ mod tests {
         )
         .expect("bounded plan");
         assert_eq!(findings.len(), 4);
-        assert_eq!(last.load(std::sync::atomic::Ordering::Acquire), 4 * 1000 + 4);
+        assert_eq!(
+            last.load(std::sync::atomic::Ordering::Acquire),
+            4 * 1000 + 4
+        );
         assert_eq!(link.sent, 4);
     }
 
@@ -2013,12 +2076,72 @@ mod tests {
         let host = ip4("192.0.2.2");
         let scope = &|| true;
         let progress = &|_, _| {};
-        assert!(run_flag_probe_plan(&mut link, ScanKind::Fin, 1500, &[], &[80], &stop, scope, progress).is_err());
-        assert!(run_flag_probe_plan(&mut link, ScanKind::Fin, 1500, &[host], &[], &stop, scope, progress).is_err());
-        assert!(run_flag_probe_plan(&mut link, ScanKind::Fin, 1500, &vec![host; 33], &[80], &stop, scope, progress).is_err());
-        assert!(run_flag_probe_plan(&mut link, ScanKind::Fin, 1500, &[host], &vec![1u16; 129], &stop, scope, progress).is_err());
-        assert!(run_flag_probe_plan(&mut link, ScanKind::Fin, 1500, &[host], &[0], &stop, scope, progress).is_err());
-        assert!(run_flag_probe_plan(&mut link, ScanKind::Fin, 1500, &vec![host; 32], &vec![80u16; 128], &stop, scope, progress).is_err());
+        assert!(run_flag_probe_plan(
+            &mut link,
+            ScanKind::Fin,
+            1500,
+            &[],
+            &[80],
+            &stop,
+            scope,
+            progress
+        )
+        .is_err());
+        assert!(run_flag_probe_plan(
+            &mut link,
+            ScanKind::Fin,
+            1500,
+            &[host],
+            &[],
+            &stop,
+            scope,
+            progress
+        )
+        .is_err());
+        assert!(run_flag_probe_plan(
+            &mut link,
+            ScanKind::Fin,
+            1500,
+            &vec![host; 33],
+            &[80],
+            &stop,
+            scope,
+            progress
+        )
+        .is_err());
+        assert!(run_flag_probe_plan(
+            &mut link,
+            ScanKind::Fin,
+            1500,
+            &[host],
+            &vec![1u16; 129],
+            &stop,
+            scope,
+            progress
+        )
+        .is_err());
+        assert!(run_flag_probe_plan(
+            &mut link,
+            ScanKind::Fin,
+            1500,
+            &[host],
+            &[0],
+            &stop,
+            scope,
+            progress
+        )
+        .is_err());
+        assert!(run_flag_probe_plan(
+            &mut link,
+            ScanKind::Fin,
+            1500,
+            &vec![host; 32],
+            &vec![80u16; 128],
+            &stop,
+            scope,
+            progress
+        )
+        .is_err());
         assert_eq!(link.sent, 0);
     }
 
@@ -2085,8 +2208,14 @@ mod tests {
         assert_eq!(probe_registry_for_port(443)[0], ServiceProbe::TlsHello);
         assert_eq!(probe_registry_for_port(8443)[0], ServiceProbe::TlsHello);
         assert_eq!(probe_registry_for_port(8080)[0], ServiceProbe::HttpGet);
-        assert_eq!(probe_registry_for_port(6379), &[ServiceProbe::Banner, ServiceProbe::RedisPing]);
-        assert_eq!(probe_registry_for_port(53), &[ServiceProbe::Banner, ServiceProbe::DnsVersionBind]);
+        assert_eq!(
+            probe_registry_for_port(6379),
+            &[ServiceProbe::Banner, ServiceProbe::RedisPing]
+        );
+        assert_eq!(
+            probe_registry_for_port(53),
+            &[ServiceProbe::Banner, ServiceProbe::DnsVersionBind]
+        );
         assert_eq!(probe_registry_for_port(22), &[ServiceProbe::Banner]);
     }
 
@@ -2094,10 +2223,19 @@ mod tests {
     fn payload_builder_emits_expected_protocol_bytes() {
         let bytes = nonce();
         assert!(probe_payload(ServiceProbe::Banner, &bytes).is_empty());
-        assert_eq!(probe_payload(ServiceProbe::RedisPing, &bytes), b"*1\r\n$4\r\nPING\r\n");
-        assert_eq!(probe_payload(ServiceProbe::HttpGet, &bytes), b"GET / HTTP/1.0\r\n\r\n");
+        assert_eq!(
+            probe_payload(ServiceProbe::RedisPing, &bytes),
+            b"*1\r\n$4\r\nPING\r\n"
+        );
+        assert_eq!(
+            probe_payload(ServiceProbe::HttpGet, &bytes),
+            b"GET / HTTP/1.0\r\n\r\n"
+        );
         let tls = probe_payload(ServiceProbe::TlsHello, &bytes);
-        assert_eq!(&tls[..9], &[0x16, 0x03, 0x01, 0x00, 0x35, 0x01, 0x00, 0x00, 0x31]);
+        assert_eq!(
+            &tls[..9],
+            &[0x16, 0x03, 0x01, 0x00, 0x35, 0x01, 0x00, 0x00, 0x31]
+        );
         assert_eq!(&tls[9..11], &[0x03, 0x03]);
         assert_eq!(&tls[11..43], &bytes);
         assert_eq!(&tls[tls.len() - 2..], &[0x00, 0x00]);
@@ -2128,7 +2266,8 @@ mod tests {
             .expect("imap");
         assert_eq!(imap.service, "imap");
         assert!(!imap.soft);
-        let imap_bye = classify_service_response(ServiceProbe::Banner, b"* BYE autologout\r\n").expect("imap");
+        let imap_bye =
+            classify_service_response(ServiceProbe::Banner, b"* BYE autologout\r\n").expect("imap");
         assert!(imap_bye.soft);
 
         let smtp = classify_service_response(
@@ -2140,28 +2279,30 @@ mod tests {
         assert!(!smtp.soft);
         assert_eq!(smtp.claim.as_deref(), Some("Postfix"));
 
-        let ftp = classify_service_response(
-            ServiceProbe::Banner,
-            b"220 ProFTPD 1.3.8 Server ready\r\n",
-        )
-        .expect("ftp");
+        let ftp =
+            classify_service_response(ServiceProbe::Banner, b"220 ProFTPD 1.3.8 Server ready\r\n")
+                .expect("ftp");
         assert_eq!(ftp.service, "ftp");
         assert!(!ftp.soft);
         assert_eq!(ftp.claim.as_deref(), Some("ProFTPD"));
 
         // Bare 220 without protocol hints is an honest softmatch.
-        let soft = classify_service_response(ServiceProbe::Banner, b"220 welcome\r\n").expect("soft");
+        let soft =
+            classify_service_response(ServiceProbe::Banner, b"220 welcome\r\n").expect("soft");
         assert_eq!(soft.service, "ftp");
         assert!(soft.soft);
         assert_eq!(soft.claim, None);
 
         let unknown =
-            classify_service_response(ServiceProbe::Banner, b"some binary gibberish line\r\n").expect("unknown");
+            classify_service_response(ServiceProbe::Banner, b"some binary gibberish line\r\n")
+                .expect("unknown");
         assert_eq!(unknown.service, "unknown");
         assert!(unknown.soft);
 
         // Binary garbage that is not a printable line has no claim at all.
-        assert!(classify_service_response(ServiceProbe::Banner, &[0x00, 0x01, 0x02, 0xff]).is_none());
+        assert!(
+            classify_service_response(ServiceProbe::Banner, &[0x00, 0x01, 0x02, 0xff]).is_none()
+        );
         assert!(classify_service_response(ServiceProbe::Banner, b"").is_none());
     }
 
@@ -2180,7 +2321,8 @@ mod tests {
         assert_eq!(matched.claim.as_deref(), Some("8.0.36-log"));
 
         let mut error_payload = vec![0xffu8];
-        error_payload.extend_from_slice(b"#28000Host 'x' is not allowed to connect to this MySQL server");
+        error_payload
+            .extend_from_slice(b"#28000Host 'x' is not allowed to connect to this MySQL server");
         let mut error = vec![(error_payload.len() & 0xff) as u8, 0, 0, 0];
         error.extend_from_slice(&error_payload);
         let matched = classify_service_response(ServiceProbe::Banner, &error).expect("mysql error");
@@ -2202,8 +2344,9 @@ mod tests {
             assert!(!matched.soft);
             assert_eq!(matched.claim.as_deref(), Some("nginx/1.25.3"));
         }
-        let no_header = classify_service_response(ServiceProbe::HttpGet, b"HTTP/1.0 302 Found\r\n\r\n")
-            .expect("http no server");
+        let no_header =
+            classify_service_response(ServiceProbe::HttpGet, b"HTTP/1.0 302 Found\r\n\r\n")
+                .expect("http no server");
         assert_eq!(no_header.claim, None);
         assert!(classify_service_response(ServiceProbe::HttpGet, b"not http at all").is_none());
     }
@@ -2247,8 +2390,11 @@ mod tests {
         assert_eq!(matched.claim.as_deref(), Some("demo.local"));
 
         // A TLS alert is a soft TLS identification without a claim.
-        let alert = classify_service_response(ServiceProbe::TlsHello, &[0x15, 0x03, 0x03, 0x00, 0x02, 0x02, 0x28])
-            .expect("alert");
+        let alert = classify_service_response(
+            ServiceProbe::TlsHello,
+            &[0x15, 0x03, 0x03, 0x00, 0x02, 0x02, 0x28],
+        )
+        .expect("alert");
         assert_eq!(alert.service, "ssl");
         assert!(alert.soft);
         assert!(classify_service_response(ServiceProbe::TlsHello, b"plaintext").is_none());
@@ -2263,7 +2409,9 @@ mod tests {
             .expect("resp error");
         assert_eq!(err.service, "redis");
         assert!(err.soft);
-        assert!(classify_service_response(ServiceProbe::RedisPing, b"HTTP/1.1 400 Bad\r\n").is_none());
+        assert!(
+            classify_service_response(ServiceProbe::RedisPing, b"HTTP/1.1 400 Bad\r\n").is_none()
+        );
 
         // DNS/TCP reply: header (QR set) + question + TXT CHAOS answer.
         let mut reply = Vec::new();
@@ -2276,7 +2424,8 @@ mod tests {
         reply.extend_from_slice(b"9.0.1.");
         let mut framed = (reply.len() as u16).to_be_bytes().to_vec();
         framed.extend_from_slice(&reply);
-        let matched = classify_service_response(ServiceProbe::DnsVersionBind, &framed).expect("dns");
+        let matched =
+            classify_service_response(ServiceProbe::DnsVersionBind, &framed).expect("dns");
         assert_eq!(matched.service, "domain");
         assert!(!matched.soft);
         assert_eq!(matched.claim.as_deref(), Some("9.0.1."));
@@ -2286,7 +2435,8 @@ mod tests {
         quiet.extend_from_slice(&[0x12, 0x34, 0x81, 0x80]);
         quiet.extend_from_slice(&[0, 1, 0, 0, 0, 0, 0, 0]);
         quiet.extend_from_slice(b"\x07version\x04bind\x00\x00\x10\x00\x03");
-        let soft = classify_service_response(ServiceProbe::DnsVersionBind, &quiet).expect("dns soft");
+        let soft =
+            classify_service_response(ServiceProbe::DnsVersionBind, &quiet).expect("dns soft");
         assert_eq!(soft.service, "domain");
         assert!(soft.soft);
         assert_eq!(soft.claim, None);

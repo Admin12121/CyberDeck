@@ -161,7 +161,9 @@ pub fn engine_attack(
                 return Err("rules apply to wordlist mode only".into());
             }
             Some(
-                crate::features::crypto::ipc::recovery::library_rules::resolve_rules_path(&app, id)?,
+                crate::features::crypto::ipc::recovery::library_rules::resolve_rules_path(
+                    &app, id,
+                )?,
             )
         }
         _ => None,

@@ -175,7 +175,11 @@ impl InsightsCtx {
     /// Drop snapshots belonging to other cases before reading, then clone the
     /// requested session. The retain-on-read keeps case switches hygienic
     /// without needing a hook into the shared scanner state.
-    fn snapshot(&self, scope: &CaseSessionWire, session_id: u64) -> Result<Vec<SessionRow>, String> {
+    fn snapshot(
+        &self,
+        scope: &CaseSessionWire,
+        session_id: u64,
+    ) -> Result<Vec<SessionRow>, String> {
         let mut snapshots = self
             .snapshots
             .lock()
@@ -492,13 +496,10 @@ pub(crate) fn topology_from_session(
     let mut hosts: BTreeMap<String, HashSet<PortKey>> = BTreeMap::new();
     for row in rows {
         if row.state == "open" {
-            hosts
-                .entry(row.host.clone())
-                .or_default()
-                .insert(PortKey {
-                    port: row.port,
-                    protocol: row.protocol.clone(),
-                });
+            hosts.entry(row.host.clone()).or_default().insert(PortKey {
+                port: row.port,
+                protocol: row.protocol.clone(),
+            });
         }
     }
     // Deterministic retention: sort by IP key, keep the first 512, report the
@@ -571,7 +572,10 @@ pub(crate) fn topology_from_session(
 // IPC commands
 // ---------------------------------------------------------------------------
 
-fn insights_scope(selected: &State<'_, CaseSessionCtx>, ctx: &State<'_, ScanCtx>) -> Result<CaseSessionWire, String> {
+fn insights_scope(
+    selected: &State<'_, CaseSessionCtx>,
+    ctx: &State<'_, ScanCtx>,
+) -> Result<CaseSessionWire, String> {
     let scope = selected.selected()?;
     // Same authorization gate as the netscan reads: scan storage belongs to
     // the backend-selected case revision only.
@@ -613,7 +617,11 @@ pub fn netscan_topology_v1(
     sync_current_session(&ctx, &insights, &scope);
     let rows = insights.snapshot(&scope, session_id)?;
     selected.ensure(&scope)?;
-    Ok(topology_from_session(session_id, &rows, primary_local_address()))
+    Ok(topology_from_session(
+        session_id,
+        &rows,
+        primary_local_address(),
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -686,10 +694,7 @@ mod tests {
         assert_eq!(changed.state_changes[0].port, "80/tcp");
         assert_eq!(changed.state_changes[0].from, "open");
         assert_eq!(changed.state_changes[0].to, "closed");
-        assert_eq!(
-            (diff.summary.hosts_up_a, diff.summary.hosts_up_b),
-            (2, 2)
-        );
+        assert_eq!((diff.summary.hosts_up_a, diff.summary.hosts_up_b), (2, 2));
         assert_eq!(
             (diff.summary.ports_open_a, diff.summary.ports_open_b),
             (3, 3)
@@ -781,10 +786,7 @@ mod tests {
             banner: String::new(),
         }];
         let rows = rows_from_entries(&entries);
-        assert_eq!(
-            rows,
-            vec![row("192.0.2.30", 8080, "tcp", "open")]
-        );
+        assert_eq!(rows, vec![row("192.0.2.30", 8080, "tcp", "open")]);
     }
 
     // ---- topology -----------------------------------------------------------
@@ -935,10 +937,7 @@ mod tests {
         assert!(insights.snapshot(&scope_a, last_id).is_ok());
         // Re-capture replaces the stored rows for the same session id.
         insights.retain("case-a", last_id, vec![]);
-        assert_eq!(
-            insights.snapshot(&scope_a, last_id).unwrap().len(),
-            0
-        );
+        assert_eq!(insights.snapshot(&scope_a, last_id).unwrap().len(), 0);
         // Another case cannot read or keep this case's snapshots.
         let scope_b = CaseSessionWire {
             case_id: Some("case-b".into()),

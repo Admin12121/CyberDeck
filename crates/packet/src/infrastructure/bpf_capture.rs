@@ -21,9 +21,8 @@
 #![cfg(target_os = "macos")]
 
 use crate::live::{
-    capture_from_with_progress, select_interface, CaptureError, CaptureErrorCode,
-    CaptureInterface, CaptureLimits, CaptureProgress, CaptureResult, FrameSource, ReceivedFrame,
-    MAX_FRAME_BYTES,
+    capture_from_with_progress, select_interface, CaptureError, CaptureErrorCode, CaptureInterface,
+    CaptureLimits, CaptureProgress, CaptureResult, FrameSource, ReceivedFrame, MAX_FRAME_BYTES,
 };
 use std::ffi::{c_char, c_int, c_short, c_uint, c_ulong, c_void, CStr};
 use std::fs::{File, OpenOptions};
@@ -115,9 +114,7 @@ fn build_ifreq(interface_name: &str) -> Result<IfReq, CaptureError> {
     if interface_name.len() >= 16 {
         return Err(CaptureError::new(
             CaptureErrorCode::InvalidConfig,
-            format!(
-                "interface name '{interface_name}' is too long for the kernel ifreq layout"
-            ),
+            format!("interface name '{interface_name}' is too long for the kernel ifreq layout"),
         ));
     }
     let mut request = IfReq {
@@ -294,7 +291,10 @@ const _: () = assert!(std::mem::size_of::<SockAddrDl>() == 20);
 pub fn discover_interfaces() -> Result<Vec<CaptureInterface>, CaptureError> {
     let mut head: *mut IfAddrs = std::ptr::null_mut();
     if unsafe { getifaddrs(&raw mut head) } != 0 {
-        return Err(io_error("enumerate network interfaces", io::Error::last_os_error()));
+        return Err(io_error(
+            "enumerate network interfaces",
+            io::Error::last_os_error(),
+        ));
     }
     // Raw per-name observations merged below; getifaddrs yields several
     // records per interface (AF_LINK, AF_INET, ...) sharing one name.
@@ -493,8 +493,7 @@ impl BpfDevice {
             // The kernel writes the clamped size back through the same word.
             request = value;
             let mut ifreq = build_ifreq(interface_name)?;
-            let bound_rc =
-                unsafe { ioctl(fd, BIOCSETIF, (&raw mut ifreq).cast()) };
+            let bound_rc = unsafe { ioctl(fd, BIOCSETIF, (&raw mut ifreq).cast()) };
             if bound_rc == 0 {
                 bound = true;
                 break;
@@ -525,10 +524,16 @@ impl BpfDevice {
                         request /= 2;
                         continue;
                     }
-                    return Err(io_error("bind BPF to selected interface (BIOCSETIF)", error));
+                    return Err(io_error(
+                        "bind BPF to selected interface (BIOCSETIF)",
+                        error,
+                    ));
                 }
                 _ => {
-                    return Err(io_error("bind BPF to selected interface (BIOCSETIF)", error));
+                    return Err(io_error(
+                        "bind BPF to selected interface (BIOCSETIF)",
+                        error,
+                    ));
                 }
             }
         }
@@ -552,7 +557,10 @@ impl BpfDevice {
         }
         let mut dlt = 0u32;
         if unsafe { ioctl(fd, BIOCGDLT, (&raw mut dlt).cast()) } != 0 {
-            return Err(io_error("read BPF data link type (BIOCGDLT)", io::Error::last_os_error()));
+            return Err(io_error(
+                "read BPF data link type (BIOCGDLT)",
+                io::Error::last_os_error(),
+            ));
         }
         // The shared engine stamps every PCAP record as DLT_EN10MB, so a
         // non-Ethernet link type would silently fabricate false evidence.
@@ -614,7 +622,13 @@ impl BpfDevice {
         // FIONREAD guards against spurious readability before committing a
         // read; zero available bytes means nothing is actually buffered.
         let mut available: c_int = 0;
-        if unsafe { ioctl(self.device.as_raw_fd(), FIONREAD, (&raw mut available).cast()) } == 0
+        if unsafe {
+            ioctl(
+                self.device.as_raw_fd(),
+                FIONREAD,
+                (&raw mut available).cast(),
+            )
+        } == 0
             && available <= 0
         {
             return Ok(());
@@ -703,13 +717,23 @@ impl BpfDevice {
     /// program must come from `CaptureFilter::to_bpf_program`, whose
     /// predicate is cross-checked by the in-module interpreter tests.
     fn set_filter(&self, program: &[crate::live::BpfInstruction]) -> Result<(), CaptureError> {
-        let len = u32::try_from(program.len())
-            .map_err(|_| CaptureError::new(CaptureErrorCode::InvalidConfig, "filter program too large"))?;
+        let len = u32::try_from(program.len()).map_err(|_| {
+            CaptureError::new(CaptureErrorCode::InvalidConfig, "filter program too large")
+        })?;
         let raw = BpfProgramRaw {
             bf_len: len,
             bf_insns: program.as_ptr(),
         };
-        if unsafe { ioctl(self.device.as_raw_fd(), BIOCSSETF, (&raw as *const BpfProgramRaw).cast::<core::ffi::c_void>().cast_mut()) } != 0 {
+        if unsafe {
+            ioctl(
+                self.device.as_raw_fd(),
+                BIOCSSETF,
+                (&raw as *const BpfProgramRaw)
+                    .cast::<core::ffi::c_void>()
+                    .cast_mut(),
+            )
+        } != 0
+        {
             return Err(io_error(
                 "install BPF capture filter (BIOCSSETF)",
                 io::Error::last_os_error(),
@@ -890,13 +914,22 @@ mod tests {
         // A valid record afterwards is unreachable once untrusted; parsing
         // must report Untrusted at the front, never skip ahead blindly.
         push_record(&mut kernel, 1_700_000_001, 0, 14, 14, 20, &frame(14, 0x34));
-        assert!(matches!(step_kernel_record(&kernel, &mut out), Stepped::Untrusted));
+        assert!(matches!(
+            step_kernel_record(&kernel, &mut out),
+            Stepped::Untrusted
+        ));
         // caplen exceeding the wire length breaks a kernel invariant.
         let mut kernel = Vec::new();
         push_record(&mut kernel, 1_700_000_000, 0, 20, 10, 20, &frame(20, 0x35));
-        assert!(matches!(step_kernel_record(&kernel, &mut out), Stepped::Untrusted));
+        assert!(matches!(
+            step_kernel_record(&kernel, &mut out),
+            Stepped::Untrusted
+        ));
         // A short tail cannot contain the fixed fields at all.
-        assert!(matches!(step_kernel_record(&kernel[..8], &mut out), Stepped::Untrusted));
+        assert!(matches!(
+            step_kernel_record(&kernel[..8], &mut out),
+            Stepped::Untrusted
+        ));
     }
 
     #[test]
@@ -927,21 +960,41 @@ mod tests {
         let data = frame(14, 0x66);
         let mut kernel = Vec::new();
         push_record(&mut kernel, -5, 0, 14, 14, 20, &data);
-        assert!(matches!(step_kernel_record(&kernel, &mut out), Stepped::Skipped(_)));
+        assert!(matches!(
+            step_kernel_record(&kernel, &mut out),
+            Stepped::Skipped(_)
+        ));
         let mut kernel = Vec::new();
         push_record(&mut kernel, 1_700_000_000, 1_000_000, 14, 14, 20, &data);
-        assert!(matches!(step_kernel_record(&kernel, &mut out), Stepped::Skipped(_)));
+        assert!(matches!(
+            step_kernel_record(&kernel, &mut out),
+            Stepped::Skipped(_)
+        ));
         let mut kernel = Vec::new();
         push_record(&mut kernel, 1_700_000_000, -1, 14, 14, 20, &data);
-        assert!(matches!(step_kernel_record(&kernel, &mut out), Stepped::Skipped(_)));
+        assert!(matches!(
+            step_kernel_record(&kernel, &mut out),
+            Stepped::Skipped(_)
+        ));
     }
 
     #[test]
     fn snaplen_truncated_records_are_dropped_like_linux_msg_trunc() {
         let mut out = [0u8; MAX_FRAME_BYTES];
         let mut kernel = Vec::new();
-        push_record(&mut kernel, 1_700_000_000, 0, 20, 1_500, 20, &frame(20, 0x77));
-        assert!(matches!(step_kernel_record(&kernel, &mut out), Stepped::Skipped(40)));
+        push_record(
+            &mut kernel,
+            1_700_000_000,
+            0,
+            20,
+            1_500,
+            20,
+            &frame(20, 0x77),
+        );
+        assert!(matches!(
+            step_kernel_record(&kernel, &mut out),
+            Stepped::Skipped(40)
+        ));
     }
 
     #[test]
