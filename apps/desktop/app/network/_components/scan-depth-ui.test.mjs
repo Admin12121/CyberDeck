@@ -39,25 +39,51 @@ test("raw scan-type selector declares exactly the five documented flag scans", (
 });
 
 test("stealth scan controls exist with progress and stop mirroring the SYN flow", () => {
-  assert.match(scanViewSource, /Raw depth/);
-  assert.match(scanViewSource, /Stop raw/);
+  // UX revision: raw-depth controls are compact toolbar buttons; the full
+  // labels, platform restriction and silence semantics live in tooltips.
+  assert.match(scanViewSource, /title="Raw depth — Linux only: FIN\/NULL\/Xmas\/ACK\/Window flag probes/);
+  assert.match(scanViewSource, /title="Stop raw — stops the case-authorized raw FIN\/NULL\/Xmas\/ACK\/Window scan"/);
   assert.match(scanViewSource, /ariaLabel="Raw scan type"/);
+  assert.match(
+    scanViewSource,
+    /title="Raw scan types require Linux · silence means the documented default state, not proof"/,
+  );
   // Progress line bound to the stealth channel state.
   assert.match(scanViewSource, /stealthProgress\.tried.*stealthProgress\.total/s);
-  // Notes-pane findings panel with the documented silence semantics.
+  // Findings strip with the documented silence semantics.
   assert.match(scanViewSource, /open\|filtered/);
   assert.match(scanViewSource, /stealthFindings\.map/);
 });
 
 test("raw scan types carry the explicit Linux platform note", () => {
-  assert.match(scanViewSource, /Raw scan types require Linux/);
-  // Non-Linux fallback also names the restriction.
+  // Platform availability lives in the Laptop-icon tooltip (aria-label +
+  // title), never rendered as body text; the unsupported-platform fallback
+  // wording survives inside the same tooltip constant.
   assert.match(
     scanViewSource,
     /Raw FIN\/NULL\/Xmas\/ACK\/Window scan types require Linux/,
   );
   // Linux-only raw ops are also listed in the Windows note.
   assert.match(scanViewSource, /raw SYN and raw FIN\/NULL\/Xmas\/ACK\/Window scan types are Linux-only/);
+  assert.match(scanViewSource, /aria-label=\{platformNote\}/);
+  assert.match(scanViewSource, /title=\{platformNote\}/);
+});
+
+test("authorization is one compact toolbar checkbox with the full wording in a tooltip", () => {
+  // The backend requires the authorized flag on every scan command, so the
+  // checkbox stays; the §9.3 wording survives verbatim in the InfoTip text.
+  assert.match(scanViewSource, /aria-label="I am authorized to assess this target"/);
+  assert.match(scanViewSource, /I am authorized to assess this target/);
+  assert.match(
+    scanViewSource,
+    /I confirm the target is mine or I have explicit authorization to assess it/,
+  );
+  assert.match(scanViewSource, /<InfoTip text=\{AUTHORIZATION_TIP\} \/>/);
+  // No full-width authorization section and no in-view case management.
+  assert.ok(!/Authorization \(§9\.3\)/.test(scanViewSource));
+  assert.ok(!/AuthorizedCaseAction/.test(scanViewSource));
+  // Without a case the view shows one muted line pointing at the Case section.
+  assert.match(scanViewSource, /Select a case in the Case section to enable scanning/);
 });
 
 test("stealth and service-probe flows are gated behind authorization and a saved case", () => {

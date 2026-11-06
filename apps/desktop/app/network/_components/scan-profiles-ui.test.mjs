@@ -41,6 +41,8 @@ test("the timing selector is honest: only Normal is adaptive today", () => {
   // The tooltip must disclose that the other labels change no behavior yet.
   assert.match(scanViewSource, /Selecting them changes no probe behavior today/);
   assert.match(scanViewSource, /ariaLabel="Timing template"/);
+  // The honesty contract is attached to the selector as a tooltip.
+  assert.match(scanViewSource, /title=\{TIMING_TOOLTIP\}/);
 });
 
 test("profile controls exist with picker, name input, save, load and delete", () => {
@@ -59,6 +61,23 @@ test("profile controls exist with picker, name input, save, load and delete", ()
   assert.match(scanViewSource, /\{profiles\.length\}\/32 profiles/);
   // The picker degrades to an explicit empty entry, never a blank select.
   assert.match(scanViewSource, /No profile selected/);
+});
+
+test("profile summary and save failures render in the status strip, notes prose lives in a tooltip", () => {
+  assert.match(scanViewSource, /<StatusStrip items=\{statusItems\} \/>/);
+  assert.match(scanViewSource, /Case save failed: /);
+  // The Notes panel is gone; its prose survives verbatim in the toolbar
+  // info-button tooltip (UX revision: no prose walls on screen).
+  assert.match(scanViewSource, /title=\{NOTES_TOOLTIP\}/);
+  assert.match(
+    scanViewSource,
+    /Native scan status is global; results and findings withheld until a scan is started in this case/,
+  );
+  assert.match(
+    scanViewSource,
+    /Scan results, findings and Stop are bound to the backend-selected case generation/,
+  );
+  assert.ok(!/Pane title="Notes"/.test(scanViewSource));
 });
 
 test("save, load and delete handlers are bounded and validate stored JSON", () => {
