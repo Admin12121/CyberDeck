@@ -29,7 +29,7 @@ const capabilities = JSON.parse(readFileSync(capabilityPath, "utf8"));
 if (capabilities.schema !== 1 ||
     capabilities.source_commit !== "1994b513b550edfe3e7fcaa1103759a9343e57a4" ||
     capabilities.abi_version !== 4 ||
-    capabilities.hash_modes.map(x => x.id).join(",") !== "0,10,20,50,60,100,110,120,132,400,500,1000,1100,1400,1500,1700,1731,1800,2100,3200,5500,5600,7400,9400,9600,9700,10400,10500,11300,11600,13400,13600,15600,15700,17200,17210") {
+    capabilities.hash_modes.map(x => x.id).join(",") !== "0,10,20,50,60,100,110,120,132,400,500,1000,1100,1400,1500,1700,1731,1800,2100,3200,5500,5600,7400,9400,9600,9700,10400,10500,11300,11600,13100,13400,13600,15600,15700,17200,17210,18200,22100") {
   throw new Error("embedded Hashcat capability manifest conflicts with pinned C/worker contract");
 }
 const argIndex = process.argv.indexOf("--out");
@@ -117,6 +117,10 @@ const supportedModes = [
   { id: 1500, algorithm: "descrypt" },
   { id: 1731, algorithm: "mssql-2012" },
   { id: 132, algorithm: "mssql-2005" },
+  // Batch-6 Kerberos etype 23 + BitLocker.
+  { id: 13100, algorithm: "kerberos-tgs-rep" },
+  { id: 18200, algorithm: "kerberos-as-rep" },
+  { id: 22100, algorithm: "bitlocker" },
   // Batch-5 wallets (KeePass, Bitcoin, Ethereum PBKDF2/scrypt).
   { id: 11300, algorithm: "bitcoin" },
   { id: 13400, algorithm: "keepass" },

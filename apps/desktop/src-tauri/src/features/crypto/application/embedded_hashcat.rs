@@ -9,14 +9,18 @@ use cyberdeck_crypto::recovery::RecoveryTarget;
 mod preset;
 pub use preset::WordlistPreset;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
 use std::io::{BufReader, Read, Write};
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::{Mutex, OnceLock};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{mpsc, Mutex, OnceLock};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+use sha2::{Digest, Sha256};
 
 #[cfg(test)]
 const MAGIC: &[u8; 8] = b"CDHC0001";
@@ -73,25 +77,33 @@ fn worker_name() -> &'static str {
     }
 }
 
+fn shim_name() -> &'static str {
+    if cfg!(windows) {
+        "cyberdeck_hashcat_shim.dll"
+    } else if cfg!(target_os = "macos") {
+        "libcyberdeck_hashcat_shim.dylib"
+    } else {
+        "libcyberdeck_hashcat_shim.so"
+    }
+}
+
+fn hashcat_library_name() -> &'static str {
+    if cfg!(windows) {
+        "hashcat.dll"
+    } else if cfg!(target_os = "macos") {
+        "libhashcat.8.dylib"
+    } else {
+        "libhashcat.so.8"
+    }
+}
+
 pub fn runtime_available(root: &Path) -> Result<(), String> {
     // A native library without its exact SHA-256 mode, kernels and notices
     // cannot be advertised as a complete bundled recovery capability.
     let required_files = [
         worker_name(),
-        if cfg!(windows) {
-            "cyberdeck_hashcat_shim.dll"
-        } else if cfg!(target_os = "macos") {
-            "libcyberdeck_hashcat_shim.dylib"
-        } else {
-            "libcyberdeck_hashcat_shim.so"
-        },
-        if cfg!(windows) {
-            "hashcat.dll"
-        } else if cfg!(target_os = "macos") {
-            "libhashcat.8.dylib"
-        } else {
-            "libhashcat.so.8"
-        },
+        shim_name(),
+        hashcat_library_name(),
         if cfg!(windows) {
             "modules/module_00000.dll"
         } else {
@@ -143,6 +155,31 @@ pub fn runtime_available(root: &Path) -> Result<(), String> {
     // oldoffice and PDF 1.1-1.3 ship optimized-only kernel families.
     // Wallet batch (B3): all four wallet modes are pure-only.
     for (mode, kernels) in [
+        (
+            13100u32,
+            &[
+                "m13100_a0-optimized.cl",
+                "m13100_a1-optimized.cl",
+                "m13100_a3-optimized.cl",
+                "m13100_a0-pure.cl",
+                "m13100_a1-pure.cl",
+                "m13100_a3-pure.cl",
+                "m13100_a4-pure.cl",
+            ] as &[&str],
+        ),
+        (
+            18200,
+            &[
+                "m18200_a0-optimized.cl",
+                "m18200_a1-optimized.cl",
+                "m18200_a3-optimized.cl",
+                "m18200_a0-pure.cl",
+                "m18200_a1-pure.cl",
+                "m18200_a3-pure.cl",
+                "m18200_a4-pure.cl",
+            ] as &[&str],
+        ),
+        (22100u32, &["m22100-pure.cl"] as &[&str]),
         (11300u32, &["m11300-pure.cl"] as &[&str]),
         (13400, &["m13400-pure.cl"] as &[&str]),
         (15600, &["m15600-pure.cl"] as &[&str]),
@@ -303,6 +340,15 @@ const PUBLIC_KATS: &[(u32, &str, &str)] = &[
     (13400, "hashcat", "$keepass$*2*24569*0*c40432355cce7348c48053ceea0a28e7d18859c4ea47e3a799c6300861f64b95*265dafcc42e1537ff42e97e1e283c70014133be0fe2d420b4d24c6d57c9d2207*a00e20a852694c15aabb074d61b902fa*48dd553fb96f7996635f2414bfe6a1a8429ef0ffb71a1752abbef31853172c35*a44ae659958ad7fae8c8952cb83f3cf03fec2371ce22a8bf7fac1e687af2f249*1*64*5a26ea376cc5afc955104c334571d30486acbac512a94b75ca82a9e31dd97bf7"),
     (15600, "hashcat", "$ethereum$p*1024*38353131353831333338313138363430*a8b4dfe92687dbc0afeb5dae7863f18964241e96b264f09959903c8c924583fc*0a9252861d1e235994ce33dbca91c98231764d8ecb4950015a8ae20d6415b986"),
     (15700, "hashcat", "$ethereum$s*262144*8*1*3134313837333434333838303231333633373433323633373534333136363537*73da7f80ec3bd4f2a128c3a815cfb4d576ecb1a9b47024c902e62ea926f7795b*910e0f8dc1f7ba41959e1089bb769f3e919109591913cc33ba03953d7a905efd"),
+    // Batch-6: upstream hashcat example hash (module ST_HASH/ST_PASS,
+    // pass "hashcat"), independently verified by the native CPU verifier
+    // in cyberdeck-crypto/src/bitlocker.rs.
+    (22100, "hashcat", "$bitlocker$1$16$6f972989ddc209f1eccf07313a7266a2$1048576$12$3a33a8eaff5e6f81d907b591$60$316b0f6d4cb445fb056f0e3e0633c413526ff4481bbf588917b70a4e8f8075f5ceb45958a800b42cb7ff9b7f5e17c6145bf8561ea86f52d3592059fb"),
+    // Batch-6: upstream hashcat example hashes (module ST_HASH/ST_PASS,
+    // pass "hashcat"), independently verified by the native CPU verifier
+    // in cyberdeck-crypto/src/kerberos.rs.
+    (13100, "hashcat", "$krb5tgs$23$*user$realm$test/spn*$b548e10f5694ae018d7ad63c257af7dc$35e8e45658860bc31a859b41a08989265f4ef8afd75652ab4d7a30ef151bf6350d879ae189a8cb769e01fa573c6315232b37e4bcad9105520640a781e5fd85c09615e78267e494f433f067cc6958200a82f70627ce0eebc2ac445729c2a8a0255dc3ede2c4973d2d93ac8c1a56b26444df300cb93045d05ff2326affaa3ae97f5cd866c14b78a459f0933a550e0b6507bf8af27c2391ef69fbdd649dd059a4b9ae2440edd96c82479645ccdb06bae0eead3b7f639178a90cf24d9a"),
+    (18200, "hashcat", "$krb5asrep$23$user@domain.com:3e156ada591263b8aab0965f5aebd837$007497cb51b6c8116d6407a782ea0e1c5402b17db7afa6b05a6d30ed164a9933c754d720e279c6c573679bd27128fe77e5fea1f72334c1193c8ff0b370fadc6368bf2d49bbfdba4c5dccab95e8c8ebfdc75f438a0797dbfb2f8a1a5f4c423f9bfc1fea483342a11bd56a216f4d5158ccc4b224b52894fadfba3957dfe4b6b8f5f9f9fe422811a314768673e0c924340b8ccb84775ce9defaa3baa0910b676ad0036d13032b0dd94e3b13903cc738a7b6d00b0b3c210d1f972a6c7cae9bd3c959acf7565be528fc179118f28c679f6deeee1456f0781eb8154e18e49cb27b64bf74cd7112a0ebae2102ac"),
 ];
 type Readiness = Result<Vec<u32>, String>;
 static READINESS_CACHE: OnceLock<Mutex<HashMap<PathBuf, Readiness>>> = OnceLock::new();
@@ -341,6 +387,9 @@ fn self_test_mode(root: &Path, mode: u32, word: &str, digest: &str) -> Result<()
             .env("TMP", scratch.path())
             .env("TEMP", scratch.path())
             .stdin(Stdio::piped())
+            // Progress frames are tolerable garbage for KAT sessions: stdout
+            // stays null and acceptance comes solely from the exit code plus
+            // the independently verified outfile below.
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
@@ -403,6 +452,10 @@ fn self_test_mode(root: &Path, mode: u32, word: &str, digest: &str) -> Result<()
             9700 | 9400 | 9600 | 10400 | 10500 => "kdf",
             // Wallet containers verify through cyberdeck-crypto/wallets.
             11300 | 13400 | 15600 | 15700 => "kdf",
+            // Disk encryption verifies through cyberdeck-crypto/bitlocker.
+            22100 => "kdf",
+            // Kerberos verifies through cyberdeck-crypto/kerberos.
+            13100 | 18200 => "kdf",
             1100 => "mscash",
             1500 => "descrypt",
             _ => return Err("Hashcat self-test mode unsupported".into()),
@@ -430,29 +483,197 @@ pub fn verified_modes(root: &Path) -> Readiness {
     if let Some(stored) = guard.get(root) {
         return stored.clone();
     }
-    let result = (|| {
-        runtime_available(root)?;
-        if !probe_opencl_loader(root)? {
-            return Err("Bundled Hashcat OpenCL loader unavailable".into());
-        }
-        let mut verified = Vec::new();
-        let mut first_failure = None;
-        for &(mode, word, digest) in PUBLIC_KATS {
-            match self_test_mode(root, mode, word, digest) {
-                Ok(()) => verified.push(mode),
-                Err(error) if first_failure.is_none() => first_failure = Some(error),
-                Err(_) => {}
-            }
-        }
-        if verified.is_empty() {
-            Err(first_failure.unwrap_or_else(|| {
-                "No bundled Hashcat mode passed its private known-answer test".into()
-            }))
-        } else {
-            Ok(verified)
-        }
-    })();
+    let result = run_readiness_sweep(root);
     guard.insert(root.to_path_buf(), result.clone());
+    result
+}
+
+/// The uncached readiness gate: a full sequential sweep of every public
+/// known-answer test through the exact bundled private worker. This takes
+/// roughly 452s on first execution because every KDF mode compiles and runs
+/// its on-device KAT.
+fn run_readiness_sweep(root: &Path) -> Readiness {
+    runtime_available(root)?;
+    if !probe_opencl_loader(root)? {
+        return Err("Bundled Hashcat OpenCL loader unavailable".into());
+    }
+    let mut verified = Vec::new();
+    let mut first_failure = None;
+    for &(mode, word, digest) in PUBLIC_KATS {
+        match self_test_mode(root, mode, word, digest) {
+            Ok(()) => verified.push(mode),
+            Err(error) if first_failure.is_none() => first_failure = Some(error),
+            Err(_) => {}
+        }
+    }
+    if verified.is_empty() {
+        Err(first_failure.unwrap_or_else(|| {
+            "No bundled Hashcat mode passed its private known-answer test".into()
+        }))
+    } else {
+        Ok(verified)
+    }
+}
+
+/// Disk-persisted readiness findings with a runtime-fingerprint trust model.
+///
+/// SECURITY INVARIANT: this cache may only claim modes that were actually
+/// executed against this exact runtime. The fingerprint covers the runtime's
+/// source-manifest.json bytes (which pin the built source tree) plus the
+/// exact file sizes of the worker, shim and Hashcat library binaries (which
+/// pin the produced artifacts); any change to the built runtime invalidates
+/// every persisted finding. Modes absent from PUBLIC_KATS are always dropped
+/// (clamped), an empty verified set never validates as a hit, and every
+/// persistence error silently degrades to the synchronous sweep path — the
+/// KAT gate never depends on the cache being readable or writable.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct PersistedReadiness {
+    fingerprint: String,
+    verified: Vec<u32>,
+    verified_at_epoch_ms: u64,
+}
+
+const READINESS_CACHE_FILE_LIMIT: u64 = 64 * 1024;
+static READINESS_REFRESH_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
+
+/// SHA-256 over the runtime's source-manifest.json bytes bound with the file
+/// sizes of the three linked binaries. Binary names are hashed alongside the
+/// sizes so a swapped runtime layout cannot alias two runtimes to one
+/// fingerprint. Any unreadable component fails closed to None, which forces
+/// the synchronous sweep path.
+fn runtime_fingerprint(root: &Path) -> Option<String> {
+    let manifest = fs::read(root.join("source-manifest.json")).ok()?;
+    let mut hasher = Sha256::new();
+    hasher.update(&manifest);
+    for name in [worker_name(), shim_name(), hashcat_library_name()] {
+        let size = fs::metadata(root.join(name)).ok()?.len();
+        hasher.update([0u8]);
+        hasher.update(name.as_bytes());
+        hasher.update(size.to_le_bytes());
+    }
+    Some(
+        hasher
+            .finalize()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect(),
+    )
+}
+
+/// Validate and load a persisted readiness cache. Returns None — meaning the
+/// caller must run the synchronous sweep — when the file is unreadable,
+/// corrupt, oversized, written for a different runtime fingerprint, or its
+/// mode list is not a non-empty subset of PUBLIC_KATS. An empty verified set
+/// is written only after an observed failed sweep (see write_readiness_cache)
+/// and therefore never validates.
+fn read_readiness_cache(root: &Path, cache_path: &Path) -> Option<Vec<u32>> {
+    if fs::metadata(cache_path).ok()?.len() > READINESS_CACHE_FILE_LIMIT {
+        return None;
+    }
+    let bytes = fs::read(cache_path).ok()?;
+    let persisted: PersistedReadiness = serde_json::from_slice(&bytes).ok()?;
+    if persisted.fingerprint != runtime_fingerprint(root)? {
+        return None;
+    }
+    let known: HashSet<u32> = PUBLIC_KATS.iter().map(|&(mode, _, _)| mode).collect();
+    // Subset gate: only modes that are actually part of the public KAT set
+    // were ever executed against this runtime. Any unknown mode means the
+    // file was not produced by this build, so it never validates.
+    if persisted.verified.is_empty() || !persisted.verified.iter().all(|mode| known.contains(mode))
+    {
+        return None;
+    }
+    // Clamp: modes not present in PUBLIC_KATS are dropped from the cached
+    // list, enforcing the advertised-set invariant at the return boundary
+    // even if a future edit loosens the subset gate above.
+    let mut verified: Vec<u32> = persisted
+        .verified
+        .into_iter()
+        .filter(|mode| known.contains(mode))
+        .collect();
+    verified.sort_unstable();
+    verified.dedup();
+    Some(verified)
+}
+
+/// Best-effort cache persistence; every error is silently ignored by design.
+/// A plain (non-atomic) write is safe here because every read re-parses,
+/// re-fingerprints and re-gates the content, so a torn write can only ever
+/// degrade to the synchronous sweep path. A failed sweep is recorded as an
+/// empty verified set: the file then never validates as a hit (forcing the
+/// synchronous gate) and a previously good cache cannot outlive an observed
+/// real failure on the same runtime.
+fn write_readiness_cache(root: &Path, cache_path: &Path, readiness: &Readiness) {
+    let verified = match readiness {
+        Ok(modes) => modes.clone(),
+        Err(_) => Vec::new(),
+    };
+    let Some(fingerprint) = runtime_fingerprint(root) else {
+        return;
+    };
+    let persisted = PersistedReadiness {
+        fingerprint,
+        verified,
+        verified_at_epoch_ms: SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|elapsed| elapsed.as_millis() as u64)
+            .unwrap_or(0),
+    };
+    let payload = serde_json::to_vec(&persisted).unwrap_or_default();
+    let _ = fs::write(cache_path, payload);
+}
+
+/// Re-run the full KAT sweep off the caller's critical path and rewrite the
+/// persisted cache. The refresh is silent: it logs nothing, never panics
+/// (catch_unwind) and touches no shared process state — its only effect is
+/// the cache file. A single in-flight refresh prevents repeated capability
+/// queries from stacking concurrent GPU sweeps.
+fn spawn_readiness_refresh(root: PathBuf, cache_path: PathBuf) {
+    if READINESS_REFRESH_IN_FLIGHT
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        return;
+    }
+    thread::spawn(move || {
+        let result = catch_unwind(AssertUnwindSafe(|| run_readiness_sweep(&root)));
+        // A panicked refresh preserves the last-known-good cache file.
+        if let Ok(readiness) = result {
+            write_readiness_cache(&root, &cache_path, &readiness);
+        }
+        READINESS_REFRESH_IN_FLIGHT.store(false, Ordering::SeqCst);
+    });
+}
+
+/// Readiness with a disk-persisted verified set: a cache hit for the current
+/// runtime fingerprint returns immediately while a background thread re-runs
+/// the full KAT sweep and rewrites the file (trust model: PersistedReadiness
+/// above). Without a cache path — or on any cache miss/corruption — this is
+/// exactly the synchronous in-process behavior of verified_modes.
+pub fn verified_modes_cached(root: &Path, cache_path: Option<&Path>) -> Readiness {
+    let Some(cache_path) = cache_path else {
+        return verified_modes(root);
+    };
+    if let Some(verified) = read_readiness_cache(root, cache_path) {
+        // Publish the persisted findings into the process-lifetime cache so
+        // the other verified_modes gates (job start, autopilot) do not repeat
+        // the multi-minute sweep after the capabilities query already ran.
+        // try_lock keeps the hit path truly immediate: verified_modes holds
+        // the cache mutex across its whole synchronous sweep, and a caller
+        // stuck behind that lock would defeat the cached fast path. On
+        // contention the insert is skipped; the sweep publishes its own
+        // result when it completes.
+        let cache = READINESS_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+        if let Ok(mut guard) = cache.try_lock() {
+            guard
+                .entry(root.to_path_buf())
+                .or_insert_with(|| Ok(verified.clone()));
+        }
+        spawn_readiness_refresh(root.to_path_buf(), cache_path.to_path_buf());
+        return Ok(verified);
+    }
+    let result = verified_modes(root);
+    write_readiness_cache(root, cache_path, &result);
     result
 }
 
@@ -518,6 +739,9 @@ pub(super) fn validate_embedded_request(request: &RecoveryRequest) -> Result<u32
         "keepass" => 13400,
         "ethereum-pbkdf2" => 15600,
         "ethereum-scrypt" => 15700,
+        "bitlocker" => 22100,
+        "kerberos-tgs-rep" => 13100,
+        "kerberos-as-rep" => 18200,
         "winzip-aes" => 13600,
         "7zip" => 11600,
         // Legacy ZipCrypto runs as 17200 (deflate) or 17210 (stored),
@@ -533,30 +757,13 @@ pub(super) fn validate_embedded_request(request: &RecoveryRequest) -> Result<u32
         // already validated the family against the requested mode.
         RecoveryTarget::Kdf { .. } => {
             const KDF_MODES: &[&str] = &[
-                "phpass",
-                "md5crypt",
-                "sha512crypt",
-                "bcrypt",
-                "sha256crypt",
-                "mscash",
-                "mscash2",
-                "netntlm-v1",
-                "netntlm-v2",
-                "mssql-2005",
-                "mssql-2012",
-                "descrypt",
-                "winzip-aes",
-                "7zip",
-                "zip-legacy",
-                "office-97-2003",
-                "office-2007",
-                "office-2013",
-                "pdf-1.1-1.3",
-                "pdf-1.4-1.6",
-                "bitcoin",
-                "keepass",
-                "ethereum-pbkdf2",
-                "ethereum-scrypt",
+                "phpass", "md5crypt", "sha512crypt", "bcrypt", "sha256crypt", "mscash",
+                "mscash2", "netntlm-v1", "netntlm-v2", "mssql-2005", "mssql-2012",
+                "descrypt", "winzip-aes", "7zip", "zip-legacy",
+                "office-97-2003", "office-2007", "office-2013", "pdf-1.1-1.3",
+                "pdf-1.4-1.6", "bitcoin", "keepass", "ethereum-pbkdf2",
+                "ethereum-scrypt", "bitlocker", "kerberos-tgs-rep",
+                "kerberos-as-rep",
             ];
             if KDF_MODES.contains(&request.algorithm.as_str()) {
                 Ok(mode)
@@ -608,41 +815,13 @@ fn frame_mode(
     }
     if !matches!(
         hash_mode,
-        0 | 10
-            | 20
-            | 50
-            | 60
-            | 100
-            | 110
-            | 120
-            | 132
-            | 400
-            | 500
-            | 1000
-            | 1100
-            | 1400
-            | 1500
-            | 1700
-            | 1731
-            | 1800
-            | 2100
-            | 3200
-            | 5500
-            | 5600
-            | 7400
-            | 11600
-            | 13600
-            | 17200
-            | 17210
-            | 9400
-            | 9600
-            | 9700
-            | 10400
-            | 10500
-            | 11300
-            | 13400
-            | 15600
-            | 15700
+        0 | 10 | 20 | 50 | 60 | 100 | 110 | 120 | 132 | 400 | 500 | 1000 | 1100 | 1400 | 1500
+        | 1700 | 1731 | 1800 | 2100 | 3200 | 5500 | 5600 | 7400
+        | 11600 | 13600 | 17200 | 17210
+        | 9400 | 9600 | 9700 | 10400 | 10500
+        | 11300 | 13400 | 15600 | 15700
+        | 22100
+        | 13100 | 18200
     ) {
         return Err("embedded Hashcat mode unsupported".into());
     }
@@ -657,6 +836,94 @@ fn frame_mode(
     Ok(packet)
 }
 
+/// GPU progress frame emitted by the worker on stdout during a session:
+/// fixed layout "CDHC0003" (8 ASCII bytes) + u64 tried + u64 budget + u32
+/// cracked, all little-endian, exactly PROGRESS_FRAME_SIZE bytes, roughly
+/// every 500ms. Frames are aggregates for the progress UI only; matches
+/// still come exclusively from the independently verified outfile, and the
+/// session outcome remains the worker's exit code.
+const PROGRESS_MAGIC: &[u8; 8] = b"CDHC0003";
+const PROGRESS_FRAME_SIZE: usize = 8 + 8 + 8 + 4;
+const PROGRESS_BUFFER_LIMIT: usize = 4096;
+
+/// Incremental, strict parser for worker GPU progress frames. Complete
+/// frames are extracted across arbitrary chunk boundaries with partial
+/// reads buffered. Any unknown magic, malformed layout or unbounded
+/// garbage poisons the parser permanently: no further frames are produced.
+/// The supervisor keeps draining stdout to EOF afterwards so the worker
+/// never observes a broken pipe mid-session; the session outcome is never
+/// affected — it remains the worker's exit code plus the verified outfile.
+struct ProgressFrames {
+    buffer: Vec<u8>,
+    healthy: bool,
+}
+
+impl ProgressFrames {
+    fn new() -> Self {
+        Self {
+            buffer: Vec::new(),
+            healthy: true,
+        }
+    }
+
+    fn absorb(&mut self, chunk: &[u8]) -> Vec<(u64, u64, u32)> {
+        let mut frames = Vec::new();
+        if !self.healthy {
+            return frames;
+        }
+        // A stalled or hostile writer must not grow this buffer unbounded.
+        if self.buffer.len() + chunk.len() > PROGRESS_BUFFER_LIMIT {
+            self.healthy = false;
+            self.buffer.clear();
+            return frames;
+        }
+        self.buffer.extend_from_slice(chunk);
+        while self.buffer.len() >= PROGRESS_FRAME_SIZE {
+            if &self.buffer[..8] != PROGRESS_MAGIC {
+                self.healthy = false;
+                self.buffer.clear();
+                return frames;
+            }
+            let tried = u64::from_le_bytes(
+                self.buffer[8..16]
+                    .try_into()
+                    .expect("fixed frame layout"),
+            );
+            let budget = u64::from_le_bytes(
+                self.buffer[16..24]
+                    .try_into()
+                    .expect("fixed frame layout"),
+            );
+            let cracked = u32::from_le_bytes(
+                self.buffer[24..28]
+                    .try_into()
+                    .expect("fixed frame layout"),
+            );
+            frames.push((tried, budget, cracked));
+            self.buffer.drain(..PROGRESS_FRAME_SIZE);
+        }
+        frames
+    }
+}
+
+/// Drain all GPU progress frames that arrived since the last poll and
+/// forward them as aggregate progress wires. Frame counters are never
+/// trusted for matches; the authoritative result remains the verified
+/// outfile processed after the worker exits successfully.
+fn forward_progress_frames<P: FnMut(RecoveryProgressWire)>(
+    frame_recv: &mpsc::Receiver<(u64, u64, u32)>,
+    progress: &mut P,
+) {
+    while let Ok((tried, budget, cracked)) = frame_recv.try_recv() {
+        progress(RecoveryProgressWire {
+            tried,
+            budget,
+            matches: cracked as usize,
+            stage: None,
+        });
+    }
+}
+
 /// Executes selected bundled MD5/SHA-1/NTLM/SHA-256/SHA-512 wordlist mode. This function
 /// does not assume Hashcat's device identifiers match CyberDeck's Rust OpenCL
 /// inventory. Automatic GPU selection must not be certified without a KAT.
@@ -666,7 +933,7 @@ pub fn execute_path<P: FnMut(RecoveryProgressWire)>(
     runtime: &Path,
     cancel: &RecoveryCancel,
     preset: WordlistPreset,
-    _progress: P,
+    mut progress: P,
 ) -> Result<RecoveryRun, String> {
     let hash_mode = validate_embedded_request(request)?;
     runtime_available(runtime)?;
@@ -749,7 +1016,9 @@ pub fn execute_path<P: FnMut(RecoveryProgressWire)>(
             .env("TMP", scratch.path())
             .env("TEMP", scratch.path())
             .stdin(Stdio::piped())
-            .stdout(Stdio::null())
+            // GPU progress frames are consumed from stdout; the worker's
+            // diagnostics stay on the redacted stderr channel.
+            .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .spawn()
             .map_err(|_| "could not start bundled Hashcat worker")?,
@@ -763,6 +1032,38 @@ pub fn execute_path<P: FnMut(RecoveryProgressWire)>(
         pipe.write_all(&bytes)
             .map_err(|_| "private Hashcat worker protocol write failed")?;
     }
+    // GPU progress: the worker emits fixed CDHC0003 counter frames on stdout
+    // during the session. A dedicated reader thread turns the blocking pipe
+    // into a channel so the poll loop below keeps its exact cancellation and
+    // deadline cadence (incremental availability is drained via try_recv).
+    // Frames are aggregates only; matches still come exclusively from the
+    // verified outfile, and the final outcome is still the exit code. A
+    // worker build without frame support simply writes nothing to stdout and
+    // the reader thread sees EOF, so progress stays empty rather than
+    // failing the session.
+    let (frame_send, frame_recv) = mpsc::channel::<(u64, u64, u32)>();
+    if let Some(mut pipe) = child.0.stdout.take() {
+        thread::spawn(move || {
+            let mut parser = ProgressFrames::new();
+            let mut chunk = [0u8; 512];
+            loop {
+                match pipe.read(&mut chunk) {
+                    Ok(0) | Err(_) => break, // EOF: the session is ending.
+                    Ok(read_len) => {
+                        for (tried, budget, cracked) in parser.absorb(&chunk[..read_len]) {
+                            if frame_send.send((tried, budget, cracked)).is_err() {
+                                // Supervisor gone; stop reading.
+                                return;
+                            }
+                        }
+                        // After malformed frames the parser is poisoned and
+                        // this loop keeps draining stdout to EOF so the
+                        // worker never sees a broken pipe mid-session.
+                    }
+                }
+            }
+        });
+    }
     let started = Instant::now();
     let cancelled = loop {
         if cancel.is_cancelled() {
@@ -771,6 +1072,7 @@ pub fn execute_path<P: FnMut(RecoveryProgressWire)>(
         if started.elapsed() > HARD_DEADLINE {
             return Err("Hashcat worker timed out and was terminated".into());
         }
+        forward_progress_frames(&frame_recv, &mut progress);
         match child.0.try_wait() {
             Ok(Some(status)) => {
                 if !status.success() {
@@ -785,6 +1087,9 @@ pub fn execute_path<P: FnMut(RecoveryProgressWire)>(
     // Drop terminates any remaining child and waits before TempDir deletes
     // sensitive inputs/output, including on timeout and case cancellation.
     drop(child);
+    // Deliver final frames that completed before exit so the UI's last
+    // counters approach the real totals before the summary lands.
+    forward_progress_frames(&frame_recv, &mut progress);
     if cancelled || cancel.is_cancelled() {
         return Ok(recovery_backend::embedded_result(
             request,
@@ -862,7 +1167,7 @@ mod tests {
     use super::*;
     #[test]
     fn every_public_native_mode_fixture_is_independently_verifiable_without_gpu() {
-        assert_eq!(PUBLIC_KATS.len(), 36);
+        assert_eq!(PUBLIC_KATS.len(), 39);
         for &(mode, word, hash) in PUBLIC_KATS {
             let algorithm = match mode {
                 0 => "md5",
@@ -882,6 +1187,10 @@ mod tests {
                 9700 | 9400 | 9600 | 10400 | 10500 => "kdf",
                 // Wallet containers likewise.
                 11300 | 13400 | 15600 | 15700 => "kdf",
+                // Disk encryption likewise.
+                22100 => "kdf",
+                // Kerberos likewise (verify through cyberdeck-crypto/kerberos).
+                13100 | 18200 => "kdf",
                 // Hint-driven composed targets: the wire shape is ambiguous.
                 10 => "md5-pass-salt",
                 20 => "md5-salt-pass",
@@ -916,8 +1225,9 @@ mod tests {
         // Batch-3 archive containers passed their on-device KATs on the same
         // hardware (RTX 4060, 2026-11-05); they must keep passing.
         for required in [
-            0u32, 100, 1000, 1400, 1700, 500, 1800, 3200, 400, 1100, 2100, 13600, 11600, 17200,
-            17210, 9700, 9400, 9600, 10400, 10500, 11300, 13400, 15600, 15700,
+            0u32, 100, 1000, 1400, 1700, 500, 1800, 3200, 400, 1100, 2100,
+            13600, 11600, 17200, 17210, 9700, 9400, 9600, 10400, 10500,
+            11300, 13400, 15600, 15700, 22100, 13100, 18200,
         ] {
             assert!(
                 modes.contains(&required),
@@ -934,6 +1244,11 @@ mod tests {
 
     #[test]
     fn digest_modes_and_worker_v2_packet_are_bounded() {
+        // POSIX-style "/tmp/fixture" paths are not absolute on Windows; the
+        // fixture root must be a real absolute temporary directory on every
+        // platform because the worker protocol rejects relative inputs.
+        let scratch = tempfile::tempdir().unwrap();
+        let path = scratch.path();
         for (algorithm, size, mode) in [
             ("md5", 32, 0),
             ("sha1", 40, 100),
@@ -950,7 +1265,6 @@ mod tests {
                 target_hashes: Vec::new(),
             };
             assert_eq!(validate_embedded_request(&request), Ok(mode));
-            let path = Path::new("/tmp/fixture");
             let packet = frame_mode(path, path, path, path, 100, 30, 0, mode).unwrap();
             assert_eq!(&packet[..8], b"CDHC0002");
             assert_eq!(u32::from_le_bytes(packet[24..28].try_into().unwrap()), mode);
@@ -958,7 +1272,6 @@ mod tests {
             bad.target_hash.pop();
             assert!(validate_embedded_request(&bad).is_err());
         }
-        let path = Path::new("/tmp/fixture");
         assert!(frame_mode(path, path, path, path, 1, 10, 0, 999).is_err());
     }
 
@@ -1007,10 +1320,130 @@ mod tests {
 
     #[test]
     fn protocol_bounds_and_path_safety() {
-        let root = Path::new("/tmp/a");
+        // Same Windows portability rule: the fixture root is a real absolute
+        // temporary directory; the relative-path rejection case stays.
+        let scratch = tempfile::tempdir().unwrap();
+        let root = scratch.path();
         assert!(frame(root, root, root, root, 1, 20, 0).is_ok());
         assert!(frame(root, root, root, root, 0, 20, 0).is_err());
         assert!(frame(root, root, root, root, 1, 301, 0).is_err());
         assert!(frame(Path::new("relative"), root, root, root, 1, 20, 0).is_err());
+    }
+
+    #[test]
+    fn gpu_progress_frames_parse_across_chunks_and_poison_on_garbage() {
+        let mut frame = Vec::new();
+        frame.extend_from_slice(b"CDHC0003");
+        frame.extend_from_slice(&1234u64.to_le_bytes());
+        frame.extend_from_slice(&10_000u64.to_le_bytes());
+        frame.extend_from_slice(&2u32.to_le_bytes());
+        assert_eq!(frame.len(), PROGRESS_FRAME_SIZE);
+        let mut parser = ProgressFrames::new();
+        // A frame split across arbitrary reads is buffered until complete.
+        assert!(parser.absorb(&frame[..11]).is_empty());
+        assert_eq!(parser.absorb(&frame[11..]), vec![(1234, 10_000, 2)]);
+        // Several complete frames in one chunk are all forwarded.
+        let mut two = frame.clone();
+        two.extend_from_slice(&frame);
+        assert_eq!(
+            parser.absorb(&two),
+            vec![(1234, 10_000, 2), (1234, 10_000, 2)]
+        );
+        // A valid frame followed by unknown magic: the good frame is still
+        // forwarded, then the parser poisons permanently and silently.
+        let mut poisoned = frame.clone();
+        poisoned.extend_from_slice(b"CDHC9999");
+        poisoned.extend_from_slice(&[0u8; PROGRESS_FRAME_SIZE - 8]);
+        assert_eq!(parser.absorb(&poisoned), vec![(1234, 10_000, 2)]);
+        assert!(parser.absorb(&frame).is_empty());
+        // A truncated magic prefix stays buffered without poisoning.
+        let mut fresh = ProgressFrames::new();
+        assert!(fresh.absorb(&frame[..7]).is_empty());
+        assert_eq!(fresh.absorb(&frame[7..]), vec![(1234, 10_000, 2)]);
+    }
+
+    #[test]
+    fn runtime_fingerprint_requires_the_pinned_runtime_files() {
+        let scratch = tempfile::tempdir().unwrap();
+        let root = scratch.path();
+        assert!(runtime_fingerprint(root).is_none());
+        std::fs::write(root.join("source-manifest.json"), b"manifest-v1").unwrap();
+        assert!(runtime_fingerprint(root).is_none());
+        std::fs::write(root.join(worker_name()), b"worker-bytes").unwrap();
+        std::fs::write(root.join(shim_name()), b"shim-bytes").unwrap();
+        std::fs::write(root.join(hashcat_library_name()), b"hashcat-bytes").unwrap();
+        let first = runtime_fingerprint(root).unwrap();
+        // The produced-artifact sizes are part of the runtime identity, so a
+        // different build must change the fingerprint.
+        std::fs::write(root.join(shim_name()), b"shim-bytes-v2").unwrap();
+        let second = runtime_fingerprint(root).unwrap();
+        assert_ne!(first, second);
+    }
+
+    #[cfg(test)]
+    fn persisted_cache(fingerprint: &str, verified: &[u32]) -> PersistedReadiness {
+        PersistedReadiness {
+            fingerprint: fingerprint.to_string(),
+            verified: verified.to_vec(),
+            verified_at_epoch_ms: 1,
+        }
+    }
+
+    #[test]
+    fn readiness_cache_roundtrip_validates_fingerprint_and_modes() {
+        let scratch = tempfile::tempdir().unwrap();
+        let root = scratch.path();
+        let cache = scratch.path().join("embedded-hashcat-verified.json");
+        std::fs::write(root.join("source-manifest.json"), b"manifest-v1").unwrap();
+        std::fs::write(root.join(worker_name()), b"worker-bytes").unwrap();
+        std::fs::write(root.join(shim_name()), b"shim-bytes").unwrap();
+        std::fs::write(root.join(hashcat_library_name()), b"hashcat-bytes").unwrap();
+        let fingerprint = runtime_fingerprint(root).unwrap();
+        // Without a cache the synchronous sweep runs; on this incomplete
+        // bundle it fails, and the failure persists only as an empty set
+        // that never validates as a hit.
+        assert!(verified_modes_cached(root, Some(&cache)).is_err());
+        let parsed: PersistedReadiness = serde_json::from_slice(&std::fs::read(&cache).unwrap())
+            .unwrap();
+        assert_eq!(parsed.fingerprint, fingerprint);
+        assert!(parsed.verified.is_empty());
+        assert!(read_readiness_cache(root, &cache).is_none());
+        // Modes outside PUBLIC_KATS invalidate the cache entirely.
+        let outside = persisted_cache(&fingerprint, &[9999]);
+        std::fs::write(&cache, serde_json::to_vec(&outside).unwrap()).unwrap();
+        assert!(read_readiness_cache(root, &cache).is_none());
+        // A cache written for a different runtime (worker size changed) is
+        // rejected by the fingerprint.
+        let stale = persisted_cache(&fingerprint, &[0, 1000]);
+        std::fs::write(&cache, serde_json::to_vec(&stale).unwrap()).unwrap();
+        std::fs::write(root.join(worker_name()), b"worker-bytes-v2").unwrap();
+        assert!(read_readiness_cache(root, &cache).is_none());
+        // A valid cache for this exact runtime is accepted, sorted and
+        // deduplicated.
+        std::fs::write(root.join(worker_name()), b"worker-bytes").unwrap();
+        let good = persisted_cache(&fingerprint, &[1000, 0, 1000]);
+        std::fs::write(&cache, serde_json::to_vec(&good).unwrap()).unwrap();
+        assert_eq!(read_readiness_cache(root, &cache).unwrap(), vec![0, 1000]);
+        // Corrupt cache content is rejected.
+        std::fs::write(&cache, b"not-json").unwrap();
+        assert!(read_readiness_cache(root, &cache).is_none());
+    }
+
+    #[test]
+    fn valid_cache_hit_returns_immediately_without_a_sweep() {
+        let scratch = tempfile::tempdir().unwrap();
+        let root = scratch.path();
+        let cache = scratch.path().join("ready.json");
+        std::fs::write(root.join("source-manifest.json"), b"manifest-v1").unwrap();
+        std::fs::write(root.join(worker_name()), b"worker-bytes").unwrap();
+        std::fs::write(root.join(shim_name()), b"shim-bytes").unwrap();
+        std::fs::write(root.join(hashcat_library_name()), b"hashcat-bytes").unwrap();
+        let fingerprint = runtime_fingerprint(root).unwrap();
+        let good = persisted_cache(&fingerprint, &[0, 1400]);
+        std::fs::write(&cache, serde_json::to_vec(&good).unwrap()).unwrap();
+        // A cache hit must return without executing any KAT sweep; on this
+        // incomplete bundle the synchronous sweep itself would fail.
+        let verified = verified_modes_cached(root, Some(&cache)).unwrap();
+        assert_eq!(verified, vec![0, 1400]);
     }
 }

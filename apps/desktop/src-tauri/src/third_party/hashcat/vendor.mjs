@@ -61,7 +61,7 @@ if (mode === "--import") {
   dirFiles("include", (name) => name.endsWith(".h") || name.endsWith(".def"));
   // The complete host EMU object family uses almost all common inc_ sources,
   // not only the kernel for hash mode 1400.
-  const bundledModePrefixes = ["00000", "00010", "00020", "00050", "00060", "00100", "00110", "00120", "00132", "00400", "00500", "01100", "01400", "01500", "01700", "01731", "01800", "02100", "03200", "05500", "05600", "07400", "11600", "13600", "17200", "17210", "09400", "09600", "09700", "10400", "10500", "11300", "13400", "15600", "15700"];
+  const bundledModePrefixes = ["00000", "00010", "00020", "00050", "00060", "00100", "00110", "00120", "00132", "00400", "00500", "01100", "01400", "01500", "01700", "01731", "01800", "02100", "03200", "05500", "05600", "07400", "11600", "13600", "17200", "17210", "09400", "09600", "09700", "10400", "10500", "11300", "13400", "15600", "15700", "13100", "18200", "22100"];
   dirFiles("OpenCL", (name) => {
     if (name.endsWith(".h")) return true;
     if (!name.endsWith(".cl")) return false;
@@ -115,6 +115,10 @@ if (mode === "--import") {
   for (const mode of ["11300", "13400", "15600", "15700"]) {
     add("src/modules/module_" + mode + ".c");
   }
+  // Batch-6: Kerberos etype 23 TGS-REP/AS-REP (13100/18200) and BitLocker (22100).
+  for (const mode of ["13100", "18200", "22100"]) {
+    add("src/modules/module_" + mode + ".c");
+  }
   // Shared module-common sources included verbatim by batch modules.
   add("src/modules/blowfish_common.c");
   add("src/modules/scrypt_common.c");
@@ -134,6 +138,10 @@ if (mode === "--import") {
   // Batch-5 wallet kernels: all four wallet modes are pure-only.
   dirFiles("OpenCL", (name) =>
     /^m(11300|13400|15600|15700)[-a-z0-9_]*\.cl$/.test(name));
+  // Batch-6 kernels: Kerberos modes ship optimized + pure families,
+  // BitLocker is pure-only.
+  dirFiles("OpenCL", (name) =>
+    /^m(13100|18200|22100)[-a-z0-9_]*\.cl$/.test(name));
   // Apple Metal/OpenCL extension sources pinned for macOS runtime parity.
   add("src/ext_metal.m");
   add("src/ext_iokit.m");

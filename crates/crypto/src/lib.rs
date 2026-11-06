@@ -23,6 +23,8 @@ pub mod windows_auth;
 pub mod archives;
 pub mod documents;
 pub mod wallets;
+pub mod bitlocker;
+pub mod kerberos;
 
 use base64::Engine as _;
 use hmac::{Hmac, Mac};
@@ -293,6 +295,12 @@ pub fn kdf_format(hash: &str) -> Option<&'static str> {
         Some("ethereum-pbkdf2")
     } else if hash.starts_with("$ethereum$s*") {
         Some("ethereum-scrypt")
+    } else if hash.starts_with("$bitlocker$") {
+        Some("bitlocker")
+    } else if hash.starts_with("$krb5tgs$") {
+        Some("kerberos-tgs-rep")
+    } else if hash.starts_with("$krb5asrep$") {
+        Some("kerberos-as-rep")
     } else if hash.starts_with("WPA*01*") {
         Some("wpa-pmkid")
     } else if hash.starts_with("$NETNTLMv2$") {
@@ -467,6 +475,20 @@ pub fn verify_kdf_format(format: &str, hash: &str, candidate: &str) -> Result<bo
         }
         "ethereum-scrypt" => {
             let parsed = wallets::EthereumScrypt::parse(hash)?;
+            parsed.verify(candidate)
+        }
+        // Disk encryption (format batch B4).
+        "bitlocker" => {
+            let parsed = bitlocker::BitLocker::parse(hash)?;
+            parsed.verify(candidate)
+        }
+        // Kerberos etype 23 (format batch B4).
+        "kerberos-tgs-rep" => {
+            let parsed = kerberos::KerberosTgsRep::parse(hash)?;
+            parsed.verify(candidate)
+        }
+        "kerberos-as-rep" => {
+            let parsed = kerberos::KerberosAsRep::parse(hash)?;
             parsed.verify(candidate)
         }
         // Composed salted/HMAC digests carry an explicit algorithm hint; the

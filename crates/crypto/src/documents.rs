@@ -40,8 +40,8 @@ fn sha512(data: &[u8]) -> [u8; 64] {
     sha2::Sha512::digest(data).into()
 }
 
-/// RC4 stream cipher (used by Office <=2003 and PDF R2-R4).
-fn rc4(key: &[u8], data: &[u8]) -> Vec<u8> {
+/// RC4 stream cipher (used by Office <=2003, PDF R2-R4 and Kerberos etype 23).
+pub(crate) fn rc4(key: &[u8], data: &[u8]) -> Vec<u8> {
     let mut state: [u8; 256] = core::array::from_fn(|i| i as u8);
     let mut j = 0usize;
     for i in 0..256 {
