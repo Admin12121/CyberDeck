@@ -15,6 +15,7 @@ pub mod domain;
 pub mod fragments;
 pub mod infrastructure;
 pub mod pcap_write;
+pub mod pcapng_write;
 pub mod inventory;
 pub mod live;
 pub mod scan_packets;
