@@ -52,7 +52,7 @@ fn port_matches(check_port: u16, excerpt: &ProbeExcerpt) -> bool {
     excerpt.port == check_port
 }
 
-static REGISTRY: [CheckDefinition; 8] = [
+static REGISTRY: [CheckDefinition; 13] = [
     CheckDefinition {
         name: "ssh-version-disclosure",
         severity: CheckSeverity::Info,
@@ -165,6 +165,71 @@ static REGISTRY: [CheckDefinition; 8] = [
             }
         },
     },
+    CheckDefinition {
+        name: "pop3-banner-disclosure",
+        severity: CheckSeverity::Info,
+        evaluate: |excerpt| {
+            if port_matches(110, excerpt) && excerpt.text.starts_with("+ok") {
+                let head: String = excerpt.text.chars().take(64).collect();
+                Some(format!("POP3 banner discloses server identity: {head}"))
+            } else {
+                None
+            }
+        },
+    },
+    CheckDefinition {
+        name: "imap-capability-disclosure",
+        severity: CheckSeverity::Info,
+        evaluate: |excerpt| {
+            // "* OK [CAPABILITY IMAP4rev1 ...]" enumerates the server's
+            // supported extensions before any authentication.
+            if port_matches(143, excerpt) && excerpt.text.starts_with("* ok") && excerpt.text.contains("capability") {
+                let head: String = excerpt.text.chars().take(80).collect();
+                Some(format!("IMAP pre-auth capability disclosure: {head}"))
+            } else {
+                None
+            }
+        },
+    },
+    CheckDefinition {
+        name: "vnc-weak-protocol",
+        severity: CheckSeverity::Medium,
+        evaluate: |excerpt| {
+            // RFB 003.008 predates the tighter 004/005 auth pairings; VNC's
+            // challenge-response has well-known weaknesses either way.
+            if port_matches(5900, excerpt) && excerpt.text.starts_with("rfb 003.") {
+                Some("VNC RFB 3.x handshake: legacy authentication model on a remote-control service".into())
+            } else {
+                None
+            }
+        },
+    },
+    CheckDefinition {
+        name: "docker-api-unauthenticated",
+        severity: CheckSeverity::Medium,
+        evaluate: |excerpt| {
+            // An unauthenticated Docker Engine API (2375) returns the index
+            // JSON on GET / — full container control with no TLS and no auth.
+            if port_matches(2375, excerpt)
+                && (excerpt.text.contains("docker") || excerpt.text.contains("/v1."))
+            {
+                Some("Docker Engine API answered without authentication; container control is exposed unencrypted".into())
+            } else {
+                None
+            }
+        },
+    },
+    CheckDefinition {
+        name: "elasticsearch-cluster-disclosure",
+        severity: CheckSeverity::Low,
+        evaluate: |excerpt| {
+            if port_matches(9200, excerpt) && excerpt.text.contains("cluster_name") {
+                Some("Elasticsearch root index discloses cluster metadata (cluster_name, version) without authentication".into())
+            } else {
+                None
+            }
+        },
+    },
 ];
 
 /// Evaluate the registry against one probe excerpt. Excerpts longer than
@@ -258,6 +323,21 @@ mod tests {
         assert_eq!(findings.len(), 1);
         // Case-insensitive: uppercase PONG matches.
         assert!(!evaluate("Redis", 6379, "+PONG\r\n").is_empty());
+    }
+
+    #[test]
+    fn pop3_imap_vnc_docker_elasticsearch_checks_classify() {
+        assert!(evaluate("POP3", 110, "+OK POP3 lab.test server ready\r\n")
+            .iter().any(|f| f.check == "pop3-banner-disclosure"));
+        assert!(evaluate("IMAP", 143, "* OK [CAPABILITY IMAP4rev1 STARTTLS] ready\r\n")
+            .iter().any(|f| f.check == "imap-capability-disclosure"));
+        let vnc = evaluate("VNC", 5900, "RFB 003.008\r\n");
+        assert_eq!(vnc[0].check, "vnc-weak-protocol");
+        assert_eq!(vnc[0].severity, CheckSeverity::Medium);
+        let docker = evaluate("HTTP", 2375, "{\"message\":\"Docker index\"}");
+        assert_eq!(docker[0].check, "docker-api-unauthenticated");
+        assert!(evaluate("HTTP", 9200, "{\"cluster_name\":\"lab\",\"version\":{}}")
+            .iter().any(|f| f.check == "elasticsearch-cluster-disclosure"));
     }
 
     #[test]
