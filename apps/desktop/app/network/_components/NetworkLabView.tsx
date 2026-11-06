@@ -13,11 +13,13 @@
  */
 import { useEffect, useRef, useState } from "react";
 import { FolderOpen, Radar } from "lucide-react";
-import { Chip, EmptyState, Pane, TextInput, ToolButton } from "@ds/panes";
+import { Chip, EmptyState, Pane, Select, TextInput, ToolButton } from "@ds/panes";
 import {
+  captureInterfacesV1,
   isDesktop,
   networkLabEventsV1,
   pcapOpenDialog,
+  type CaptureInterfaceV1,
   type LabEventKindWire,
   type LabEventWire,
   type LabEventsWire,
@@ -34,6 +36,13 @@ import {
   formatAnswerSet,
   questionTypeLabel,
 } from "./network-lab-dns-ipc";
+import {
+  labSweepBlockReason,
+  networkLabArpSweepStopV1,
+  networkLabArpSweepV1,
+  type LabArpNeighborWire,
+  type LabSweepProgressWire,
+} from "./network-lab-targeting-ipc";
 import { useWorkbench } from "@state/workbench";
 import {
   networkLabAnalyzePcapV1,
@@ -84,6 +93,16 @@ export function NetworkLabView() {
   const [scope, setScope] = useState<NetworkLabScopeWire | null>(null);
   const [scopeBusy, setScopeBusy] = useState(false);
   const [scopeError, setScopeError] = useState<string | null>(null);
+  // Lab-scope-targeted ARP sweep (the arc's only ACTIVE command): the target
+  // set is resolved on the backend from the saved scope alone — the view
+  // never sends addresses, only the interface choice and the authorization
+  // acknowledgment, so it cannot widen the operator's declared scope.
+  const [sweepInterfaces, setSweepInterfaces] = useState<CaptureInterfaceV1[]>([]);
+  const [sweepInterface, setSweepInterface] = useState("");
+  const [sweepBusy, setSweepBusy] = useState(false);
+  const [sweepProgress, setSweepProgress] = useState<LabSweepProgressWire | null>(null);
+  const [sweepResults, setSweepResults] = useState<LabArpNeighborWire[] | null>(null);
+  const [sweepError, setSweepError] = useState<string | null>(null);
   const currentCase = useRef(wb.caseId);
   currentCase.current = wb.caseId;
   const openSequence = useRef(0);
@@ -122,6 +141,13 @@ export function NetworkLabView() {
     setLivePolling(false);
     setLiveStatus(null);
     setLiveError(null);
+    // A case switch revokes the sweep's case-revision ownership on the
+    // backend (the worker closure revalidates it), so per-run sweep state
+    // never survives into the new revision.
+    setSweepBusy(false);
+    setSweepProgress(null);
+    setSweepResults(null);
+    setSweepError(null);
   }, [wb.caseId]);
 
   // Live subscription poll: every ~2s while enabled. A self-rescheduling
@@ -271,6 +297,64 @@ export function NetworkLabView() {
     }
   };
 
+  // Sweep interface list: same active-Ethernet filter the netscan ARP
+  // discovery uses (ethernet, up, not loopback); the sweep runs on one
+  // explicitly selected interface or not at all.
+  useEffect(() => {
+    if (!desktop) return;
+    let active = true;
+    void captureInterfacesV1()
+      .then((interfaces) => {
+        if (!active) return;
+        const connected = interfaces.filter(
+          (iface) => iface.ethernet && iface.up && !iface.loopback,
+        );
+        setSweepInterfaces(connected);
+        setSweepInterface((current) =>
+          current || (connected.length > 0 ? connected[0].name : ""),
+        );
+      })
+      .catch(() => {
+        if (active) setSweepInterfaces([]);
+      });
+    return () => {
+      active = false;
+    };
+  }, [desktop]);
+
+  // The scope state lives behind the backend; refresh the block-reason
+  // source whenever the workbench case changes (scope is re-read above).
+  const sweepBlock = labSweepBlockReason(scope);
+
+  const runSweep = async () => {
+    const caseId = wb.caseId;
+    const ticket = ++openSequence.current;
+    const isCurrent = () => currentCase.current === caseId && ticket === openSequence.current;
+    setSweepBusy(true);
+    setSweepError(null);
+    setSweepProgress(null);
+    try {
+      const rows = await networkLabArpSweepV1(sweepInterface, authorized, caseId, (progress) => {
+        if (isCurrent()) setSweepProgress(progress);
+      });
+      if (!isCurrent()) return;
+      setSweepResults(rows);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      if (isCurrent() && message !== "cancelled") setSweepError(message);
+    } finally {
+      if (isCurrent()) setSweepBusy(false);
+    }
+  };
+
+  const stopSweep = async () => {
+    try {
+      await networkLabArpSweepStopV1();
+    } catch (err) {
+      setSweepError(err instanceof Error ? err.message : String(err));
+    }
+  };
+
   return (
     <div className="h-full min-h-0 overflow-y-auto bg-app p-3">
       <div className="mx-auto flex max-w-5xl flex-col gap-px bg-line">
@@ -347,6 +431,91 @@ export function NetworkLabView() {
               <span role="alert" className="text-xs text-err">
                 {scopeError}
               </span>
+            ) : null}
+          </div>
+          {/* Lab-scope-targeted ARP sweep: the arc's only ACTIVE command.
+              Targets are resolved on the backend exclusively from the saved
+              lab scope (Target 1 ∪ Target 2) and every candidate is checked
+              against it, so the sweep refuses anything outside the declared
+              scope. Linux native worker, native confirmation, CAP_NET_RAW. */}
+          <div className="border-t border-line p-3">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="font-medium uppercase tracking-wider text-fg-muted">
+                ARP sweep (Target 1 ∪ Target 2)
+              </span>
+              <Select
+                value={sweepInterface}
+                onChange={setSweepInterface}
+                options={[
+                  { value: "", label: "Choose Ethernet NIC" },
+                  ...sweepInterfaces.map((iface) => ({
+                    value: iface.name,
+                    label: iface.name,
+                  })),
+                ]}
+                ariaLabel="ARP sweep Ethernet interface"
+                className="w-44"
+              />
+              {sweepBusy ? (
+                <ToolButton
+                  tone="danger"
+                  onClick={() => void stopSweep()}
+                  title="Stop the case-authorized lab ARP sweep; the native worker checks the stop flag before every probe"
+                >
+                  Stop sweep
+                </ToolButton>
+              ) : (
+                <ToolButton
+                  tone="primary"
+                  onClick={() => void runSweep()}
+                  disabled={!desktop || !authorized || !sweepInterface || sweepBlock !== null}
+                  title="Linux only: sweeps ONLY the IPv4 targets resolved from the saved lab scope (Target 1 ∪ Target 2), at most 32 probes at 10/s, native confirmation and CAP_NET_RAW required; refuses anything outside the declared scope"
+                >
+                  ARP sweep (Target 1 ∪ Target 2)
+                </ToolButton>
+              )}
+              {sweepBlock ? <Chip tone="muted">{sweepBlock}</Chip> : null}
+              {sweepProgress ? (
+                <Chip tone={sweepProgress.phase === "done" ? "ok" : "muted"}>
+                  {sweepProgress.phase === "done"
+                    ? `${sweepProgress.answered ?? 0}/${sweepProgress.total_targets} answered · ${sweepProgress.elapsed_ms} ms`
+                    : `sweeping ${sweepProgress.total_targets} scope targets · ${(sweepProgress.elapsed_ms / 1000).toFixed(1)} s`}
+                </Chip>
+              ) : null}
+            </div>
+            {sweepError ? (
+              <div role="alert" className="mt-2 border border-err/50 bg-err/10 px-3 py-1 font-mono text-[10px] text-err">
+                {sweepError}
+              </div>
+            ) : null}
+            {sweepResults ? (
+              sweepResults.length === 0 ? (
+                <p className="pt-2 text-xs text-fg-muted">
+                  no hosts answered the authorized lab ARP sweep — silence is not evidence of
+                  absence; the sweep probed only the saved lab scope
+                </p>
+              ) : (
+                <div className="max-h-64 overflow-auto pt-2">
+                  <table className="data-table">
+                    <thead>
+                      <tr>
+                        <th>IP</th>
+                        <th>Responder MAC</th>
+                        <th className="w-24">Latency</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {sweepResults.map((row) => (
+                        <tr key={row.host}>
+                          <td className="font-mono text-fg">{row.host}</td>
+                          <td className="font-mono text-fg-dim">{row.mac}</td>
+                          <td>{row.elapsed_ms} ms</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )
             ) : null}
           </div>
         </Pane>
