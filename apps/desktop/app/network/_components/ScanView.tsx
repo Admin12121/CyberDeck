@@ -2,10 +2,11 @@
 /** Case-authorized native TCP/UDP scan observations via Rust. */
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import {
-  FileJson, FileSpreadsheet, Laptop, Play, Radar, Save, Square, Trash2, Upload,
+  FileJson, FileSpreadsheet, Info, Laptop, Play, Radar, Save, Square, Trash2, Upload,
 } from "lucide-react";
-import { EmptyState, Pane, Resizer, Select, TextInput, ToolButton } from "@ds/panes";
+import { Select, TextInput, ToolButton } from "@ds/panes";
 import { IconButton, InfoTip, StatusStrip } from "@ds/compact";
+import { Frame, FrameHeader, FramePanel, FrameTitle } from "@/components/ui/frame";
 import {
   isDesktop,
   netscanExport,
@@ -49,9 +50,8 @@ import {
   type ScanProfileWire,
 } from "@lib/ipc";
 import { useWorkbench, useWorkbenchCase } from "@state/workbench";
-import { AuthorizedCaseAction } from "@/app/_components/AuthorizedCaseAction";
-import { useWorkspaceDraft } from "@state/workspace-sessions";
-import { invoke, Channel } from "@tauri-apps/api/core";
+import { useWorkspaceDraft } from "@state/workspace-sessions";import { invoke, Channel } from "@tauri-apps/api/core";
+
 
 const PORT_PRESETS = [
   { value: "top25", label: "Top 25 ports" },
@@ -163,6 +163,15 @@ const AUTHORIZATION_TIP =
   "§9.3 — I confirm the target is mine or I have explicit authorization to assess it. "
   + "The backend verifies the selected saved case and asks for native confirmation before starting.";
 
+/**
+ * The former Notes-pane prose, one hover away (toolbar info button). The
+ * platform capability paragraph lives in the Laptop-icon tooltip instead.
+ */
+const NOTES_TOOLTIP =
+  "Native scan status is global; results and findings withheld until a scan is started in this case. "
+  + "Live scan status appears in the status strip; completed scans are listed below the results table. "
+  + "Scan results, findings and Stop are bound to the backend-selected case generation; switching cases revokes stale read access.";
+
 /** Uniform toolbar cell: h-7 icon buttons center inside the h-8 row line. */
 function IconCell({ children }: { children: ReactNode }) {
   return (
@@ -201,7 +210,6 @@ export function ScanView() {
     wb.caseId, "network", "scan-session-revision", null,
   );
   const [target, setTarget] = useWorkspaceDraft(wb.caseId, "network", "scan-target", "127.0.0.1");
-  const [notesWidth, setNotesWidth] = useState(264);
   const [ports, setPorts] = useWorkspaceDraft(wb.caseId, "network", "scan-ports", "top25");
   const [transport, setTransport] = useWorkspaceDraft<"tcp" | "udp">(
     wb.caseId, "network", "scan-transport", "tcp",
@@ -842,7 +850,30 @@ export function ScanView() {
     profiles.length > 0
       ? { label: `${profiles.length}/32 profiles · session-local` }
       : null,
+    status.save_error
+      ? { label: "Case save failed: " + status.save_error, tone: "err" }
+      : null,
   ];
+
+  // Completed-operation findings render in one strip below the results table.
+  const hasFindings = synFindings !== null || stealthFindings !== null
+    || trace6Rows !== null || traceRows !== null || icmpRows !== null
+    || ndpNeighbors !== null || arpNeighbors !== null || discovered !== null;
+
+  // Empty state: one short title + one muted line, centered in a card.
+  // Case selection happens in the Case section, never inside this view.
+  const emptyTitle = running
+    ? "Scanning…"
+    : revision === null
+      ? "No case selected"
+      : !authorized ? "Authorization required" : "Ready to scan";
+  const emptyLine = revision === null
+    ? "Select a case in the Case section to enable scanning."
+    : !authorized
+      ? "Confirm the authorization checkbox in the toolbar."
+      : running
+        ? "Results appear here as probes complete."
+        : "Enter a target and press Run scan.";
 
   return (
     <div className="flex h-full min-h-0 flex-col">
@@ -1155,6 +1186,9 @@ export function ScanView() {
           </>
         ) : null}
         <span className="flex-1" />
+        <IconCell>
+          <IconButton icon={Info} title={NOTES_TOOLTIP} />
+        </IconCell>
         <span
           role="note"
           tabIndex={0}
@@ -1166,299 +1200,86 @@ export function ScanView() {
         </span>
       </div>
       <StatusStrip items={statusItems} />
-      {error ? <div className="border-b border-err/50 bg-err/10 px-2 py-1 font-mono text-[10px] text-err">{error}</div> : null}
-      {revision === null && <AuthorizedCaseAction activity="Network scanning" />}
-      <div className="flex min-h-0 flex-1 gap-px bg-line">
-        <div className="flex min-w-0 flex-1 flex-col gap-px bg-line">
-          <Pane title="Authorization (§9.3)" className="shrink-0">
-            <label className="flex cursor-pointer items-start gap-2 p-2 text-xs leading-relaxed text-fg-dim">
-              <input
-                type="checkbox"
-                checked={authorized}
-                onChange={(e) => setAuthorized(e.target.checked)}
-                className="mt-0.5 accent-[var(--color-orange)]"
-              />
-              <span>
-                I confirm the target is mine or I have explicit authorization to assess it. The backend verifies the selected saved case and asks for native confirmation before starting.
-              </span>
-            </label>
-            {windowsHost ? (
-              <div className="flex flex-wrap items-center gap-2 border-t border-line p-2">
-                <span className="text-xs text-fg-muted">Windows discovery · TCP/UDP above; ICMP and trace below require a connected adapter</span>
-                <Select value={arpInterface} onChange={setArpInterface}
-                  options={[{ value: "", label: "Select network adapter" }, ...arpInterfaces.map((iface) => ({ value: iface.name, label: iface.display_name || "Windows adapter #" + iface.index }))]}
-                  ariaLabel="Windows source network adapter" className="w-52" />
-                {icmpBusy ? (
-                  <ToolButton tone="danger" onClick={() => void stopIcmp()}
-                    title="Cancel active Windows ICMPv4 discovery">
-                    <Square size={11} /> Stop ping
-                  </ToolButton>
-                ) : (
-                  <ToolButton onClick={() => void discoverIcmp()}
-                    disabled={!desktop || !authorized || networkBusy || revision === null || !arpInterface ||
-                      !target.trim() || running || status.running || traceBusy}
-                    title="Windows IP Helper ICMPv4 Echo with native confirmation">
-                    Ping IPv4
-                  </ToolButton>
-                )}
-                {traceBusy ? (
-                  <ToolButton tone="danger" onClick={() => void stopTrace()}
-                    title="Cancel active Windows traceroute">
-                    <Square size={11} /> Stop trace
-                  </ToolButton>
-                ) : (
-                  <ToolButton onClick={() => void runTrace()}
-                    disabled={!desktop || !authorized || networkBusy || revision === null || !arpInterface ||
-                      !target.trim() || running || status.running || icmpBusy}
-                    title="Windows IP Helper IPv4 traceroute with native authorization">
-                    Trace IPv4
-                  </ToolButton>
-                )}
-                <span className="text-xs text-fg-muted">TCP/UDP scans do not require the capture driver. ARP, NDP, raw SYN and raw FIN/NULL/Xmas/ACK/Window scan types are Linux-only.</span>
-                {arpInterfaces.length === 0 && <span role="status" className="text-xs text-fg-muted">
-                  No active IPv4 source adapter. TCP/UDP scans remain available above.
-                </span>}
-              </div>
-            ) : linuxHost ? (
-            <div className="flex flex-wrap items-center gap-2 border-t border-line p-2">
-              <span className="font-mono text-[10px] text-fg-muted">Linux on-link discovery</span>
-              <Select
-                value={arpInterface}
-                onChange={setArpInterface}
-                options={[
-                  { value: "", label: "Choose Ethernet NIC" },
-                  ...arpInterfaces.map((iface) => ({
-                    value: iface.name, label: iface.name,
-                  })),
-                ]}
-                ariaLabel="ARP discovery Ethernet interface"
-                className="w-44"
-              />
-              {arpBusy ? (
-                <ToolButton tone="danger" onClick={() => void stopArp()}
-                  title="Stop case-authorized native ARP discovery">
-                  <Square size={11} /> Stop ARP
-                </ToolButton>
-              ) : (
-                <ToolButton
-                  onClick={() => void discoverArp()}
-                  disabled={!desktop || !authorized || networkBusy || revision === null || !arpInterface
-                    || !target.trim() || running || status.running || ndpBusy || synBusy}
-                  title="Linux only: native confirmation, on-link scope, CAP_NET_RAW and case authorization required">
-                  Discover ARP
-                </ToolButton>
-              )}
-              <span className="font-mono text-[10px] text-fg-muted">
-                ARP: up to 32 on-link IPv4 hosts
-              </span>
-              {ndpBusy ? (
-                <ToolButton tone="danger" onClick={() => void stopNdp()}>
-                  <Square size={11} /> Stop NDP
-                </ToolButton>
-              ) : (
-                <ToolButton onClick={() => void discoverNdp()}
-                  disabled={!desktop || !authorized || networkBusy || revision === null || !arpInterface ||
-                    !target.trim() || running || status.running || arpBusy || synBusy}
-                  title="Linux only: native case confirmation, selected NIC, fe80::/10 IPv6 target and CAP_NET_RAW required">
-                  Discover NDP
-                </ToolButton>
-              )}
-              <span className="font-mono text-[10px] text-fg-muted">
-                NDP: 16 link-local IPv6 hosts · silence ≠ down
-              </span>
-              {traceBusy ? (
-                <ToolButton tone="danger" onClick={() => void stopTrace()}
-                  title="Cancel the current case-scoped ICMP route trace">
-                  <Square size={11} /> Stop trace
-                </ToolButton>
-              ) : (
-                <ToolButton onClick={() => void runTrace()}
-                  disabled={!desktop || !authorized || networkBusy || revision === null || !arpInterface ||
-                    !target.trim() || running || status.running || arpBusy || ndpBusy || synBusy || icmpBusy}
-                  title="Linux or Windows: up to 12 TTL-limited ICMPv4 probes, backend confirmation and saved-case authorization required">
-                  Trace IPv4
-                </ToolButton>
-              )}
-              {traceBusy ? null : (
-                <ToolButton onClick={() => void runTrace6()}
-                  disabled={!desktop || !authorized || networkBusy || revision === null || !arpInterface ||
-                    !target.trim() || running || status.running || arpBusy || ndpBusy || synBusy || icmpBusy}
-                  title="Linux only: up to 12 hop-limited ICMPv6 probes with per-hop unicast hop limit, backend confirmation and saved-case authorization required">
-                  Trace IPv6
-                </ToolButton>
-              )}
-              {icmpBusy ? (
-                <ToolButton tone="danger" onClick={() => void stopIcmp()}>
-                  <Square size={11} /> Stop ICMP
-                </ToolButton>
-              ) : (
-                <ToolButton onClick={() => void discoverIcmp()}
-                  disabled={!desktop || !authorized || networkBusy || revision === null || !arpInterface ||
-                    !target.trim() || running || status.running || arpBusy || ndpBusy || synBusy}
-                  title="Windows native IP Helper or Linux CAP_NET_RAW: explicitly confirmed case-scoped ICMPv4 discovery">
-                  ICMP Echo
-                </ToolButton>
-              )}
-              <span className="font-mono text-[10px] text-fg-muted">
-                ICMPv4: up to 32 hosts
-              </span>
-              <ToolButton onClick={() => void discoverIcmp6()}
-                disabled={!desktop || !authorized || networkBusy || revision === null || !arpInterface ||
-                  !target.trim() || running || status.running || arpBusy || ndpBusy || synBusy || icmpBusy || traceBusy}
-                title="Linux native ICMPv6 Echo: 32 distinct fe80::/10 targets on the selected Ethernet interface, native confirmation, CAP_NET_RAW">
-                IPv6 Echo
-              </ToolButton>
-              {synBusy ? (
-                <ToolButton tone="danger" onClick={() => void stopSyn()} title="Stop case-authorized raw SYN scan">
-                  <Square size={11} /> Stop SYN
-                </ToolButton>
-              ) : (
-                <ToolButton onClick={() => void runSyn()}
-                  disabled={!desktop || !authorized || networkBusy || revision === null || !arpInterface
-                    || !target.trim() || !ports.trim() || running || status.running || arpBusy}
-                  title="Linux only: CAP_NET_RAW, selected interface, backend saved-case authorization and native confirmation required">
-                  <Play size={11} /> Raw SYN
-                </ToolButton>
-              )}
-              <ToolButton onClick={() => void runSyn6()}
-                disabled={!desktop || !authorized || networkBusy || revision === null || !arpInterface ||
-                  !target.trim() || !ports.trim() || running || status.running ||
-                  synBusy || arpBusy || ndpBusy || icmpBusy || traceBusy}
-                title="Linux: max 16 distinct fe80::/10 hosts, 64 ports, 512 SYN probes and 8 in flight; requires CAP_NET_RAW and native consent">
-                IPv6 SYN
-              </ToolButton>
-              {synProgress ? (
-                <span className="font-mono text-[10px] text-fg-muted">
-                  SYN {synProgress.tried}/{synProgress.total} · {synProgress.percent}%
-                </span>
-              ) : null}
-              <span className="font-mono text-[10px] uppercase text-fg-muted">raw depth</span>
-              <Select
-                value={stealthType}
-                onChange={(value) => setStealthType(value as StealthScanTypeWire)}
-                options={STEALTH_SCAN_TYPES}
-                ariaLabel="Raw scan type"
-                className="w-36"
-              />
-              {stealthBusy ? (
-                <ToolButton tone="danger" onClick={() => void stopStealth()}
-                  title="Stop the case-authorized raw FIN/NULL/Xmas/ACK/Window scan">
-                  <Square size={11} /> Stop raw
-                </ToolButton>
-              ) : (
-                <ToolButton onClick={() => void runStealth()}
-                  disabled={!desktop || !authorized || networkBusy || revision === null || !arpInterface ||
-                    !target.trim() || !ports.trim() || running || status.running}
-                  title="Linux only: FIN/NULL/Xmas/ACK/Window flag probes with documented reply semantics; requires CAP_NET_RAW, a selected interface, a saved case and native confirmation">
-                  <Play size={11} /> Raw depth
-                </ToolButton>
-              )}
-              <span className="font-mono text-[10px] text-fg-muted">
-                Raw scan types require Linux · silence means the documented default state, not proof
-              </span>
-              {stealthProgress ? (
-                <span className="font-mono text-[10px] text-fg-muted">
-                  {stealthType} {stealthProgress.tried}/{stealthProgress.total} · {stealthProgress.percent}%
-                </span>
-              ) : null}
-            </div>
-            ) : (
-              <div role="status" className="border-t border-line p-3 text-xs text-fg-muted">
-                Native raw probes and ICMP are not available on this platform.
-                Raw FIN/NULL/Xmas/ACK/Window scan types require Linux. TCP/UDP connect
-                scans remain supported. {capabilities?.capture_detail ?? "Reading native capabilities…"}
-              </div>
-            )}
-          </Pane>
-          {progress ? (
-            <div className="shrink-0 border-b border-line bg-panel px-2 py-1.5">
-              <div className="mb-0.5 flex items-center justify-between font-mono text-[10px] text-fg-muted">
-                <span>{progress.tried} / {progress.total} probes</span>
-                <span>{progress.percent}%</span>
-              </div>
-              <div className="h-1.5 w-full border border-line bg-app">
-                <div className="h-full bg-orange" style={{ width: `${progress.percent}%` }} />
-              </div>
-            </div>
-          ) : null}
-          <Pane title={"Network observations: " + observedCount + " · " + openCount + " open · " + (observationPage?.closed ?? 0) + " closed · " + (observationPage?.inconclusive ?? 0) + " inconclusive"} className="min-h-0 flex-1">
-            {results.length === 0 && !observationPage?.entries.length ? (
-              <EmptyState
-                title={running ? "Scanning…" : revision === null ? "Create a case to begin" : !authorized ? "Confirm the authorized target" : "Ready to scan"}
-                detail={revision === null
-                  ? "Create or select a saved case above. This enables the scan controls without starting network traffic."
-                  : !authorized
-                    ? "Review the scope authorization checkbox, then select TCP or UDP and Run scan. A native confirmation is required."
-                    : "Enter an authorized host, choose ports and press Run scan. Results, including closed and inconclusive observations, appear here."}
-                badge="TCP / UDP"
-              />
-            ) : (
-              <table className="data-table">
-                <thead>
-                  <tr>
-                    <th className="w-40">Host</th>
-                    <th className="w-16">Port</th>
-                    <th className="w-16">Proto</th>
-                    <th className="w-20">State</th>
-                    <th className="w-28">Service</th>
-                    <th>Banner</th>
-                    <th>Reason / evidence</th>
-                    <th>Elapsed</th>
-                    <th className="w-32">Probe</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {observationPage
-                    ? observationPage.entries.map((r, i) => (
-                      <tr key={"obs-" + r.host + "-" + r.port + "-" + i}>
-                        <td className="text-fg">{r.host}</td>
-                        <td>{r.port}</td>
-                        <td className="uppercase text-fg-muted">{r.protocol}</td>
-                        <td className={r.state === "open" ? "text-ok" : "text-fg-muted"}>{r.state}</td>
-                        <td className="text-orange" title={r.service_basis}>{r.service}{r.service_basis === "port_hint_only" ? " (port hint)" : ""}{r.remote_software_claim ? <span title="Unverified software identity claimed by the remote server"> · claims {r.remote_software_claim}</span> : null}</td>
-                        <td className="truncate text-fg-muted" title={r.banner}>{r.banner || "—"}</td>
-                        <td className="text-fg-muted" title={"Method: " + r.method + "; attempts: " + r.attempts + "; retries: " + r.retries + "; OS error: " + (r.os_error_code ?? "n/a")}>{r.reason}</td>
-                        <td>{r.elapsed_ms} ms</td>
-                        {probeCell(r.host, r.port, r.state === "open")}
-                      </tr>
-                    ))
-                    : results.map((r, i) => (
-                      <tr key={"open-" + r.host + "-" + r.port + "-" + i}>
-                        <td className="text-fg">{r.host}</td>
-                        <td>{r.port}</td>
-                        <td className="uppercase text-fg-muted">tcp</td>
-                        <td className="text-ok">{r.state}</td>
-                        <td className="text-orange">{r.service}</td>
-                        <td className="truncate text-fg-muted" title={r.banner}>{r.banner}</td>
-                        <td>—</td><td>—</td>
-                        {probeCell(r.host, r.port, r.state === "open")}
-                      </tr>
-                    ))}
-                </tbody>
-              </table>
-            )}
-          </Pane>
-          {observationPage && observationPage.total > 100 && (
-            <div className="flex shrink-0 items-center gap-2 border-t border-line px-3 py-1 text-xs text-fg-muted">
-              <ToolButton disabled={observationOffset === 0} onClick={() => setObservationOffset(Math.max(0, observationOffset - 100))}>Previous</ToolButton>
-              <span>{observationPage.offset + 1}–{Math.min(observationPage.offset + observationPage.shown, observationPage.total)} / {observationPage.total}</span>
-              <ToolButton disabled={observationOffset + observationPage.shown >= observationPage.total} onClick={() => setObservationOffset(observationOffset + 100)}>Next</ToolButton>
-            </div>
-          )}
+      {error ? <div role="alert" className="shrink-0 bg-err/10 px-3 py-1 font-mono text-[10px] text-err">{error}</div> : null}
+      {progress ? (
+        <div className="shrink-0 px-3 py-1">
+          <div className="mb-0.5 flex items-center justify-between font-mono text-[10px] text-fg-muted">
+            <span>{progress.tried} / {progress.total} probes</span>
+            <span>{progress.percent}%</span>
+          </div>
+          <div className="h-1.5 w-full border border-line bg-app">
+            <div className="h-full bg-orange" style={{ width: `${progress.percent}%` }} />
+          </div>
         </div>
-        <Resizer direction="horizontal" flip ariaLabel="Resize scan notes" value={notesWidth} onChange={setNotesWidth} min={220} max={500} />
-        <Pane title="Notes" className="shrink-0" style={{ width: notesWidth }}>
-          <div className="p-2 font-mono text-[10px] leading-relaxed text-fg-muted">
-            {windowsHost
-              ? "Windows: TCP connect and bounded UDP scanning; IPv4 Ping and Trace use the Windows IP Helper API and do not need the missing packet-capture driver. Select a saved case, check authorization, and confirm the operation."
-              : "Linux: TCP connect, bounded UDP, and privileged native raw probes. ARP/NDP/SYN require CAP_NET_RAW and an on-link interface. UDP silence is inconclusive. All active probes require case selection and native confirmation."}
+      ) : null}
+      <div className="flex min-h-0 flex-1 flex-col bg-app">
+        {results.length === 0 && !observationPage?.entries.length ? (
+          <div className="flex min-h-0 flex-1 items-center justify-center px-4 py-6">
+            <Frame aria-label="Scan status" className="w-full max-w-md p-1">
+              <FrameHeader className="px-4 py-3">
+                <FrameTitle>{emptyTitle}</FrameTitle>
+              </FrameHeader>
+              <FramePanel className="px-4 py-3">
+                <p className="text-xs text-fg-muted">{emptyLine}</p>
+              </FramePanel>
+            </Frame>
           </div>
-          <div className="border-t border-line px-2 py-1.5 font-mono text-[10px] text-fg-muted">
-            {scanCase.current === wb.caseId
-              ? `status: ${status.running ? "scan running" : "idle"} · ${status.results} stored results · ${status.saved_findings} case findings`
-              : "Native scan status is global; results and findings withheld until a scan is started in this case"}
+        ) : (
+          <div className="min-h-0 flex-1 overflow-auto">
+            <table className="data-table">
+              <thead>
+                <tr>
+                  <th className="w-40">Host</th>
+                  <th className="w-16">Port</th>
+                  <th className="w-16">Proto</th>
+                  <th className="w-20">State</th>
+                  <th className="w-28">Service</th>
+                  <th>Banner</th>
+                  <th>Reason / evidence</th>
+                  <th>Elapsed</th>
+                  <th className="w-32">Probe</th>
+                </tr>
+              </thead>
+              <tbody>
+                {observationPage
+                  ? observationPage.entries.map((r, i) => (
+                    <tr key={"obs-" + r.host + "-" + r.port + "-" + i}>
+                      <td className="text-fg">{r.host}</td>
+                      <td>{r.port}</td>
+                      <td className="uppercase text-fg-muted">{r.protocol}</td>
+                      <td className={r.state === "open" ? "text-ok" : "text-fg-muted"}>{r.state}</td>
+                      <td className="text-orange" title={r.service_basis}>{r.service}{r.service_basis === "port_hint_only" ? " (port hint)" : ""}{r.remote_software_claim ? <span title="Unverified software identity claimed by the remote server"> · claims {r.remote_software_claim}</span> : null}</td>
+                      <td className="truncate text-fg-muted" title={r.banner}>{r.banner || "—"}</td>
+                      <td className="text-fg-muted" title={"Method: " + r.method + "; attempts: " + r.attempts + "; retries: " + r.retries + "; OS error: " + (r.os_error_code ?? "n/a")}>{r.reason}</td>
+                      <td>{r.elapsed_ms} ms</td>
+                      {probeCell(r.host, r.port, r.state === "open")}
+                    </tr>
+                  ))
+                  : results.map((r, i) => (
+                    <tr key={"open-" + r.host + "-" + r.port + "-" + i}>
+                      <td className="text-fg">{r.host}</td>
+                      <td>{r.port}</td>
+                      <td className="uppercase text-fg-muted">tcp</td>
+                      <td className="text-ok">{r.state}</td>
+                      <td className="text-orange">{r.service}</td>
+                      <td className="truncate text-fg-muted" title={r.banner}>{r.banner}</td>
+                      <td>—</td><td>—</td>
+                      {probeCell(r.host, r.port, r.state === "open")}
+                    </tr>
+                  ))}
+              </tbody>
+            </table>
           </div>
-          {status.save_error ? <div className="border-t border-line p-2 text-xs text-err">Case save failed: {status.save_error}</div> : null}
+        )}
+        {observationPage && observationPage.total > 100 && (
+          <div className="flex shrink-0 items-center gap-2 border-t border-line px-3 py-1 text-xs text-fg-muted">
+            <ToolButton disabled={observationOffset === 0} onClick={() => setObservationOffset(Math.max(0, observationOffset - 100))}>Previous</ToolButton>
+            <span>{observationPage.offset + 1}–{Math.min(observationPage.offset + observationPage.shown, observationPage.total)} / {observationPage.total}</span>
+            <ToolButton disabled={observationOffset + observationPage.shown >= observationPage.total} onClick={() => setObservationOffset(observationOffset + 100)}>Next</ToolButton>
+          </div>
+        )}
+        {hasFindings ? (
+          <div className="max-h-56 shrink-0 overflow-y-auto">
           {synFindings !== null ? (
             <div className="border-t border-line p-2 text-[10px] text-fg-muted">
               <div className="mb-1 font-semibold text-fg">
@@ -1475,7 +1296,8 @@ export function ScanView() {
           ) : null}
           {stealthFindings !== null ? (
             <div className="border-t border-line p-2 text-[10px] text-fg-muted">
-              <div className="mb-1 font-semibold text-fg">
+              <div className="mb-1 font-semibold text-fg"
+                title="States classify one probe each; FIN/NULL/Xmas silence is open|filtered and ACK/Window silence is filtered by definition.">
                 Raw {stealthType} scan: {stealthFindings.length} observations · {stealthFindings.filter((r) => r.state === "open").length} open · {stealthFindings.filter((r) => r.state === "open_filtered").length} open|filtered
               </div>
               <div className="max-h-36 overflow-y-auto font-mono">
@@ -1485,14 +1307,11 @@ export function ScanView() {
                   </div>
                 ))}
               </div>
-              <div className="text-fg-muted">
-                States classify one probe each; FIN/NULL/Xmas silence is open|filtered and ACK/Window silence is filtered by definition.
-              </div>
             </div>
           ) : null}
           {trace6Rows !== null ? (
-            <div>
-              <p className="font-mono text-[10px] text-fg-muted">
+            <div className="border-t border-line p-2 text-[10px] text-fg-muted">
+              <p className="mb-1 font-semibold text-fg">
                 Native IPv6 ICMPv6 route trace: {trace6Rows.length} observed hop-limit steps
               </p>
               {trace6Rows.map((hop) => (
@@ -1505,7 +1324,8 @@ export function ScanView() {
           ) : null}
           {traceRows !== null ? (
             <div className="border-t border-line p-2 text-[10px] text-fg-muted">
-              <div className="mb-1 font-semibold text-fg">
+              <div className="mb-1 font-semibold text-fg"
+                title="Router identities are not authenticated; missing responses do not prove missing hops.">
                 Native IPv4 ICMP route trace: {traceRows.length} observed TTL steps
               </div>
               <div className="max-h-36 overflow-y-auto font-mono">
@@ -1516,7 +1336,6 @@ export function ScanView() {
                   </div>
                 ))}
               </div>
-              <div className="text-fg-muted">Router identities are not authenticated; missing responses do not prove missing hops.</div>
             </div>
           ) : null}
           {icmpRows !== null ? (
@@ -1573,13 +1392,8 @@ export function ScanView() {
             </div>
           ) : null}
 
-          <div className="border-t border-line p-2">
-            <span className="text-fg-muted">Live scan status appears above; completed scans are listed below.</span>
           </div>
-          <div className="border-t border-line p-2 text-[10px] text-fg-muted">
-            Scan results, findings and Stop are bound to the backend-selected case generation; switching cases revokes stale read access.
-          </div>
-        </Pane>
+        ) : null}
       </div>
     </div>
   );
