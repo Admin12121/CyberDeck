@@ -13,7 +13,10 @@ import { fileURLToPath } from "node:url";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const studioSource = readFileSync(join(here, "PacketStudioView.tsx"), "utf8");
-const pendingClientSource = readFileSync(join(here, "pcap-export-ipc.ts"), "utf8");
+// The canonical invoke client + wire types live in lib/ipc.ts; the local
+// module re-exports them and keeps only pure helpers.
+const pendingClientSource = readFileSync(join(here, "../../../lib/ipc.ts"), "utf8");
+const helperSource = readFileSync(join(here, "pcap-export-ipc.ts"), "utf8");
 const exportCommandSource = readFileSync(
   join(here, "../../../src-tauri/src/features/network/ipc/pcap_export.rs"),
   "utf8",
@@ -134,7 +137,7 @@ test("opened captures surface a dismissible fragment-reassembly banner", () => {
 });
 
 test("banner text summarizes count, overlap conflicts and first datagram ids", () => {
-  const helper = /export function reassemblyBannerText\([\s\S]*?\n\}/.exec(pendingClientSource);
+  const helper = /export function reassemblyBannerText\([\s\S]*?\n\}/.exec(helperSource);
   assert.ok(helper, "reassemblyBannerText helper missing");
   assert.match(helper[0], /summary\.datagram_count/);
   assert.match(helper[0], /summary\.flagged_overlap_count/);

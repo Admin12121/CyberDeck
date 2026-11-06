@@ -13,6 +13,8 @@ import { fileURLToPath } from "node:url";
 const here = dirname(fileURLToPath(import.meta.url));
 const viewSource = readFileSync(join(here, "ScanInsightsView.tsx"), "utf8");
 const ipcSource = readFileSync(join(here, "scan-insights-ipc.ts"), "utf8");
+// The canonical invoke clients + wire types live in lib/ipc.ts (three levels up).
+const canonicalIpcSource = readFileSync(join(here, "../../../lib/ipc.ts"), "utf8");
 const workspaceSource = readFileSync(join(here, "NetworkWorkspace.tsx"), "utf8");
 const registrySource = readFileSync(join(here, "../../../state/tool-registry.ts"), "utf8");
 const backendSource = readFileSync(
@@ -82,7 +84,7 @@ test("honesty contract: up means open evidence, l2 stays on the deck's own segme
 
 test("frontend clients target the registered insights command names", () => {
   for (const command of ["netscan_diff_v1", "netscan_topology_v1"]) {
-    assert.match(ipcSource, new RegExp("[\"']" + command + "[\"']"));
+    assert.match(canonicalIpcSource, new RegExp("[\"']" + command + "[\"']"));
     assert.match(
       backendSource,
       new RegExp("pub fn " + command),
@@ -111,15 +113,15 @@ test("insights are registered as the fourth network tool and keep-all-mounted", 
 });
 
 test("pending clients validate inputs and refuse the browser runtime", () => {
-  assert.match(ipcSource, /scan insights require the desktop runtime/);
-  assert.match(ipcSource, /Number\.isSafeInteger\(sessionAId\)/);
-  assert.match(ipcSource, /Number\.isSafeInteger\(sessionId\)/);
+  assert.match(canonicalIpcSource, /scan insights require the desktop runtime/);
+  assert.match(canonicalIpcSource, /Number\.isSafeInteger\(sessionAId\)/);
+  assert.match(canonicalIpcSource, /Number\.isSafeInteger\(sessionId\)/);
   // Wire field names are the serde names, never renamed.
   for (const field of [
     "ports_added", "ports_removed", "state_changes", "hosts_up_a", "ports_open_b",
     "open_port_count", "is_local", "truncated", "session_a_id",
   ]) {
-    assert.match(ipcSource, new RegExp("\\b" + field + "\\b"));
+    assert.match(canonicalIpcSource, new RegExp("\\b" + field + "\\b"));
   }
 });
 

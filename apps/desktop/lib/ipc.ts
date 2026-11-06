@@ -1057,6 +1057,8 @@ export interface PcapOpenWire {
   malformed_tail: boolean;
   file_name: string;
   packets: PcapPacketWire[];
+  /** Additive open-time summary of the bounded fragment reassembly pass. */
+  reassembly?: ReassemblySummaryWire | null;
 }
 
 export async function pcapOpenDialog(): Promise<PcapOpenWire> {
@@ -1183,6 +1185,42 @@ export async function networkLabSetScopeV1(
 export async function networkLabScopeV1(): Promise<NetworkLabScopeWire> {
   if (!inTauri) throw new Error("Lab scope status requires the desktop runtime");
   return invoke<NetworkLabScopeWire>("network_lab_scope_v1", {});
+}
+
+// --- Packet Studio export view -> case ---------------------------------------
+// Wire types mirror features/network/ipc/pcap_export.rs and pcap_wire.rs.
+
+/** Receipt for pcap_export_view_v1: identity and size only, never bytes. */
+export interface PcapExportReceiptWire {
+  artifact_id: string;
+  sha256: string;
+  byte_len: number;
+  packet_count: number;
+  file_name: string;
+}
+
+/** Additive reassembly summary on the pcap open wire (serde default: null). */
+export interface ReassemblySummaryWire {
+  datagram_count: number;
+  flagged_overlap_count: number;
+  first_datagram_ids: string[];
+}
+
+/** Mirrors the backend selection cap (MAX_CAPTURE_PACKETS in the packet crate). */
+export const PCAP_EXPORT_MAX_PACKETS = 200_000;
+
+/**
+ * Export the given packet indices of the currently opened capture as an
+ * immutable classic-PCAP case artifact. The backend re-validates everything:
+ * indices against the opened capture cache, the saved selected case, and the
+ * Ethernet/frame-size/total-size bounds of the evidence importer.
+ */
+export async function pcapExportViewV1(indices: number[]): Promise<PcapExportReceiptWire> {
+  if (!inTauri) throw new Error("case artifact export requires the desktop runtime");
+  if (indices.length === 0 || indices.length > PCAP_EXPORT_MAX_PACKETS) {
+    throw new Error("export selection must contain 1..200000 packet indices");
+  }
+  return invoke<PcapExportReceiptWire>("pcap_export_view_v1", { indices });
 }
 
 // --- recovery + file digests --------------------------------------------------
