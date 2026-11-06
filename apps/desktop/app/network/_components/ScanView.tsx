@@ -5,8 +5,7 @@ import {
   FileJson, FileSpreadsheet, Info, Laptop, Play, Radar, Save, Square, Trash2, Upload,
 } from "lucide-react";
 import { Select, TextInput, ToolButton } from "@ds/panes";
-import { IconButton, InfoTip, StatusStrip } from "@ds/compact";
-import { Frame, FrameHeader, FramePanel, FrameTitle } from "@/components/ui/frame";
+import { EmptyCard, IconButton, InfoTip, StatusStrip } from "@ds/compact";
 import {
   isDesktop,
   netscanExport,
@@ -1214,16 +1213,9 @@ export function ScanView() {
       ) : null}
       <div className="flex min-h-0 flex-1 flex-col bg-app">
         {results.length === 0 && !observationPage?.entries.length ? (
-          <div className="flex min-h-0 flex-1 items-center justify-center px-4 py-6">
-            <Frame aria-label="Scan status" className="w-full max-w-md p-1">
-              <FrameHeader className="px-4 py-3">
-                <FrameTitle>{emptyTitle}</FrameTitle>
-              </FrameHeader>
-              <FramePanel className="px-4 py-3">
-                <p className="text-xs text-fg-muted">{emptyLine}</p>
-              </FramePanel>
-            </Frame>
-          </div>
+          <EmptyCard icon={Radar} title={emptyTitle}>
+            {emptyLine}
+          </EmptyCard>
         ) : (
           <div className="min-h-0 flex-1 overflow-auto">
             <table className="data-table">
