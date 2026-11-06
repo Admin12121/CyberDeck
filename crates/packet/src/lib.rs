@@ -18,6 +18,7 @@ pub mod pcap_write;
 pub mod os_hints;
 pub mod pcapng_write;
 pub mod inventory;
+pub mod lab_events;
 pub mod live;
 pub mod scan_packets;
 pub mod scan_replies;
