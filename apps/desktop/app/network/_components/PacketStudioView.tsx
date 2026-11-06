@@ -18,6 +18,13 @@ import {
 } from "@lib/ipc";
 import { useWorkbench } from "@state/workbench";
 import { useWorkspaceDraft } from "@state/workspace-sessions";
+import {
+  pcapExportViewV1,
+  reassemblyBannerText,
+  reassemblyOf,
+  shortArtifactId,
+  type PcapExportReceiptWire,
+} from "./pcap-export-ipc";
 import { LiveCaptureView } from "./LiveCaptureView";
 import { PacketStartView } from "./PacketStartView";
 import { PacketTable } from "./PacketTable";
@@ -68,6 +75,11 @@ function ImportedCaptureView() {
   const [showSample, setShowSample] = useState(false);
   const [openError, setOpenError] = useState<string | null>(null);
   const [opening, setOpening] = useState(false);
+  // Export view -> case: receipt of the last successful backend export and
+  // the dismissible reassembly banner visibility for the opened capture.
+  const [exportResult, setExportResult] = useState<PcapExportReceiptWire | null>(null);
+  const [exporting, setExporting] = useState(false);
+  const [showReassembly, setShowReassembly] = useState(true);
   const [filter, setFilter] = useWorkspaceDraft(wb.caseId, "network", "packet-filter", "");
   const [packetScrollTop, setPacketScrollTop] = useState(0);
   const packetScrollRef = useRef<HTMLDivElement>(null);
@@ -90,7 +102,16 @@ function ImportedCaptureView() {
     setPacketBytes(null);
     setOpening(false);
     setOpenError(null);
+    setExportResult(null);
+    setShowReassembly(true);
   }, [wb.caseId]);
+
+  // Mirrors ScanView: a case counts as saved-selected only when the native
+  // session is ready for the workbench's current case id. Case artifact
+  // exports are refused by the backend without one.
+  const savedCaseReady = wb.caseSession.phase === "ready"
+    && wb.caseSession.caseId === wb.caseId
+    && wb.caseSession.revision !== null;
 
   const packets = capture?.packets ?? (showSample ? SAMPLE_DISPLAY : []);
 
@@ -109,6 +130,8 @@ function ImportedCaptureView() {
       setShowSample(false);
       setSelected(0);
       setPacketBytes(null);
+      setExportResult(null);
+      setShowReassembly(true);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       if (isCurrent() && message !== "cancelled") setOpenError(message);
@@ -135,10 +158,33 @@ function ImportedCaptureView() {
       setShowSample(false);
       setSelected(0);
       setPacketBytes(null);
+      setExportResult(null);
+      setShowReassembly(true);
     } catch (cause) {
       if (isCurrent()) setOpenError("Could not reopen verified case capture: " + String(cause));
     } finally {
       if (isCurrent()) setOpening(false);
+    }
+  };
+
+  // Export the CURRENTLY FILTERED view back into the selected saved case.
+  // The frontend only passes indices: the backend re-checks every index
+  // against the opened capture cache, re-serializes the original frame bytes
+  // as classic PCAP and commits them as an immutable case artifact through
+  // the same path as a native capture save. No bytes or paths cross the UI.
+  const exportView = async () => {
+    if (!capture) return;
+    setExporting(true);
+    setOpenError(null);
+    try {
+      const receipt = await pcapExportViewV1(filtered.map((packet) => packet.index));
+      setExportResult(receipt);
+    } catch (cause) {
+      setOpenError(
+        "Export view → case failed: " + (cause instanceof Error ? cause.message : String(cause)),
+      );
+    } finally {
+      setExporting(false);
     }
   };
 
@@ -155,6 +201,9 @@ function ImportedCaptureView() {
   const hierarchy = useMemo(() => protocolHierarchy(filtered), [filtered]);
   const ioBuckets = useMemo(() => ioSeriesOf(filtered), [filtered]);
   const hierarchyBytes = useMemo(() => filtered.reduce((sum, item) => sum + item.length, 0), [filtered]);
+  // Open-time fragment reassembly summary (additive wire field; null when the
+  // capture held no fragment evidence worth surfacing).
+  const reassembly = useMemo(() => (capture ? reassemblyOf(capture) : null), [capture]);
 
   const current = filtered.find((p) => p.index === selected) ?? filtered[0];
   // A bounded virtual window keeps large PCAPs responsive without dropping rows.
@@ -231,6 +280,22 @@ function ImportedCaptureView() {
         >
           <FolderOpen size={11} /> {opening ? "opening…" : "Open…"}
         </ToolButton>
+        <ToolButton
+          onClick={() => void exportView()}
+          disabled={!capture || exporting || !savedCaseReady}
+          title={!capture
+            ? "Open a capture to export its filtered view"
+            : savedCaseReady
+              ? "Persist the currently filtered packets as an immutable classic-PCAP case artifact"
+              : "Select a saved case to export the view into"}
+        >
+          {exporting ? "exporting…" : "Export view → case"}
+        </ToolButton>
+        {exportResult ? (
+          <Chip tone="ok">
+            {exportResult.packet_count} pkts → case · {shortArtifactId(exportResult.artifact_id)}
+          </Chip>
+        ) : null}
 
         <TextInput
           value={filter}
@@ -259,6 +324,23 @@ function ImportedCaptureView() {
       {capture?.malformed_tail ? (
         <div className="border-b border-warn/40 bg-warn/10 px-2 py-1 font-mono text-[10px] text-warn">
           capture has a malformed trailing record; packets before it loaded
+        </div>
+      ) : null}
+      {reassembly && showReassembly ? (
+        <div
+          className="flex items-center justify-between gap-2 border-b border-warn/40 bg-warn/10 px-2 py-1 font-mono text-[10px] text-warn"
+          role="status"
+          aria-label="Fragment reassembly summary"
+        >
+          <span className="truncate">{reassemblyBannerText(reassembly)}</span>
+          <button
+            type="button"
+            className="shrink-0 px-1 font-mono text-[10px] text-warn hover:text-fg"
+            aria-label="Dismiss reassembly summary"
+            onClick={() => setShowReassembly(false)}
+          >
+            ×
+          </button>
         </div>
       ) : null}
 

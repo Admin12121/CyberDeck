@@ -1848,6 +1848,56 @@ export async function netscanDiscoverHosts(targets: string, authorized: boolean)
   return invoke<string[]>("netscan_discover_hosts", { targets, authorized });
 }
 
+// --- scan insights (ndiff diff + topology) -----------------------------------
+// Wire types mirror features/network/ipc/scan_insights.rs serde exactly.
+
+export interface ScanDiffStateChangeWire { port: string; from: string; to: string; }
+export interface ScanDiffHostWire {
+  host: string;
+  ports_added: string[];
+  ports_removed: string[];
+  state_changes: ScanDiffStateChangeWire[];
+}
+export interface ScanDiffSummaryWire {
+  hosts_up_a: number;
+  hosts_up_b: number;
+  ports_open_a: number;
+  ports_open_b: number;
+}
+export interface ScanDiffWire {
+  session_a_id: number;
+  session_b_id: number;
+  new_hosts: string[];
+  lost_hosts: string[];
+  changed_hosts: ScanDiffHostWire[];
+  summary: ScanDiffSummaryWire;
+}
+export interface TopologyNodeWire { id: string; label: string; open_port_count: number; is_local: boolean; }
+export interface TopologyEdgeWire { a: string; b: string; kind: "l2" | "subnet"; }
+export interface ScanTopologyWire {
+  session_id: number;
+  nodes: TopologyNodeWire[];
+  edges: TopologyEdgeWire[];
+  truncated: boolean;
+}
+
+export async function netscanDiffV1(sessionAId: number, sessionBId: number): Promise<ScanDiffWire> {
+  if (!inTauri) throw new Error("scan insights require the desktop runtime");
+  if (!Number.isSafeInteger(sessionAId) || sessionAId <= 0
+    || !Number.isSafeInteger(sessionBId) || sessionBId <= 0) {
+    throw new Error("invalid bounded scan session ids");
+  }
+  return invoke<ScanDiffWire>("netscan_diff_v1", { sessionAId, sessionBId });
+}
+
+export async function netscanTopologyV1(sessionId: number): Promise<ScanTopologyWire> {
+  if (!inTauri) throw new Error("scan insights require the desktop runtime");
+  if (!Number.isSafeInteger(sessionId) || sessionId <= 0) {
+    throw new Error("invalid bounded scan session id");
+  }
+  return invoke<ScanTopologyWire>("netscan_topology_v1", { sessionId });
+}
+
 // --- browser fallback (demo jobs) --------------------------------------------
 
 interface Simulation {

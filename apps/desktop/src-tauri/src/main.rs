@@ -18,6 +18,7 @@ fn main() {
         .manage(features::crypto::ipc::recovery::RecoveryCtx::default())
         .manage(features::network::ipc::capture::CaptureCtx::default())
         .manage(features::network::ipc::netscan::ScanCtx::default())
+        .manage(features::network::ipc::scan_insights::InsightsCtx::default())
         .manage(std::sync::Arc::new(
             features::network::ipc::arp_discovery::ArpDiscoveryCtx::default(),
         ))
@@ -221,6 +222,8 @@ fn main() {
             features::network::ipc::netscan::netscan_history,
             features::network::ipc::netscan::netscan_export,
             features::network::ipc::netscan::netscan_discover_hosts,
+            features::network::ipc::scan_insights::netscan_diff_v1,
+            features::network::ipc::scan_insights::netscan_topology_v1,
             features::network::ipc::arp_discovery::netscan_arp_discover_v1,
             features::network::ipc::arp_discovery::netscan_arp_stop_v1,
             features::network::ipc::arp_discovery::netscan_arp_status_v1,

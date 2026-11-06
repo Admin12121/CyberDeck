@@ -7,6 +7,10 @@ pub(super) struct CaptureImport {
     pub(super) format: &'static str,
     pub(super) nanosecond: bool,
     pub(super) malformed_tail: bool,
+    /// Parser-computed fragment reassembly report; the cache keeps original
+    /// evidence only, so this rides on the import result for open-time
+    /// surfacing and is never mixed back into the packet list.
+    pub(super) reassembly: cyberdeck_packet::fragments::ReassemblyReport,
 }
 
 /// Keep original bytes exactly as imported; parsed packets refer back to them.
@@ -28,6 +32,7 @@ pub(super) fn import_bytes(bytes: Vec<u8>) -> Result<CaptureImport, String> {
         format,
         nanosecond: parsed.nanosecond,
         malformed_tail: parsed.malformed_tail,
+        reassembly: parsed.reassembly,
     })
 }
 

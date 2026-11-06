@@ -1,6 +1,7 @@
 //! Capture IPC adapters; stable command macros remain in pcap.rs.
 use super::{
-    capture_file, capture_service, hex_format, pcap_wire::wire_packet, PcapCtx, PcapOpenWire,
+    capture_file, capture_service, hex_format, pcap_wire::reassembly_summary, pcap_wire::wire_packet,
+    PcapCtx, PcapOpenWire,
 };
 use crate::features::forensics::ipc::evidence::HexResponse;
 use tauri::{AppHandle, State};
@@ -32,6 +33,7 @@ pub(super) fn open_dialog(app: AppHandle, ctx: State<'_, PcapCtx>) -> Result<Pca
         shown,
         malformed_tail: imported.malformed_tail,
         file_name,
+        reassembly: reassembly_summary(&imported.reassembly),
         packets: (0..shown)
             .map(|i| {
                 wire_packet(

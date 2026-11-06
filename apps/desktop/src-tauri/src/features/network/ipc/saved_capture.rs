@@ -1,7 +1,10 @@
 //! Case-bound, path-free saved original PCAP consumption.
 //! The verified reader reopens the immutable same-handle SHA-256-checked source
 //! for each bounded request; no independent cached-case authority is created.
-use super::{capture_service, hex_format, pcap_wire::wire_packet, PcapOpenWire};
+use super::{
+    capture_service, hex_format, pcap_wire::reassembly_summary, pcap_wire::wire_packet,
+    PcapOpenWire,
+};
 use crate::features::cases::infrastructure::authorized_transfer::{
     with_verified_artifact, EvidenceConsumer,
 };
@@ -34,6 +37,7 @@ pub(super) fn open(
                 shown,
                 malformed_tail: false,
                 file_name: record.name.clone(),
+                reassembly: reassembly_summary(&source.reassembly),
                 packets: (0..shown)
                     .map(|index| {
                         wire_packet(

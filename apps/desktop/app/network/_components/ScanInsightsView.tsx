@@ -8,20 +8,19 @@
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Chip, EmptyState, Pane, Select, ToolButton } from "@ds/panes";
-import { isDesktop, netscanHistory, type ScanHistoryItemWire } from "@lib/ipc";
+import {
+  isDesktop, netscanHistory, netscanDiffV1, netscanTopologyV1,
+  type ScanHistoryItemWire, type ScanDiffWire, type ScanTopologyWire,
+} from "@lib/ipc";
 import { useWorkbench, useWorkbenchCase } from "@state/workbench";
 import { AuthorizedCaseAction } from "@/app/_components/AuthorizedCaseAction";
 import {
   hostChangeCount,
   formatSessionLabel,
   formatStateChange,
-  netscanDiffV1,
-  netscanTopologyV1,
   radialLayout,
   TOPOLOGY_NODE_LIMIT,
   topologyNodeRadius,
-  type ScanDiffWire,
-  type ScanTopologyWire,
 } from "./scan-insights-ipc";
 
 /** Poll cadence for the read-only session history sweep. */

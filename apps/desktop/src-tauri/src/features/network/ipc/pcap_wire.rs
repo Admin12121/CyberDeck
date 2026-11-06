@@ -1,6 +1,6 @@
 //! IPC wire types and packet timestamp/metadata presentation projection.
 //! Stable fields and serialized names are shared with the desktop frontend.
-use cyberdeck_packet::PacketMeta;
+use cyberdeck_packet::{fragments::ReassemblyReport, PacketMeta};
 use serde::Serialize;
 
 #[derive(Debug, Serialize)]
@@ -32,6 +32,48 @@ pub struct PcapOpenWire {
     pub malformed_tail: bool,
     pub file_name: String,
     pub packets: Vec<PcapPacketWire>,
+    /// Additive open-time summary of the bounded fragment reassembly pass.
+    /// `Option` + serde default keep older wire consumers compiling; `None`
+    /// means the capture held no fragment evidence worth surfacing.
+    #[serde(default)]
+    pub reassembly: Option<ReassemblySummaryWire>,
+}
+
+/// Bounded reassembly summary. Original frames remain the evidence; this only
+/// reports what the passive assembler derived or flagged while opening.
+#[derive(Debug, Serialize)]
+pub struct ReassemblySummaryWire {
+    pub datagram_count: usize,
+    pub flagged_overlap_count: usize,
+    /// Identifiers of the first reassembled datagrams, capped at 8 so one
+    /// pathological capture cannot bloat the wire or the banner.
+    pub first_datagram_ids: Vec<String>,
+}
+
+/// `None` unless the reassembly pass actually reconstructed a datagram or
+/// flagged an overlap conflict; otherwise a bounded projection of the report.
+pub(super) fn reassembly_summary(report: &ReassemblyReport) -> Option<ReassemblySummaryWire> {
+    if report.completed.is_empty() && report.conflicts == 0 {
+        return None;
+    }
+    Some(ReassemblySummaryWire {
+        datagram_count: report.completed.len(),
+        flagged_overlap_count: report.conflicts,
+        first_datagram_ids: report
+            .completed
+            .iter()
+            .take(8)
+            .map(|datagram| {
+                format!(
+                    "v{} id=0x{:x} frames {}-{}",
+                    datagram.ip_version,
+                    datagram.identification,
+                    datagram.first_packet_index,
+                    datagram.last_packet_index
+                )
+            })
+            .collect(),
+    })
 }
 
 pub(super) fn wire_packet(

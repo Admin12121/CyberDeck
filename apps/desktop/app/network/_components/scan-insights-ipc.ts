@@ -1,95 +1,29 @@
 /**
- * Scan Insights pending IPC client + pure view helpers.
+ * Scan Insights wire re-exports + pure view helpers.
  *
- * The canonical clients and wire types will be folded into lib/ipc.ts by the
- * coordinator; until then this module follows the network-lab-model.ts
- * pattern: typed wrappers calling `invoke` directly (never raw paths, never
- * process spawning), wire field names exactly mirroring the Rust serde
- * structs in src-tauri/src/features/network/ipc/scan_insights.rs, and pure
- * helpers at the bottom that node --test exercises directly.
+ * The canonical clients and wire types live in lib/ipc.ts and mirror the Rust
+ * serde structs in src-tauri/src/features/network/ipc/scan_insights.rs
+ * exactly. Pure helpers at the bottom are what node --test exercises
+ * directly; the relative .ts import keeps node's TS-strip loader able to
+ * resolve them without a bundler.
  */
-import { invoke } from "@tauri-apps/api/core";
+import type {
+  ScanDiffHostWire,
+  ScanDiffStateChangeWire,
+  TopologyNodeWire,
+} from "../../../lib/ipc.ts";
 
-const inTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
-
-// --- wire types (mirror scan_insights.rs serde structs) ----------------------
-
-export interface ScanDiffStateChangeWire {
-  port: string;
-  from: string;
-  to: string;
-}
-
-export interface ScanDiffHostWire {
-  host: string;
-  ports_added: string[];
-  ports_removed: string[];
-  state_changes: ScanDiffStateChangeWire[];
-}
-
-export interface ScanDiffSummaryWire {
-  hosts_up_a: number;
-  hosts_up_b: number;
-  ports_open_a: number;
-  ports_open_b: number;
-}
-
-export interface ScanDiffWire {
-  session_a_id: number;
-  session_b_id: number;
-  new_hosts: string[];
-  lost_hosts: string[];
-  changed_hosts: ScanDiffHostWire[];
-  summary: ScanDiffSummaryWire;
-}
-
-export interface TopologyNodeWire {
-  id: string;
-  label: string;
-  open_port_count: number;
-  is_local: boolean;
-}
-
-export interface TopologyEdgeWire {
-  a: string;
-  b: string;
-  kind: "l2" | "subnet";
-}
-
-export interface ScanTopologyWire {
-  session_id: number;
-  nodes: TopologyNodeWire[];
-  edges: TopologyEdgeWire[];
-  truncated: boolean;
-}
-
-// --- pending canonical clients ----------------------------------------------
-
-/** ndiff-style comparison of two completed scan sessions of the selected case. */
-export async function netscanDiffV1(
-  sessionAId: number,
-  sessionBId: number,
-): Promise<ScanDiffWire> {
-  if (!inTauri) throw new Error("scan insights require the desktop runtime");
-  if (!Number.isSafeInteger(sessionAId) || sessionAId <= 0
-    || !Number.isSafeInteger(sessionBId) || sessionBId <= 0) {
-    throw new Error("invalid bounded scan session ids");
-  }
-  return invoke<ScanDiffWire>("netscan_diff_v1", { sessionAId, sessionBId });
-}
-
-/**
- * Topology projection of one completed scan session. Calling this also pins
- * that session into the backend's bounded snapshot store (read-only capture),
- * which is what keeps cross-session diffs possible after newer scans run.
- */
-export async function netscanTopologyV1(sessionId: number): Promise<ScanTopologyWire> {
-  if (!inTauri) throw new Error("scan insights require the desktop runtime");
-  if (!Number.isSafeInteger(sessionId) || sessionId <= 0) {
-    throw new Error("invalid bounded scan session id");
-  }
-  return invoke<ScanTopologyWire>("netscan_topology_v1", { sessionId });
-}
+export {
+  netscanDiffV1,
+  netscanTopologyV1,
+  type ScanDiffStateChangeWire,
+  type ScanDiffHostWire,
+  type ScanDiffSummaryWire,
+  type ScanDiffWire,
+  type TopologyNodeWire,
+  type TopologyEdgeWire,
+  type ScanTopologyWire,
+} from "../../../lib/ipc.ts";
 
 // --- pure helpers (node --test exercises these directly) ----------------------
 
