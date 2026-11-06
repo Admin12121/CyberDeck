@@ -50,7 +50,7 @@ test("offline toolbar carries the Export view -> case control, gated and busy-la
   assert.match(studioSource, /Export view → case \(PCAPNG\): native writer/);
   // The honest reason is visible via the tooltip for each disabled state.
   assert.match(studioSource, /select a saved case first/);
-  assert.match(studioSource, /Open a capture to export its filtered view/);
+  assert.match(studioSource, /Export view → case \(PCAP\): open a capture first/);
 });
 
 test("export sends the currently FILTERED packet indices and renders a result chip", () => {
