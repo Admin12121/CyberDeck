@@ -247,6 +247,7 @@ fn main() {
             features::network::ipc::icmp_echo::netscan_icmp_status_v1,
             features::network::ipc::icmp_echo::netscan_trace_ipv4_v1,
             features::network::ipc::icmp_echo::netscan_icmp6_discover_v1,
+            features::network::ipc::icmp_echo::netscan_trace_ipv6_v1,
             features::network::ipc::scan_depth::netscan_stealth_start_v1,
             features::network::ipc::scan_depth::netscan_stealth_stop_v1,
             features::network::ipc::scan_depth::netscan_stealth_status_v1,

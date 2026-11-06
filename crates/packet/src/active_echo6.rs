@@ -105,6 +105,55 @@ pub(crate) fn parse_kernel_link_local(source: &str, name: &str, index: u32) -> O
     }
     None
 }
+/// One traceroute hop: which router answered, whether the target was
+/// reached, and how long the round trip took. Inconclusive hops are honest:
+/// silence or non-matching replies never invent a responder.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TraceHop6 {
+    pub hop: u8,
+    pub responder: Option<Ipv6Addr>,
+    pub reached: bool,
+    pub reason: &'static str,
+    pub elapsed_ms: u64,
+}
+
+/// Scoped, operator-confirmed ICMPv6 traceroute over the same raw-socket
+/// machinery as the echo sweep, one hop limit per probe. Linux only: raw
+/// ICMPv6 and AF_PACKET require CAP_NET_RAW.
+pub fn trace_ipv6_echo(
+    interface_name: &str,
+    target: Ipv6Addr,
+    max_hops: u8,
+    stop: &AtomicBool,
+    scope_active: &(impl Fn() -> bool + Sync),
+) -> Result<Vec<TraceHop6>, Echo6Error> {
+    validate_hosts(&[target])?;
+    if max_hops == 0 || max_hops > 16 {
+        return Err(Echo6Error::new(
+            Echo6ErrorCode::InvalidScope,
+            "trace hop limit must be 1..=16",
+        ));
+    }
+    if stop.load(Ordering::Acquire) || !scope_active() {
+        return Err(Echo6Error::new(
+            Echo6ErrorCode::Cancelled,
+            "IPv6 trace scope revoked",
+        ));
+    }
+    #[cfg(target_os = "linux")]
+    {
+        linux::trace(interface_name, target, max_hops, stop, scope_active)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = interface_name;
+        Err(Echo6Error::new(
+            Echo6ErrorCode::Unsupported,
+            "native ICMPv6 traceroute currently requires Linux CAP_NET_RAW",
+        ))
+    }
+}
+
 pub fn discover_ipv6_echo(
     interface_name: &str,
     targets: &[Ipv6Addr],
@@ -145,6 +194,8 @@ mod linux {
     const SOL_SOCKET: c_int = 1;
     const SO_BINDTODEVICE: c_int = 25;
     const IPPROTO_ICMPV6: c_int = 58;
+    const IPPROTO_IPV6: c_int = 41;
+    const IPV6_UNICAST_HOPS: c_int = 16;
     const ETH_P_IPV6: u16 = 0x86dd;
     const POLLIN: i16 = 1;
     #[repr(C)]
@@ -225,6 +276,233 @@ mod linux {
     fn cancelled(stop: &AtomicBool, scope: &(impl Fn() -> bool + Sync)) -> bool {
         stop.load(Ordering::Acquire) || !scope()
     }
+    /// ICMPv6 traceroute: one hop limit per probe, replies correlated by the
+    /// echo identity. Echo replies mean the target was reached; ICMPv6
+    /// time-exceeded (kind 3) means an intermediate router answered and its
+    /// address is the frame's IPv6 source. Silence stays inconclusive.
+    pub(super) fn trace(
+        interface: &str,
+        target: Ipv6Addr,
+        max_hops: u8,
+        stop: &AtomicBool,
+        scope: &(impl Fn() -> bool + Sync),
+    ) -> Result<Vec<TraceHop6>, Echo6Error> {
+        let known = discover_interfaces()
+            .map_err(|e| Echo6Error::new(Echo6ErrorCode::Device, e.message))?;
+        let nic = select_interface(&known, interface)
+            .map_err(|e| Echo6Error::new(Echo6ErrorCode::Device, e.message))?;
+        let meta = std::fs::read_to_string("/proc/net/if_inet6").map_err(|e| {
+            Echo6Error::new(
+                Echo6ErrorCode::Device,
+                format!("read selected Linux IPv6 interface addresses: {e}"),
+            )
+        })?;
+        let source = parse_kernel_link_local(&meta, &nic.name, nic.index).ok_or_else(|| {
+            Echo6Error::new(
+                Echo6ErrorCode::InvalidScope,
+                "selected NIC does not have a kernel-configured IPv6 link-local source",
+            )
+        })?;
+        let index = c_int::try_from(nic.index).map_err(|_| {
+            Echo6Error::new(Echo6ErrorCode::Device, "selected interface index overflow")
+        })?;
+        let sender = Fd(unsafe { socket(AF_INET6, SOCK_RAW | SOCK_CLOEXEC, IPPROTO_ICMPV6) });
+        if sender.0 < 0 {
+            return Err(last_error("open native ICMPv6 raw transmitter"));
+        }
+        let mut device = nic.name.as_bytes().to_vec();
+        device.push(0);
+        if unsafe {
+            setsockopt(
+                sender.0,
+                SOL_SOCKET,
+                SO_BINDTODEVICE,
+                device.as_ptr().cast(),
+                device.len() as u32,
+            )
+        } < 0
+        {
+            return Err(last_error("bind ICMPv6 transmitter to selected NIC"));
+        }
+        let local = SockAddrIn6 {
+            family: AF_INET6 as u16,
+            port: 0,
+            flowinfo: 0,
+            addr: source.octets(),
+            scope_id: nic.index,
+        };
+        if unsafe {
+            bind(
+                sender.0,
+                (&raw const local).cast(),
+                std::mem::size_of::<SockAddrIn6>() as u32,
+            )
+        } < 0
+        {
+            return Err(last_error("bind actual link-local IPv6 source"));
+        }
+        let protocol = ETH_P_IPV6.to_be();
+        let receiver =
+            Fd(unsafe { socket(AF_PACKET, SOCK_RAW | SOCK_CLOEXEC, c_int::from(protocol)) });
+        if receiver.0 < 0 {
+            return Err(last_error("open native ICMPv6 Ethernet receiver"));
+        }
+        let local_link = SockAddrLl {
+            family: AF_PACKET as u16,
+            protocol,
+            ifindex: index,
+            hatype: 0,
+            pkttype: 0,
+            halen: 0,
+            addr: [0; 8],
+        };
+        if unsafe {
+            bind(
+                receiver.0,
+                (&raw const local_link).cast(),
+                std::mem::size_of::<SockAddrLl>() as u32,
+            )
+        } < 0
+        {
+            return Err(last_error("bind selected ICMPv6 response interface"));
+        }
+
+        let mut hops = Vec::with_capacity(usize::from(max_hops));
+        for hop in 1..=u16::from(max_hops) {
+            if cancelled(stop, scope) {
+                return Err(Echo6Error::new(
+                    Echo6ErrorCode::Cancelled,
+                    "IPv6 trace scope revoked",
+                ));
+            }
+            let hop_c = c_int::from(hop);
+            if unsafe {
+                setsockopt(
+                    sender.0,
+                    IPPROTO_IPV6,
+                    IPV6_UNICAST_HOPS,
+                    (&raw const hop_c).cast(),
+                    std::mem::size_of::<c_int>() as u32,
+                )
+            } < 0
+            {
+                return Err(last_error("set per-hop IPv6 unicast hop limit"));
+            }
+            let (identifier, sequence) = random_request_id()?;
+            let datagram = crate::scan_packets::ipv6_icmp_echo(
+                source,
+                target,
+                identifier,
+                sequence,
+                hop as u8,
+            )
+            .map_err(|_| {
+                Echo6Error::new(Echo6ErrorCode::InvalidScope, "invalid scoped ICMPv6 echo bytes")
+            })?;
+            let dst = SockAddrIn6 {
+                family: AF_INET6 as u16,
+                port: 0,
+                flowinfo: 0,
+                addr: target.octets(),
+                scope_id: nic.index,
+            };
+            let started = Instant::now();
+            let payload = &datagram[40..];
+            let wrote = unsafe {
+                sendto(
+                    sender.0,
+                    payload.as_ptr().cast(),
+                    payload.len(),
+                    0,
+                    (&raw const dst).cast(),
+                    std::mem::size_of::<SockAddrIn6>() as u32,
+                )
+            };
+            if wrote != payload.len() as isize {
+                return Err(last_error("send one bounded ICMPv6 trace probe"));
+            }
+            let outstanding = ProbeIdentity {
+                local: IpAddr::V6(source),
+                target: IpAddr::V6(target),
+                transport: ProbeTransport::IcmpEcho,
+                local_port: 0,
+                target_port: 0,
+                syn_sequence: None,
+                echo_key: Some((identifier, sequence)),
+            };
+            let mut hop = TraceHop6 {
+                hop: hop as u8,
+                responder: None,
+                reached: false,
+                reason: "icmpv6_trace_no_matching_response",
+                elapsed_ms: 0,
+            };
+            let mut frame = [0u8; 4096];
+            while started.elapsed() < MAX_WAIT {
+                if cancelled(stop, scope) {
+                    return Err(Echo6Error::new(
+                        Echo6ErrorCode::Cancelled,
+                        "IPv6 trace scope revoked",
+                    ));
+                }
+                let remaining = MAX_WAIT.saturating_sub(started.elapsed());
+                let mut fds = PollFd {
+                    fd: receiver.0,
+                    events: POLLIN,
+                    revents: 0,
+                };
+                let ready = unsafe {
+                    poll(&raw mut fds, 1, remaining.as_millis().min(50).max(1) as c_int)
+                };
+                if ready < 0 {
+                    if io::Error::last_os_error().kind() == io::ErrorKind::Interrupted {
+                        continue;
+                    }
+                    return Err(last_error("poll native ICMPv6 trace replies"));
+                }
+                if ready == 0 || fds.revents & POLLIN == 0 {
+                    continue;
+                }
+                let length = unsafe { recv(receiver.0, frame.as_mut_ptr().cast(), frame.len(), 0) };
+                if length < 0 {
+                    if io::Error::last_os_error().kind() == io::ErrorKind::Interrupted {
+                        continue;
+                    }
+                    return Err(last_error("read native ICMPv6 Ethernet reply"));
+                }
+                match correlate_ethernet_response(&frame[..length as usize], &outstanding) {
+                    Some(ReplyEvidence::IcmpEcho) => {
+                        hop.reached = true;
+                        hop.responder = Some(target);
+                        hop.reason = "icmpv6_echo_reply_matching_identifier";
+                        hop.elapsed_ms = started.elapsed().as_millis() as u64;
+                        break;
+                    }
+                    Some(ReplyEvidence::IcmpV6Error { kind: 3, .. }) => {
+                        // Time exceeded: the frame's IPv6 source is the
+                        // intermediate router that dropped the probe.
+                        if length as usize >= 38 {
+                            let octets: [u8; 16] = frame[22..38]
+                                .try_into()
+                                .expect("bounded frame slice is 16 bytes");
+                            hop.responder = Some(Ipv6Addr::from(octets));
+                        }
+                        hop.reason = "icmpv6_time_exceeded_from_intermediate_hop";
+                        hop.elapsed_ms = started.elapsed().as_millis() as u64;
+                        break;
+                    }
+                    _ => continue,
+                }
+            }
+            let reached = hop.reached;
+            hops.push(hop);
+            if reached {
+                break;
+            }
+        }
+        Ok(hops)
+    }
+
     pub(super) fn discover(
         interface: &str,
         targets: &[Ipv6Addr],

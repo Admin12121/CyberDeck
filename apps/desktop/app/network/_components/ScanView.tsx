@@ -13,6 +13,8 @@ import {
   netscanIcmpDiscoverV1,
   netscanIcmp6DiscoverV1,
   netscanTraceIpv4V1,
+  netscanTraceIpv6V1,
+  type TraceHopV6Wire,
   netscanIcmpStopV1,
   netscanSynStartV1,
   netscanSyn6StartV1,
@@ -252,6 +254,7 @@ export function ScanView() {
     setIcmpFamily("IPv4");
     setIcmpRows(null);
     setTraceRows(null);
+    setTrace6Rows(null);
     setTraceBusy(false);
     setSynBusy(false);
     setSynFamily("IPv4");
@@ -591,6 +594,24 @@ export function ScanView() {
       if (activeCase.current === key) setError(err instanceof Error ? err.message : String(err));
     } finally {
       if (activeCase.current === key) setIcmpBusy(false);
+    }
+  };
+  const [trace6Rows, setTrace6Rows] = useState<TraceHopV6Wire[] | null>(null);
+  const runTrace6 = async () => {
+    if (networkBusy) return;
+    if (!desktop || revision === null || !authorized || !arpInterface ||
+      running || status.running || arpBusy || ndpBusy || synBusy || icmpBusy || traceBusy) return;
+    const key = identity;
+    setError(null);
+    setTrace6Rows(null);
+    setTraceBusy(true);
+    try {
+      const rows = await netscanTraceIpv6V1(target, arpInterface, 12, true);
+      if (activeCase.current === key) setTrace6Rows(rows);
+    } catch (err) {
+      if (activeCase.current === key) setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      if (activeCase.current === key) setTraceBusy(false);
     }
   };
   const runTrace = async () => {
@@ -957,6 +978,14 @@ export function ScanView() {
                   Trace IPv4
                 </ToolButton>
               )}
+              {traceBusy ? null : (
+                <ToolButton onClick={() => void runTrace6()}
+                  disabled={!desktop || !authorized || networkBusy || revision === null || !arpInterface ||
+                    !target.trim() || running || status.running || arpBusy || ndpBusy || synBusy || icmpBusy}
+                  title="Linux only: up to 12 hop-limited ICMPv6 probes with per-hop unicast hop limit, backend confirmation and saved-case authorization required">
+                  Trace IPv6
+                </ToolButton>
+              )}
               {icmpBusy ? (
                 <ToolButton tone="danger" onClick={() => void stopIcmp()}>
                   <Square size={11} /> Stop ICMP
@@ -1158,6 +1187,19 @@ export function ScanView() {
               <div className="text-fg-muted">
                 States classify one probe each; FIN/NULL/Xmas silence is open|filtered and ACK/Window silence is filtered by definition.
               </div>
+            </div>
+          ) : null}
+          {trace6Rows !== null ? (
+            <div>
+              <p className="font-mono text-[10px] text-fg-muted">
+                Native IPv6 ICMPv6 route trace: {trace6Rows.length} observed hop-limit steps
+              </p>
+              {trace6Rows.map((hop) => (
+                <p key={hop.hop} className="font-mono text-[11px]">
+                  hop {hop.hop}: {hop.responder ?? "no response"}
+                  {hop.reached ? " — destination reached" : ""} ({hop.elapsed_ms} ms, {hop.reason})
+                </p>
+              ))}
             </div>
           ) : null}
           {traceRows !== null ? (

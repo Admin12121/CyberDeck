@@ -535,3 +535,155 @@ pub async fn netscan_icmp6_discover_v1(
         Ok(rows)
     }
 }
+
+
+/// Scoped, operator-confirmed IPv6 ICMP traceroute. Mirrors the IPv4 flow:
+/// single-lease gate, saved-case scope, native confirmation, bounded hops,
+/// findings persisted. Linux only (raw ICMPv6 + AF_PACKET).
+#[tauri::command]
+pub async fn netscan_trace_ipv6_v1(
+    target: String,
+    interface_name: String,
+    max_hops: u8,
+    authorized: bool,
+    app: AppHandle,
+    selected: State<'_, CaseSessionCtx>,
+    evidence: State<'_, EvidenceCtx>,
+    scanner: State<'_, ScanCtx>,
+    arp: State<'_, Arc<super::arp_discovery::ArpDiscoveryCtx>>,
+    syn: State<'_, Arc<super::syn_scan::SynScanCtx>>,
+    ctx: State<'_, Arc<EchoCtx>>,
+) -> Result<Vec<TraceHopWire>, String> {
+    if !authorized {
+        return Err("explicit route-tracing authorization required".into());
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (
+            target,
+            interface_name,
+            max_hops,
+            app,
+            selected,
+            evidence,
+            scanner,
+            arp,
+            syn,
+            ctx,
+        );
+        return Err("native IPv6 traceroute currently requires Linux CAP_NET_RAW".into());
+    }
+    #[cfg(target_os = "linux")]
+    {
+        use cyberdeck_packet::active_echo6::trace_ipv6_echo;
+        if max_hops == 0 || max_hops > 16 {
+            return Err("traceroute max_hops must be between 1 and 16".into());
+        }
+        let (scope, case) = saved_scope(&selected)?;
+        if scanner.running.load(Ordering::Acquire) || arp.is_running() || syn.is_running() {
+            return Err("stop other Network operations before route tracing".into());
+        }
+        let parsed = super::netscan::parse_targets(&target)?;
+        let [IpAddr::V6(host)] = parsed.as_slice() else {
+            return Err("traceroute requires exactly one IPv6 unicast target".into());
+        };
+        let host = *host;
+        if host.is_multicast() || host.is_unspecified() {
+            return Err("traceroute requires a unicast IPv6 target".into());
+        }
+        if !evidence
+            .store
+            .lock()
+            .map_err(|_| "case store unavailable")?
+            .case_exists(&case)?
+        {
+            return Err("saved case does not exist".into());
+        }
+        let prompt = format!(
+            "Authorize native IPv6 route tracing to {} using selected interface '{}' in saved case '{}'? At most {} hop-limited ICMPv6 probes, 600ms each, no retries. Router responses may be absent or altered; all active probes require permission; Linux needs CAP_NET_RAW.",
+            host, interface_name, case, max_hops
+        );
+        let dialog = app.clone();
+        let accepted = tokio::task::spawn_blocking(move || {
+            dialog
+                .dialog()
+                .message(prompt)
+                .title("Confirm native IPv6 route trace")
+                .buttons(MessageDialogButtons::YesNo)
+                .blocking_show()
+        })
+        .await
+        .map_err(|_| "route trace confirmation unavailable")?;
+        if !accepted {
+            return Err("route tracing declined".into());
+        }
+        selected.ensure(&scope)?;
+        if scanner.running.load(Ordering::Acquire) || arp.is_running() || syn.is_running() {
+            return Err("another scan became active during route trace confirmation".into());
+        }
+        let permit = app
+            .state::<Arc<super::operation_gate::NetworkOperationGate>>()
+            .acquire(super::operation_gate::ActiveOperation::IcmpEcho)?;
+        let state = Arc::clone(&*ctx);
+        if state.running.swap(true, Ordering::AcqRel) {
+            return Err("an ICMP Echo or route trace is already active".into());
+        }
+        state.stop.store(false, Ordering::Release);
+        if let Ok(mut owner) = state.owner.lock() {
+            *owner = Some(scope.clone());
+        } else {
+            state.running.store(false, Ordering::Release);
+            return Err("ICMP operation owner registry unavailable".into());
+        }
+        let worker_app = app.clone();
+        let worker_scope = scope.clone();
+        let device = interface_name.clone();
+        let state_worker = Arc::clone(&state);
+        let hops = tokio::task::spawn_blocking(move || {
+            let _active_operation = permit;
+            let _guard = RunGuard(Arc::clone(&state_worker));
+            trace_ipv6_echo(&device, host, max_hops, &state_worker.stop, &|| {
+                worker_app
+                    .state::<CaseSessionCtx>()
+                    .ensure(&worker_scope)
+                    .is_ok()
+            })
+            .map_err(|err| format!("{:?}: {}", err.code, err.message))
+        })
+        .await
+        .map_err(|_| "route trace worker unavailable")??;
+        selected.ensure(&scope)?;
+        let rows: Vec<TraceHopWire> = hops
+            .into_iter()
+            .map(|hop| TraceHopWire {
+                ttl: hop.hop,
+                responder: hop.responder.map(|address| address.to_string()),
+                reached: hop.reached,
+                reason: hop.reason,
+                elapsed_ms: hop.elapsed_ms,
+            })
+            .collect();
+        if !rows.is_empty() {
+            let findings: Vec<NewFinding> = rows
+                .iter()
+                .map(|hop| NewFinding {
+                    title: format!("IPv6 route trace hop {} toward {}", hop.ttl, host),
+                    severity: "info".into(),
+                    details: format!(
+                        "Authorized IPv6 ICMPv6 traceroute\nInterface: {}\nDestination: {}\nHop limit: {}\nObserved responder: {}\nReached destination: {}\nReason: {}\nElapsed ms: {}\nEvidence: per-hop unicast hop limit set on the raw socket; replies matched by echo identifier. Router addresses are unverified network claims; silence is inconclusive",
+                        interface_name, host, hop.ttl, hop.responder.as_deref().unwrap_or("no response"),
+                        hop.reached, hop.reason, hop.elapsed_ms,
+                    ),
+                })
+                .collect();
+            let store = evidence
+                .store
+                .lock()
+                .map_err(|_| "case store unavailable")?;
+            store
+                .add_findings(&case, &findings)
+                .map_err(|e| format!("finding persistence failed: {e}"))?;
+        }
+        Ok(rows)
+    }
+}

@@ -1886,6 +1886,30 @@ export async function netscanTraceIpv4V1(
   return invoke<TraceHopWire[]>("netscan_trace_ipv4_v1", { target, interfaceName, maxHops, authorized });
 }
 
+export interface TraceHopV6Wire {
+  hop: number;
+  responder: string | null;
+  reached: boolean;
+  reason: string;
+  elapsed_ms: number;
+}
+
+/** Scoped, operator-confirmed IPv6 ICMPv6 traceroute (Linux, raw socket). */
+export async function netscanTraceIpv6V1(
+  target: string,
+  interfaceName: string,
+  maxHops: number,
+  authorized: boolean,
+): Promise<TraceHopV6Wire[]> {
+  if (!inTauri) throw new Error("IPv6 traceroute requires the desktop runtime");
+  return invoke<TraceHopV6Wire[]>("netscan_trace_ipv6_v1", {
+    target,
+    interfaceName,
+    maxHops,
+    authorized,
+  });
+}
+
 export interface IcmpObservationWire {
   host: string;
   state: "responded" | "unreachable" | "inconclusive";
