@@ -1,8 +1,11 @@
 "use client";
 /** Case-authorized native TCP/UDP scan observations via Rust. */
-import { useCallback, useEffect, useRef, useState } from "react";
-import { Play, Square } from "lucide-react";
-import { Chip, EmptyState, Pane, Resizer, Select, TextInput, ToolButton } from "@ds/panes";
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
+import {
+  FileJson, FileSpreadsheet, Laptop, Play, Radar, Save, Square, Trash2, Upload,
+} from "lucide-react";
+import { EmptyState, Pane, Resizer, Select, TextInput, ToolButton } from "@ds/panes";
+import { IconButton, InfoTip, StatusStrip } from "@ds/compact";
 import {
   isDesktop,
   netscanExport,
@@ -150,6 +153,25 @@ const TIMING_TOOLTIP =
   + "Paranoid/Sneaky/Polite are recorded with the profile and would hold the max bound; Aggressive would hold the min. "
   + "Selecting them changes no probe behavior today.";
 
+/**
+ * Full §9.3 authorization wording, verbatim in the tooltip/aria-label. UX
+ * revision: the toolbar shows only the compact checkbox + short label. The
+ * checkbox itself cannot be dropped — every scan command takes the authorized
+ * flag and the backend rejects probes without this acknowledgment.
+ */
+const AUTHORIZATION_TIP =
+  "§9.3 — I confirm the target is mine or I have explicit authorization to assess it. "
+  + "The backend verifies the selected saved case and asks for native confirmation before starting.";
+
+/** Uniform toolbar cell: h-7 icon buttons center inside the h-8 row line. */
+function IconCell({ children }: { children: ReactNode }) {
+  return (
+    <span className="inline-flex h-8 w-8 shrink-0 items-center justify-center">
+      {children}
+    </span>
+  );
+}
+
 export function ScanView() {
   const desktop = isDesktop();
   const [capabilities, setCapabilities] = useState<NetworkRuntimeCapabilitiesV1 | null>(null);
@@ -223,6 +245,9 @@ export function ScanView() {
   const [profiles, setProfiles] = useState<ScanProfileWire[]>([]);
   const [selectedProfile, setSelectedProfile] = useState("");
   const [profileName, setProfileName] = useState("");
+  // Presentation-only: the profile-name input is revealed by the Save icon
+  // button and hidden again after a successful save (or Escape).
+  const [savingProfile, setSavingProfile] = useState(false);
   const [profileBusy, setProfileBusy] = useState(false);
   const [arpNeighbors, setArpNeighbors] = useState<ArpNeighborWire[] | null>(null);
   const [observationPage, setObservationPage] = useState<ScanObservationPageWire | null>(null);
@@ -346,6 +371,7 @@ export function ScanView() {
         target, ports, transport, timing,
       }));
       setProfileName("");
+      setSavingProfile(false);
       setSelectedProfile(saved.name);
       await refreshProfiles();
     } catch (err) {
@@ -793,19 +819,53 @@ export function ScanView() {
   };
   const isPreset = PORT_PRESETS.some((p) => p.value === ports);
 
+  // Platform availability, one hover away (Laptop icon) instead of prose rows.
+  // Verbatim from the former Notes paragraph plus the availability sentence.
+  const platformNote = windowsHost
+    ? "Windows: TCP connect and bounded UDP scanning; IPv4 Ping and Trace use the Windows IP Helper API and do not need the missing packet-capture driver. Select a saved case, check authorization, and confirm the operation. TCP/UDP scans do not require the capture driver. ARP, NDP, raw SYN and raw FIN/NULL/Xmas/ACK/Window scan types are Linux-only."
+    : linuxHost
+      ? "Linux: TCP connect, bounded UDP, and privileged native raw probes. ARP/NDP/SYN require CAP_NET_RAW and an on-link interface. UDP silence is inconclusive. All active probes require case selection and native confirmation."
+      : "Native raw probes and ICMP are not available on this platform. Raw FIN/NULL/Xmas/ACK/Window scan types require Linux. TCP/UDP connect scans remain supported. " + (capabilities?.capture_detail ?? "Reading native capabilities…");
+
+  // Status strip instead of a full-width counter bar or toolbar chips: it
+  // renders only when there is something to count or an active operation.
+  const statusItems: readonly ({ label: string; tone?: "muted" | "orange" | "ok" | "err" } | null)[] = [
+    running || status.running
+      ? { label: running ? "scan running" : "other session running", tone: "orange" }
+      : null,
+    observedCount > 0 || openCount > 0
+      ? { label: `${observedCount} observed · ${openCount} open · ${observationPage?.closed ?? 0} closed · ${observationPage?.inconclusive ?? 0} inconclusive` }
+      : null,
+    scanCase.current === wb.caseId && (status.results > 0 || status.saved_findings > 0)
+      ? { label: `${status.results} stored results · ${status.saved_findings} case findings` }
+      : null,
+    profiles.length > 0
+      ? { label: `${profiles.length}/32 profiles · session-local` }
+      : null,
+  ];
+
   return (
     <div className="flex h-full min-h-0 flex-col">
-      <div className="cd-workspace-toolbar shrink-0 items-center gap-2  px-2">
-        <span className="font-mono text-[10px] uppercase text-fg-muted">target</span>
-        <TextInput value={target} onChange={setTarget} placeholder="IP, CIDR, !exclusion" ariaLabel="Scan target" className="w-56" />
+      <div className="flex shrink-0 flex-wrap items-center gap-2 px-2 py-1.5">
+        <label className="flex cursor-pointer items-center gap-1.5 text-xs text-fg-dim">
+          <input
+            type="checkbox"
+            checked={authorized}
+            onChange={(e) => setAuthorized(e.target.checked)}
+            className="accent-[var(--color-orange)]"
+            aria-label="I am authorized to assess this target"
+          />
+          <span>I am authorized to assess this target</span>
+        </label>
+        <InfoTip text={AUTHORIZATION_TIP} />
+        <TextInput value={target} onChange={setTarget} placeholder="IP, CIDR, !exclusion" ariaLabel="Scan target" className="w-52" />
         <Select
           value={transport}
           onChange={(value) => setTransport(value === "udp" ? "udp" : "tcp")}
           options={[{ value: "tcp", label: "TCP connect" }, { value: "udp", label: "UDP" }]}
           ariaLabel="Scan transport"
-          className="w-32"
+          className="w-28"
         />
-        <span className="font-mono text-[10px] uppercase text-fg-muted">ports</span>
         <Select
           value={isPreset ? ports : "custom"}
           onChange={setPorts}
@@ -814,60 +874,20 @@ export function ScanView() {
             ...(isPreset ? [] : [{ value: ports, label: ports || "custom" }]),
           ]}
           ariaLabel="Port selection"
-          className="w-44"
-        />
-        {!isPreset ? (
-          <TextInput value={ports} onChange={setPorts} placeholder="80,443,8000-8100" ariaLabel="Custom ports" className="w-40" />
-        ) : null}
-        {discoveryBusy ? (
-          <ToolButton tone="danger" onClick={() => void stopDiscovery()}
-            title="Cancel the current saved-case TCP host discovery">
-            <Square size={11} /> Stop discovery
-          </ToolButton>
-        ) : (
-          <ToolButton
-            onClick={() => void discover()}
-            disabled={!desktop || revision === null || !authorized || !target.trim() || networkBusy}
-            title="Discover responding hosts using bounded case-authorized TCP probes"
-          >
-            Discover hosts
-          </ToolButton>
-        )}
-        {status.running || (running && scanCase.current === wb.caseId) ? (
-          <ToolButton tone="danger" onClick={() => void stop()}>
-            <Square size={11} /> Stop
-          </ToolButton>
-        ) : (
-          <ToolButton
-            tone="primary"
-            onClick={() => void start()}
-            disabled={!desktop || revision === null || !authorized || !target.trim() || networkBusy}
-            title={revision === null ? "Select a saved native investigation case before scanning" : "Backend-selected case and native confirmation are required before network probes"}
-          >
-            <Play size={11} /> {running ? "scanning…" : "Run scan"}
-          </ToolButton>
-        )}
-        <Chip tone={status.running || running ? "orange" : "muted"}>
-          {running ? "running" : status.running ? "other session running" : "idle"}
-        </Chip>
-        {results.length > 0 ? (
-          <>
-            <ToolButton onClick={() => void exportResults("json")} title="Save results as JSON">JSON</ToolButton>
-            <ToolButton onClick={() => void exportResults("csv")} title="Save results as CSV">CSV</ToolButton>
-          </>
-        ) : null}
-        <span className="ml-auto font-mono text-[10px] text-fg-muted">{openCount} open / {observedCount} observed</span>
-      </div>
-      <div className="cd-workspace-toolbar shrink-0 items-center gap-2  px-2">
-        <span className="font-mono text-[10px] uppercase text-fg-muted">timing</span>
-        <Select
-          value={timing}
-          onChange={(value) => setTiming(value as TimingTemplateWire)}
-          options={TIMING_TEMPLATES}
-          ariaLabel="Timing template"
           className="w-40"
         />
-        <span className="font-mono text-[10px] uppercase text-fg-muted">profile</span>
+        {!isPreset ? (
+          <TextInput value={ports} onChange={setPorts} placeholder="80,443,8000-8100" ariaLabel="Custom ports" className="w-36" />
+        ) : null}
+        <span title={TIMING_TOOLTIP} className="inline-flex items-center">
+          <Select
+            value={timing}
+            onChange={(value) => setTiming(value as TimingTemplateWire)}
+            options={TIMING_TEMPLATES}
+            ariaLabel="Timing template"
+            className="w-36"
+          />
+        </span>
         <Select
           value={selectedProfile}
           onChange={setSelectedProfile}
@@ -876,38 +896,276 @@ export function ScanView() {
             ...profiles.map((profile) => ({ value: profile.name, label: profile.name })),
           ]}
           ariaLabel="Saved scan profile"
-          className="w-44"
-        />
-        <ToolButton
-          onClick={() => void saveProfile()}
-          disabled={!desktop || profileBusy || !profileName.trim() || !target.trim()}
-          title="Save the current target, ports, transport and timing template as a named profile. Session-local, max 32 profiles and 4 KiB of parameters each; saving never touches the network or the case store.">
-          Save profile
-        </ToolButton>
-        <ToolButton
-          onClick={loadSelectedProfile}
-          disabled={!selectedProfile || profileBusy}
-          title="Load the saved profile into target, ports, transport and timing template">
-          Load
-        </ToolButton>
-        <ToolButton
-          tone="danger"
-          onClick={() => void deleteSelectedProfile()}
-          disabled={!selectedProfile || profileBusy}
-          title="Delete the selected saved profile from the session-local store">
-          Delete
-        </ToolButton>
-        <TextInput
-          value={profileName}
-          onChange={setProfileName}
-          placeholder="profile name"
-          ariaLabel="New profile name"
           className="w-40"
         />
-        <span className="ml-auto font-mono text-[10px] text-fg-muted" title={TIMING_TOOLTIP}>
-          {timing} · {profiles.length}/32 profiles · session-local
+        {status.running || (running && scanCase.current === wb.caseId) ? (
+          <IconCell>
+            <IconButton icon={Square} tone="danger" onClick={() => void stop()} title="Stop the active scan" />
+          </IconCell>
+        ) : (
+          <IconCell>
+            <IconButton
+              icon={Play}
+              tone="primary"
+              onClick={() => void start()}
+              disabled={!desktop || revision === null || !authorized || !target.trim() || networkBusy}
+              title={revision === null ? "Select a saved native investigation case before scanning" : "Backend-selected case and native confirmation are required before network probes"}
+            />
+          </IconCell>
+        )}
+        {discoveryBusy ? (
+          <IconCell>
+            <IconButton icon={Square} tone="danger" onClick={() => void stopDiscovery()}
+              title="Cancel the current saved-case TCP host discovery" />
+          </IconCell>
+        ) : (
+          <IconCell>
+            <IconButton
+              icon={Radar}
+              onClick={() => void discover()}
+              disabled={!desktop || revision === null || !authorized || !target.trim() || networkBusy}
+              title="Discover hosts — discover responding hosts using bounded case-authorized TCP probes"
+            />
+          </IconCell>
+        )}
+        <IconCell>
+          <IconButton
+            icon={Save}
+            tone={savingProfile ? "primary" : "default"}
+            onClick={() => { if (!savingProfile) setSavingProfile(true); else void saveProfile(); }}
+            disabled={!desktop || profileBusy || !target.trim() || (savingProfile && !profileName.trim())}
+            title="Save profile — saves the current target, ports, transport and timing template as a named profile. Session-local, max 32 profiles and 4 KiB of parameters each; saving never touches the network or the case store."
+          />
+        </IconCell>
+        {savingProfile ? (
+          <TextInput
+            value={profileName}
+            onChange={setProfileName}
+            placeholder="profile name"
+            ariaLabel="New profile name"
+            className="w-36"
+            onKeyDown={(e) => {
+              if (e.key === "Escape") {
+                setProfileName("");
+                setSavingProfile(false);
+              }
+            }}
+          />
+        ) : null}
+        <IconCell>
+          <IconButton
+            icon={Upload}
+            onClick={loadSelectedProfile}
+            disabled={!selectedProfile || profileBusy}
+            title="Load profile — loads the saved profile into target, ports, transport and timing template"
+          />
+        </IconCell>
+        <IconCell>
+          <IconButton
+            icon={Trash2}
+            tone="danger"
+            onClick={() => void deleteSelectedProfile()}
+            disabled={!selectedProfile || profileBusy}
+            title="Delete profile — deletes the selected saved profile from the session-local store"
+          />
+        </IconCell>
+        {windowsHost ? (
+          <>
+            <span title="Windows discovery — ICMP ping and traceroute require a connected adapter" className="inline-flex items-center">
+              <Select value={arpInterface} onChange={setArpInterface}
+                options={[{ value: "", label: "Select network adapter" }, ...arpInterfaces.map((iface) => ({ value: iface.name, label: iface.display_name || "Windows adapter #" + iface.index }))]}
+                ariaLabel="Windows source network adapter" className="w-48" />
+            </span>
+            {icmpBusy ? (
+              <ToolButton tone="danger" onClick={() => void stopIcmp()}
+                title="Cancel active Windows ICMPv4 discovery">
+                Stop
+              </ToolButton>
+            ) : (
+              <ToolButton onClick={() => void discoverIcmp()}
+                disabled={!desktop || !authorized || networkBusy || revision === null || !arpInterface ||
+                  !target.trim() || running || status.running || traceBusy}
+                title="Ping IPv4 — Windows IP Helper ICMPv4 Echo with native confirmation">
+                Ping
+              </ToolButton>
+            )}
+            {traceBusy ? (
+              <ToolButton tone="danger" onClick={() => void stopTrace()}
+                title="Cancel active Windows traceroute">
+                Stop
+              </ToolButton>
+            ) : (
+              <ToolButton onClick={() => void runTrace()}
+                disabled={!desktop || !authorized || networkBusy || revision === null || !arpInterface ||
+                  !target.trim() || running || status.running || icmpBusy}
+                title="Trace IPv4 — Windows IP Helper IPv4 traceroute with native authorization">
+                Trace 4
+              </ToolButton>
+            )}
+            {arpInterfaces.length === 0 && <span role="status" className="font-mono text-[10px] text-fg-muted">
+              No active IPv4 source adapter; TCP/UDP scans remain available.
+            </span>}
+          </>
+        ) : linuxHost ? (
+          <>
+            <Select
+              value={arpInterface}
+              onChange={setArpInterface}
+              options={[
+                { value: "", label: "Choose Ethernet NIC" },
+                ...arpInterfaces.map((iface) => ({
+                  value: iface.name, label: iface.name,
+                })),
+              ]}
+              ariaLabel="ARP discovery Ethernet interface"
+              className="w-40"
+            />
+            {arpBusy ? (
+              <ToolButton tone="danger" onClick={() => void stopArp()}
+                title="Stop case-authorized native ARP discovery">
+                Stop
+              </ToolButton>
+            ) : (
+              <ToolButton
+                onClick={() => void discoverArp()}
+                disabled={!desktop || !authorized || networkBusy || revision === null || !arpInterface
+                  || !target.trim() || running || status.running || ndpBusy || synBusy}
+                title="ARP — Linux only: native confirmation, on-link scope, CAP_NET_RAW and case authorization required. Up to 32 on-link IPv4 hosts">
+                ARP
+              </ToolButton>
+            )}
+            {ndpBusy ? (
+              <ToolButton tone="danger" onClick={() => void stopNdp()}
+                title="Stop the active case-authorized NDP discovery">
+                Stop
+              </ToolButton>
+            ) : (
+              <ToolButton onClick={() => void discoverNdp()}
+                disabled={!desktop || !authorized || networkBusy || revision === null || !arpInterface ||
+                  !target.trim() || running || status.running || arpBusy || synBusy}
+                title="NDP — Linux only: native case confirmation, selected NIC, fe80::/10 IPv6 target and CAP_NET_RAW required. 16 link-local IPv6 hosts · silence ≠ down">
+                NDP
+              </ToolButton>
+            )}
+            {traceBusy ? (
+              <ToolButton tone="danger" onClick={() => void stopTrace()}
+                title="Cancel the current case-scoped ICMP route trace">
+                Stop
+              </ToolButton>
+            ) : (
+              <ToolButton onClick={() => void runTrace()}
+                disabled={!desktop || !authorized || networkBusy || revision === null || !arpInterface ||
+                  !target.trim() || running || status.running || arpBusy || ndpBusy || synBusy || icmpBusy}
+                title="Trace IPv4 — Linux or Windows: up to 12 TTL-limited ICMPv4 probes, backend confirmation and saved-case authorization required">
+                Trace 4
+              </ToolButton>
+            )}
+            {traceBusy ? null : (
+              <ToolButton onClick={() => void runTrace6()}
+                disabled={!desktop || !authorized || networkBusy || revision === null || !arpInterface ||
+                  !target.trim() || running || status.running || arpBusy || ndpBusy || synBusy || icmpBusy}
+                title="Trace IPv6 — Linux only: up to 12 hop-limited ICMPv6 probes with per-hop unicast hop limit, backend confirmation and saved-case authorization required">
+                Trace 6
+              </ToolButton>
+            )}
+            {icmpBusy ? (
+              <ToolButton tone="danger" onClick={() => void stopIcmp()}
+                title="Cancel the active case-scoped ICMPv4 echo discovery">
+                Stop
+              </ToolButton>
+            ) : (
+              <ToolButton onClick={() => void discoverIcmp()}
+                disabled={!desktop || !authorized || networkBusy || revision === null || !arpInterface ||
+                  !target.trim() || running || status.running || arpBusy || ndpBusy || synBusy}
+                title="Echo IPv4 — Windows native IP Helper or Linux CAP_NET_RAW: explicitly confirmed case-scoped ICMPv4 discovery. Up to 32 hosts">
+                Echo 4
+              </ToolButton>
+            )}
+            <ToolButton onClick={() => void discoverIcmp6()}
+              disabled={!desktop || !authorized || networkBusy || revision === null || !arpInterface ||
+                !target.trim() || running || status.running || arpBusy || ndpBusy || synBusy || icmpBusy || traceBusy}
+              title="Echo IPv6 — Linux native ICMPv6 Echo: 32 distinct fe80::/10 targets on the selected Ethernet interface, native confirmation, CAP_NET_RAW">
+              Echo 6
+            </ToolButton>
+            {synBusy ? (
+              <ToolButton tone="danger" onClick={() => void stopSyn()}
+                title="Stop case-authorized raw SYN scan">
+                Stop
+              </ToolButton>
+            ) : (
+              <ToolButton onClick={() => void runSyn()}
+                disabled={!desktop || !authorized || networkBusy || revision === null || !arpInterface
+                  || !target.trim() || !ports.trim() || running || status.running || arpBusy}
+                title="Raw SYN — Linux only: CAP_NET_RAW, selected interface, backend saved-case authorization and native confirmation required">
+                SYN
+              </ToolButton>
+            )}
+            <ToolButton onClick={() => void runSyn6()}
+              disabled={!desktop || !authorized || networkBusy || revision === null || !arpInterface ||
+                !target.trim() || !ports.trim() || running || status.running ||
+                synBusy || arpBusy || ndpBusy || icmpBusy || traceBusy}
+              title="SYN IPv6 — Linux: max 16 distinct fe80::/10 hosts, 64 ports, 512 SYN probes and 8 in flight; requires CAP_NET_RAW and native consent">
+              SYN 6
+            </ToolButton>
+            {synProgress ? (
+              <span className="font-mono text-[10px] text-fg-muted">
+                SYN {synProgress.tried}/{synProgress.total} · {synProgress.percent}%
+              </span>
+            ) : null}
+            <span
+              title="Raw scan types require Linux · silence means the documented default state, not proof"
+              className="inline-flex items-center"
+            >
+              <Select
+                value={stealthType}
+                onChange={(value) => setStealthType(value as StealthScanTypeWire)}
+                options={STEALTH_SCAN_TYPES}
+                ariaLabel="Raw scan type"
+                className="w-32"
+              />
+            </span>
+            {stealthBusy ? (
+              <ToolButton tone="danger" onClick={() => void stopStealth()}
+                title="Stop raw — stops the case-authorized raw FIN/NULL/Xmas/ACK/Window scan">
+                Stop
+              </ToolButton>
+            ) : (
+              <ToolButton onClick={() => void runStealth()}
+                disabled={!desktop || !authorized || networkBusy || revision === null || !arpInterface ||
+                  !target.trim() || !ports.trim() || running || status.running}
+                title="Raw depth — Linux only: FIN/NULL/Xmas/ACK/Window flag probes with documented reply semantics; requires CAP_NET_RAW, a selected interface, a saved case and native confirmation">
+                Raw
+              </ToolButton>
+            )}
+            {stealthProgress ? (
+              <span className="font-mono text-[10px] text-fg-muted">
+                {stealthType} {stealthProgress.tried}/{stealthProgress.total} · {stealthProgress.percent}%
+              </span>
+            ) : null}
+          </>
+        ) : null}
+        {results.length > 0 ? (
+          <>
+            <IconCell>
+              <IconButton icon={FileJson} onClick={() => void exportResults("json")} title="Save results as JSON" />
+            </IconCell>
+            <IconCell>
+              <IconButton icon={FileSpreadsheet} onClick={() => void exportResults("csv")} title="Save results as CSV" />
+            </IconCell>
+          </>
+        ) : null}
+        <span className="flex-1" />
+        <span
+          role="note"
+          tabIndex={0}
+          aria-label={platformNote}
+          title={platformNote}
+          className="inline-flex h-8 cursor-help items-center text-fg-muted hover:text-fg-dim focus-visible:outline focus-visible:outline-1 focus-visible:outline-ring"
+        >
+          <Laptop size={12} strokeWidth={1.5} />
         </span>
       </div>
+      <StatusStrip items={statusItems} />
       {error ? <div className="border-b border-err/50 bg-err/10 px-2 py-1 font-mono text-[10px] text-err">{error}</div> : null}
       {revision === null && <AuthorizedCaseAction activity="Network scanning" />}
       <div className="flex min-h-0 flex-1 gap-px bg-line">

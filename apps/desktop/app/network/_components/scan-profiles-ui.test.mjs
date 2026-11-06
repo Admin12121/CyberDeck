@@ -45,10 +45,17 @@ test("the timing selector is honest: only Normal is adaptive today", () => {
 
 test("profile controls exist with picker, name input, save, load and delete", () => {
   assert.match(scanViewSource, /ariaLabel="Saved scan profile"/);
+  // UX revision: save/load/delete are icon toolbar buttons whose full labels
+  // (and honesty wording) live in the tooltip/aria-label; the profile-name
+  // input is revealed only while saving and hides again after a save.
+  assert.match(scanViewSource, /icon=\{Save\}/);
+  assert.match(scanViewSource, /title="Save profile — /);
+  assert.match(scanViewSource, /icon=\{Upload\}/);
+  assert.match(scanViewSource, /title="Load profile — /);
+  assert.match(scanViewSource, /icon=\{Trash2\}/);
+  assert.match(scanViewSource, /title="Delete profile — /);
   assert.match(scanViewSource, /ariaLabel="New profile name"/);
-  assert.match(scanViewSource, /Save profile\s*<\/ToolButton>/);
-  assert.match(scanViewSource, /Load\s*<\/ToolButton>/);
-  assert.match(scanViewSource, /Delete\s*<\/ToolButton>/);
+  assert.match(scanViewSource, /savingProfile/);
   assert.match(scanViewSource, /\{profiles\.length\}\/32 profiles/);
   // The picker degrades to an explicit empty entry, never a blank select.
   assert.match(scanViewSource, /No profile selected/);
