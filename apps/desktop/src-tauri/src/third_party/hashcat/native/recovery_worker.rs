@@ -8,7 +8,6 @@ mod hashcat_ffi;
 
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 
 const MAGIC: &[u8; 8] = b"CDHC0001";
 const MAGIC_MULTI_MODE: &[u8; 8] = b"CDHC0002";

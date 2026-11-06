@@ -284,6 +284,7 @@ pub async fn capture_start_v1(
                 format!("{:?}: {}", e.code, e.message)
             })?),
         };
+        #[cfg(target_os = "linux")]
         let status = capture
             .manager
             .start_linux_filtered(case, &interface_name, limits, parsed_filter)
