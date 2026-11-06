@@ -12,6 +12,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const here = dirname(fileURLToPath(import.meta.url));
+const read = (file) => readFileSync(join(here, file), "utf8");
 const viewSource = readFileSync(join(here, "NetworkLabView.tsx"), "utf8");
 const modelSource = readFileSync(join(here, "network-lab-model.ts"), "utf8");
 const commandSource = readFileSync(
@@ -182,3 +183,51 @@ test("label and summary helpers map every wire kind and condense claims", async 
     "scope: T1 1 · T2 2 · authorized",
   );
 });
+
+// --- Bettercap-mode passive timeline (wave 4) ---------------------------------
+
+test("live monitor is passive, capture-gated and renders the event timeline", () => {
+  const view = read("NetworkLabView.tsx");
+  const canonical = read("../../../lib/ipc.ts");
+  const backend = read("../../../src-tauri/src/features/network/ipc/network_lab.rs");
+  const engine = read("../../../../../crates/packet/src/lab_events.rs");
+  // The pane exists, is gated on an opened capture, and transmits nothing.
+  assert.match(view, /Live monitor \(passive timeline over the opened capture\)/);
+  assert.match(view, /networkLabEventsV1\(routerIp\.trim\(\) \|\| null\)/);
+  assert.match(canonical, /Passive timeline over the opened capture; transmits nothing/);
+  assert.match(backend, /pub fn network_lab_events_v1/);
+  assert.match(backend, /State<'_, PcapCtx>/);
+  // Conflict events fire once per IP, never per repeat claim.
+  assert.match(engine, /conflict_fired/);
+  assert.match(engine, /fn arp_conflict_fires_when_a_second_mac_claims_the_same_ip/);
+  // Every honesty contract holds: passive-only wording stays intact.
+  assert.match(view, /passive observations only/);
+});
+
+test("timeline labels map every wire kind", () => {
+  const { labEventKindLabel } = await_import();
+  assert.equal(labEventKindLabel("new_host"), "New host");
+  assert.equal(labEventKindLabel("new_service"), "New service");
+  assert.equal(labEventKindLabel("arp_conflict"), "ARP conflict");
+  assert.equal(labEventKindLabel("gateway_changed"), "Gateway changed");
+});
+
+// node --test cannot import the TSX view directly; the label helper is
+// re-implemented here from the source contract and cross-checked.
+function await_import() {
+  const view = read("NetworkLabView.tsx");
+  const body = /export function labEventKindLabel\(kind: LabEventKindWire\): string \{([\s\S]*?)\n\}/.exec(view);
+  assert.ok(body, "labEventKindLabel missing from NetworkLabView.tsx");
+  const table = {
+    new_host: /"new_host":\s*\n?\s*return "New host";/,
+    new_service: /"new_service":\s*\n?\s*return "New service";/,
+    arp_conflict: /"arp_conflict":\s*\n?\s*return "ARP conflict";/,
+    gateway_changed: /"gateway_changed":\s*\n?\s*return "Gateway changed";/,
+  };
+  return {
+    labEventKindLabel: (kind) => {
+      assert.match(body[1], table[kind], `kind ${kind} label missing`);
+      return { new_host: "New host", new_service: "New service", arp_conflict: "ARP conflict", gateway_changed: "Gateway changed" }[kind];
+    },
+  };
+}

@@ -351,3 +351,30 @@ mod tests {
         assert_eq!(mac_from_layers(&eth("not-a-mac")), None);
     }
 }
+
+
+/// IPC-facing projection: events + the counters the UI needs to show that
+/// the timeline is capped instead of silently truncated.
+#[derive(Debug, Clone, Serialize)]
+pub struct LabEventsWire {
+    pub events: Vec<LabEvent>,
+    pub new_hosts: usize,
+    pub new_services: usize,
+    pub conflicts: usize,
+    pub gateway_changes: usize,
+    pub truncated: bool,
+}
+
+/// Convenience wrapper for the IPC layer: derive + summarize in one call.
+pub fn derive_events_wire(packets: &[PacketMeta], router_ip: Option<&str>) -> LabEventsWire {
+    let events = derive_events(packets, router_ip);
+    let count = |kind: LabEventKind| events.iter().filter(|e| e.kind == kind).count();
+    LabEventsWire {
+        truncated: events.len() >= MAX_EVENTS,
+        new_hosts: count(LabEventKind::NewHost),
+        new_services: count(LabEventKind::NewService),
+        conflicts: count(LabEventKind::ArpConflict),
+        gateway_changes: count(LabEventKind::GatewayChanged),
+        events,
+    }
+}

@@ -14,7 +14,14 @@
 import { useEffect, useRef, useState } from "react";
 import { FolderOpen, Radar } from "lucide-react";
 import { Chip, EmptyState, Pane, TextInput, ToolButton } from "@ds/panes";
-import { isDesktop, pcapOpenDialog, type PcapOpenWire } from "@lib/ipc";
+import {
+  isDesktop,
+  networkLabEventsV1,
+  pcapOpenDialog,
+  type LabEventKindWire,
+  type LabEventsWire,
+  type PcapOpenWire,
+} from "@lib/ipc";
 import { useWorkbench } from "@state/workbench";
 import {
   networkLabAnalyzePcapV1,
@@ -41,6 +48,10 @@ export function NetworkLabView() {
   const [analyzing, setAnalyzing] = useState(false);
   const [analysis, setAnalysis] = useState<NetworkLabAnalysisWire | null>(null);
   const [analysisError, setAnalysisError] = useState<string | null>(null);
+  // Bettercap-mode passive timeline over the opened capture; per-run result
+  // state like every other capture-derived view value.
+  const [timeline, setTimeline] = useState<LabEventsWire | null>(null);
+  const [timelineBusy, setTimelineBusy] = useState(false);
   const [routerIp, setRouterIp] = useState("");
   const [targetsT1, setTargetsT1] = useState("");
   const [targetsT2, setTargetsT2] = useState("");
@@ -378,6 +389,75 @@ export function NetworkLabView() {
           )}
         </Pane>
 
+        <Pane title="Live monitor (passive timeline over the opened capture)">
+          <div className="space-y-2 p-3">
+            <div className="flex flex-wrap items-center gap-2">
+              <ToolButton
+                disabled={!desktop || !capture || timelineBusy}
+                title={capture
+                  ? "Derive the event timeline: new hosts, first services, ARP conflicts, gateway changes"
+                  : "Open a capture first — the timeline derives from the opened capture"}
+                onClick={() => {
+                  setTimelineBusy(true);
+                  networkLabEventsV1(routerIp.trim() || null)
+                    .then((wire) => setTimeline(wire))
+                    .catch((cause) =>
+                      setAnalysisError(
+                        "Lab timeline failed: " + (cause instanceof Error ? cause.message : String(cause)),
+                      ),
+                    )
+                    .finally(() => setTimelineBusy(false));
+                }}
+              >
+                <Radar size={11} /> {timelineBusy ? "deriving…" : "Derive event timeline"}
+              </ToolButton>
+              {timeline ? (
+                <>
+                  <Chip tone="ok">{timeline.new_hosts} new hosts</Chip>
+                  <Chip tone="ok">{timeline.new_services} services</Chip>
+                  {timeline.conflicts > 0 ? <Chip tone="err">{timeline.conflicts} ARP conflicts</Chip> : null}
+                  {timeline.gateway_changes > 0 ? <Chip tone="err">{timeline.gateway_changes} gateway changes</Chip> : null}
+                  {timeline.truncated ? <Chip tone="muted">timeline capped at 512</Chip> : null}
+                </>
+              ) : (
+                <Chip>no timeline yet</Chip>
+              )}
+            </div>
+            {timeline && timeline.events.length > 0 ? (
+              <div className="max-h-64 overflow-auto">
+                <table className="data-table">
+                  <thead>
+                    <tr>
+                      <th className="w-24">Time</th>
+                      <th className="w-32">Event</th>
+                      <th className="w-40">Subject</th>
+                      <th>Detail</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {timeline.events.map((event, index) => (
+                      <tr key={`${event.timestamp_ms}-${event.kind}-${index}`}>
+                        <td className="font-mono text-[11px]">{formatSeenMs(event.timestamp_ms)}</td>
+                        <td>
+                          <Chip tone={event.kind === "arp_conflict" || event.kind === "gateway_changed" ? "err" : "muted"}>
+                            {labEventKindLabel(event.kind)}
+                          </Chip>
+                        </td>
+                        <td className="font-mono text-[11px]">{event.subject}</td>
+                        <td className="text-fg-muted">{event.detail}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            ) : timeline ? (
+              <p className="text-xs text-fg-muted">
+                no events in this capture — a timeline needs parseable IP endpoints, services or ARP claims
+              </p>
+            ) : null}
+          </div>
+        </Pane>
+
         <Pane title="Active interaction (not available in this arc)">
           <div className="space-y-2 p-3 text-xs leading-relaxed text-fg-dim">
             <p>
@@ -412,4 +492,18 @@ export function NetworkLabView() {
       </div>
     </div>
   );
+}
+
+/** One-line label per timeline event kind; pure so node tests cover it. */
+export function labEventKindLabel(kind: LabEventKindWire): string {
+  switch (kind) {
+    case "new_host":
+      return "New host";
+    case "new_service":
+      return "New service";
+    case "arp_conflict":
+      return "ARP conflict";
+    case "gateway_changed":
+      return "Gateway changed";
+  }
 }

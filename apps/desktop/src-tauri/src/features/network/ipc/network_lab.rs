@@ -529,3 +529,24 @@ mod tests {
         assert!(!capture_nanosecond(&[]));
     }
 }
+
+
+// --- Bettercap-mode event timeline (passive) ---------------------------------
+
+/// Chronological lab events derived from the opened capture: new hosts,
+/// first service sightings, ARP conflicts and gateway MAC changes.
+#[tauri::command]
+pub fn network_lab_events_v1(
+    ctx: State<'_, PcapCtx>,
+    router_ip: Option<String>,
+) -> Result<cyberdeck_packet::lab_events::LabEventsWire, String> {
+    let guard = ctx
+        .current
+        .lock()
+        .map_err(|_| "capture cache unavailable".to_string())?;
+    let capture = guard.as_ref().ok_or("no capture is open")?;
+    Ok(cyberdeck_packet::lab_events::derive_events_wire(
+        &capture.packets,
+        router_ip.as_deref(),
+    ))
+}

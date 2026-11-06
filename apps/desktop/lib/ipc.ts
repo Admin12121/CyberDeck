@@ -1195,6 +1195,33 @@ export async function networkLabScopeV1(): Promise<NetworkLabScopeWire> {
   return invoke<NetworkLabScopeWire>("network_lab_scope_v1", {});
 }
 
+// --- Network Lab live event timeline (Bettercap-mode, passive) ---------------
+// Wire types mirror crates/packet/src/lab_events.rs LabEventsWire.
+
+export type LabEventKindWire = "new_host" | "new_service" | "arp_conflict" | "gateway_changed";
+
+export interface LabEventWire {
+  timestamp_ms: number;
+  kind: LabEventKindWire;
+  subject: string;
+  detail: string;
+}
+
+export interface LabEventsWire {
+  events: LabEventWire[];
+  new_hosts: number;
+  new_services: number;
+  conflicts: number;
+  gateway_changes: number;
+  truncated: boolean;
+}
+
+/** Passive timeline over the opened capture; transmits nothing. */
+export async function networkLabEventsV1(routerIp: string | null): Promise<LabEventsWire> {
+  if (!inTauri) throw new Error("Lab events require the desktop runtime");
+  return invoke<LabEventsWire>("network_lab_events_v1", { routerIp });
+}
+
 // --- Packet Studio export view -> case ---------------------------------------
 // Wire types mirror features/network/ipc/pcap_export.rs and pcap_wire.rs.
 
