@@ -87,6 +87,8 @@ export function LiveCaptureView({ presentation = "full", onCaptureStarted, onRet
   const [devices, setDevices] = useState<CaptureInterfaceV1[]>([]);
   const [device, setDevice] = useWorkspaceDraft(caseId, "network", "capture-device", "");
   const [maxPackets, setMaxPackets] = useWorkspaceDraft(caseId, "network", "capture-frames", "4000");
+  // Optional kernel-side capture filter (bounded subset: host/port/proto joined by "and").
+  const [captureFilter, setCaptureFilter] = useWorkspaceDraft(caseId, "network", "capture-filter", "");
   const [memoryMiB, setMemoryMiB] = useWorkspaceDraft(caseId, "network", "capture-memory", "8");
   const [seconds, setSeconds] = useWorkspaceDraft(caseId, "network", "capture-time", "60");
   const [tab, setTab] = useWorkspaceDraft<Tab>(caseId, "network", "capture-tab", "packets");
@@ -203,7 +205,7 @@ export function LiveCaptureView({ presentation = "full", onCaptureStarted, onRet
     const key = identity, version = ++token.current;
     setWorking(true); setStatus(null); setPages(emptyPages()); setFrame(null); setError(null); setActivity([]); setSaved(null); setDecoded(null); setStream(null);
     try {
-      const next = await captureStartV1(selectedDevice, limits);
+      const next = await captureStartV1(selectedDevice, limits, captureFilter.trim() || undefined);
       if (next.case_id !== caseId || !Number.isSafeInteger(next.session_id) || next.session_id <= 0) throw new Error("invalid backend capture identity");
       // The native dialog may resolve after this route unmounts. Keep only the
       // backend-owned identity so a later mount can resume status and Stop.
@@ -425,6 +427,9 @@ export function LiveCaptureView({ presentation = "full", onCaptureStarted, onRet
             </label>
             <label className="flex flex-col gap-1 text-xs text-fg-muted">Duration (s)
               <TextInput value={seconds} onChange={setSeconds} ariaLabel="Maximum capture seconds" className="w-28" />
+              <TextInput value={captureFilter} onChange={setCaptureFilter} ariaLabel="Capture filter"
+                placeholder='filter: host 10.0.0.1 · port 443 · tcp and host x'
+                className="w-56" />
             </label>
           </div>
         )}

@@ -971,9 +971,13 @@ export async function captureInterfacesV1(): Promise<CaptureInterfaceV1[]> {
 /** Starts only after backend case selection and a native OS confirmation;
  * permission failures are returned by the native capture status. No privilege elevation.
  */
-export async function captureStartV1(interfaceName: string, limits: CaptureLimitsV1): Promise<CaptureStatusV1> {
+export async function captureStartV1(
+  interfaceName: string,
+  limits: CaptureLimitsV1,
+  filter?: string,
+): Promise<CaptureStatusV1> {
   if (!inTauri) throw new Error("Native capture requires the desktop runtime");
-  return invoke<CaptureStatusV1>("capture_start_v1", { interfaceName, limits });
+  return invoke<CaptureStatusV1>("capture_start_v1", { interfaceName, limits, filter: filter ?? null });
 }
 export async function captureStatusV1(sessionId: number): Promise<CaptureStatusV1> {
   if (!inTauri) throw new Error("Native capture requires the desktop runtime");
@@ -1215,6 +1219,15 @@ export const PCAP_EXPORT_MAX_PACKETS = 200_000;
  * indices against the opened capture cache, the saved selected case, and the
  * Ethernet/frame-size/total-size bounds of the evidence importer.
  */
+/** PCAPNG container variant; identical gating and receipt shape. */
+export async function pcapExportViewNgV1(indices: number[]): Promise<PcapExportReceiptWire> {
+  if (!inTauri) throw new Error("case artifact export requires the desktop runtime");
+  if (indices.length === 0 || indices.length > PCAP_EXPORT_MAX_PACKETS) {
+    throw new Error("export selection must contain 1..200000 packet indices");
+  }
+  return invoke<PcapExportReceiptWire>("pcap_export_view_ng_v1", { indices });
+}
+
 export async function pcapExportViewV1(indices: number[]): Promise<PcapExportReceiptWire> {
   if (!inTauri) throw new Error("case artifact export requires the desktop runtime");
   if (indices.length === 0 || indices.length > PCAP_EXPORT_MAX_PACKETS) {

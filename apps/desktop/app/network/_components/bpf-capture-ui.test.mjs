@@ -85,7 +85,7 @@ test("live.rs routes macOS discovery and capture through the BPF backend", () =>
   );
   assert.match(
     live,
-    /crate::infrastructure::bpf_capture::capture_with_progress\(/,
+    /capture_macos_with_progress_filtered\(|crate::infrastructure::bpf_capture::capture_with_progress_filtered\(/,
   );
   // The platform catch-all no longer claims macOS is unsupported.
   assert.match(live, /not\(any\(target_os = "linux", target_os = "macos"\)\)/);

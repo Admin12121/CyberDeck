@@ -21,6 +21,7 @@ import {
 import { useWorkbench } from "@state/workbench";
 import { useWorkspaceDraft } from "@state/workspace-sessions";
 import {
+  pcapExportViewNgV1,
   pcapExportViewV1,
   reassemblyBannerText,
   reassemblyOf,
@@ -180,12 +181,15 @@ function ImportedCaptureView() {
   // against the opened capture cache, re-serializes the original frame bytes
   // as classic PCAP and commits them as an immutable case artifact through
   // the same path as a native capture save. No bytes or paths cross the UI.
-  const exportView = async () => {
+  const exportView = async (format: "pcap" | "pcapng") => {
     if (!capture) return;
     setExporting(true);
     setOpenError(null);
     try {
-      const receipt = await pcapExportViewV1(filtered.map((packet) => packet.index));
+      const indices = filtered.map((packet) => packet.index);
+      const receipt = format === "pcapng"
+        ? await pcapExportViewNgV1(indices)
+        : await pcapExportViewV1(indices);
       setExportResult(receipt);
     } catch (cause) {
       setOpenError(
@@ -289,7 +293,7 @@ function ImportedCaptureView() {
           <FolderOpen size={11} /> {opening ? "opening…" : "Open…"}
         </ToolButton>
         <ToolButton
-          onClick={() => void exportView()}
+          onClick={() => void exportView("pcap")}
           disabled={!capture || exporting || !savedCaseReady}
           title={!capture
             ? "Open a capture to export its filtered view"
@@ -297,7 +301,14 @@ function ImportedCaptureView() {
               ? "Persist the currently filtered packets as an immutable classic-PCAP case artifact"
               : "Select a saved case to export the view into"}
         >
-          {exporting ? "exporting…" : "Export view → case"}
+          {exporting ? "exporting…" : "Export view → case (PCAP)"}
+        </ToolButton>
+        <ToolButton
+          onClick={() => void exportView("pcapng")}
+          disabled={!capture || exporting || !savedCaseReady}
+          title="Export the currently filtered packets as a PCAPNG case artifact (native writer, round-trips through the bundled reader)"
+        >
+          {exporting ? "exporting…" : "Export view → case (PCAPNG)"}
         </ToolButton>
         {exportResult ? (
           <Chip tone="ok">

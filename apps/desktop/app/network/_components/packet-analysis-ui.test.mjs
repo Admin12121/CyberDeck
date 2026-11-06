@@ -120,7 +120,7 @@ test("Capture starts from clicking a real eligible interface, with native author
   assert.match(live, /onClick=\{\(\) => \{ setDevice\(entry.name\); void start\(entry.name\); \}\}/);
   assert.match(live, /async function start\(selectedDevice = device\)/);
   assert.match(live, /eligible\.some\(\(entry\) => entry\.name === selectedDevice\)/);
-  assert.match(live, /captureStartV1\(selectedDevice, limits\)/);
+  assert.match(live, /captureStartV1\(selectedDevice, limits, captureFilter/);
   assert.match(live, /Select an authorized saved case/);
   assert.match(live, /<Router\b/);
   assert.doesNotMatch(live, /rounded-md border border-line bg-panel px-4 py-5 text-sm/);

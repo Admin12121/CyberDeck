@@ -1073,6 +1073,36 @@ pub fn capture_linux_with_progress(
     capture_macos_with_progress(interface_name, limits, cancel, progress)
 }
 
+/// macOS alias for the session layer: the BPF backend installs the filter
+/// program (BIOCSSETF) before the engine reads its first batch.
+#[cfg(target_os = "macos")]
+pub fn capture_linux_with_progress_filtered(
+    interface_name: &str,
+    filter: Option<&CaptureFilter>,
+    limits: &CaptureLimits,
+    cancel: &AtomicBool,
+    progress: impl FnMut(CaptureProgress),
+) -> Result<CaptureResult, CaptureError> {
+    capture_macos_with_progress_filtered(interface_name, filter, limits, cancel, progress)
+}
+
+/// Windows has no kernel filter support this arc; an operator-supplied
+/// filter is refused honestly instead of being silently ignored.
+#[cfg(target_os = "windows")]
+pub fn capture_linux_with_progress_filtered(
+    _interface_name: &str,
+    filter: Option<&CaptureFilter>,
+    _limits: &CaptureLimits,
+    _cancel: &AtomicBool,
+    _progress: impl FnMut(CaptureProgress),
+) -> Result<CaptureResult, CaptureError> {
+    let _ = filter;
+    Err(CaptureError::new(
+        CaptureErrorCode::UnsupportedPlatform,
+        "capture filters are not supported on the Windows capture backend",
+    ))
+}
+
 /// Explicit macOS BPF (/dev/bpf) entry point for platform-aware callers.
 /// Passive receive only: no frames are ever sent or injected.
 #[cfg(target_os = "macos")]

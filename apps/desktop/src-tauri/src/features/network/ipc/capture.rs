@@ -241,12 +241,13 @@ pub async fn capture_start_v1(
     app: AppHandle,
     interface_name: String,
     limits: CaptureLimitsWire,
+    filter: Option<String>,
     session: State<'_, CaseSessionCtx>,
     capture: State<'_, CaptureCtx>,
 ) -> Result<CaptureStatus, String> {
     #[cfg(not(any(target_os = "linux", target_os = "windows")))]
     {
-        let _ = (app, interface_name, limits, session, capture);
+        let _ = (app, interface_name, limits, filter, session, capture);
         return Err("native Ethernet capture unsupported on this OS".into());
     }
     #[cfg(any(target_os = "linux", target_os = "windows"))]
@@ -277,9 +278,15 @@ pub async fn capture_start_v1(
         session.ensure(&scope)?;
         let case = scope.case_id.as_deref().ok_or("no selected case")?;
         #[cfg(target_os = "linux")]
+        let parsed_filter = match filter.as_deref() {
+            None | Some("") => None,
+            Some(text) => Some(live::CaptureFilter::parse(text).map_err(|e| {
+                format!("{:?}: {}", e.code, e.message)
+            })?),
+        };
         let status = capture
             .manager
-            .start_linux(case, &interface_name, limits)
+            .start_linux_filtered(case, &interface_name, limits, parsed_filter)
             .map_err(|e| format!("{:?}: {}", e.code, e.message))?;
         #[cfg(target_os = "windows")]
         let status = capture

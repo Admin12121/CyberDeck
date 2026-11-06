@@ -137,6 +137,7 @@ fn main() {
             features::network::ipc::network_lab::network_lab_set_scope_v1,
             features::network::ipc::network_lab::network_lab_scope_v1,
             features::network::ipc::pcap_export::pcap_export_view_v1,
+            features::network::ipc::pcap_export::pcap_export_view_ng_v1,
             features::network::ipc::os_hints_ipc::capture_os_hints_v1,
             features::network::ipc::scan_profiles::netscan_profile_save_v1,
             features::network::ipc::scan_profiles::netscan_profile_list_v1,

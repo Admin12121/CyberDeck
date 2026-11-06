@@ -10,6 +10,7 @@
 import type { PcapOpenWire, ReassemblySummaryWire } from "../../../lib/ipc.ts";
 
 export {
+  pcapExportViewNgV1,
   pcapExportViewV1,
   type PcapExportReceiptWire,
   type ReassemblySummaryWire,
