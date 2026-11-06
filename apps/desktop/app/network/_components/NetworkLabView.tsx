@@ -43,6 +43,11 @@ import {
   type LabArpNeighborWire,
   type LabSweepProgressWire,
 } from "./network-lab-targeting-ipc";
+import {
+  networkLabReportExportV1,
+  reportReceiptText,
+  type LabReportReceiptWire,
+} from "./network-lab-report-ipc";
 import { useWorkbench } from "@state/workbench";
 import {
   networkLabAnalyzePcapV1,
@@ -78,6 +83,13 @@ export function NetworkLabView() {
   const [dnsResult, setDnsResult] = useState<DnsMonitorWire | null>(null);
   const [dnsBusy, setDnsBusy] = useState(false);
   const [dnsError, setDnsError] = useState<string | null>(null);
+  // Lab session report export (Bettercap session-report parity): one bounded
+  // markdown artifact persisted as ONE case finding; per-run receipt state
+  // like every other capture-derived view value.
+  const [reportReceipt, setReportReceipt] = useState<LabReportReceiptWire | null>(null);
+  const [reportBusy, setReportBusy] = useState(false);
+  const [reportError, setReportError] = useState<string | null>(null);
+  const [reportIncludeDns, setReportIncludeDns] = useState(true);
   // Live source: the lab either derives over the opened capture or
   // SUBSCRIBES to Packet Studio's running capture session (one capture,
   // many modules). It never starts or stops a capture of its own.
@@ -129,12 +141,17 @@ export function NetworkLabView() {
     setCapture(null);
     setAnalysis(null);
     setDnsResult(null);
+    // The exported report is case evidence: a case switch drops the receipt
+    // so the chip can never claim an export into the previous case.
+    setReportReceipt(null);
     setOpening(false);
     setAnalyzing(false);
     setDnsBusy(false);
+    setReportBusy(false);
     setOpenError(null);
     setAnalysisError(null);
     setDnsError(null);
+    setReportError(null);
     // A case switch revokes the capture session's ownership on the backend,
     // so the live subscription is meaningless: stop polling and drop the
     // stale status instead of letting it render against the new revision.
@@ -226,6 +243,7 @@ export function NetworkLabView() {
       // backend cache is replaced, so they never survive an open.
       setAnalysis(null);
       setDnsResult(null);
+      setReportReceipt(null);
       return wire;
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -277,6 +295,29 @@ export function NetworkLabView() {
       setDnsError(err instanceof Error ? err.message : String(err));
     } finally {
       setDnsBusy(false);
+    }
+  };
+
+  // Lab session report export: read-only over the opened capture; the
+  // backend renders one bounded markdown artifact and persists ONE case
+  // finding into the backend-selected saved case. The receipt is the only
+  // thing that comes back across IPC.
+  const runReportExport = async () => {
+    if (!capture) return;
+    const caseId = wb.caseId;
+    const ticket = ++openSequence.current;
+    const isCurrent = () => currentCase.current === caseId && ticket === openSequence.current;
+    setReportBusy(true);
+    setReportError(null);
+    try {
+      const wire = await networkLabReportExportV1(routerIp.trim() || null, reportIncludeDns);
+      if (!isCurrent()) return;
+      setReportReceipt(wire);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      if (isCurrent() && message !== "cancelled") setReportError(message);
+    } finally {
+      if (isCurrent()) setReportBusy(false);
     }
   };
 
@@ -790,6 +831,51 @@ export function NetworkLabView() {
               ) : null}
               <DnsFindingsTable wire={dnsResult} />
             </div>
+
+            {/* Session report: one structured artifact (ARP findings, event
+                timeline, host inventory, DNS findings) rendered to bounded
+                markdown and persisted as ONE case finding in the backend-
+                selected saved case. Read-only over the capture; the frontend
+                only ever receives a receipt. */}
+            <div className="border-t border-line pt-3">
+              <div
+                role="group"
+                aria-label="Export lab session report"
+                className="flex flex-wrap items-center gap-2 pb-2"
+              >
+                <span className="font-medium uppercase tracking-wider text-fg-muted">
+                  Session report
+                </span>
+                <ToolButton
+                  tone="primary"
+                  disabled={!desktop || !capture || reportBusy}
+                  title={
+                    capture
+                      ? "Render one bounded lab session report (ARP findings, event timeline, host inventory, DNS findings) and persist it as a single case finding in the selected saved case"
+                      : "Open a capture first — the session report reduces the opened capture"
+                  }
+                  onClick={() => void runReportExport()}
+                >
+                  <Radar size={11} /> {reportBusy ? "exporting…" : "Export session report"}
+                </ToolButton>
+                <label className="flex items-center gap-1 text-xs text-fg-dim">
+                  <input
+                    type="checkbox"
+                    checked={reportIncludeDns}
+                    onChange={(event) => setReportIncludeDns(event.target.checked)}
+                    className="accent-[var(--color-orange)]"
+                    aria-label="Include DNS findings in the session report"
+                  />
+                  <span>include DNS findings</span>
+                </label>
+                <ReportReceiptChip receipt={reportReceipt} />
+              </div>
+              {reportError ? (
+                <div role="alert" className="border border-err/50 bg-err/10 px-3 py-1 font-mono text-[10px] text-err">
+                  {reportError}
+                </div>
+              ) : null}
+            </div>
           </div>
         </Pane>
 
@@ -918,6 +1004,16 @@ export function DnsMonitorChips({ wire }: { wire: DnsMonitorWire | null }) {
       {wire.findings.length >= 128 ? <Chip tone="muted">findings capped at 128</Chip> : null}
     </>
   );
+}
+
+/**
+ * Receipt chip for the exported session report: size, destination case and
+ * the truncation flag (a truncated artifact is labeled as such, never
+ * silently shrunk). The markdown itself never crosses IPC.
+ */
+export function ReportReceiptChip({ receipt }: { receipt: LabReportReceiptWire | null }) {
+  if (!receipt) return <Chip>no report exported yet</Chip>;
+  return <Chip tone={receipt.truncated ? "orange" : "ok"}>{reportReceiptText(receipt)}</Chip>;
 }
 
 /**
