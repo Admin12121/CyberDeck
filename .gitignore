@@ -35,3 +35,5 @@ target-agent-*
 .web-bridge-trash-*
 
 *.md
+
+.zcode/
