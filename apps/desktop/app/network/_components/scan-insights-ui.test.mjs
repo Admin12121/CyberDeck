@@ -4,6 +4,11 @@
 // backend is cross-checked for command names, bound constants and wire labels.
 // The pure helpers in scan-insights-ipc.ts (layout, formatting) are imported
 // and exercised with real assertions.
+//
+// UX revision (Zenmap reference): one focused mode at a time behind an icon
+// rail, one toolbar row per mode, and all long explanations in InfoTip
+// tooltips — so honesty wording is asserted against the tooltip text, and
+// on-screen prose is asserted ABSENT.
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
@@ -29,6 +34,20 @@ test("insights view provides baseline and compare pickers plus a topology picker
   // The pickers are fed from the netscan history, not invented state.
   assert.match(viewSource, /netscanHistory\(\)/);
   assert.match(viewSource, /formatSessionLabel\(/);
+  // Placeholders stay short; the "no completed sessions" repetition is gone.
+  assert.match(viewSource, /label: "baseline"/);
+  assert.match(viewSource, /label: "compare"/);
+  assert.doesNotMatch(viewSource, /no completed sessions/);
+});
+
+test("one focused mode is visible at a time via the icon rail", () => {
+  assert.match(viewSource, /<IconRail\s+items=\{MODE_RAIL_ITEMS\}/);
+  assert.match(viewSource, /icon: GitCompare/);
+  assert.match(viewSource, /icon: Network/);
+  assert.match(viewSource, /const \[mode, setMode\] = useState<InsightsMode>\("diff"\)/);
+  // Exactly one mode's toolbar and content render per pass.
+  assert.match(viewSource, /\{mode === "diff" \? \(/);
+  assert.match(viewSource, /from "@ds\/compact"/);
 });
 
 test("diff runs only through the typed pending client with both sessions chosen", () => {
@@ -38,7 +57,9 @@ test("diff runs only through the typed pending client with both sessions chosen"
   assert.match(diffBody[1], /revision === null/);
   // A session compared against itself is a wasted bounded read; disabled.
   assert.match(viewSource, /baselineId === compareId/);
-  // The button cannot run before a saved case is selected.
+  // The trigger is an icon button (Play), not a labeled toolbar button, and it
+  // cannot run before a saved case is selected.
+  assert.match(viewSource, /<IconButton\s+icon=\{Play\}/);
   assert.match(viewSource, /disabled=\{!desktop \|\| revision === null \|\| diffBusy/);
 });
 
@@ -73,13 +94,40 @@ test("topology overflow notice and client-side node bound are present", () => {
   assert.match(backendSource, /MAX_TOPOLOGY_EDGES: usize = 2048/);
 });
 
-test("honesty contract: up means open evidence, l2 stays on the deck's own segment", () => {
-  assert.match(viewSource, /Host &quot;up&quot; means at least one open port/);
-  assert.match(viewSource, /only this deck&apos;s own segment claims l2 adjacency/);
+test("honesty contract lives in the toolbar InfoTip tooltips, not on-screen prose", () => {
+  // The full honesty wording survives verbatim as tooltip text.
+  assert.match(viewSource, /Host "up" means at least one open port/);
+  assert.match(viewSource, /only this deck's own segment claims l2 adjacency/);
   assert.match(viewSource, /last 8 completed scans/);
-  // The backend docs and edge builder agree with the rendered legend.
-  assert.match(backendSource, /no ARP or MAC records exist in the/);
-  assert.match(backendSource, /"l2"|"subnet"/);
+  // The topology legend survives inside the topology tooltip.
+  assert.match(viewSource, /node size = open ports · solid = l2 on-link/);
+  // Both mode rows carry the tip; the HTML-entity prose footer is gone.
+  assert.match(viewSource, /<InfoTip text=\{HONESTY_NOTE\} \/>/);
+  assert.match(viewSource, /<InfoTip text=\{TOPOLOGY_NOTE\} \/>/);
+  assert.doesNotMatch(viewSource, /&quot;up&quot;|deck&apos;s/);
+});
+
+test("the two-session hint is a StatusStrip item shown only when fewer than 2 sessions exist", () => {
+  assert.match(viewSource, /<StatusStrip items=\{statusItems\}/);
+  assert.match(viewSource, /history\.length < 2 \? \{ label: "select two completed sessions to diff" \} : null/);
+  // Result counts stay available as muted strip items, not pane prose.
+  assert.match(viewSource, /port changes/);
+  assert.match(viewSource, /nodes · \$\{topology\.edges\.length\} edges/);
+});
+
+test("case gate is a compact one-liner with working create and choose actions", () => {
+  assert.match(viewSource, /Select or create an investigation case/);
+  assert.match(viewSource, /Waiting for the selected investigation/);
+  // Buttons stay functional: native case create + the cases chooser route.
+  assert.match(viewSource, /caseCreate\(/);
+  assert.match(viewSource, /router\.push\("\/cases"\)/);
+  assert.match(viewSource, /"Create case"/);
+  assert.match(viewSource, /Choose existing/);
+  // The two-sentence rationale lives in the gate's InfoTip.
+  assert.match(viewSource, /requires a saved case so results, permissions and evidence stay isolated/);
+  // No stacked section gate anymore.
+  assert.doesNotMatch(viewSource, /AuthorizedCaseAction/);
+  assert.match(viewSource, /revision === null \? <CaseGate activity="Scan insights" \/> : null/);
 });
 
 test("frontend clients target the registered insights command names", () => {
