@@ -528,6 +528,179 @@ mod tests {
         assert!(capture_nanosecond(&[0x0a, 0x0d, 0x0d, 0x0a]));
         assert!(!capture_nanosecond(&[]));
     }
+
+    // --- DNS response monitor reduction -------------------------------------
+
+    /// Minimal UDP/DNS message: one A question, optional A answers.
+    fn dns_message(
+        id: u16,
+        is_response: bool,
+        rcode: u8,
+        name: &str,
+        answers: &[([u8; 4], u32)],
+    ) -> Vec<u8> {
+        let mut data = Vec::new();
+        data.extend_from_slice(&id.to_be_bytes());
+        let flags: u16 = if is_response {
+            0x8000u16 | u16::from(rcode)
+        } else {
+            0x0100
+        };
+        data.extend_from_slice(&flags.to_be_bytes());
+        data.extend_from_slice(&1u16.to_be_bytes()); // questions
+        data.extend_from_slice(&(answers.len() as u16).to_be_bytes());
+        data.extend_from_slice(&[0, 0, 0, 0]); // authority + additional
+        for label in name.split('.') {
+            data.push(label.len() as u8);
+            data.extend_from_slice(label.as_bytes());
+        }
+        data.push(0);
+        data.extend_from_slice(&1u16.to_be_bytes()); // type A
+        data.extend_from_slice(&1u16.to_be_bytes()); // class IN
+        for (ip, ttl) in answers {
+            data.extend_from_slice(&[0xc0, 0x0c]); // name pointer to the question
+            data.extend_from_slice(&1u16.to_be_bytes()); // type A
+            data.extend_from_slice(&1u16.to_be_bytes()); // class IN
+            data.extend_from_slice(&ttl.to_be_bytes());
+            data.extend_from_slice(&4u16.to_be_bytes()); // rdlength
+            data.extend_from_slice(ip);
+        }
+        data
+    }
+
+    /// Ethernet + IPv4 + UDP frame with both ports on 53 carrying `dns`.
+    fn udp_dns_frame(src: [u8; 4], dst: [u8; 4], dns: &[u8]) -> Vec<u8> {
+        let mut frame = Vec::new();
+        frame.extend_from_slice(&[0x00; 6]); // destination MAC
+        frame.extend_from_slice(&[0xaa; 6]); // source MAC
+        frame.extend_from_slice(&0x0800u16.to_be_bytes());
+        let total_length = (20 + 8 + dns.len()) as u16;
+        frame.extend_from_slice(&[0x45, 0x00]); // version/IHL, DSCP
+        frame.extend_from_slice(&total_length.to_be_bytes());
+        frame.extend_from_slice(&[0, 0, 0, 0]); // id, flags/fragment offset
+        frame.push(64); // ttl
+        frame.push(17); // protocol UDP
+        frame.extend_from_slice(&[0, 0]); // header checksum (not validated)
+        frame.extend_from_slice(&src);
+        frame.extend_from_slice(&dst);
+        frame.extend_from_slice(&53u16.to_be_bytes()); // source port
+        frame.extend_from_slice(&53u16.to_be_bytes()); // destination port
+        frame.extend_from_slice(&((8 + dns.len()) as u16).to_be_bytes());
+        frame.extend_from_slice(&[0, 0]); // UDP checksum (not validated)
+        frame.extend_from_slice(dns);
+        frame
+    }
+
+    #[test]
+    fn dns_monitor_reduces_frames_and_reports_answer_inconsistency() {
+        let frames = vec![
+            meta(
+                1_000,
+                &udp_dns_frame(
+                    [10, 0, 0, 5],
+                    [10, 0, 0, 1],
+                    &dns_message(0x1234, false, 0, "bank.example", &[]),
+                ),
+            ),
+            meta(
+                2_000,
+                &udp_dns_frame(
+                    [10, 0, 0, 1],
+                    [10, 0, 0, 5],
+                    &dns_message(0x1234, true, 0, "bank.example", &[([203, 0, 113, 10], 300)]),
+                ),
+            ),
+            meta(
+                3_000,
+                &udp_dns_frame(
+                    [10, 0, 0, 1],
+                    [10, 0, 0, 5],
+                    &dns_message(0x1235, true, 0, "bank.example", &[([198, 51, 100, 66], 300)]),
+                ),
+            ),
+        ];
+        let wire = dns_monitor_capture(&capture_with(frames));
+        assert_eq!(wire.observations_seen, 3, "query plus two responses");
+        assert_eq!(wire.queried_names, 1);
+        assert_eq!(wire.findings.len(), 1);
+        let finding = &wire.findings[0];
+        assert_eq!(
+            finding.kind,
+            cyberdeck_packet::dns_monitor::DnsFindingKind::AnswerInconsistency
+        );
+        let baseline = finding.baseline.as_ref().expect("baseline recorded");
+        assert_eq!(baseline.values, vec!["203.0.113.10"]);
+        assert_eq!(baseline.seen_ms, 2_000);
+        let later = finding.later.as_ref().expect("later set recorded");
+        assert_eq!(later.values, vec!["198.51.100.66"]);
+        assert_eq!(finding.first_seen_ms, 2_000);
+        assert_eq!(finding.last_seen_ms, 3_000);
+    }
+
+    #[test]
+    fn dns_monitor_skips_malformed_and_non_dns_frames() {
+        let mut truncated = udp_dns_frame(
+            [10, 0, 0, 1],
+            [10, 0, 0, 5],
+            &dns_message(1, true, 0, "bank.example", &[([203, 0, 113, 10], 60)]),
+        );
+        let total = truncated.len();
+        truncated.truncate(total - 2); // torn answer record
+        let frames = vec![
+            meta(1_000, &truncated),
+            meta(
+                2_000,
+                &arp_frame([0xaa; 6], 2, [0xaa; 6], [10, 0, 0, 9], [10, 0, 0, 2]),
+            ),
+        ];
+        let wire = dns_monitor_capture(&capture_with(frames));
+        assert_eq!(wire.observations_seen, 0);
+        assert_eq!(wire.queried_names, 0);
+        assert!(wire.findings.is_empty());
+    }
+
+    #[test]
+    fn dns_monitor_surfaces_suspicious_target_and_nxdomain_from_frames() {
+        let frames = vec![
+            meta(
+                1_000,
+                &udp_dns_frame(
+                    [10, 0, 0, 1],
+                    [10, 0, 0, 5],
+                    &dns_message(1, true, 0, "evil.example", &[([169, 254, 169, 254], 60)]),
+                ),
+            ),
+            meta(
+                2_000,
+                &udp_dns_frame(
+                    [10, 0, 0, 1],
+                    [10, 0, 0, 5],
+                    &dns_message(2, true, 0, "news.example", &[([203, 0, 113, 7], 60)]),
+                ),
+            ),
+            meta(
+                3_000,
+                &udp_dns_frame(
+                    [10, 0, 0, 1],
+                    [10, 0, 0, 5],
+                    &dns_message(3, true, 3, "news.example", &[]),
+                ),
+            ),
+        ];
+        let wire = dns_monitor_capture(&capture_with(frames));
+        assert_eq!(wire.observations_seen, 3);
+        assert_eq!(wire.queried_names, 2);
+        let kinds: Vec<_> = wire.findings.iter().map(|f| f.kind).collect();
+        assert!(kinds.contains(&cyberdeck_packet::dns_monitor::DnsFindingKind::SuspiciousTarget));
+        assert!(kinds.contains(&cyberdeck_packet::dns_monitor::DnsFindingKind::NxdomainInjection));
+        let suspicious = wire
+            .findings
+            .iter()
+            .find(|f| f.kind == cyberdeck_packet::dns_monitor::DnsFindingKind::SuspiciousTarget)
+            .expect("suspicious finding present");
+        assert!(suspicious.detail.contains("169.254.169.254"));
+        assert_eq!(suspicious.first_seen_ms, 1_000);
+    }
 }
 
 
@@ -549,4 +722,94 @@ pub fn network_lab_events_v1(
         &capture.packets,
         router_ip.as_deref(),
     ))
+}
+
+// --- Bettercap-mode DNS response monitor (passive) ----------------------------
+
+/// Defensive observation cap for DNS messages, mirroring the ARP analyzer's
+/// ceiling: the capture parser already bounds frames, this keeps the
+/// observation list bounded even if a future cache source stops enforcing it.
+const MAX_DNS_OBSERVATIONS: usize = 1024;
+
+/// Wire result of one passive DNS-response monitoring run over the opened
+/// capture: the bounded interception indicators plus the counters that show
+/// what the run actually saw (honest caps instead of silent truncation).
+#[derive(Debug, Serialize)]
+pub struct DnsMonitorWire {
+    /// DNS messages reduced into monitor observations (queries + responses).
+    pub observations_seen: usize,
+    /// Bounded interception indicators (analyzer caps at 128).
+    pub findings: Vec<cyberdeck_packet::dns_monitor::DnsFinding>,
+    /// Distinct question names seen, capped at the analyzer's tracking bound.
+    pub queried_names: usize,
+}
+
+/// Reduce one dissected frame to a DNS monitor observation. The dissector
+/// labels a frame "DNS" whenever port 53 is involved (even when the payload
+/// is malformed), so the summary is re-decoded from the retained payload and
+/// unparseable frames are skipped rather than half-reported.
+fn dns_observation_from_dissected(
+    dissected: &Dissected,
+    timestamp_ms: u64,
+) -> Option<cyberdeck_packet::dns_monitor::DnsObservation> {
+    if dissected.protocol != "DNS" {
+        return None;
+    }
+    let summary = cyberdeck_packet::dns::parse_dns(&dissected.payload)?;
+    let question = summary.first_question.as_ref()?;
+    Some(cyberdeck_packet::dns_monitor::DnsObservation {
+        timestamp_ms,
+        is_response: summary.is_response,
+        question_name: question.name.clone(),
+        question_type: question.record_type,
+        answers: summary
+            .answer_records
+            .iter()
+            .map(|answer| {
+                (
+                    answer.value.clone(),
+                    cyberdeck_packet::dns::record_type_label(answer.record_type),
+                )
+            })
+            .collect(),
+        response_code: summary.response_code,
+    })
+}
+
+/// Pure analysis core over a cached capture (no Tauri types): walk the
+/// packets, reduce UDP DNS summaries into observations in capture order, run
+/// the passive monitor. Same reduction style as the ARP analyzer above.
+fn dns_monitor_capture(capture: &CachedCapture) -> DnsMonitorWire {
+    let nanosecond = capture_nanosecond(&capture.bytes);
+    let mut observations: Vec<cyberdeck_packet::dns_monitor::DnsObservation> = Vec::new();
+    for meta in &capture.packets {
+        if observations.len() >= MAX_DNS_OBSERVATIONS {
+            break;
+        }
+        if let Some(observation) =
+            dns_observation_from_dissected(&meta.dissected, frame_timestamp_ms(meta, nanosecond))
+        {
+            observations.push(observation);
+        }
+    }
+    let report = cyberdeck_packet::dns_monitor::analyze_dns(&observations);
+    DnsMonitorWire {
+        observations_seen: observations.len(),
+        queried_names: report.queried_names,
+        findings: report.findings,
+    }
+}
+
+/// Passive DNS-response monitoring over the currently opened capture:
+/// answer inconsistencies, loopback/link-local answer targets and NXDOMAIN
+/// injection. Read-only: no frames are transmitted and no authorization is
+/// required, matching the other offline capture-read commands.
+#[tauri::command]
+pub fn network_lab_dns_monitor_v1(ctx: State<'_, PcapCtx>) -> Result<DnsMonitorWire, String> {
+    let guard = ctx
+        .current
+        .lock()
+        .map_err(|_| "capture cache unavailable".to_string())?;
+    let capture = guard.as_ref().ok_or("no capture is open")?;
+    Ok(dns_monitor_capture(capture))
 }
