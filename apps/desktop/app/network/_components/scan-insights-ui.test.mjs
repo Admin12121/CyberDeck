@@ -117,13 +117,14 @@ test("the two-session hint is a StatusStrip item shown only when fewer than 2 se
 
 test("case gate is a pointer line only — no case management here (user directive)", () => {
   // Cases are managed in the Case section; the view shows ONE muted line.
-  assert.match(viewSource, /No case selected — pick one in the Case section/);
-  assert.match(viewSource, /Waiting for the selected investigation/);
+  // The footer bar already shows case state: the gate renders NOTHING
+  // (no pointer line, no explanation) except errors.
+  assert.doesNotMatch(viewSource, /No case selected/);
+  assert.doesNotMatch(viewSource, /pick one in the Case section/);
+  assert.doesNotMatch(viewSource, /Waiting for the selected investigation/);
   assert.doesNotMatch(viewSource, /Create case/);
   assert.doesNotMatch(viewSource, /Choose existing/);
   assert.doesNotMatch(viewSource, /caseCreate\(/);
-  // The rationale lives in the gate's InfoTip, not on screen.
-  assert.match(viewSource, /Cases are managed in the Case section, not here/);
   // No stacked section gate anymore.
   assert.doesNotMatch(viewSource, /AuthorizedCaseAction/);
   assert.match(viewSource, /revision === null \? <CaseGate activity="Scan insights" \/> : null/);

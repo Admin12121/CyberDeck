@@ -2,12 +2,14 @@
 /**
  * Network Lab (Ettercap-inspired mode, passive/defensive arc).
  *
- * UX revision: an icon rail (Bettercap-style) switches between five modes —
+ * UX revision: a compact left-aligned icon-only pill rail (34px buttons,
+ * tooltip = label, active = orange filled pill) switches between five modes —
  * Scope, ARP, Live, DNS, Report — and exactly ONE mode renders at a time.
  * Each mode is one `SectionHeader` line (single state chip + InfoTip) above a
- * compact toolbar row and the results table; long explanations live in InfoTip
- * tooltips instead of body text. The active-interaction gate is a single
- * strip line under the rail (disabled control + passive-arc chip + InfoTip).
+ * compact h-8 toolbar row and the results table; long explanations live in
+ * InfoTip tooltips instead of body text, and no separator lines separate
+ * toolbar rows. The active-interaction gate is a single strip line under the
+ * rail (disabled control + passive-arc chip + InfoTip).
  *
  * Gates (unchanged, Master Plan §5.1): scope entries are IP/CIDR strings held
  * in memory only behind an explicit authorization checkbox; ARP analysis, the
@@ -15,9 +17,10 @@
  * capture or a subscribed Packet Studio session; the lab never transmits.
  */
 import { useEffect, useRef, useState } from "react";
-import { Ban, Crosshair, FolderOpen, Globe, Network, Radar } from "lucide-react";
-import { Chip, EmptyState, Pane, Select, TextInput, ToolButton } from "@ds/panes";
-import { IconRail, IconButton, InfoTip, SectionHeader, StatusStrip } from "@ds/compact";
+import { Ban, Crosshair, FileText, FolderOpen, Globe, Network, Radar } from "lucide-react";
+import type { LucideIcon } from "lucide-react";
+import { Chip, EmptyState, Select, TextInput, ToolButton } from "@ds/panes";
+import { IconButton, InfoTip, SectionHeader, StatusStrip } from "@ds/compact";
 import {
   captureInterfacesV1,
   isDesktop,
@@ -69,8 +72,11 @@ import {
 
 const SCOPE_TEXT_MAX_CHARS = 8192;
 
-/** Rail modes: one visible at a time (Bettercap icon-rail navigation). */
+/** Rail modes: one visible at a time (icon-only pill rail navigation). */
 type LabMode = "scope" | "arp" | "live" | "dns" | "report";
+
+/** Shared toolbar-row layout: h-8 controls, consistent gap, no separators. */
+const TOOLBAR_ROW = "flex flex-wrap items-center gap-2 px-3 py-2";
 
 export function NetworkLabView() {
   const desktop = isDesktop();
@@ -247,12 +253,43 @@ export function NetworkLabView() {
       : undefined;
   const dnsFindings =
     dnsResult && dnsResult.findings.length > 0 ? dnsResult.findings.length : undefined;
+  const railItems: { id: LabMode; label: string; icon: LucideIcon; badge?: number }[] = [
+    { id: "scope", label: "Scope", icon: Crosshair },
+    { id: "arp", label: "ARP", icon: Network, badge: arpConflicts },
+    { id: "live", label: "Live", icon: Radar, badge: liveGatewayChanges },
+    { id: "dns", label: "DNS", icon: Globe, badge: dnsFindings },
+    { id: "report", label: "Report", icon: FileText },
+  ];
   const dnsState = !dnsResult
     ? "no analysis"
     : dnsResult.findings.length > 0
       ? `${dnsResult.findings.length} finding${dnsResult.findings.length === 1 ? "" : "s"}`
       : "clean";
   const dnsStateTone = !dnsResult ? "muted" : dnsResult.findings.length > 0 ? "err" : "ok";
+  const liveState =
+    liveSource === "session"
+      ? livePolling
+        ? liveStatus?.active
+          ? "live"
+          : "idle"
+        : "not subscribed"
+      : timeline
+        ? "derived"
+        : "no timeline";
+  const liveStateTone =
+    liveSource === "session" && livePolling && liveStatus?.active ? "ok" : "muted";
+  const liveStripItems = [
+    liveSource === "session" && liveStatus
+      ? {
+          label: `session ${liveSessionId} · ${liveStatus.interface} · ${liveStatus.phase} · ${liveStatus.captured_packets} captured${liveStatus.active ? "" : " · not running"}`,
+          tone: liveStatus.active ? ("ok" as const) : ("muted" as const),
+        }
+      : null,
+    ...timelineStatusItems(displayTimeline),
+  ];
+  // The lab needs a saved, backend-selected case for the sweep and the
+  // report export; case management itself lives in the Case section only.
+  const needsSavedCase = wb.caseId === "scratchpad" || wb.caseId.trim().length === 0;
 
   const openCapture = async (): Promise<PcapOpenWire | null> => {
     const caseId = wb.caseId;
@@ -423,24 +460,41 @@ export function NetworkLabView() {
 
   return (
     <div className="flex h-full min-h-0 flex-col bg-app">
-      <IconRail
-        items={[
-          { id: "scope", label: "Scope", icon: Crosshair },
-          { id: "arp", label: "ARP", icon: Network, badge: arpConflicts },
-          { id: "live", label: "Live", icon: Radar, badge: liveGatewayChanges },
-          { id: "dns", label: "DNS", icon: Globe, badge: dnsFindings },
-          { id: "report", label: "Report", icon: Radar },
-        ]}
-        active={mode}
-        onChange={(id) => setMode(id as LabMode)}
-        ariaLabel="Network Lab modes"
-      />
+      {/* Icon-only pill rail: 34px square buttons, tooltip = label, active =
+          orange filled pill. Left-aligned; no tab underline, no full-width
+          stretch, no labels under the icons. */}
+      <nav aria-label="Network Lab modes" className="flex shrink-0 items-center gap-1 px-3 pb-1 pt-2">
+        {railItems.map((item) => {
+          const Icon = item.icon;
+          const activeMode = item.id === mode;
+          return (
+            <button
+              key={item.id}
+              type="button"
+              onClick={() => setMode(item.id)}
+              aria-pressed={activeMode}
+              aria-label={item.label}
+              title={item.label}
+              className={`relative inline-flex h-[34px] w-[34px] items-center justify-center rounded-full transition-colors focus-visible:outline focus-visible:outline-1 focus-visible:outline-ring ${
+                activeMode ? "bg-orange text-white" : "text-fg-muted hover:bg-line/60 hover:text-fg"
+              }`}
+            >
+              <Icon size={16} strokeWidth={activeMode ? 2 : 1.5} />
+              {item.badge !== undefined && item.badge > 0 ? (
+                <span className="absolute -right-1.5 -top-1.5 min-w-3.5 rounded-full bg-err px-1 text-center font-mono text-[9px] leading-3.5 text-white">
+                  {item.badge}
+                </span>
+              ) : null}
+            </button>
+          );
+        })}
+      </nav>
       {/* Active interaction gate: ONE strip line instead of a pane of three
           inert buttons. The full gate wording lives in the InfoTip. */}
       <div
         role="group"
         aria-label="Active interaction (not available in this arc)"
-        className="flex shrink-0 items-center gap-2 border-b border-line bg-panel px-3 py-1"
+        className="flex shrink-0 items-center gap-2 px-3 pb-1"
       >
         <IconButton
           icon={Ban}
@@ -463,7 +517,7 @@ export function NetworkLabView() {
               stateTone={scope?.authorized ? "orange" : "muted"}
               info="Ettercap-inspired lab mode inside Packet Studio: unified host inventory, passive ARP anomaly analysis and passive DNS-response monitoring over already-captured frames. The lab reads captures and never transmits packets; scope entries are IP/CIDR strings held in memory only and are never persisted (Master Plan §5.1)."
             />
-            <div className="grid gap-3 px-3 pb-2 md:grid-cols-2">
+            <div className="grid gap-3 px-3 pb-1 md:grid-cols-2">
               <label className="block text-xs text-fg-dim">
                 <span className="mb-1 block font-medium text-fg-muted">Target 1</span>
                 <textarea
@@ -489,7 +543,7 @@ export function NetworkLabView() {
                 />
               </label>
             </div>
-            <div className="flex flex-wrap items-center gap-2 border-t border-line px-3 py-2">
+            <div className={TOOLBAR_ROW}>
               <label className="flex items-center gap-1.5 text-xs text-fg-dim">
                 <input
                   type="checkbox"
@@ -519,7 +573,7 @@ export function NetworkLabView() {
                 lab scope (Target 1 ∪ Target 2) and every candidate is checked
                 against it, so the sweep refuses anything outside the declared
                 scope. Linux native worker, native confirmation, CAP_NET_RAW. */}
-            <div className="border-t border-line px-3 py-2">
+            <div className="px-3 py-2">
               <div className="flex flex-wrap items-center gap-2">
                 <span className="text-xs font-medium text-fg-muted">ARP sweep</span>
                 <Select
@@ -562,6 +616,11 @@ export function NetworkLabView() {
                   </Chip>
                 ) : null}
               </div>
+              {needsSavedCase ? (
+                <p className="pt-1 text-[10px] text-fg-muted">
+                  Select a case in the Case section — lab ARP sweeps require a saved case.
+                </p>
+              ) : null}
               {sweepError ? (
                 <div role="alert" className="mt-2 border border-err/50 bg-err/10 px-3 py-1 font-mono text-[10px] text-err">
                   {sweepError}
@@ -613,7 +672,7 @@ export function NetworkLabView() {
               stateTone={capture ? "ok" : "muted"}
               info="Passive ARP anomaly analysis over the opened capture: duplicate IP→MAC claims, gratuitous ARP bursts and gateway impersonation, plus a unified host inventory. The analyzer never transmits a packet."
             />
-            <div className="flex flex-wrap items-center gap-2 border-b border-line px-3 py-2">
+            <div className={TOOLBAR_ROW}>
               <ToolButton
                 onClick={() => void openCapture()}
                 disabled={!desktop || opening}
@@ -634,16 +693,16 @@ export function NetworkLabView() {
                 onChange={setRouterIp}
                 placeholder="gateway IP (optional)"
                 ariaLabel="Gateway IP for gateway-impersonation detection"
-                className="w-44"
+                className="h-8 w-44 sm:h-7"
               />
             </div>
             {openError ? (
-              <div role="alert" className="border-b border-err/50 bg-err/10 px-3 py-1 font-mono text-[10px] text-err">
+              <div role="alert" className="mx-3 border border-err/50 bg-err/10 px-3 py-1 font-mono text-[10px] text-err">
                 {openError}
               </div>
             ) : null}
             {analysisError ? (
-              <div role="alert" className="border-b border-err/50 bg-err/10 px-3 py-1 font-mono text-[10px] text-err">
+              <div role="alert" className="mx-3 border border-err/50 bg-err/10 px-3 py-1 font-mono text-[10px] text-err">
                 {analysisError}
               </div>
             ) : null}
@@ -706,7 +765,7 @@ export function NetworkLabView() {
                     </tbody>
                   </table>
                 </div>
-                <p className="border-t border-line px-3 pt-2 font-mono text-[10px] uppercase tracking-wider text-fg-muted">
+                <p className="px-3 pb-1 pt-3 text-[11px] font-semibold text-fg-muted">
                   Unified host inventory
                 </p>
                 <div className="p-1">
@@ -754,97 +813,94 @@ export function NetworkLabView() {
         )}
 
         {mode === "live" && (
-          <Pane title="Live monitor (passive event timeline)">
-            <div className="space-y-2 p-3">
-              <div className="flex flex-wrap items-center gap-2">
-                <label className="flex items-center gap-1 text-xs text-fg-dim">
-                  <span className="font-medium uppercase tracking-wider text-fg-muted">Live source</span>
-                  <select
-                    value={liveSource}
-                    onChange={(event) =>
-                      switchLiveSource(event.target.value === "session" ? "session" : "opened")
-                    }
-                    aria-label="Live timeline source: opened capture or running capture session"
-                    className="rounded border border-line bg-panel px-2 py-1 text-xs text-fg outline-none focus:outline-none"
-                  >
-                    <option value="opened">Opened capture</option>
-                    <option value="session">Running capture session</option>
-                  </select>
-                </label>
-                {liveSource === "session" ? (
-                  <>
-                    <TextInput
-                      value={liveSessionId}
-                      onChange={(text) => setLiveSessionId(text.replace(/[^0-9]/g, "").slice(0, 15))}
-                      placeholder="session id (Packet Studio)"
-                      ariaLabel="Capture session id to subscribe to"
-                      className="w-44"
-                    />
-                    {livePolling ? (
-                      <ToolButton
-                        onClick={stopLiveSubscription}
-                        title="Stop polling the subscribed session. The lab never stops Packet Studio's capture itself"
-                      >
-                        Stop live subscription
-                      </ToolButton>
-                    ) : (
-                      <ToolButton
-                        tone="primary"
-                        disabled={!desktop || !isValidLiveSessionId(liveSessionId)}
-                        onClick={startLiveSubscription}
-                        title="Subscribe to the running capture session: poll its passive lab status every 2 seconds. Requires Packet Studio's live capture to be running"
-                      >
-                        Subscribe
-                      </ToolButton>
-                    )}
-                    {liveStatus ? (
-                      <Chip tone={liveStatus.active ? "ok" : "muted"}>
-                        session {liveSessionId} · {liveStatus.interface} · {liveStatus.phase} ·{" "}
-                        {liveStatus.captured_packets} captured
-                        {liveStatus.active ? "" : " · not running"}
-                      </Chip>
-                    ) : null}
-                  </>
-                ) : (
-                  <ToolButton
-                    disabled={!desktop || !capture || timelineBusy}
-                    title={capture
-                      ? "Derive the event timeline: new hosts, first services, ARP conflicts, gateway changes"
-                      : "Open a capture first — the timeline derives from the opened capture"}
-                    onClick={() => {
-                      setTimelineBusy(true);
-                      networkLabEventsV1(routerIp.trim() || null)
-                        .then((wire) => setTimeline(wire))
-                        .catch((cause) =>
-                          setAnalysisError(
-                            "Lab timeline failed: " + (cause instanceof Error ? cause.message : String(cause)),
-                          ),
-                        )
-                        .finally(() => setTimelineBusy(false));
-                    }}
-                  >
-                    <Radar size={11} /> {timelineBusy ? "deriving…" : "Derive event timeline"}
-                  </ToolButton>
-                )}
-                <TimelineChips wire={displayTimeline} />
-              </div>
+          <section aria-label="Live monitor" className="flex min-h-0 flex-col pb-6">
+            <SectionHeader
+              icon={Radar}
+              title="Live monitor"
+              state={liveState}
+              stateTone={liveStateTone}
+              info="Bettercap-style one-capture-many-modules subscription: the lab subscribes to Packet Studio's running capture and never starts its own capture, and Packet Studio's capture must be running for live counts. The lab transmits nothing; Packet Studio owns the capture lifecycle, the lab only reads its status. While the session runs, the captured counter tracks it live; the event timeline derives from the session's retained frames."
+            />
+            <div className={TOOLBAR_ROW}>
+              <label className="flex items-center gap-1.5 text-xs text-fg-dim">
+                <span className="text-fg-muted">Source</span>
+                <select
+                  value={liveSource}
+                  onChange={(event) =>
+                    switchLiveSource(event.target.value === "session" ? "session" : "opened")
+                  }
+                  aria-label="Live timeline source: opened capture or running capture session"
+                  className="rounded border border-line bg-panel px-2 py-1 text-xs text-fg outline-none focus:outline-none"
+                >
+                  <option value="opened">Opened capture</option>
+                  <option value="session">Running capture session</option>
+                </select>
+              </label>
               {liveSource === "session" ? (
-                <p className="text-xs leading-relaxed text-fg-dim">
-                  Bettercap-style one-capture-many-modules subscription: the lab subscribes to Packet
-                  Studio's running capture and never starts its own capture, and Packet Studio's capture
-                  must be running for live counts. The lab transmits nothing; Packet Studio owns the
-                  capture lifecycle, the lab only reads its status. While the session runs, the captured
-                  counter tracks it live; the event timeline derives from the session's retained frames.
-                </p>
-              ) : null}
-              {liveError ? (
-                <div role="alert" className="border-b border-err/50 bg-err/10 px-3 py-1 font-mono text-[10px] text-err">
-                  {liveError}
-                </div>
-              ) : null}
-              <TimelineTable wire={displayTimeline} />
+                <>
+                  <TextInput
+                    value={liveSessionId}
+                    onChange={(text) => setLiveSessionId(text.replace(/[^0-9]/g, "").slice(0, 15))}
+                    placeholder="session id (Packet Studio)"
+                    ariaLabel="Capture session id to subscribe to"
+                    className="h-8 w-44 sm:h-7"
+                  />
+                  {livePolling ? (
+                    <ToolButton
+                      onClick={stopLiveSubscription}
+                      title="Stop polling the subscribed session. The lab never stops Packet Studio's capture itself"
+                    >
+                      Stop
+                    </ToolButton>
+                  ) : (
+                    <ToolButton
+                      tone="primary"
+                      disabled={!desktop || !isValidLiveSessionId(liveSessionId)}
+                      onClick={startLiveSubscription}
+                      title="Subscribe to the running capture session: poll its passive lab status every 2 seconds. Requires Packet Studio's live capture to be running"
+                    >
+                      Subscribe
+                    </ToolButton>
+                  )}
+                </>
+              ) : (
+                <ToolButton
+                  disabled={!desktop || !capture || timelineBusy}
+                  title={capture
+                    ? "Derive the event timeline: new hosts, first services, ARP conflicts, gateway changes"
+                    : "Open a capture first — the timeline derives from the opened capture"}
+                  onClick={() => {
+                    setTimelineBusy(true);
+                    networkLabEventsV1(routerIp.trim() || null)
+                      .then((wire) => setTimeline(wire))
+                      .catch((cause) =>
+                        setAnalysisError(
+                          "Lab timeline failed: " + (cause instanceof Error ? cause.message : String(cause)),
+                        ),
+                      )
+                      .finally(() => setTimelineBusy(false));
+                  }}
+                >
+                  {timelineBusy ? "deriving…" : "Derive timeline"}
+                </ToolButton>
+              )}
             </div>
-          </Pane>
+            {liveError ? (
+              <div role="alert" className="mx-3 border border-err/50 bg-err/10 px-3 py-1 font-mono text-[10px] text-err">
+                {liveError}
+              </div>
+            ) : null}
+            <StatusStrip items={liveStripItems} />
+            {!displayTimeline ? (
+              <EmptyState
+                icon={Radar}
+                title="No timeline yet"
+                detail="Derive from the opened capture or subscribe to a running session."
+                badge="passive"
+              />
+            ) : null}
+            <TimelineTable wire={displayTimeline} />
+          </section>
         )}
 
         {mode === "dns" && (
@@ -856,7 +912,7 @@ export function NetworkLabView() {
               stateTone={dnsStateTone}
               info="Passive DNS-response monitor over the opened capture (dns-spoofing counterpart): answer inconsistencies, loopback/link-local answer targets and NXDOMAIN injection. Read-only — the monitor reads the opened capture and never transmits anything."
             />
-            <div className="flex flex-wrap items-center gap-2 border-b border-line px-3 py-2">
+            <div className={TOOLBAR_ROW}>
               {!capture ? (
                 <ToolButton
                   onClick={() => void openCapture()}
@@ -880,7 +936,7 @@ export function NetworkLabView() {
               </ToolButton>
             </div>
             {dnsError ? (
-              <div role="alert" className="border-b border-err/50 bg-err/10 px-3 py-1 font-mono text-[10px] text-err">
+              <div role="alert" className="mx-3 border border-err/50 bg-err/10 px-3 py-1 font-mono text-[10px] text-err">
                 {dnsError}
               </div>
             ) : null}
@@ -898,54 +954,59 @@ export function NetworkLabView() {
         )}
 
         {mode === "report" && (
-          <Pane title="Session report">
-            <div className="p-3">
-              {/* Session report: one structured artifact (ARP findings, event
-                  timeline, host inventory, DNS findings) rendered to bounded
-                  markdown and persisted as ONE case finding in the backend-
-                  selected saved case. Read-only over the capture; the frontend
-                  only ever receives a receipt. */}
-              <div className="border-t border-line pt-3">
-                <div
-                  role="group"
-                  aria-label="Export lab session report"
-                  className="flex flex-wrap items-center gap-2 pb-2"
-                >
-                  <span className="font-medium uppercase tracking-wider text-fg-muted">
-                    Session report
-                  </span>
-                  <ToolButton
-                    tone="primary"
-                    disabled={!desktop || !capture || reportBusy}
-                    title={
-                      capture
-                        ? "Render one bounded lab session report (ARP findings, event timeline, host inventory, DNS findings) and persist it as a single case finding in the selected saved case"
-                        : "Open a capture first — the session report reduces the opened capture"
-                    }
-                    onClick={() => void runReportExport()}
-                  >
-                    <Radar size={11} /> {reportBusy ? "exporting…" : "Export session report"}
-                  </ToolButton>
-                  <label className="flex items-center gap-1 text-xs text-fg-dim">
-                    <input
-                      type="checkbox"
-                      checked={reportIncludeDns}
-                      onChange={(event) => setReportIncludeDns(event.target.checked)}
-                      className="accent-[var(--color-orange)]"
-                      aria-label="Include DNS findings in the session report"
-                    />
-                    <span>include DNS findings</span>
-                  </label>
-                  <ReportReceiptChip receipt={reportReceipt} />
-                </div>
-                {reportError ? (
-                  <div role="alert" className="border border-err/50 bg-err/10 px-3 py-1 font-mono text-[10px] text-err">
-                    {reportError}
-                  </div>
-                ) : null}
-              </div>
+          <section aria-label="Session report" className="flex min-h-0 flex-col pb-6">
+            {/* lab-report-ui.test.mjs pins this span (exact className + text)
+                and the border-t group wrapper below verbatim; the span doubles
+                as this mode's one-line title, so the mode shows ONE label
+                instead of a header plus a group-label pair. */}
+            <div className="flex shrink-0 items-center gap-2 px-3 py-1.5">
+              <FileText size={13} strokeWidth={1.5} className="shrink-0 text-fg-muted" />
+              <span className="font-medium uppercase tracking-wider text-fg-muted">Session report</span>
+              <InfoTip text="One structured artifact (ARP findings, event timeline, host inventory, DNS findings) rendered to bounded markdown and persisted as ONE case finding in the backend-selected saved case. Read-only over the capture; the frontend only ever receives a receipt." />
+              <span className="flex-1" />
             </div>
-          </Pane>
+            <div className="border-t border-line pt-3">
+              <div
+                role="group"
+                aria-label="Export lab session report"
+                className={TOOLBAR_ROW}
+              >
+                <ToolButton
+                  tone="primary"
+                  disabled={!desktop || !capture || reportBusy}
+                  title={
+                    capture
+                      ? "Render one bounded lab session report (ARP findings, event timeline, host inventory, DNS findings) and persist it as a single case finding in the selected saved case"
+                      : "Open a capture first — the session report reduces the opened capture"
+                  }
+                  onClick={() => void runReportExport()}
+                >
+                  {reportBusy ? "exporting…" : "Export session report"}
+                </ToolButton>
+                <label className="flex items-center gap-1 text-xs text-fg-dim">
+                  <input
+                    type="checkbox"
+                    checked={reportIncludeDns}
+                    onChange={(event) => setReportIncludeDns(event.target.checked)}
+                    className="accent-[var(--color-orange)]"
+                    aria-label="Include DNS findings in the session report"
+                  />
+                  <span>include DNS findings</span>
+                </label>
+                <ReportReceiptChip receipt={reportReceipt} />
+              </div>
+              {reportError ? (
+                <div role="alert" className="mx-3 border border-err/50 bg-err/10 px-3 py-1 font-mono text-[10px] text-err">
+                  {reportError}
+                </div>
+              ) : null}
+              {needsSavedCase ? (
+                <p className="px-3 pb-2 text-[10px] text-fg-muted">
+                  Select a case in the Case section — the report is persisted as case evidence.
+                </p>
+              ) : null}
+            </div>
+          </section>
         )}
       </div>
     </div>
@@ -966,18 +1027,22 @@ export function labEventKindLabel(kind: LabEventKindWire): string {
   }
 }
 
-/** Count chips shared by both live sources; honest about the 512-event cap. */
-export function TimelineChips({ wire }: { wire: LabEventsWire | null }) {
-  if (!wire) return <Chip>no timeline yet</Chip>;
-  return (
-    <>
-      <Chip tone="ok">{wire.new_hosts} new hosts</Chip>
-      <Chip tone="ok">{wire.new_services} services</Chip>
-      {wire.conflicts > 0 ? <Chip tone="err">{wire.conflicts} ARP conflicts</Chip> : null}
-      {wire.gateway_changes > 0 ? <Chip tone="err">{wire.gateway_changes} gateway changes</Chip> : null}
-      {wire.truncated ? <Chip tone="muted">timeline capped at 512</Chip> : null}
-    </>
-  );
+/**
+ * StatusStrip items shared by both live sources; honest about the 512-event
+ * cap. Empty until a source has data — the section header carries the
+ * "no timeline" state instead of a stray chip.
+ */
+export function timelineStatusItems(wire: LabEventsWire | null) {
+  if (!wire) return [];
+  return [
+    { label: `${wire.new_hosts} new hosts`, tone: "ok" as const },
+    { label: `${wire.new_services} services`, tone: "ok" as const },
+    wire.conflicts > 0 ? { label: `${wire.conflicts} ARP conflicts`, tone: "err" as const } : null,
+    wire.gateway_changes > 0
+      ? { label: `${wire.gateway_changes} gateway changes`, tone: "err" as const }
+      : null,
+    wire.truncated ? { label: "timeline capped at 512", tone: "muted" as const } : null,
+  ];
 }
 
 /** Timeline table shared by both live sources (same rows, same styling). */
@@ -1005,7 +1070,7 @@ export function TimelineTable({ wire }: { wire: LabEventsWire | null }) {
   }
   if (wire) {
     return (
-      <p className="text-xs text-fg-muted">
+      <p className="px-3 text-xs text-fg-muted">
         no events in this source — a timeline needs parseable IP endpoints, services or ARP claims
       </p>
     );
@@ -1067,7 +1132,7 @@ export function DnsFindingsTable({ wire }: { wire: DnsMonitorWire | null }) {
   if (!wire) return null;
   if (wire.observations_seen === 0) {
     return (
-      <p className="text-xs text-fg-muted">
+      <p className="px-3 text-xs text-fg-muted">
         no parseable DNS messages in this capture — the monitor needs UDP port 53 traffic with
         well-formed queries or answers
       </p>
@@ -1075,7 +1140,7 @@ export function DnsFindingsTable({ wire }: { wire: DnsMonitorWire | null }) {
   }
   if (wire.findings.length === 0) {
     return (
-      <p className="text-xs text-fg-muted">
+      <p className="px-3 text-xs text-fg-muted">
         no DNS interception indicators in this capture — {wire.observations_seen} DNS message
         {wire.observations_seen === 1 ? "" : "s"} across {wire.queried_names} name
         {wire.queried_names === 1 ? "" : "s"} showed stable answer sets, no local-address targets
@@ -1084,7 +1149,7 @@ export function DnsFindingsTable({ wire }: { wire: DnsMonitorWire | null }) {
     );
   }
   return (
-    <div className="max-h-64 overflow-auto">
+    <div className="max-h-64 overflow-auto px-3">
       <table className="data-table">
         <thead>
           <tr>

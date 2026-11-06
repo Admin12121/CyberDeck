@@ -58,24 +58,25 @@ const MODE_RAIL_ITEMS = [
  * so the secure constraint (saved case before native reads) is unchanged.
  */
 function CaseGate({ activity }: { activity: string }) {
-  const { caseId, caseSession, setCaseId } = useWorkbenchCase();
-  const [error, setError] = useState<string | null>(null);
-  return (
-    <div className="flex shrink-0 items-center gap-2 px-3 py-1.5" role="status">
-      <span className="text-xs text-fg-muted">
-        {caseId === "scratchpad"
-          ? "No case selected — pick one in the Case section"
-          : "Waiting for the selected investigation"}
-      </span>
-      <InfoTip
-        text={activity + " needs a saved case so results, permissions and evidence stay isolated. Cases are managed in the Case section, not here."}
-      />
-      {caseSession.phase === "error" && caseSession.error
-        ? <span role="alert" className="font-mono text-[10px] text-err">{caseSession.error}</span>
-        : null}
-      {error ? <span role="alert" className="font-mono text-[10px] text-err">{error}</span> : null}
-    </div>
-  );
+  const { caseSession } = useWorkbenchCase();
+  const [error] = useState<string | null>(null);
+  // The footer bar already shows case state; no explanation here. Errors
+  // are the only thing this gate ever renders.
+  if (caseSession.phase === "error" && caseSession.error) {
+    return (
+      <div className="px-3 py-1.5">
+        <span role="alert" className="font-mono text-[10px] text-err">{caseSession.error}</span>
+      </div>
+    );
+  }
+  if (error) {
+    return (
+      <div className="px-3 py-1.5">
+        <span role="alert" className="font-mono text-[10px] text-err">{error}</span>
+      </div>
+    );
+  }
+  return null;
 }
 
 export function ScanInsightsView() {

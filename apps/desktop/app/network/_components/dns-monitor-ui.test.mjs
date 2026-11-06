@@ -24,22 +24,15 @@ const analyzerSource = readFileSync(
 
 // --------------------------------------------------------------- UI contract ---
 
-test("DNS monitor section lives in the live monitor pane and is capture-gated", () => {
-  assert.match(viewSource, /DNS monitor/);
-  // The section sits inside the Live monitor pane, below the timeline.
-  const pane = /<Pane title="Live monitor \(passive event timeline\)">([\s\S]*?)<\/Pane>/.exec(
-    viewSource,
-  );
-  assert.ok(pane, "Live monitor pane missing");
-  assert.match(pane[1], /DNS monitor/);
-  assert.match(pane[1], /DnsFindingsTable wire=\{dnsResult\}/);
+test("DNS monitor is its own rail mode and is capture-gated", () => {
+  assert.match(viewSource, /title="DNS monitor"/);
+  assert.match(viewSource, /<DnsFindingsTable wire=\{dnsResult\} \/>/);
   // Same read-only capture gate as the timeline derivation: the button is
   // disabled until a capture is open and explains why in its tooltip.
-  const button = /<ToolButton[^>]*tone="primary"[^>]*>[\s\S]*?Analyze DNS responses/.exec(
-    pane[1],
+  const button = /<ToolButton\s+tone="primary"\s+disabled=\{!desktop \|\| !capture \|\| dnsBusy\}\s+title=\{[\s\S]*?\}\s+onClick=\{\(\) => void runDnsMonitor\(\)\}\s*>[\s\S]*?Analyze DNS/.exec(
+    viewSource,
   );
-  assert.ok(button, "Analyze DNS responses button missing");
-  assert.match(button[0], /!desktop \|\| !capture \|\| dnsBusy/);
+  assert.ok(button, "Analyze DNS button missing");
   assert.match(button[0], /Open a capture first/);
 });
 

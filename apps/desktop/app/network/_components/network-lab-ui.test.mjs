@@ -1,10 +1,13 @@
-// Source-contract tests for the Network Lab slice (passive ARP analysis +
-// unified host inventory + lab scope). NetworkLabView.tsx is a React client
-// component, so under plain `node --test` it is asserted as SOURCE TEXT: the
-// passive-only wording, the disabled active-interaction controls, the
-// authorization gates and the wired tables must exist verbatim. The Rust
-// analyzer and command files are cross-checked for the bounds the UI relies
-// on, and the pure model helpers are exercised for real logic assertions.
+// Source-contract tests for the Network Lab shell (passive ARP analysis +
+// unified host inventory + lab scope + the active-interaction gate strip).
+// NetworkLabView.tsx is a React client component, so under plain `node --test`
+// it is asserted as SOURCE TEXT: the passive-only wording, the one-line
+// active-interaction gate, the authorization gates and the wired tables must
+// exist verbatim. The Rust analyzer and command files are cross-checked for
+// the bounds the UI relies on, and the pure model helpers are exercised for
+// real logic assertions. (Live-monitor contracts live in
+// network-lab-live-ui.test.mjs; DNS in dns-monitor-ui.test.mjs; the sweep in
+// lab-targeting-ui.test.mjs; the report in lab-report-ui.test.mjs.)
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
@@ -36,23 +39,28 @@ test("Network Lab view is labeled passive-only in both header and body", () => {
   assert.ok(passiveIndex >= 0 && tableIndex > passiveIndex);
 });
 
-test("active interaction section is present, titled for this arc, and every control is disabled", () => {
-  const section = /<Pane title="Active interaction \(not available in this arc\)">([\s\S]*?)<\/Pane>/.exec(
+test("active interaction gate is one strip line: a disabled control, a passive-arc chip and the full wording in a tooltip", () => {
+  const strip = /role="group"\s+aria-label="Active interaction \(not available in this arc\)"[\s\S]*?<\/div>/.exec(
     viewSource,
   );
-  assert.ok(section, "Active interaction pane missing");
-  const body = section[1];
-  // Each mock control is disabled and says why in its tooltip.
-  const buttons = body.match(/<ToolButton[\s\S]*?>/g) ?? [];
-  assert.ok(buttons.length >= 3, "expected the three inactive controls");
+  assert.ok(strip, "Active interaction gate strip missing");
+  const body = strip[0];
+  // One disabled icon control says why in its tooltip; the big inactive
+  // ToolButtons are gone.
+  const buttons = body.match(/<IconButton[\s\S]*?>/g) ?? [];
+  assert.ok(buttons.length >= 1, "expected the disabled gate control");
   for (const button of buttons) {
     assert.match(button, /disabled/);
     assert.match(button, /not available in this arc/);
   }
-  // The pane names the ettercap-style manipulations it refuses to offer.
-  assert.match(body, /ARP poisoning/);
+  assert.doesNotMatch(body, /<ToolButton/);
+  assert.match(body, /icon=\{Ban\}/);
+  assert.match(body, /passive arc/);
+  // The gate names the ettercap-style manipulations it refuses to offer,
+  // and the Master Plan gate wording survives inside the tooltip.
+  assert.match(body, /ARP cache poisoning/);
   assert.match(body, /Master Plan/);
-  assert.match(body, /passive observations only|passive/);
+  assert.match(body, /passive observations only/);
 });
 
 test("lab scope controls exist and the set-scope action is authorization-gated", () => {
@@ -60,10 +68,13 @@ test("lab scope controls exist and the set-scope action is authorization-gated",
   assert.match(viewSource, /Target 2/);
   assert.match(viewSource, /aria-label="Target 1 scope: IP or CIDR entries separated by commas or newlines"/);
   assert.match(viewSource, /aria-label="Target 2 scope: IP or CIDR entries separated by commas or newlines"/);
-  // Authorization checkbox drives the button, mirroring ScanView's gate.
+  // Authorization checkbox drives the button; the visible label is one short
+  // sentence and the full legal wording lives in the InfoTip.
   assert.match(viewSource, /checked=\{authorized\}/);
-  const setScopeButton = /<ToolButton[^>]*tone="primary"[^>]*>[\s\S]*?Set lab scope/.exec(viewSource);
-  assert.ok(setScopeButton, "Set lab scope button missing");
+  assert.match(viewSource, /I am authorized to assess this scope/);
+  assert.match(viewSource, /capped at 64 entries per target group and held in memory only/);
+  const setScopeButton = /<ToolButton[^>]*tone="primary"[^>]*>[\s\S]*?Set scope/.exec(viewSource);
+  assert.ok(setScopeButton, "Set scope button missing");
   assert.match(setScopeButton[0], /!authorized/);
   assert.match(viewSource, /networkLabSetScopeV1\(/);
   // The scope chip reflects the persisted-in-memory state.
@@ -71,7 +82,10 @@ test("lab scope controls exist and the set-scope action is authorization-gated",
 });
 
 test("analysis section wires the passive analyzer over the opened capture", () => {
-  assert.match(viewSource, /Analyze opened capture/);
+  const analyzeButton = /<ToolButton\s+tone="primary"\s+onClick=\{\(\) => void runAnalysis\(\)\}\s+disabled=\{!desktop \|\| opening \|\| analyzing\}\s+title="Run passive ARP anomaly analysis over the opened capture; opens a file picker first if none is open">[\s\S]*?analyzing… : "Analyze"\}/.exec(
+    viewSource,
+  );
+  assert.ok(analyzeButton, "Analyze button missing");
   // Without a capture the same handler goes through the pcap_open_dialog
   // flow (delegated to openCapture, which is the PacketStudioView flow).
   const analyze = /const runAnalysis = async \(\) => \{([\s\S]*?)\n  \};/.exec(viewSource);
@@ -183,51 +197,3 @@ test("label and summary helpers map every wire kind and condense claims", async 
     "scope: T1 1 · T2 2 · authorized",
   );
 });
-
-// --- Bettercap-mode passive timeline (wave 4) ---------------------------------
-
-test("live monitor is passive, capture-gated and renders the event timeline", () => {
-  const view = read("NetworkLabView.tsx");
-  const canonical = read("../../../lib/ipc.ts");
-  const backend = read("../../../src-tauri/src/features/network/ipc/network_lab.rs");
-  const engine = read("../../../../../crates/packet/src/lab_events.rs");
-  // The pane exists, is gated on an opened capture, and transmits nothing.
-  assert.match(view, /Live monitor \(passive event timeline\)/);
-  assert.match(view, /networkLabEventsV1\(routerIp\.trim\(\) \|\| null\)/);
-  assert.match(canonical, /Passive timeline over the opened capture; transmits nothing/);
-  assert.match(backend, /pub fn network_lab_events_v1/);
-  assert.match(backend, /State<'_, PcapCtx>/);
-  // Conflict events fire once per IP, never per repeat claim.
-  assert.match(engine, /conflict_fired/);
-  assert.match(engine, /fn arp_conflict_fires_when_a_second_mac_claims_the_same_ip/);
-  // Every honesty contract holds: passive-only wording stays intact.
-  assert.match(view, /passive observations only/);
-});
-
-test("timeline labels map every wire kind", () => {
-  const { labEventKindLabel } = await_import();
-  assert.equal(labEventKindLabel("new_host"), "New host");
-  assert.equal(labEventKindLabel("new_service"), "New service");
-  assert.equal(labEventKindLabel("arp_conflict"), "ARP conflict");
-  assert.equal(labEventKindLabel("gateway_changed"), "Gateway changed");
-});
-
-// node --test cannot import the TSX view directly; the label helper is
-// re-implemented here from the source contract and cross-checked.
-function await_import() {
-  const view = read("NetworkLabView.tsx");
-  const body = /export function labEventKindLabel\(kind: LabEventKindWire\): string \{([\s\S]*?)\n\}/.exec(view);
-  assert.ok(body, "labEventKindLabel missing from NetworkLabView.tsx");
-  const table = {
-    new_host: /"new_host":\s*\n?\s*return "New host";/,
-    new_service: /"new_service":\s*\n?\s*return "New service";/,
-    arp_conflict: /"arp_conflict":\s*\n?\s*return "ARP conflict";/,
-    gateway_changed: /"gateway_changed":\s*\n?\s*return "Gateway changed";/,
-  };
-  return {
-    labEventKindLabel: (kind) => {
-      assert.match(body[1], table[kind], `kind ${kind} label missing`);
-      return { new_host: "New host", new_service: "New service", arp_conflict: "ARP conflict", gateway_changed: "Gateway changed" }[kind];
-    },
-  };
-}
