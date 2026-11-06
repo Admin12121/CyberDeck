@@ -147,6 +147,11 @@ pub struct TlsHello {
     pub sni: Option<String>,
     pub alpn: Vec<String>,
     pub cipher: Option<u16>,
+    /// The captured first record, bounded by MAX_TLS_RECORD. Carried so the
+    /// depth pass in tls_description can re-walk the extensions without
+    /// re-validating transport framing; nothing beyond the captured bytes is
+    /// ever read.
+    pub payload: Vec<u8>,
 }
 
 fn sni(ext: &[u8]) -> Option<String> {
@@ -245,6 +250,9 @@ pub fn tls_hello(data: &[u8]) -> Option<TlsHello> {
         sni: None,
         alpn: Vec::new(),
         cipher,
+        // Keep exactly the dissected record; trailing captured bytes after
+        // the first record belong to other messages and are not claimed.
+        payload: data[..record_len + 5].to_vec(),
     };
     if cursor == hello.len() {
         return Some(out);
@@ -315,8 +323,25 @@ pub fn tls_description(tls: &TlsHello) -> String {
         value.push_str(" ALPN=");
         value.push_str(&tls.alpn.join(","));
     }
-    if let Some(cipher) = tls.cipher {
-        value.push_str(&format!(" cipher=0x{cipher:04x}"));
+    // Depth suffix from the same captured record: the named cipher suite
+    // replaces the raw code when the IANA table knows it, and up to four
+    // named extensions summarize the inventory. Everything stays bounded and
+    // honest — a hello the depth pass cannot accept keeps the raw form.
+    let depth = super::tls_depth::hello_depth(&tls.payload);
+    match depth.as_ref().and_then(|d| d.cipher_name.clone()) {
+        Some(name) => value.push_str(&format!(" cipher={name}")),
+        None => {
+            if let Some(cipher) = tls.cipher {
+                value.push_str(&format!(" cipher=0x{cipher:04x}"));
+            }
+        }
+    }
+    if let Some(depth) = depth {
+        let named: Vec<&str> = depth.extensions.iter().take(4).map(String::as_str).collect();
+        if !named.is_empty() {
+            value.push_str(" ext=");
+            value.push_str(&named.join(","));
+        }
     }
     value
 }
@@ -409,5 +434,59 @@ mod tests {
         let fields = http_fields(&oversized);
         assert!(fields.is_some());
         assert_eq!(fields.unwrap().host, None);
+    }
+    #[test]
+    fn description_appends_named_cipher_and_extension_depth() {
+        // The existing ClientHello fixture offers SNI, ALPN and versions;
+        // the depth suffix names them and claims no single cipher suite.
+        let hello = tls_hello(&client()).unwrap();
+        let description = tls_description(&hello);
+        assert!(description.contains(" ext=server_name,alpn,supported_versions"));
+        assert!(!description.contains("cipher"));
+
+        // A TLS 1.3 ServerHello selecting AES-256-GCM names the suite and
+        // the share group's extension set.
+        let mut server = vec![3, 3];
+        server.extend([9; 32]);
+        server.push(0); // session ID
+        server.extend(0x1302u16.to_be_bytes());
+        server.push(0); // compression
+        let mut key_share = vec![0x00, 0x1D, 0, 32];
+        key_share.extend([6; 32]);
+        let mut extensions = vec![0, 43, 0, 2, 3, 4, 0, 51];
+        extensions.extend((key_share.len() as u16).to_be_bytes());
+        extensions.extend(key_share);
+        server.extend((extensions.len() as u16).to_be_bytes());
+        server.extend(extensions);
+        let mut message = vec![2, 0, 0, server.len() as u8];
+        message.extend(server);
+        let mut record = vec![22, 3, 3];
+        record.extend((message.len() as u16).to_be_bytes());
+        record.extend(message);
+        let hello = tls_hello(&record).unwrap();
+        let description = tls_description(&hello);
+        assert!(description.contains("TLS ServerHello TLS1.3"));
+        assert!(description.contains(" cipher=TLS_AES_256_GCM_SHA384"));
+        assert!(description.contains(" ext=supported_versions,key_share"));
+    }
+    #[test]
+    fn description_falls_back_to_raw_code_when_depth_has_no_name() {
+        // A minimal ServerHello with an unnamed suite keeps the raw hex form;
+        // nothing outside the name tables is invented.
+        let mut server = vec![3, 3];
+        server.extend([9; 32]);
+        server.push(0);
+        server.extend(0xABCDu16.to_be_bytes());
+        server.push(0);
+        let mut message = vec![2, 0, 0, server.len() as u8];
+        message.extend(server);
+        let mut record = vec![22, 3, 3];
+        record.extend((message.len() as u16).to_be_bytes());
+        record.extend(message);
+        let hello = tls_hello(&record).unwrap();
+        assert_eq!(
+            tls_description(&hello),
+            "TLS ServerHello TLS1.2 cipher=0xabcd"
+        );
     }
 }
