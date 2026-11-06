@@ -9,3 +9,4 @@ pub mod scan_depth;
 pub mod pcap_export;
 pub mod network_lab;
 pub mod scan_insights;
+pub mod os_hints_ipc;

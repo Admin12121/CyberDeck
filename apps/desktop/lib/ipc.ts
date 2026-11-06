@@ -1223,6 +1223,37 @@ export async function pcapExportViewV1(indices: number[]): Promise<PcapExportRec
   return invoke<PcapExportReceiptWire>("pcap_export_view_v1", { indices });
 }
 
+// --- passive OS-family hints over the opened capture --------------------------
+// Wire types mirror features/network/ipc/os_hints_ipc.rs; hints are always
+// low/very-low confidence with evidence, never verdicts.
+
+export interface OsHintWire {
+  family: string;
+  confidence: string;
+  evidence: string[];
+}
+
+export interface OsHintObservationWire {
+  source: string;
+  destination: string;
+  syn_ack: boolean;
+  hint: OsHintWire;
+}
+
+export interface OsHintsWire {
+  hints: OsHintObservationWire[];
+  /** Total handshake segments seen, including any beyond the returned cap. */
+  sampled: number;
+  /** The bound applied to `hints`; `sampled` may exceed it. */
+  cap: number;
+}
+
+/** Read-only handshake analysis of the opened capture; transmits nothing. */
+export async function captureOsHintsV1(): Promise<OsHintsWire> {
+  if (!inTauri) throw new Error("OS hints require the desktop runtime");
+  return invoke<OsHintsWire>("capture_os_hints_v1", {});
+}
+
 // --- recovery + file digests --------------------------------------------------
 
 export interface CrackMatchWire {

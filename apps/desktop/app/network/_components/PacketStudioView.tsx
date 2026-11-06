@@ -11,7 +11,9 @@ import {
   pcapOpenCaseV1,
   pcapCasePacketBytesV1,
   pcapCaseFollowStreamV1,
+  captureOsHintsV1,
   type HexResponseWire,
+  type OsHintsWire,
   type PcapOpenWire,
   type PcapPacketWire,
   type StreamTranscriptWire,
@@ -84,7 +86,11 @@ function ImportedCaptureView() {
   const [packetScrollTop, setPacketScrollTop] = useState(0);
   const packetScrollRef = useRef<HTMLDivElement>(null);
   const [selected, setSelected] = useState(0);
-  const [tab, setTab] = useWorkspaceDraft<"packets" | "conversations" | "endpoints" | "hierarchy" | "io" | "statistics" | "streams">(wb.caseId, "network", "packet-view", "packets");
+  const [tab, setTab] = useWorkspaceDraft<"packets" | "conversations" | "endpoints" | "hierarchy" | "io" | "statistics" | "streams" | "os-hints">(wb.caseId, "network", "packet-view", "packets");
+  // Passive OS-family hints over the opened capture; per-run result state,
+  // reset on case switch like every other capture-derived view state.
+  const [osHints, setOsHints] = useState<OsHintsWire | null>(null);
+  const [osHintsLoading, setOsHintsLoading] = useState(false);
   const [packetBytes, setPacketBytes] = useState<{ frameIndex: number; data: HexResponseWire } | null>(null);
   // null: details and bytes share the row evenly; dragging pins px.
   const [detailsWidth, setDetailsWidth] = useState<number | null>(null);
@@ -104,6 +110,8 @@ function ImportedCaptureView() {
     setOpenError(null);
     setExportResult(null);
     setShowReassembly(true);
+    setOsHints(null);
+    setOsHintsLoading(false);
   }, [wb.caseId]);
 
   // Mirrors ScanView: a case counts as saved-selected only when the native
@@ -484,6 +492,23 @@ function ImportedCaptureView() {
                 })}
               </tbody>
             </table>
+          ) : tab === "os-hints" ? (
+            <OsHintsView
+              desktop={desktop}
+              hints={osHints}
+              loading={osHintsLoading}
+              hasCapture={Boolean(capture)}
+              onAnalyze={() => {
+                setOsHintsLoading(true);
+                captureOsHintsV1()
+                  .then((wire) => setOsHints(wire))
+                  .catch((cause) => setOpenError(
+                    "OS hints analysis failed: "
+                      + (cause instanceof Error ? cause.message : String(cause)),
+                  ))
+                  .finally(() => setOsHintsLoading(false));
+              }}
+            />
           ) : (
             <FollowStreamView packets={filtered} artifactId={savedArtifactId} />
           )}
@@ -539,9 +564,89 @@ function ImportedCaptureView() {
               ) : null}
             </div>}
       />
-      <WorkspaceTabs items={["packets", "conversations", "endpoints", "hierarchy", "io", "statistics", "streams"] as const}
+      <WorkspaceTabs items={["packets", "conversations", "endpoints", "hierarchy", "io", "statistics", "streams", "os-hints"] as const}
         active={tab} onChange={setTab} placement="bottom" ariaLabel="Packet investigation views" />
       </div>
+    </div>
+  );
+}
+
+
+// --------------------------------------------------------------- os hints ----
+
+/**
+ * Passive OS-family hints over TCP handshake segments of the opened capture.
+ * Every row repeats the low-confidence contract: family hints come from a
+ * handful of documented stack breakpoints, and "unknown" is the honest
+ * majority case.
+ */
+function OsHintsView({ desktop, hints, loading, hasCapture, onAnalyze }: {
+  desktop: boolean;
+  hints: OsHintsWire | null;
+  loading: boolean;
+  hasCapture: boolean;
+  onAnalyze: () => void;
+}) {
+  return (
+    <div className="flex h-full min-h-0 flex-col p-2">
+      <div className="mb-2 flex items-center gap-2">
+        <ToolButton
+          disabled={!desktop || !hasCapture || loading}
+          title={hasCapture
+            ? "Classify TCP handshake segments into coarse OS families (low-confidence hints only)"
+            : "Open a capture first — hints analyze the currently opened capture"}
+          onClick={onAnalyze}>
+          {loading ? "analyzing…" : "Analyze OS hints (opened capture)"}
+        </ToolButton>
+        {hints ? (
+          <Chip tone="ok">{hints.hints.length} of {hints.sampled} handshake segment(s) hinted</Chip>
+        ) : (
+          <Chip>no analysis yet</Chip>
+        )}
+      </div>
+      <p className="mb-2 font-mono text-[10px] text-fg-muted">
+        low-confidence hints from documented stack breakpoints (initial TTL, window scale, MSS,
+        option order) — never verdicts, never versions; "unknown" is the expected result for
+        hardened or uncommon stacks
+      </p>
+      {hints && hints.hints.length > 0 ? (
+        <table className="data-table">
+          <thead>
+            <tr>
+              <th>Source</th>
+              <th>Destination</th>
+              <th className="w-20">Segment</th>
+              <th className="w-32">Family hint</th>
+              <th className="w-24">Confidence</th>
+              <th>Evidence</th>
+            </tr>
+          </thead>
+          <tbody>
+            {hints.hints.map((observation, index) => (
+              <tr key={`${observation.source}-${observation.destination}-${index}`}>
+                <td className="font-mono text-[11px]">{observation.source}</td>
+                <td className="font-mono text-[11px]">{observation.destination}</td>
+                <td>{observation.syn_ack ? <Chip>SYN/ACK</Chip> : <Chip>SYN</Chip>}</td>
+                <td>
+                  <Chip tone={observation.hint.family === "unknown" ? "muted" : "orange"}>
+                    {observation.hint.family}
+                  </Chip>
+                </td>
+                <td className="text-fg-muted">{observation.hint.confidence}</td>
+                <td className="text-fg-muted">{observation.hint.evidence.join(" · ")}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      ) : hints ? (
+        <EmptyState
+          title="No classifiable handshake segments"
+          detail="The opened capture holds no TCP SYN or SYN/ACK frames with recoverable signature layers." />
+      ) : (
+        <EmptyState
+          title="Not analyzed yet"
+          detail="Run the analysis to classify handshake segments; the capture itself stays untouched." />
+      )}
     </div>
   );
 }
