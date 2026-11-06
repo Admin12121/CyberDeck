@@ -57,8 +57,8 @@ test("rail badges count real state: ARP conflicts, live gateway changes, DNS fin
 // ------------------------------------------------------------- live monitor ---
 
 test("live monitor is passive, capture-gated and renders the event timeline", () => {
-  // The section exists as its own mode with a single state-chip header.
-  assert.match(view, /title="Live monitor"/);
+  // The mode exists with its long explanation in one InfoTip, not body prose.
+  assert.match(view, /\{mode === "live" && \(/);
   assert.match(view, /networkLabEventsV1\(routerIp\.trim\(\) \|\| null\)/);
   assert.match(canonical, /Passive timeline over the opened capture; transmits nothing/);
   assert.match(backend, /pub fn network_lab_events_v1/);
@@ -74,13 +74,13 @@ test("live monitor is passive, capture-gated and renders the event timeline", ()
 
 test("live subscription stays honest about the session source", () => {
   // Subscribe is gated on a valid session id; its tooltip names the 2s poll.
-  const subscribe = /<ToolButton\s+tone="primary"\s+disabled=\{!desktop \|\| !isValidLiveSessionId\(liveSessionId\)\}\s+onClick=\{startLiveSubscription\}\s+title="[^"]*">[\s\S]*?Subscribe/.exec(
+  const subscribe = /<ToolButton\s+tone="primary"\s+disabled=\{!desktop \|\| !isValidLiveSessionId\(liveSessionId\)\}\s+onClick=\{startLiveSubscription\}\s+title="[^"]*"\s*>[\s\S]*?Subscribe/.exec(
     view,
   );
   assert.ok(subscribe, "Subscribe button missing");
   assert.match(subscribe[0], /poll its passive lab status every 2 seconds/);
   // Stop clears the poll only; the lab never stops Packet Studio's capture.
-  const stop = /<ToolButton\s+onClick=\{stopLiveSubscription\}\s+title="Stop polling the subscribed session\. The lab never stops Packet Studio's capture itself">[\s\S]*?Stop/.exec(
+  const stop = /<ToolButton\s+onClick=\{stopLiveSubscription\}\s+title="Stop polling the subscribed session\. The lab never stops Packet Studio's capture itself"\s*>[\s\S]*?Stop/.exec(
     view,
   );
   assert.ok(stop, "Stop subscription button missing");

@@ -39,14 +39,12 @@ test("Network Lab view is labeled passive-only in both header and body", () => {
   assert.ok(passiveIndex >= 0 && tableIndex > passiveIndex);
 });
 
-test("active interaction gate is one strip line: a disabled control, a passive-arc chip and the full wording in a tooltip", () => {
-  const strip = /role="group"\s+aria-label="Active interaction \(not available in this arc\)"[\s\S]*?<\/div>/.exec(
-    viewSource,
-  );
-  assert.ok(strip, "Active interaction gate strip missing");
-  const body = strip[0];
+test("active interaction gate is one compact cluster in the mode toolbar row: a disabled control, a passive-arc chip and the full wording in a tooltip", () => {
+  const gate = /const gateCluster = \([\s\S]*?\n  \);/.exec(viewSource);
+  assert.ok(gate, "Active interaction gate cluster missing");
+  const body = gate[0];
   // One disabled icon control says why in its tooltip; the big inactive
-  // ToolButtons are gone.
+  // ToolButtons are gone and there is no separate banner row.
   const buttons = body.match(/<IconButton[\s\S]*?>/g) ?? [];
   assert.ok(buttons.length >= 1, "expected the disabled gate control");
   for (const button of buttons) {
@@ -82,7 +80,7 @@ test("lab scope controls exist and the set-scope action is authorization-gated",
 });
 
 test("analysis section wires the passive analyzer over the opened capture", () => {
-  const analyzeButton = /<ToolButton\s+tone="primary"\s+onClick=\{\(\) => void runAnalysis\(\)\}\s+disabled=\{!desktop \|\| opening \|\| analyzing\}\s+title="Run passive ARP anomaly analysis over the opened capture; opens a file picker first if none is open">[\s\S]*?analyzing… : "Analyze"\}/.exec(
+  const analyzeButton = /<ToolButton\s+tone="primary"\s+onClick=\{\(\) => void runAnalysis\(\)\}\s+disabled=\{!desktop \|\| opening \|\| analyzing\}\s+title="Run passive ARP anomaly analysis over the opened capture; opens a file picker first if none is open"\s*>[\s\S]*?analyzing…" : "Analyze"\}/.exec(
     viewSource,
   );
   assert.ok(analyzeButton, "Analyze button missing");

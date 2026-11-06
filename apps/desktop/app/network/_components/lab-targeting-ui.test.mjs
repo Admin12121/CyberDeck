@@ -24,12 +24,14 @@ const backendSource = read(
 
 // --------------------------------------------------------------- UI contract ---
 
-test("sweep button is scope-constrained: labeled Target 1 ∪ Target 2 and gated on authorization + set scope + desktop + interface", () => {
+test("sweep button is scope-constrained: labeled Target 1 ∪ Target 2 in its tooltip and gated on authorization + set scope + desktop + interface", () => {
   assert.match(viewSource, /ARP sweep \(Target 1 ∪ Target 2\)/);
   // Anchor the whole contiguous button block (attributes and label), so the
-  // earlier Set-lab-scope primary button cannot satisfy this match.
+  // earlier Set-scope primary button cannot satisfy this match. The visible
+  // label stays short ("Sweep"); the full scope constraint lives in the
+  // tooltip.
   const button =
-    /<ToolButton\s+tone="primary"\s+(?:onClick=\{[^}]*\}\s+)?disabled=\{[^}]*\}\s+title="[^"]*refuses anything outside the declared scope[^"]*"\s*>\s+ARP sweep \(Target 1 ∪ Target 2\)/.exec(
+    /<ToolButton\s+tone="primary"\s+(?:onClick=\{[^}]*\}\s+)?disabled=\{[^}]*\}\s+title="[^"]*refuses anything outside the declared scope[^"]*"\s*>\s+Sweep/.exec(
       viewSource,
     );
   assert.ok(button, "ARP sweep button missing");

@@ -3,24 +3,27 @@
  * Network Lab (Ettercap-inspired mode, passive/defensive arc).
  *
  * UX revision: a compact left-aligned icon-only pill rail (34px buttons,
- * tooltip = label, active = orange filled pill) switches between five modes —
- * Scope, ARP, Live, DNS, Report — and exactly ONE mode renders at a time.
- * Each mode is one `SectionHeader` line (single state chip + InfoTip) above a
- * compact h-8 toolbar row and the results table; long explanations live in
- * InfoTip tooltips instead of body text, and no separator lines separate
- * toolbar rows. The active-interaction gate is a single strip line under the
- * rail (disabled control + passive-arc chip + InfoTip).
+ * tooltip = label, active = orange filled pill) merged into ONE toolbar row
+ * per mode — Scope, ARP, Live, DNS, Report — with exactly one mode rendered
+ * at a time. Row = rail pills + the mode's h-8 controls + one InfoTip (the
+ * long explanation that used to be body text) + the active-interaction gate
+ * cluster (disabled control + passive-arc chip + Master Plan tooltip) + a
+ * single state chip. Content area: a centered card when empty, full-bleed
+ * tables when data. No separator lines between rows; spacing only.
  *
  * Gates (unchanged, Master Plan §5.1): scope entries are IP/CIDR strings held
- * in memory only behind an explicit authorization checkbox; ARP analysis, the
- * DNS monitor and the event timeline are passive reductions over the opened
- * capture or a subscribed Packet Studio session; the lab never transmits.
+ * in memory only behind an explicit authorization checkbox (the checkbox
+ * stays in the Scope mode only — the backend set-scope/sweep commands refuse
+ * without it; the passive analysis modes carry zero auth chrome); ARP
+ * analysis, the DNS monitor and the event timeline are passive reductions
+ * over the opened capture or a subscribed Packet Studio session; the lab
+ * never transmits.
  */
 import { useEffect, useRef, useState } from "react";
 import { Ban, Crosshair, FileText, FolderOpen, Globe, Network, Radar } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
-import { Chip, EmptyState, Select, TextInput, ToolButton } from "@ds/panes";
-import { IconButton, InfoTip, SectionHeader, StatusStrip } from "@ds/compact";
+import { Chip, Select, TextInput, ToolButton } from "@ds/panes";
+import { IconButton, InfoTip, StatusStrip } from "@ds/compact";
 import {
   captureInterfacesV1,
   isDesktop,
@@ -75,8 +78,27 @@ const SCOPE_TEXT_MAX_CHARS = 8192;
 /** Rail modes: one visible at a time (icon-only pill rail navigation). */
 type LabMode = "scope" | "arp" | "live" | "dns" | "report";
 
-/** Shared toolbar-row layout: h-8 controls, consistent gap, no separators. */
+/** Shared toolbar-row layout: rail pills + h-8 controls, spacing, no lines. */
 const TOOLBAR_ROW = "flex flex-wrap items-center gap-2 px-3 py-2";
+
+/**
+ * Empty-state card: centered in the full remaining height, one header line
+ * (icon + title) above one short panel line. No explanation stacks, no
+ * badges.
+ */
+function LabEmptyCard({ icon: Icon, title, line }: { icon: LucideIcon; title: string; line: string }) {
+  return (
+    <div className="flex min-h-0 flex-1 items-center justify-center p-6">
+      <div className="w-full max-w-sm overflow-hidden rounded-md border border-line bg-panel">
+        <div className="flex items-center gap-2 px-3 py-2">
+          <Icon size={14} strokeWidth={1.5} className="shrink-0 text-fg-muted" />
+          <span className="text-xs font-semibold text-fg">{title}</span>
+        </div>
+        <div className="bg-app px-3 py-2 text-xs text-fg-muted">{line}</div>
+      </div>
+    </div>
+  );
+}
 
 export function NetworkLabView() {
   const desktop = isDesktop();
@@ -287,9 +309,53 @@ export function NetworkLabView() {
       : null,
     ...timelineStatusItems(displayTimeline),
   ];
-  // The lab needs a saved, backend-selected case for the sweep and the
-  // report export; case management itself lives in the Case section only.
-  const needsSavedCase = wb.caseId === "scratchpad" || wb.caseId.trim().length === 0;
+
+  // Icon-only pill rail: 34px square buttons, tooltip = label, active =
+  // orange filled pill. Left-aligned inside the mode's toolbar row; no
+  // bordered wrapper, no tab underline, no labels under the icons.
+  const railPills = (
+    <nav aria-label="Network Lab modes" className="flex items-center gap-1">
+      {railItems.map((item) => {
+        const Icon = item.icon;
+        const activeMode = item.id === mode;
+        return (
+          <button
+            key={item.id}
+            type="button"
+            onClick={() => setMode(item.id)}
+            aria-pressed={activeMode}
+            aria-label={item.label}
+            title={item.label}
+            className={`relative inline-flex h-[34px] w-[34px] items-center justify-center rounded-full transition-colors focus-visible:outline focus-visible:outline-1 focus-visible:outline-ring ${
+              activeMode ? "bg-orange text-white" : "text-fg-muted hover:bg-line/60 hover:text-fg"
+            }`}
+          >
+            <Icon size={16} strokeWidth={activeMode ? 2 : 1.5} />
+            {item.badge !== undefined && item.badge > 0 ? (
+              <span className="absolute -right-1.5 -top-1.5 min-w-3.5 rounded-full bg-err px-1 text-center font-mono text-[9px] leading-3.5 text-white">
+                {item.badge}
+              </span>
+            ) : null}
+          </button>
+        );
+      })}
+    </nav>
+  );
+
+  // Active interaction gate: ONE compact cluster at the end of every mode's
+  // toolbar row (no separate banner row). The full Master Plan gate wording
+  // lives in the InfoTip.
+  const gateCluster = (
+    <>
+      <IconButton
+        icon={Ban}
+        disabled
+        title="ARP cache poisoning (MITM), crafted frame injection and traffic alteration are not available in this arc; the lab is passive/defensive only and never transmits"
+      />
+      <Chip>passive arc</Chip>
+      <InfoTip text="Active traffic manipulation — ARP cache poisoning, on-path (MITM) interaction, packet injection — requires a user-configured authorized lab scope, explicit confirmation, compatible privileges and a visible stop/emergency-disengage control (Master Plan §5.1). This arc ships passive observations only, so these controls stay disabled." />
+    </>
+  );
 
   const openCapture = async (): Promise<PcapOpenWire | null> => {
     const caseId = wb.caseId;
@@ -460,64 +526,74 @@ export function NetworkLabView() {
 
   return (
     <div className="flex h-full min-h-0 flex-col bg-app">
-      {/* Icon-only pill rail: 34px square buttons, tooltip = label, active =
-          orange filled pill. Left-aligned; no tab underline, no full-width
-          stretch, no labels under the icons. */}
-      <nav aria-label="Network Lab modes" className="flex shrink-0 items-center gap-1 px-3 pb-1 pt-2">
-        {railItems.map((item) => {
-          const Icon = item.icon;
-          const activeMode = item.id === mode;
-          return (
-            <button
-              key={item.id}
-              type="button"
-              onClick={() => setMode(item.id)}
-              aria-pressed={activeMode}
-              aria-label={item.label}
-              title={item.label}
-              className={`relative inline-flex h-[34px] w-[34px] items-center justify-center rounded-full transition-colors focus-visible:outline focus-visible:outline-1 focus-visible:outline-ring ${
-                activeMode ? "bg-orange text-white" : "text-fg-muted hover:bg-line/60 hover:text-fg"
-              }`}
+      {mode === "scope" && (
+        <section aria-label="Lab scope" className="flex min-h-0 flex-1 flex-col">
+          <div className={TOOLBAR_ROW}>
+            {railPills}
+            <label className="flex items-center gap-1.5 text-xs text-fg-dim">
+              <input
+                type="checkbox"
+                checked={authorized}
+                onChange={(event) => setAuthorized(event.target.checked)}
+                className="accent-[var(--color-orange)]"
+              />
+              <span>I am authorized to assess this scope</span>
+            </label>
+            <InfoTip text="I confirm this lab scope is mine or I have explicit authorization to assess it. The scope is validated, capped at 64 entries per target group and held in memory only." />
+            <ToolButton
+              tone="primary"
+              onClick={() => void applyScope()}
+              disabled={!desktop || !authorized || scopeBusy}
+              title="Validate and store the lab scope in memory; requires the authorization checkbox"
             >
-              <Icon size={16} strokeWidth={activeMode ? 2 : 1.5} />
-              {item.badge !== undefined && item.badge > 0 ? (
-                <span className="absolute -right-1.5 -top-1.5 min-w-3.5 rounded-full bg-err px-1 text-center font-mono text-[9px] leading-3.5 text-white">
-                  {item.badge}
-                </span>
-              ) : null}
-            </button>
-          );
-        })}
-      </nav>
-      {/* Active interaction gate: ONE strip line instead of a pane of three
-          inert buttons. The full gate wording lives in the InfoTip. */}
-      <div
-        role="group"
-        aria-label="Active interaction (not available in this arc)"
-        className="flex shrink-0 items-center gap-2 px-3 pb-1"
-      >
-        <IconButton
-          icon={Ban}
-          disabled
-          title="ARP cache poisoning (MITM), crafted frame injection and traffic alteration are not available in this arc; the lab is passive/defensive only and never transmits"
-        />
-        <Chip>passive arc</Chip>
-        <InfoTip text="Active traffic manipulation — ARP cache poisoning, on-path (MITM) interaction, packet injection — requires a user-configured authorized lab scope, explicit confirmation, compatible privileges and a visible stop/emergency-disengage control (Master Plan §5.1). This arc ships passive observations only, so these controls stay disabled." />
-        <span className="flex-1" />
-        <Chip tone="ok">passive observations only</Chip>
-      </div>
-
-      <div className="min-h-0 flex-1 overflow-y-auto">
-        {mode === "scope" && (
-          <section aria-label="Lab scope" className="flex min-h-0 flex-col pb-6">
-            <SectionHeader
-              icon={Crosshair}
-              title="Lab scope"
-              state={scopeSummary(scope)}
-              stateTone={scope?.authorized ? "orange" : "muted"}
-              info="Ettercap-inspired lab mode inside Packet Studio: unified host inventory, passive ARP anomaly analysis and passive DNS-response monitoring over already-captured frames. The lab reads captures and never transmits packets; scope entries are IP/CIDR strings held in memory only and are never persisted (Master Plan §5.1)."
+              Set scope
+            </ToolButton>
+            <Select
+              value={sweepInterface}
+              onChange={setSweepInterface}
+              options={[
+                { value: "", label: "Choose Ethernet NIC" },
+                ...sweepInterfaces.map((iface) => ({
+                  value: iface.name,
+                  label: iface.name,
+                })),
+              ]}
+              ariaLabel="ARP sweep Ethernet interface"
+              className="w-44"
             />
-            <div className="grid gap-3 px-3 pb-1 md:grid-cols-2">
+            {sweepBusy ? (
+              <ToolButton
+                tone="danger"
+                onClick={() => void stopSweep()}
+                title="Stop the case-authorized lab ARP sweep; the native worker checks the stop flag before every probe"
+              >
+                Stop sweep
+              </ToolButton>
+            ) : (
+              <ToolButton
+                tone="primary"
+                onClick={() => void runSweep()}
+                disabled={!desktop || !authorized || !sweepInterface || sweepBlock !== null}
+                title="Linux only: ARP sweep (Target 1 ∪ Target 2) probes ONLY the IPv4 targets resolved from the saved lab scope, at most 32 probes at 10/s, native confirmation and CAP_NET_RAW required; refuses anything outside the declared scope"
+              >
+                Sweep
+              </ToolButton>
+            )}
+            {sweepBlock ? <Chip tone="muted">{sweepBlock}</Chip> : null}
+            {sweepProgress ? (
+              <Chip tone={sweepProgress.phase === "done" ? "ok" : "muted"}>
+                {sweepProgress.phase === "done"
+                  ? `${sweepProgress.answered ?? 0}/${sweepProgress.total_targets} answered · ${sweepProgress.elapsed_ms} ms`
+                  : `sweeping ${sweepProgress.total_targets} scope targets · ${(sweepProgress.elapsed_ms / 1000).toFixed(1)} s`}
+              </Chip>
+            ) : null}
+            <InfoTip text="Ettercap-inspired lab mode inside Packet Studio: unified host inventory, passive ARP anomaly analysis and passive DNS-response monitoring over already-captured frames. The lab reads captures and never transmits packets; scope entries are IP/CIDR strings held in memory only and are never persisted (Master Plan §5.1)." />
+            <span className="flex-1" />
+            {gateCluster}
+            <Chip tone={scope?.authorized ? "orange" : "muted"}>{scopeSummary(scope)}</Chip>
+          </div>
+          <div className="flex min-h-0 flex-1 flex-col overflow-y-auto">
+            <div className="grid gap-3 px-3 py-2 md:grid-cols-2">
               <label className="block text-xs text-fg-dim">
                 <span className="mb-1 block font-medium text-fg-muted">Target 1</span>
                 <textarea
@@ -543,472 +619,387 @@ export function NetworkLabView() {
                 />
               </label>
             </div>
-            <div className={TOOLBAR_ROW}>
-              <label className="flex items-center gap-1.5 text-xs text-fg-dim">
-                <input
-                  type="checkbox"
-                  checked={authorized}
-                  onChange={(event) => setAuthorized(event.target.checked)}
-                  className="accent-[var(--color-orange)]"
-                />
-                <span>I am authorized to assess this scope</span>
-              </label>
-              <InfoTip text="I confirm this lab scope is mine or I have explicit authorization to assess it. The scope is validated, capped at 64 entries per target group and held in memory only." />
-              <ToolButton
-                tone="primary"
-                onClick={() => void applyScope()}
-                disabled={!desktop || !authorized || scopeBusy}
-                title="Validate and store the lab scope in memory; requires the authorization checkbox"
-              >
-                Set scope
-              </ToolButton>
-              {scopeError ? (
-                <span role="alert" className="text-xs text-err">
-                  {scopeError}
-                </span>
-              ) : null}
+            {sweepError ? (
+              <div role="alert" className="mx-3 border border-err/50 bg-err/10 px-3 py-1 font-mono text-[10px] text-err">
+                {sweepError}
+              </div>
+            ) : null}
+            {sweepResults ? (
+              sweepResults.length === 0 ? (
+                <p className="px-3 py-2 text-xs text-fg-muted">
+                  no hosts answered the authorized lab ARP sweep — silence is not evidence of
+                  absence; the sweep probed only the saved lab scope
+                </p>
+              ) : (
+                <div className="max-h-64 overflow-auto">
+                  <table className="data-table">
+                    <thead>
+                      <tr>
+                        <th>IP</th>
+                        <th>Responder MAC</th>
+                        <th className="w-24">Latency</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {sweepResults.map((row) => (
+                        <tr key={row.host}>
+                          <td className="font-mono text-fg">{row.host}</td>
+                          <td className="font-mono text-fg-dim">{row.mac}</td>
+                          <td>{row.elapsed_ms} ms</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )
+            ) : null}
+          </div>
+        </section>
+      )}
+
+      {mode === "arp" && (
+        <section aria-label="ARP analysis" className="flex min-h-0 flex-1 flex-col">
+          <div className={TOOLBAR_ROW}>
+            {railPills}
+            <ToolButton
+              onClick={() => void openCapture()}
+              disabled={!desktop || opening}
+              title={desktop ? "Open a PCAP or PCAPNG capture using the native Rust parser" : "Opening captures requires the desktop runtime"}
+            >
+              <FolderOpen size={11} /> {opening ? "opening…" : "Open capture…"}
+            </ToolButton>
+            <ToolButton
+              tone="primary"
+              onClick={() => void runAnalysis()}
+              disabled={!desktop || opening || analyzing}
+              title="Run passive ARP anomaly analysis over the opened capture; opens a file picker first if none is open"
+            >
+              {analyzing ? "analyzing…" : "Analyze"}
+            </ToolButton>
+            <TextInput
+              value={routerIp}
+              onChange={setRouterIp}
+              placeholder="gateway IP (optional)"
+              ariaLabel="Gateway IP for gateway-impersonation detection"
+              className="h-8 w-44 sm:h-7"
+            />
+            <InfoTip text="Passive ARP anomaly analysis over the opened capture: duplicate IP→MAC claims, gratuitous ARP bursts and gateway impersonation, plus a unified host inventory. The analyzer never transmits a packet." />
+            <span className="flex-1" />
+            {gateCluster}
+            <Chip tone={capture ? "ok" : "muted"}>
+              {capture
+                ? `${capture.file_name} · ${capture.format.toUpperCase()} · ${capture.packet_count} packets`
+                : "no capture"}
+            </Chip>
+          </div>
+          {openError ? (
+            <div role="alert" className="mx-3 border border-err/50 bg-err/10 px-3 py-1 font-mono text-[10px] text-err">
+              {openError}
             </div>
-            {/* Lab-scope-targeted ARP sweep: the arc's only ACTIVE command.
-                Targets are resolved on the backend exclusively from the saved
-                lab scope (Target 1 ∪ Target 2) and every candidate is checked
-                against it, so the sweep refuses anything outside the declared
-                scope. Linux native worker, native confirmation, CAP_NET_RAW. */}
-            <div className="px-3 py-2">
-              <div className="flex flex-wrap items-center gap-2">
-                <span className="text-xs font-medium text-fg-muted">ARP sweep</span>
-                <Select
-                  value={sweepInterface}
-                  onChange={setSweepInterface}
-                  options={[
-                    { value: "", label: "Choose Ethernet NIC" },
-                    ...sweepInterfaces.map((iface) => ({
-                      value: iface.name,
-                      label: iface.name,
-                    })),
-                  ]}
-                  ariaLabel="ARP sweep Ethernet interface"
-                  className="w-44"
+          ) : null}
+          {analysisError ? (
+            <div role="alert" className="mx-3 border border-err/50 bg-err/10 px-3 py-1 font-mono text-[10px] text-err">
+              {analysisError}
+            </div>
+          ) : null}
+          {!analysis ? (
+            <LabEmptyCard
+              icon={Radar}
+              title="No passive analysis yet"
+              line="Open a capture or press Analyze."
+            />
+          ) : (
+            <div className="min-h-0 flex-1 overflow-y-auto pb-4">
+              <p className="px-3 pt-2 font-mono text-[10px] text-fg-muted">
+                {analysis.arp_frame_count} ARP frames · {analysis.observation_count} attributable
+                observations · {analysis.findings.length} finding
+                {analysis.findings.length === 1 ? "" : "s"} · {analysis.hosts.length} host
+                {analysis.hosts.length === 1 ? "" : "s"}
+                {analysis.router_ip ? ` · gateway ${analysis.router_ip}` : ""}
+              </p>
+              <table className="data-table">
+                <thead>
+                  <tr>
+                    <th>Kind</th>
+                    <th>IP</th>
+                    <th>MACs (claims each)</th>
+                    <th className="w-24">First seen</th>
+                    <th className="w-24">Last seen</th>
+                    <th className="w-16">Claims</th>
+                    <th className="w-24">Severity</th>
+                    <th>Detail</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {analysis.findings.map((finding, index) => (
+                    <tr key={`${finding.ip}-${finding.kind}-${index}`}>
+                      <td className="text-fg">{findingKindLabel(finding.kind)}</td>
+                      <td className="font-mono text-fg">{finding.ip}</td>
+                      <td className="font-mono text-[11px] text-fg-dim" title={finding.detail}>
+                        {summarizeMacClaims(finding.macs)}
+                      </td>
+                      <td>{formatSeenMs(finding.first_seen_ms)}</td>
+                      <td>{formatSeenMs(finding.last_seen_ms)}</td>
+                      <td>{totalClaims(finding.macs)}</td>
+                      <td>
+                        <Chip tone={finding.severity === "critical" ? "err" : "orange"}>
+                          {finding.severity}
+                        </Chip>
+                      </td>
+                      <td className="text-fg-muted">{finding.detail}</td>
+                    </tr>
+                  ))}
+                  {analysis.findings.length === 0 ? (
+                    <tr>
+                      <td colSpan={8} className="text-center text-fg-muted">
+                        no ARP anomalies detected in this capture
+                      </td>
+                    </tr>
+                  ) : null}
+                </tbody>
+              </table>
+              <p className="px-3 pb-1 pt-3 text-[11px] font-semibold text-fg-muted">
+                Unified host inventory
+              </p>
+              <table className="data-table">
+                <thead>
+                  <tr>
+                    <th>IP</th>
+                    <th>MACs (claims each)</th>
+                    <th className="w-24">First seen</th>
+                    <th className="w-24">Last seen</th>
+                    <th className="w-24">Status</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {analysis.hosts.map((host) => (
+                    <tr key={host.ip}>
+                      <td className="font-mono text-fg">{host.ip}</td>
+                      <td className="font-mono text-[11px] text-fg-dim">
+                        {summarizeMacClaims(host.mac_claims)}
+                      </td>
+                      <td>{formatSeenMs(host.first_seen_ms)}</td>
+                      <td>{formatSeenMs(host.last_seen_ms)}</td>
+                      <td>
+                        {host.impersonated ? (
+                          <Chip tone="err">conflict</Chip>
+                        ) : (
+                          <Chip tone="ok">stable</Chip>
+                        )}
+                      </td>
+                    </tr>
+                  ))}
+                  {analysis.hosts.length === 0 ? (
+                    <tr>
+                      <td colSpan={5} className="text-center text-fg-muted">
+                        no attributable ARP claims in this capture
+                      </td>
+                    </tr>
+                  ) : null}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </section>
+      )}
+
+      {mode === "live" && (
+        <section aria-label="Live monitor" className="flex min-h-0 flex-1 flex-col">
+          <div className={TOOLBAR_ROW}>
+            {railPills}
+            <label className="flex items-center gap-1.5 text-xs text-fg-dim">
+              <span className="text-fg-muted">Source</span>
+              <select
+                value={liveSource}
+                onChange={(event) =>
+                  switchLiveSource(event.target.value === "session" ? "session" : "opened")
+                }
+                aria-label="Live timeline source: opened capture or running capture session"
+                className="h-8 rounded border border-line bg-panel px-2 text-xs text-fg outline-none focus:outline-none sm:h-7"
+              >
+                <option value="opened">Opened capture</option>
+                <option value="session">Running capture session</option>
+              </select>
+            </label>
+            {liveSource === "session" ? (
+              <>
+                <TextInput
+                  value={liveSessionId}
+                  onChange={(text) => setLiveSessionId(text.replace(/[^0-9]/g, "").slice(0, 15))}
+                  placeholder="session id (Packet Studio)"
+                  ariaLabel="Capture session id to subscribe to"
+                  className="h-8 w-44 sm:h-7"
                 />
-                {sweepBusy ? (
+                {livePolling ? (
                   <ToolButton
-                    tone="danger"
-                    onClick={() => void stopSweep()}
-                    title="Stop the case-authorized lab ARP sweep; the native worker checks the stop flag before every probe"
+                    onClick={stopLiveSubscription}
+                    title="Stop polling the subscribed session. The lab never stops Packet Studio's capture itself"
                   >
-                    Stop sweep
+                    Stop
                   </ToolButton>
                 ) : (
                   <ToolButton
                     tone="primary"
-                    onClick={() => void runSweep()}
-                    disabled={!desktop || !authorized || !sweepInterface || sweepBlock !== null}
-                    title="Linux only: ARP sweep (Target 1 ∪ Target 2) probes ONLY the IPv4 targets resolved from the saved lab scope, at most 32 probes at 10/s, native confirmation and CAP_NET_RAW required; refuses anything outside the declared scope"
+                    disabled={!desktop || !isValidLiveSessionId(liveSessionId)}
+                    onClick={startLiveSubscription}
+                    title="Subscribe to the running capture session: poll its passive lab status every 2 seconds. Requires Packet Studio's live capture to be running"
                   >
-                    Sweep
+                    Subscribe
                   </ToolButton>
                 )}
-                {sweepBlock ? <Chip tone="muted">{sweepBlock}</Chip> : null}
-                {sweepProgress ? (
-                  <Chip tone={sweepProgress.phase === "done" ? "ok" : "muted"}>
-                    {sweepProgress.phase === "done"
-                      ? `${sweepProgress.answered ?? 0}/${sweepProgress.total_targets} answered · ${sweepProgress.elapsed_ms} ms`
-                      : `sweeping ${sweepProgress.total_targets} scope targets · ${(sweepProgress.elapsed_ms / 1000).toFixed(1)} s`}
-                  </Chip>
-                ) : null}
-              </div>
-              {needsSavedCase ? (
-                <p className="pt-1 text-[10px] text-fg-muted">
-                  Select a case in the Case section — lab ARP sweeps require a saved case.
-                </p>
-              ) : null}
-              {sweepError ? (
-                <div role="alert" className="mt-2 border border-err/50 bg-err/10 px-3 py-1 font-mono text-[10px] text-err">
-                  {sweepError}
-                </div>
-              ) : null}
-              {sweepResults ? (
-                sweepResults.length === 0 ? (
-                  <p className="pt-2 text-xs text-fg-muted">
-                    no hosts answered the authorized lab ARP sweep — silence is not evidence of
-                    absence; the sweep probed only the saved lab scope
-                  </p>
-                ) : (
-                  <div className="max-h-64 overflow-auto pt-2">
-                    <table className="data-table">
-                      <thead>
-                        <tr>
-                          <th>IP</th>
-                          <th>Responder MAC</th>
-                          <th className="w-24">Latency</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {sweepResults.map((row) => (
-                          <tr key={row.host}>
-                            <td className="font-mono text-fg">{row.host}</td>
-                            <td className="font-mono text-fg-dim">{row.mac}</td>
-                            <td>{row.elapsed_ms} ms</td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                )
-              ) : null}
+              </>
+            ) : (
+              <ToolButton
+                disabled={!desktop || !capture || timelineBusy}
+                title={capture
+                  ? "Derive the event timeline: new hosts, first services, ARP conflicts, gateway changes"
+                  : "Open a capture first — the timeline derives from the opened capture"}
+                onClick={() => {
+                  setTimelineBusy(true);
+                  networkLabEventsV1(routerIp.trim() || null)
+                    .then((wire) => setTimeline(wire))
+                    .catch((cause) =>
+                      setAnalysisError(
+                        "Lab timeline failed: " + (cause instanceof Error ? cause.message : String(cause)),
+                      ),
+                    )
+                    .finally(() => setTimelineBusy(false));
+                }}
+              >
+                {timelineBusy ? "deriving…" : "Derive timeline"}
+              </ToolButton>
+            )}
+            <InfoTip text="Bettercap-style one-capture-many-modules subscription: the lab subscribes to Packet Studio's running capture and never starts its own capture, and Packet Studio's capture must be running for live counts. The lab transmits nothing; Packet Studio owns the capture lifecycle, the lab only reads its status. While the session runs, the captured counter tracks it live; the event timeline derives from the session's retained frames." />
+            <span className="flex-1" />
+            {gateCluster}
+            <Chip tone={liveStateTone}>{liveState}</Chip>
+          </div>
+          {liveError ? (
+            <div role="alert" className="mx-3 border border-err/50 bg-err/10 px-3 py-1 font-mono text-[10px] text-err">
+              {liveError}
             </div>
-          </section>
-        )}
-
-        {mode === "arp" && (
-          <section aria-label="ARP analysis" className="flex min-h-0 flex-col pb-6">
-            <SectionHeader
-              icon={Network}
-              title="ARP analysis"
-              state={
-                capture
-                  ? `${capture.file_name} · ${capture.format.toUpperCase()} · ${capture.packet_count} packets`
-                  : "no capture"
-              }
-              stateTone={capture ? "ok" : "muted"}
-              info="Passive ARP anomaly analysis over the opened capture: duplicate IP→MAC claims, gratuitous ARP bursts and gateway impersonation, plus a unified host inventory. The analyzer never transmits a packet."
+          ) : null}
+          {!displayTimeline ? (
+            <LabEmptyCard
+              icon={Radar}
+              title="No timeline yet"
+              line="Derive from the opened capture or subscribe to a session."
             />
-            <div className={TOOLBAR_ROW}>
+          ) : (
+            <div className="min-h-0 flex-1 overflow-y-auto pb-4">
+              <StatusStrip items={liveStripItems} />
+              <TimelineTable wire={displayTimeline} />
+            </div>
+          )}
+        </section>
+      )}
+
+      {mode === "dns" && (
+        <section aria-label="DNS monitor" className="flex min-h-0 flex-1 flex-col">
+          <div className={TOOLBAR_ROW}>
+            {railPills}
+            {!capture ? (
               <ToolButton
                 onClick={() => void openCapture()}
                 disabled={!desktop || opening}
                 title={desktop ? "Open a PCAP or PCAPNG capture using the native Rust parser" : "Opening captures requires the desktop runtime"}
               >
-                <FolderOpen size={11} /> {opening ? "opening…" : "Open capture…"}
+                <FolderOpen size={11} /> Open capture…
               </ToolButton>
-              <ToolButton
-                tone="primary"
-                onClick={() => void runAnalysis()}
-                disabled={!desktop || opening || analyzing}
-                title="Run passive ARP anomaly analysis over the opened capture; opens a file picker first if none is open"
-              >
-                {analyzing ? "analyzing…" : "Analyze"}
-              </ToolButton>
-              <TextInput
-                value={routerIp}
-                onChange={setRouterIp}
-                placeholder="gateway IP (optional)"
-                ariaLabel="Gateway IP for gateway-impersonation detection"
-                className="h-8 w-44 sm:h-7"
-              />
+            ) : null}
+            <ToolButton
+              tone="primary"
+              disabled={!desktop || !capture || dnsBusy}
+              title={
+                capture
+                  ? "Run the passive DNS-response monitor over the opened capture: answer inconsistencies, loopback/link-local answer targets and NXDOMAIN injection"
+                  : "Open a capture first — the DNS monitor reads the opened capture"
+              }
+              onClick={() => void runDnsMonitor()}
+            >
+              {dnsBusy ? "analyzing…" : "Analyze DNS"}
+            </ToolButton>
+            <InfoTip text="Passive DNS-response monitor over the opened capture (dns-spoofing counterpart): answer inconsistencies, loopback/link-local answer targets and NXDOMAIN injection. Read-only — the monitor reads the opened capture and never transmits anything." />
+            <span className="flex-1" />
+            {gateCluster}
+            <Chip tone={dnsStateTone}>{dnsState}</Chip>
+          </div>
+          {dnsError ? (
+            <div role="alert" className="mx-3 border border-err/50 bg-err/10 px-3 py-1 font-mono text-[10px] text-err">
+              {dnsError}
             </div>
-            {openError ? (
-              <div role="alert" className="mx-3 border border-err/50 bg-err/10 px-3 py-1 font-mono text-[10px] text-err">
-                {openError}
-              </div>
-            ) : null}
-            {analysisError ? (
-              <div role="alert" className="mx-3 border border-err/50 bg-err/10 px-3 py-1 font-mono text-[10px] text-err">
-                {analysisError}
-              </div>
-            ) : null}
-            {!analysis ? (
-              <EmptyState
-                icon={Radar}
-                title="No passive analysis yet"
-                detail="Open a capture or press Analyze — the passive analyzer runs over the opened capture."
-                badge="passive"
-              />
-            ) : (
-              <div className="flex min-h-0 flex-col">
-                <p className="px-3 pt-2 font-mono text-[10px] text-fg-muted">
-                  {analysis.arp_frame_count} ARP frames · {analysis.observation_count} attributable
-                  observations · {analysis.findings.length} finding
-                  {analysis.findings.length === 1 ? "" : "s"} · {analysis.hosts.length} host
-                  {analysis.hosts.length === 1 ? "" : "s"}
-                  {analysis.router_ip ? ` · gateway ${analysis.router_ip}` : ""}
-                </p>
-                <div className="p-1">
-                  <table className="data-table">
-                    <thead>
-                      <tr>
-                        <th>Kind</th>
-                        <th>IP</th>
-                        <th>MACs (claims each)</th>
-                        <th className="w-24">First seen</th>
-                        <th className="w-24">Last seen</th>
-                        <th className="w-16">Claims</th>
-                        <th className="w-24">Severity</th>
-                        <th>Detail</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {analysis.findings.map((finding, index) => (
-                        <tr key={`${finding.ip}-${finding.kind}-${index}`}>
-                          <td className="text-fg">{findingKindLabel(finding.kind)}</td>
-                          <td className="font-mono text-fg">{finding.ip}</td>
-                          <td className="font-mono text-[11px] text-fg-dim" title={finding.detail}>
-                            {summarizeMacClaims(finding.macs)}
-                          </td>
-                          <td>{formatSeenMs(finding.first_seen_ms)}</td>
-                          <td>{formatSeenMs(finding.last_seen_ms)}</td>
-                          <td>{totalClaims(finding.macs)}</td>
-                          <td>
-                            <Chip tone={finding.severity === "critical" ? "err" : "orange"}>
-                              {finding.severity}
-                            </Chip>
-                          </td>
-                          <td className="text-fg-muted">{finding.detail}</td>
-                        </tr>
-                      ))}
-                      {analysis.findings.length === 0 ? (
-                        <tr>
-                          <td colSpan={8} className="text-center text-fg-muted">
-                            no ARP anomalies detected in this capture
-                          </td>
-                        </tr>
-                      ) : null}
-                    </tbody>
-                  </table>
-                </div>
-                <p className="px-3 pb-1 pt-3 text-[11px] font-semibold text-fg-muted">
-                  Unified host inventory
-                </p>
-                <div className="p-1">
-                  <table className="data-table">
-                    <thead>
-                      <tr>
-                        <th>IP</th>
-                        <th>MACs (claims each)</th>
-                        <th className="w-24">First seen</th>
-                        <th className="w-24">Last seen</th>
-                        <th className="w-24">Status</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {analysis.hosts.map((host) => (
-                        <tr key={host.ip}>
-                          <td className="font-mono text-fg">{host.ip}</td>
-                          <td className="font-mono text-[11px] text-fg-dim">
-                            {summarizeMacClaims(host.mac_claims)}
-                          </td>
-                          <td>{formatSeenMs(host.first_seen_ms)}</td>
-                          <td>{formatSeenMs(host.last_seen_ms)}</td>
-                          <td>
-                            {host.impersonated ? (
-                              <Chip tone="err">conflict</Chip>
-                            ) : (
-                              <Chip tone="ok">stable</Chip>
-                            )}
-                          </td>
-                        </tr>
-                      ))}
-                      {analysis.hosts.length === 0 ? (
-                        <tr>
-                          <td colSpan={5} className="text-center text-fg-muted">
-                            no attributable ARP claims in this capture
-                          </td>
-                        </tr>
-                      ) : null}
-                    </tbody>
-                  </table>
-                </div>
-              </div>
-            )}
-          </section>
-        )}
-
-        {mode === "live" && (
-          <section aria-label="Live monitor" className="flex min-h-0 flex-col pb-6">
-            <SectionHeader
-              icon={Radar}
-              title="Live monitor"
-              state={liveState}
-              stateTone={liveStateTone}
-              info="Bettercap-style one-capture-many-modules subscription: the lab subscribes to Packet Studio's running capture and never starts its own capture, and Packet Studio's capture must be running for live counts. The lab transmits nothing; Packet Studio owns the capture lifecycle, the lab only reads its status. While the session runs, the captured counter tracks it live; the event timeline derives from the session's retained frames."
-            />
-            <div className={TOOLBAR_ROW}>
-              <label className="flex items-center gap-1.5 text-xs text-fg-dim">
-                <span className="text-fg-muted">Source</span>
-                <select
-                  value={liveSource}
-                  onChange={(event) =>
-                    switchLiveSource(event.target.value === "session" ? "session" : "opened")
-                  }
-                  aria-label="Live timeline source: opened capture or running capture session"
-                  className="rounded border border-line bg-panel px-2 py-1 text-xs text-fg outline-none focus:outline-none"
-                >
-                  <option value="opened">Opened capture</option>
-                  <option value="session">Running capture session</option>
-                </select>
-              </label>
-              {liveSource === "session" ? (
-                <>
-                  <TextInput
-                    value={liveSessionId}
-                    onChange={(text) => setLiveSessionId(text.replace(/[^0-9]/g, "").slice(0, 15))}
-                    placeholder="session id (Packet Studio)"
-                    ariaLabel="Capture session id to subscribe to"
-                    className="h-8 w-44 sm:h-7"
-                  />
-                  {livePolling ? (
-                    <ToolButton
-                      onClick={stopLiveSubscription}
-                      title="Stop polling the subscribed session. The lab never stops Packet Studio's capture itself"
-                    >
-                      Stop
-                    </ToolButton>
-                  ) : (
-                    <ToolButton
-                      tone="primary"
-                      disabled={!desktop || !isValidLiveSessionId(liveSessionId)}
-                      onClick={startLiveSubscription}
-                      title="Subscribe to the running capture session: poll its passive lab status every 2 seconds. Requires Packet Studio's live capture to be running"
-                    >
-                      Subscribe
-                    </ToolButton>
-                  )}
-                </>
-              ) : (
-                <ToolButton
-                  disabled={!desktop || !capture || timelineBusy}
-                  title={capture
-                    ? "Derive the event timeline: new hosts, first services, ARP conflicts, gateway changes"
-                    : "Open a capture first — the timeline derives from the opened capture"}
-                  onClick={() => {
-                    setTimelineBusy(true);
-                    networkLabEventsV1(routerIp.trim() || null)
-                      .then((wire) => setTimeline(wire))
-                      .catch((cause) =>
-                        setAnalysisError(
-                          "Lab timeline failed: " + (cause instanceof Error ? cause.message : String(cause)),
-                        ),
-                      )
-                      .finally(() => setTimelineBusy(false));
-                  }}
-                >
-                  {timelineBusy ? "deriving…" : "Derive timeline"}
-                </ToolButton>
-              )}
-            </div>
-            {liveError ? (
-              <div role="alert" className="mx-3 border border-err/50 bg-err/10 px-3 py-1 font-mono text-[10px] text-err">
-                {liveError}
-              </div>
-            ) : null}
-            <StatusStrip items={liveStripItems} />
-            {!displayTimeline ? (
-              <EmptyState
-                icon={Radar}
-                title="No timeline yet"
-                detail="Derive from the opened capture or subscribe to a running session."
-                badge="passive"
-              />
-            ) : null}
-            <TimelineTable wire={displayTimeline} />
-          </section>
-        )}
-
-        {mode === "dns" && (
-          <section aria-label="DNS monitor" className="flex min-h-0 flex-col pb-6">
-            <SectionHeader
+          ) : null}
+          {!dnsResult ? (
+            <LabEmptyCard
               icon={Globe}
-              title="DNS monitor"
-              state={dnsState}
-              stateTone={dnsStateTone}
-              info="Passive DNS-response monitor over the opened capture (dns-spoofing counterpart): answer inconsistencies, loopback/link-local answer targets and NXDOMAIN injection. Read-only — the monitor reads the opened capture and never transmits anything."
+              title="No DNS analysis yet"
+              line="Run the monitor over the opened capture."
             />
-            <div className={TOOLBAR_ROW}>
-              {!capture ? (
-                <ToolButton
-                  onClick={() => void openCapture()}
-                  disabled={!desktop || opening}
-                  title={desktop ? "Open a PCAP or PCAPNG capture using the native Rust parser" : "Opening captures requires the desktop runtime"}
-                >
-                  <FolderOpen size={11} /> Open capture…
-                </ToolButton>
-              ) : null}
+          ) : (
+            <div className="min-h-0 flex-1 overflow-y-auto pb-4">
+              <StatusStrip items={dnsStatusItems(dnsResult)} />
+              <DnsFindingsTable wire={dnsResult} />
+            </div>
+          )}
+        </section>
+      )}
+
+      {mode === "report" && (
+        <section aria-label="Session report" className="flex min-h-0 flex-1 flex-col">
+          {/* lab-report-ui.test.mjs pins this border-t wrapper, the
+              role="group" label and the muted uppercase span verbatim; the
+              span doubles as the row's group label (one label total) and the
+              wrapper is the region's single border. */}
+          <div className="border-t border-line pt-3">
+            <div
+              role="group"
+              aria-label="Export lab session report"
+              className={TOOLBAR_ROW}
+            >
+              {railPills}
+              <span className="font-medium uppercase tracking-wider text-fg-muted">Session report</span>
               <ToolButton
                 tone="primary"
-                disabled={!desktop || !capture || dnsBusy}
+                disabled={!desktop || !capture || reportBusy}
                 title={
                   capture
-                    ? "Run the passive DNS-response monitor over the opened capture: answer inconsistencies, loopback/link-local answer targets and NXDOMAIN injection"
-                    : "Open a capture first — the DNS monitor reads the opened capture"
+                    ? "Export session report — render one bounded lab session report (ARP findings, event timeline, host inventory, DNS findings) and persist it as a single case finding in the selected saved case"
+                    : "Open a capture first — the session report reduces the opened capture"
                 }
-                onClick={() => void runDnsMonitor()}
+                onClick={() => void runReportExport()}
               >
-                {dnsBusy ? "analyzing…" : "Analyze DNS"}
+                {reportBusy ? "exporting…" : "Export"}
               </ToolButton>
-            </div>
-            {dnsError ? (
-              <div role="alert" className="mx-3 border border-err/50 bg-err/10 px-3 py-1 font-mono text-[10px] text-err">
-                {dnsError}
-              </div>
-            ) : null}
-            <StatusStrip items={dnsStatusItems(dnsResult)} />
-            {!dnsResult ? (
-              <EmptyState
-                icon={Globe}
-                title="No DNS analysis yet"
-                detail="Run the monitor over the opened capture."
-                badge="passive"
-              />
-            ) : null}
-            <DnsFindingsTable wire={dnsResult} />
-          </section>
-        )}
-
-        {mode === "report" && (
-          <section aria-label="Session report" className="flex min-h-0 flex-col pb-6">
-            {/* lab-report-ui.test.mjs pins this span (exact className + text)
-                and the border-t group wrapper below verbatim; the span doubles
-                as this mode's one-line title, so the mode shows ONE label
-                instead of a header plus a group-label pair. */}
-            <div className="flex shrink-0 items-center gap-2 px-3 py-1.5">
-              <FileText size={13} strokeWidth={1.5} className="shrink-0 text-fg-muted" />
-              <span className="font-medium uppercase tracking-wider text-fg-muted">Session report</span>
+              <label className="flex items-center gap-1 text-xs text-fg-dim">
+                <input
+                  type="checkbox"
+                  checked={reportIncludeDns}
+                  onChange={(event) => setReportIncludeDns(event.target.checked)}
+                  className="accent-[var(--color-orange)]"
+                  aria-label="Include DNS findings in the session report"
+                />
+                <span>include DNS findings</span>
+              </label>
+              <ReportReceiptChip receipt={reportReceipt} />
               <InfoTip text="One structured artifact (ARP findings, event timeline, host inventory, DNS findings) rendered to bounded markdown and persisted as ONE case finding in the backend-selected saved case. Read-only over the capture; the frontend only ever receives a receipt." />
               <span className="flex-1" />
+              {gateCluster}
             </div>
-            <div className="border-t border-line pt-3">
-              <div
-                role="group"
-                aria-label="Export lab session report"
-                className={TOOLBAR_ROW}
-              >
-                <ToolButton
-                  tone="primary"
-                  disabled={!desktop || !capture || reportBusy}
-                  title={
-                    capture
-                      ? "Render one bounded lab session report (ARP findings, event timeline, host inventory, DNS findings) and persist it as a single case finding in the selected saved case"
-                      : "Open a capture first — the session report reduces the opened capture"
-                  }
-                  onClick={() => void runReportExport()}
-                >
-                  {reportBusy ? "exporting…" : "Export session report"}
-                </ToolButton>
-                <label className="flex items-center gap-1 text-xs text-fg-dim">
-                  <input
-                    type="checkbox"
-                    checked={reportIncludeDns}
-                    onChange={(event) => setReportIncludeDns(event.target.checked)}
-                    className="accent-[var(--color-orange)]"
-                    aria-label="Include DNS findings in the session report"
-                  />
-                  <span>include DNS findings</span>
-                </label>
-                <ReportReceiptChip receipt={reportReceipt} />
-              </div>
-              {reportError ? (
-                <div role="alert" className="mx-3 border border-err/50 bg-err/10 px-3 py-1 font-mono text-[10px] text-err">
-                  {reportError}
-                </div>
-              ) : null}
-              {needsSavedCase ? (
-                <p className="px-3 pb-2 text-[10px] text-fg-muted">
-                  Select a case in the Case section — the report is persisted as case evidence.
-                </p>
-              ) : null}
+          </div>
+          {reportError ? (
+            <div role="alert" className="mx-3 border border-err/50 bg-err/10 px-3 py-1 font-mono text-[10px] text-err">
+              {reportError}
             </div>
-          </section>
-        )}
-      </div>
+          ) : null}
+          {!reportReceipt ? (
+            <LabEmptyCard
+              icon={FileText}
+              title="Session report"
+              line="Export the opened capture as one case finding."
+            />
+          ) : null}
+        </section>
+      )}
     </div>
   );
 }
@@ -1029,8 +1020,8 @@ export function labEventKindLabel(kind: LabEventKindWire): string {
 
 /**
  * StatusStrip items shared by both live sources; honest about the 512-event
- * cap. Empty until a source has data — the section header carries the
- * "no timeline" state instead of a stray chip.
+ * cap. Empty until a source has data — the toolbar chip carries the
+ * "no timeline" state instead of a stray chip row.
  */
 export function timelineStatusItems(wire: LabEventsWire | null) {
   if (!wire) return [];
@@ -1095,7 +1086,7 @@ function TimelineRow({ event }: { event: LabEventWire }) {
 
 /**
  * Count items for the passive DNS monitor's StatusStrip; honest about the
- * 128-finding cap. Empty until a run exists — the section header carries the
+ * 128-finding cap. Empty until a run exists — the toolbar chip carries the
  * "no analysis" state.
  */
 export function dnsStatusItems(wire: DnsMonitorWire | null) {
@@ -1149,7 +1140,7 @@ export function DnsFindingsTable({ wire }: { wire: DnsMonitorWire | null }) {
     );
   }
   return (
-    <div className="max-h-64 overflow-auto px-3">
+    <div className="max-h-64 overflow-auto">
       <table className="data-table">
         <thead>
           <tr>

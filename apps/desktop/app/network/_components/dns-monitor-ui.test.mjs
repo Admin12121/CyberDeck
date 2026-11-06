@@ -1,8 +1,9 @@
 // Source-contract + pure-logic tests for the passive DNS-response monitor
 // slice (dns-spoofing detection counterpart, strictly passive). The React
-// view is asserted as SOURCE TEXT under plain `node --test`; the wire types
-// and pure helpers are imported for real logic assertions; the Rust analyzer
-// and command files are cross-checked for the bounds the UI relies on.
+// view is asserted as SOURCE TEXT under plain `node --test` (the monitor is
+// its own rail mode in the redesigned Network Lab); the wire types and pure
+// helpers are imported for real logic assertions; the Rust analyzer and
+// command files are cross-checked for the bounds the UI relies on.
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
@@ -25,7 +26,10 @@ const analyzerSource = readFileSync(
 // --------------------------------------------------------------- UI contract ---
 
 test("DNS monitor is its own rail mode and is capture-gated", () => {
-  assert.match(viewSource, /title="DNS monitor"/);
+  const section = /\{mode === "dns" && \([\s\S]*?<DnsFindingsTable wire=\{dnsResult\} \/>/.exec(
+    viewSource,
+  );
+  assert.ok(section, "DNS monitor mode missing");
   assert.match(viewSource, /<DnsFindingsTable wire=\{dnsResult\} \/>/);
   // Same read-only capture gate as the timeline derivation: the button is
   // disabled until a capture is open and explains why in its tooltip.
@@ -52,11 +56,13 @@ test("DNS monitor handler is wired to the local IPC module and resets state hone
 
 test("DNS monitor wording stays passive and the section never offers active controls", () => {
   assert.match(viewSource, /passive DNS-response monitoring/);
-  // The DNS section renders a read-only button and a table only — none of
+  // The DNS mode renders a read-only button and a table only — none of
   // the active-interaction affordances appear anywhere near it. (The prose
   // legitimately says "NXDOMAIN injection": that is the passive indicator's
   // name, so only the active control labels are forbidden here.)
-  const section = /DNS monitor[\s\S]*?<DnsFindingsTable wire=\{dnsResult\} \/>/.exec(viewSource);
+  const section = /\{mode === "dns" && \([\s\S]*?<DnsFindingsTable wire=\{dnsResult\} \/>/.exec(
+    viewSource,
+  );
   assert.ok(section, "DNS monitor section missing");
   assert.doesNotMatch(
     section[0],
