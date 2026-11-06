@@ -610,3 +610,75 @@ pub async fn netscan_service_probe_v1(
     ctx.record(result.clone());
     Ok(result)
 }
+
+
+// --- NSE-lite: bounded banner-based service checks ---------------------------
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ServiceCheckFindingWire {
+    pub check: String,
+    pub severity: String,
+    pub evidence: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ServiceChecksWire {
+    pub host: String,
+    pub port: u16,
+    pub service_claim: String,
+    pub probe_used: String,
+    pub findings: Vec<ServiceCheckFindingWire>,
+}
+
+/// Run the bounded check registry over a live probe of one host:port. The
+/// probe reuses the same user-mode machinery as `netscan_service_probe_v1`
+/// (same timeouts, same random nonce discipline, same registry); the check
+/// pass itself is pure and never opens sockets. Authorization and saved-case
+/// gating match the probe command exactly.
+#[tauri::command]
+pub async fn netscan_service_checks_v1(
+    host: String,
+    port: u16,
+    authorized: bool,
+    case_id: String,
+    session: State<'_, CaseSessionCtx>,
+    evidence: State<'_, EvidenceCtx>,
+    gate: State<'_, Arc<super::operation_gate::NetworkOperationGate>>,
+    ctx: State<'_, Arc<ProbeCtx>>,
+) -> Result<ServiceChecksWire, String> {
+    let probe = netscan_service_probe_v1(
+        host.clone(),
+        port,
+        authorized,
+        case_id,
+        session,
+        evidence,
+        gate,
+        ctx,
+    )
+    .await?;
+    // The registry classifies the raw excerpt; an excerpt that the probe
+    // stage could not capture yields no findings rather than guesses.
+    let findings = cyberdeck_packet::service_checks::evaluate(
+        &probe.service_claim,
+        port,
+        &probe.raw_excerpt_trimmed,
+    )
+    .into_iter()
+    .map(|finding| ServiceCheckFindingWire {
+        check: finding.check.to_string(),
+        severity: serde_json::to_value(finding.severity)
+            .ok()
+            .and_then(|value| value.as_str().map(str::to_string))
+            .unwrap_or_else(|| "info".to_string()),
+        evidence: finding.evidence,
+    })
+    .collect();
+    Ok(ServiceChecksWire {
+        host: probe.host,
+        port: probe.port,
+        service_claim: probe.service_claim,
+        probe_used: probe.probe_used.to_string(),
+        findings,
+    })
+}

@@ -1895,6 +1895,38 @@ export interface TraceHopV6Wire {
 }
 
 /** Scoped, operator-confirmed IPv6 ICMPv6 traceroute (Linux, raw socket). */
+// --- NSE-lite: bounded banner-based service checks ---------------------------
+
+export interface ServiceCheckFindingWire {
+  check: string;
+  severity: string;
+  evidence: string;
+}
+
+export interface ServiceChecksWire {
+  host: string;
+  port: number;
+  service_claim: string;
+  probe_used: string;
+  findings: ServiceCheckFindingWire[];
+}
+
+/** Registry pass over a live probe of one service; transmits nothing itself. */
+export async function netscanServiceChecksV1(
+  host: string,
+  port: number,
+  authorized: boolean,
+  caseId: string,
+): Promise<ServiceChecksWire> {
+  if (!inTauri) throw new Error("service checks require the desktop runtime");
+  return invoke<ServiceChecksWire>("netscan_service_checks_v1", {
+    host,
+    port,
+    authorized,
+    caseId,
+  });
+}
+
 export async function netscanTraceIpv6V1(
   target: string,
   interfaceName: string,

@@ -252,6 +252,7 @@ fn main() {
             features::network::ipc::scan_depth::netscan_stealth_stop_v1,
             features::network::ipc::scan_depth::netscan_stealth_status_v1,
             features::network::ipc::scan_depth::netscan_service_probe_v1,
+            features::network::ipc::scan_depth::netscan_service_checks_v1,
         ])
         .run(tauri::generate_context!())
         .expect("CyberDeck desktop runtime failed to start");

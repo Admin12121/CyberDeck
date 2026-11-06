@@ -22,6 +22,7 @@ pub mod lab_events;
 pub mod live;
 pub mod scan_packets;
 pub mod scan_replies;
+pub mod service_checks;
 pub mod streams;
 
 pub use application::capture::parse_capture;

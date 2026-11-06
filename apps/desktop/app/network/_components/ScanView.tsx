@@ -12,7 +12,9 @@ import {
   netscanNdpStopV1,
   netscanIcmpDiscoverV1,
   netscanIcmp6DiscoverV1,
+  netscanServiceChecksV1,
   netscanTraceIpv4V1,
+  type ServiceChecksWire,
   netscanTraceIpv6V1,
   type TraceHopV6Wire,
   netscanIcmpStopV1,
@@ -697,6 +699,28 @@ export function ScanView() {
     }
   };
 
+  // NSE-lite: run the bounded banner-check registry over one probed open
+  // port. Findings are advisory evidence lines, never verdicts.
+  const [checkResults, setCheckResults] = useState<Record<string, ServiceChecksWire>>({});
+  const runChecks = async (host: string, port: number) => {
+    if (networkBusy) return;
+    if (!desktop || revision === null || !authorized) return;
+    const key = identity;
+    const rowKey = host + ":" + port;
+    setError(null);
+    setProbeBusy(rowKey);
+    try {
+      const wire = await netscanServiceChecksV1(host, port, true, wb.caseId);
+      if (activeCase.current === key) {
+        setCheckResults((previous) => ({ ...previous, [rowKey]: wire }));
+      }
+    } catch (err) {
+      if (activeCase.current === key) setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      if (activeCase.current === key) setProbeBusy(null);
+    }
+  };
+
   const openCount = observationPage?.open ?? results.filter((r) => r.state === "open").length;
   const observedCount = observationPage?.total ?? results.length;
 
@@ -713,6 +737,7 @@ export function ScanView() {
     if (result) {
       const tone = result.confidence === "high" ? "text-ok"
         : result.confidence === "medium" ? "text-orange" : "text-fg-muted";
+      const checks = checkResults[rowKey];
       return (
         <td className={tone} title={"basis: " + result.basis + " · probe: " + result.probe_used +
           (result.raw_excerpt_trimmed ? " · excerpt: " + result.raw_excerpt_trimmed : "")}>
@@ -722,6 +747,24 @@ export function ScanView() {
               {" "}· claims {result.remote_software_claim}
             </span>
           ) : null}
+          {checks ? (
+            <span className="block font-mono text-[10px] text-fg-muted">
+              {checks.findings.length === 0
+                ? "checks: none fired"
+                : checks.findings.map((f) => (
+                    <span key={f.check} className="block"
+                      title={f.severity + " · " + f.evidence}>
+                      check {f.check} ({f.severity})
+                    </span>
+                  ))}
+            </span>
+          ) : (
+            <ToolButton onClick={() => void runChecks(host, port)}
+              disabled={networkBusy || !desktop || revision === null || !authorized}
+              title="Run the bounded NSE-lite banner checks over a fresh probe of this port; findings are advisory evidence lines">
+              run checks
+            </ToolButton>
+          )}
         </td>
       );
     }

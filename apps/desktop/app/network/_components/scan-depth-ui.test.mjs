@@ -11,6 +11,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const here = dirname(fileURLToPath(import.meta.url));
+const read = (file) => readFileSync(join(here, file), "utf8");
 const scanViewSource = readFileSync(join(here, "ScanView.tsx"), "utf8");
 const scanDepthSource = readFileSync(
   join(here, "../../../src-tauri/src/features/network/ipc/scan_depth.rs"),
@@ -162,4 +163,29 @@ test("stealth commands enforce authorization and saved-case agreement", () => {
     scanDepthSource,
     /explicit service-probe authorization acknowledgment required/,
   );
+});
+
+// --- NSE-lite banner checks (wave 4) ------------------------------------------
+
+test("NSE-lite checks are a bounded registry over probe evidence, never a scripting engine", () => {
+  const registry = read("../../../../../crates/packet/src/service_checks.rs");
+  const backend = read("../../../src-tauri/src/features/network/ipc/scan_depth.rs");
+  const canonical = read("../../../lib/ipc.ts");
+  const view = read("ScanView.tsx");
+  // Fixed registry with a hard cap: no user-supplied scripts, no eval.
+  assert.match(registry, /static REGISTRY: \[CheckDefinition; 8\]/);
+  assert.match(registry, /MAX_CHECKS: usize = 16/);
+  assert.match(registry, /MAX_FINDINGS: usize = 16/);
+  // No dynamic code evaluation primitives anywhere in the registry.
+  assert.ok(!/new Function|eval\(|Function\(/.test(registry), "registry must be static");
+  // Redis unauthenticated access is medium severity; banner disclosures info.
+  assert.match(registry, /redis-unauthenticated-access/);
+  assert.match(registry, /http-server-version-disclosure/);
+  // The command reuses the probe machinery and gates identically.
+  assert.match(backend, /pub async fn netscan_service_checks_v1/);
+  assert.match(backend, /netscan_service_probe_v1\(/);
+  assert.match(backend, /service_checks::evaluate/);
+  assert.match(canonical, /netscanServiceChecksV1/);
+  assert.match(view, /run checks/);
+  assert.match(view, /findings are advisory evidence lines/);
 });
