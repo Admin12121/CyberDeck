@@ -1,5 +1,6 @@
 //! Bounded TCP and UDP metadata, payload and passive application hints.
 use super::link::{color_for, empty_frame};
+use super::{http2, quic};
 use super::protocol;
 use super::protocol::HttpFields;
 use crate::{dns, Dissected, Layer, TcpMeta};
@@ -85,6 +86,15 @@ pub(super) fn dissect_tcp(
     let stream_id = Some(format!("tcp|{}|{}", endpoints[0], endpoints[1]));
     // Passive application parsing looks only at bytes in the captured frame.
     // A split TCP segment cannot be claimed as a complete HTTP/TLS message.
+    if http2::is_http2_preface(&payload) {
+        if let Some(dissected) = http2::dissect_http2(&payload, layers.clone()) {
+            return Dissected {
+                source: source.to_string(),
+                destination: destination.to_string(),
+                ..dissected
+            };
+        }
+    }
     let http = protocol::http_start_line(&payload);
     let tls = protocol::tls_hello(&payload);
     let protocol = if http.is_some() {
@@ -228,6 +238,16 @@ pub(super) fn dissect_udp(
     }
     let src_port = u16::from_be_bytes([transport[0], transport[1]]);
     let dst_port = u16::from_be_bytes([transport[2], transport[3]]);
+    // QUIC rides on UDP/443; the bounded header dissector replaces the
+    // plain-UDP projection when the payload carries a QUIC shape.
+    if (src_port == 443 || dst_port == 443) && transport.len() > 8 {
+        let dissected = quic::dissect_quic(&transport[8..], layers);
+        return Dissected {
+            source: source.to_string(),
+            destination: destination.to_string(),
+            ..dissected
+        };
+    }
     let length = u16::from_be_bytes([transport[4], transport[5]]);
     if length < 8 {
         return empty_frame();
