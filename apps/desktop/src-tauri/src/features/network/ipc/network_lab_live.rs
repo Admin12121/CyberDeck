@@ -130,9 +130,10 @@ fn live_status_from_snapshot(
         if observations.len() >= MAX_LIVE_OBSERVATIONS {
             break;
         }
-        if let Some(obs) =
-            observation_from_dissected(&meta.dissected, frame_timestamp_ms(meta, snapshot.nanosecond))
-        {
+        if let Some(obs) = observation_from_dissected(
+            &meta.dissected,
+            frame_timestamp_ms(meta, snapshot.nanosecond),
+        ) {
             observations.push(obs);
         }
     }
@@ -346,8 +347,8 @@ mod tests {
     #[test]
     fn unowned_sessions_fail_closed_before_any_read() {
         let temp = tempfile::tempdir().unwrap();
-        let store = cyberdeck_storage::ArtifactStore::open(&temp.path().join("case.sqlite"))
-            .unwrap();
+        let store =
+            cyberdeck_storage::ArtifactStore::open(&temp.path().join("case.sqlite")).unwrap();
         let case = store.create_case("Live Lab", "").unwrap();
         let session = CaseSessionCtx::default();
         session.select(&store, &case.id).unwrap();
@@ -358,4 +359,3 @@ mod tests {
         assert!(ctx.packet_snapshot(&session, 999).is_err());
     }
 }
-

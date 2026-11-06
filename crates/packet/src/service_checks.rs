@@ -108,7 +108,8 @@ static REGISTRY: [CheckDefinition; 13] = [
         evaluate: |excerpt| {
             // A Redis that answers PING with +PONG (or replies with a Redis
             // error shape) before any AUTH is effectively unauthenticated.
-            if excerpt.text.starts_with("+pong") || excerpt.text.starts_with("-err unknown command") {
+            if excerpt.text.starts_with("+pong") || excerpt.text.starts_with("-err unknown command")
+            {
                 Some("Redis answered an unauthenticated PING; the service exposes commands without AUTH".into())
             } else {
                 None
@@ -133,9 +134,15 @@ static REGISTRY: [CheckDefinition; 13] = [
         evaluate: |excerpt| {
             // MySQL/ MariaDB greeting: [00] ... version N.N.NN, port 3306.
             if port_matches(3306, excerpt) {
-                if let Some(position) = excerpt.text.find("mariadb").or_else(|| excerpt.text.find("mysql")) {
+                if let Some(position) = excerpt
+                    .text
+                    .find("mariadb")
+                    .or_else(|| excerpt.text.find("mysql"))
+                {
                     let head: String = excerpt.text[position..].chars().take(48).collect();
-                    return Some(format!("MySQL greeting discloses distribution/version: {head}"));
+                    return Some(format!(
+                        "MySQL greeting discloses distribution/version: {head}"
+                    ));
                 }
             }
             None
@@ -157,7 +164,9 @@ static REGISTRY: [CheckDefinition; 13] = [
         name: "smtp-banner-disclosure",
         severity: CheckSeverity::Info,
         evaluate: |excerpt| {
-            if port_matches(25, excerpt) && excerpt.text.starts_with("220-") || port_matches(25, excerpt) && excerpt.text.starts_with("220 ") {
+            if port_matches(25, excerpt) && excerpt.text.starts_with("220-")
+                || port_matches(25, excerpt) && excerpt.text.starts_with("220 ")
+            {
                 let head: String = excerpt.text.chars().take(64).collect();
                 Some(format!("SMTP banner discloses MTA identity: {head}"))
             } else {
@@ -183,7 +192,10 @@ static REGISTRY: [CheckDefinition; 13] = [
         evaluate: |excerpt| {
             // "* OK [CAPABILITY IMAP4rev1 ...]" enumerates the server's
             // supported extensions before any authentication.
-            if port_matches(143, excerpt) && excerpt.text.starts_with("* ok") && excerpt.text.contains("capability") {
+            if port_matches(143, excerpt)
+                && excerpt.text.starts_with("* ok")
+                && excerpt.text.contains("capability")
+            {
                 let head: String = excerpt.text.chars().take(80).collect();
                 Some(format!("IMAP pre-auth capability disclosure: {head}"))
             } else {
@@ -287,12 +299,14 @@ mod tests {
     fn http_server_header_with_version_is_low_severity() {
         let response = "HTTP/1.1 200 OK\r\nServer: nginx/1.18.0 (Ubuntu)\r\n\r\n";
         let findings = evaluate("HTTP", 80, response);
-        assert!(findings
-            .iter()
-            .any(|f| f.check == "http-server-version-disclosure" && f.severity == CheckSeverity::Low));
+        assert!(findings.iter().any(
+            |f| f.check == "http-server-version-disclosure" && f.severity == CheckSeverity::Low
+        ));
         // No version slash → no disclosure claim.
         let plain = evaluate("HTTP", 80, "HTTP/1.1 200 OK\r\nServer: nginx\r\n\r\n");
-        assert!(!plain.iter().any(|f| f.check == "http-server-version-disclosure"));
+        assert!(!plain
+            .iter()
+            .any(|f| f.check == "http-server-version-disclosure"));
     }
 
     #[test]
@@ -328,16 +342,25 @@ mod tests {
     #[test]
     fn pop3_imap_vnc_docker_elasticsearch_checks_classify() {
         assert!(evaluate("POP3", 110, "+OK POP3 lab.test server ready\r\n")
-            .iter().any(|f| f.check == "pop3-banner-disclosure"));
-        assert!(evaluate("IMAP", 143, "* OK [CAPABILITY IMAP4rev1 STARTTLS] ready\r\n")
-            .iter().any(|f| f.check == "imap-capability-disclosure"));
+            .iter()
+            .any(|f| f.check == "pop3-banner-disclosure"));
+        assert!(evaluate(
+            "IMAP",
+            143,
+            "* OK [CAPABILITY IMAP4rev1 STARTTLS] ready\r\n"
+        )
+        .iter()
+        .any(|f| f.check == "imap-capability-disclosure"));
         let vnc = evaluate("VNC", 5900, "RFB 003.008\r\n");
         assert_eq!(vnc[0].check, "vnc-weak-protocol");
         assert_eq!(vnc[0].severity, CheckSeverity::Medium);
         let docker = evaluate("HTTP", 2375, "{\"message\":\"Docker index\"}");
         assert_eq!(docker[0].check, "docker-api-unauthenticated");
-        assert!(evaluate("HTTP", 9200, "{\"cluster_name\":\"lab\",\"version\":{}}")
-            .iter().any(|f| f.check == "elasticsearch-cluster-disclosure"));
+        assert!(
+            evaluate("HTTP", 9200, "{\"cluster_name\":\"lab\",\"version\":{}}")
+                .iter()
+                .any(|f| f.check == "elasticsearch-cluster-disclosure")
+        );
     }
 
     #[test]

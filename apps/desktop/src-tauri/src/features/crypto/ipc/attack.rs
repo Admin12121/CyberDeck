@@ -21,9 +21,9 @@ mod rules;
 /// their source line identity.
 #[path = "../application/attack.rs"]
 mod application;
-pub use application::{combinator_over_bytes, hybrid_over_bytes, hybrid_reverse_over_bytes};
 #[cfg(test)]
 pub use application::rules_over_bytes;
+pub use application::{combinator_over_bytes, hybrid_over_bytes, hybrid_reverse_over_bytes};
 use application::{guard, mask_attack};
 
 #[tauri::command]

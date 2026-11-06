@@ -27,9 +27,9 @@ mod saved_capture;
 pub use capture_cache::CachedCapture;
 #[cfg(test)]
 use pcap_wire::wire_packet;
-pub use pcap_wire::{PcapOpenWire, PcapPacketWire};
 #[cfg(test)]
 pub use pcap_wire::LayerWire;
+pub use pcap_wire::{PcapOpenWire, PcapPacketWire};
 
 pub struct PcapCtx {
     pub current: Mutex<Option<CachedCapture>>,

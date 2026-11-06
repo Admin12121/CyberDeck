@@ -7,8 +7,7 @@
 use crate::features::forensics::ipc::evidence::EvidenceCtx;
 use crate::features::shared::session::{CaseSessionCtx, CaseSessionWire};
 use cyberdeck_packet::{
-    pcap_write, pcapng_write, PCAP_MAGIC_BE_NSEC, PCAP_MAGIC_LE_NSEC,
-    MAX_CAPTURE_PACKETS,
+    pcap_write, pcapng_write, MAX_CAPTURE_PACKETS, PCAP_MAGIC_BE_NSEC, PCAP_MAGIC_LE_NSEC,
 };
 use cyberdeck_storage::{NetworkCaptureSource, MAX_ORIGINAL_PCAP_BYTES};
 use serde::Serialize;
@@ -83,9 +82,7 @@ pub fn pcap_export_view_v1(
         .map_err(|_| "capture cache unavailable".to_string())?;
     let capture = guard.as_ref().ok_or("no capture is open")?;
     if capture.linktype != ETHERNET_LINKTYPE {
-        return Err(
-            "only Ethernet captures can be exported as case artifacts this arc".into(),
-        );
+        return Err("only Ethernet captures can be exported as case artifacts this arc".into());
     }
 
     // Deduplicate and order the selection so the export is a deterministic,
@@ -227,9 +224,7 @@ pub fn pcap_export_view_ng_v1(
         .map_err(|_| "capture cache unavailable".to_string())?;
     let capture = guard.as_ref().ok_or("no capture is open")?;
     if capture.linktype != ETHERNET_LINKTYPE {
-        return Err(
-            "only Ethernet captures can be exported as case artifacts this arc".into(),
-        );
+        return Err("only Ethernet captures can be exported as case artifacts this arc".into());
     }
 
     let mut indices = indices;

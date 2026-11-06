@@ -98,7 +98,11 @@ pub(super) fn is_sensitive_path(path: &str) -> bool {
 }
 
 fn looks_like_html(text: &str) -> bool {
-    let head: String = text.chars().take(512).collect::<String>().to_ascii_lowercase();
+    let head: String = text
+        .chars()
+        .take(512)
+        .collect::<String>()
+        .to_ascii_lowercase();
     head.contains("<!doctype html") || head.contains("<html")
 }
 
@@ -156,7 +160,9 @@ pub(super) fn confirmed_exposure(path: &str, body: &[u8]) -> bool {
                     || text.starts_with("--\n--")
                     || text.contains("CREATE TABLE"))
         }
-        "/config.php.bak" => text.contains("<?php") && (text.contains("DB_") || text.contains("AUTH_KEY")),
+        "/config.php.bak" => {
+            text.contains("<?php") && (text.contains("DB_") || text.contains("AUTH_KEY"))
+        }
         "/.env" => {
             if looks_like_html(text) {
                 return false;
@@ -211,7 +217,10 @@ mod exposure_confirmation_tests {
         for (path, body) in [
             ("/.env", &b"APP_KEY=base64:secret\nDB_HOST=db\n"[..]),
             ("/.git/HEAD", &b"ref: refs/heads/main\n"[..]),
-            ("/.git/config", &b"[core]\n\trepositoryformatversion = 0\n"[..]),
+            (
+                "/.git/config",
+                &b"[core]\n\trepositoryformatversion = 0\n"[..],
+            ),
             ("/.svn/entries", &b"12\n"[..]),
             ("/.DS_Store", &b"\0\0\0\x01Bud1rest"[..]),
             (
@@ -252,10 +261,7 @@ mod exposure_confirmation_tests {
                 "set-cookie".to_string(),
                 "sessionid=SUPER_SECRET; Path=/; Secure".to_string(),
             ),
-            (
-                "set-cookie".to_string(),
-                "theme=dark; Path=/".to_string(),
-            ),
+            ("set-cookie".to_string(), "theme=dark; Path=/".to_string()),
         ];
         let findings = session_cookie_findings(&headers, true, "https://private.invalid/");
         assert_eq!(findings.len(), 2);

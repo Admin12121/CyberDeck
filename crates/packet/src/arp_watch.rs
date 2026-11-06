@@ -205,7 +205,10 @@ pub fn analyze_arp(observations: &[ArpObservation], router_ip: Option<&str>) -> 
         } else {
             (ArpFindingKind::IpImpersonation, ArpSeverity::Warning)
         };
-        let incumbent = claims.first().map(|m| m.mac.as_str()).unwrap_or("the first");
+        let incumbent = claims
+            .first()
+            .map(|m| m.mac.as_str())
+            .unwrap_or("the first");
         let detail = format!(
             "{challenger_count} additional MAC{} claim{} {ip} after {incumbent}",
             if challenger_count == 1 { "" } else { "es" },
@@ -310,14 +313,41 @@ mod tests {
         // A calm segment: requests and matching replies over two minutes.
         for minute in 0..2u64 {
             let base = minute * 60_000;
-            obs_list.push(obs("10.0.0.5", "aa:aa:aa:aa:aa:05", ArpOperation::Request, false, base + 1_000));
-            obs_list.push(obs("10.0.0.1", "aa:aa:aa:aa:aa:01", ArpOperation::Reply, false, base + 2_000));
-            obs_list.push(obs("10.0.0.7", "aa:aa:aa:aa:aa:07", ArpOperation::Reply, false, base + 3_000));
+            obs_list.push(obs(
+                "10.0.0.5",
+                "aa:aa:aa:aa:aa:05",
+                ArpOperation::Request,
+                false,
+                base + 1_000,
+            ));
+            obs_list.push(obs(
+                "10.0.0.1",
+                "aa:aa:aa:aa:aa:01",
+                ArpOperation::Reply,
+                false,
+                base + 2_000,
+            ));
+            obs_list.push(obs(
+                "10.0.0.7",
+                "aa:aa:aa:aa:aa:07",
+                ArpOperation::Reply,
+                false,
+                base + 3_000,
+            ));
             // Regular gratuitous refreshes well under the rate threshold.
-            obs_list.push(obs("10.0.0.1", "aa:aa:aa:aa:aa:01", ArpOperation::Reply, true, base + 30_000));
+            obs_list.push(obs(
+                "10.0.0.1",
+                "aa:aa:aa:aa:aa:01",
+                ArpOperation::Reply,
+                true,
+                base + 30_000,
+            ));
         }
         let findings = analyze_arp(&obs_list, Some("10.0.0.1"));
-        assert!(findings.is_empty(), "expected no findings, got {findings:?}");
+        assert!(
+            findings.is_empty(),
+            "expected no findings, got {findings:?}"
+        );
         let hosts = host_inventory(&obs_list);
         assert_eq!(hosts.len(), 3);
         let router = hosts.iter().find(|h| h.ip == "10.0.0.1").unwrap();
@@ -329,11 +359,41 @@ mod tests {
     #[test]
     fn ip_claimed_by_two_macs_is_flagged_with_counts_and_window() {
         let obs_list = vec![
-            obs("10.0.0.9", "aa:aa:aa:aa:aa:09", ArpOperation::Reply, false, 1_000),
-            obs("10.0.0.9", "aa:aa:aa:aa:aa:09", ArpOperation::Reply, false, 2_000),
-            obs("10.0.0.9", "bb:bb:bb:bb:bb:0b", ArpOperation::Reply, false, 5_000),
-            obs("10.0.0.9", "bb:bb:bb:bb:bb:0b", ArpOperation::Reply, false, 7_500),
-            obs("10.0.0.9", "aa:aa:aa:aa:aa:09", ArpOperation::Request, false, 9_000),
+            obs(
+                "10.0.0.9",
+                "aa:aa:aa:aa:aa:09",
+                ArpOperation::Reply,
+                false,
+                1_000,
+            ),
+            obs(
+                "10.0.0.9",
+                "aa:aa:aa:aa:aa:09",
+                ArpOperation::Reply,
+                false,
+                2_000,
+            ),
+            obs(
+                "10.0.0.9",
+                "bb:bb:bb:bb:bb:0b",
+                ArpOperation::Reply,
+                false,
+                5_000,
+            ),
+            obs(
+                "10.0.0.9",
+                "bb:bb:bb:bb:bb:0b",
+                ArpOperation::Reply,
+                false,
+                7_500,
+            ),
+            obs(
+                "10.0.0.9",
+                "aa:aa:aa:aa:aa:09",
+                ArpOperation::Request,
+                false,
+                9_000,
+            ),
         ];
         let findings = analyze_arp(&obs_list, None);
         assert_eq!(findings.len(), 1);
@@ -356,7 +416,15 @@ mod tests {
     fn gratuitous_burst_over_threshold_is_flagged_under_the_threshold_is_not() {
         // 12 announcements in 30 seconds: a poisoning-style sweep.
         let burst: Vec<ArpObservation> = (0..12)
-            .map(|i| obs("10.0.0.4", "cc:cc:cc:cc:cc:04", ArpOperation::Reply, true, i * 2_500))
+            .map(|i| {
+                obs(
+                    "10.0.0.4",
+                    "cc:cc:cc:cc:cc:04",
+                    ArpOperation::Reply,
+                    true,
+                    i * 2_500,
+                )
+            })
             .collect();
         let findings = analyze_arp(&burst, None);
         assert_eq!(findings.len(), 1);
@@ -367,13 +435,29 @@ mod tests {
 
         // The same 12 announcements spread over 12 minutes stay silent.
         let calm: Vec<ArpObservation> = (0..12)
-            .map(|i| obs("10.0.0.4", "cc:cc:cc:cc:cc:04", ArpOperation::Reply, true, i * 60_000 + 1_000))
+            .map(|i| {
+                obs(
+                    "10.0.0.4",
+                    "cc:cc:cc:cc:cc:04",
+                    ArpOperation::Reply,
+                    true,
+                    i * 60_000 + 1_000,
+                )
+            })
             .collect();
         assert!(analyze_arp(&calm, None).is_empty());
 
         // Exactly at the threshold is not an anomaly (strictly greater than).
         let at_limit: Vec<ArpObservation> = (0..10)
-            .map(|i| obs("10.0.0.4", "cc:cc:cc:cc:cc:04", ArpOperation::Reply, true, i * 5_000))
+            .map(|i| {
+                obs(
+                    "10.0.0.4",
+                    "cc:cc:cc:cc:cc:04",
+                    ArpOperation::Reply,
+                    true,
+                    i * 5_000,
+                )
+            })
             .collect();
         assert!(analyze_arp(&at_limit, None).is_empty());
     }
@@ -381,8 +465,20 @@ mod tests {
     #[test]
     fn gateway_impersonation_is_relabeled_and_outranks() {
         let obs_list = vec![
-            obs("192.168.1.1", "aa:aa:aa:aa:aa:01", ArpOperation::Reply, false, 100),
-            obs("192.168.1.1", "dd:dd:dd:dd:dd:dd", ArpOperation::Reply, false, 400),
+            obs(
+                "192.168.1.1",
+                "aa:aa:aa:aa:aa:01",
+                ArpOperation::Reply,
+                false,
+                100,
+            ),
+            obs(
+                "192.168.1.1",
+                "dd:dd:dd:dd:dd:dd",
+                ArpOperation::Reply,
+                false,
+                400,
+            ),
         ];
         let without_router = analyze_arp(&obs_list, None);
         assert_eq!(without_router[0].kind, ArpFindingKind::IpImpersonation);
@@ -399,8 +495,20 @@ mod tests {
         let mut obs_list = Vec::new();
         for i in 0..300u32 {
             let ip = format!("10.1.{i}.1");
-            obs_list.push(obs(&ip, "aa:aa:aa:aa:aa:01", ArpOperation::Reply, false, 1_000));
-            obs_list.push(obs(&ip, "bb:bb:bb:bb:bb:02", ArpOperation::Reply, false, 2_000));
+            obs_list.push(obs(
+                &ip,
+                "aa:aa:aa:aa:aa:01",
+                ArpOperation::Reply,
+                false,
+                1_000,
+            ));
+            obs_list.push(obs(
+                &ip,
+                "bb:bb:bb:bb:bb:02",
+                ArpOperation::Reply,
+                false,
+                2_000,
+            ));
         }
         let findings = analyze_arp(&obs_list, None);
         assert_eq!(findings.len(), MAX_FINDINGS);
@@ -410,7 +518,13 @@ mod tests {
         let mut wide = Vec::new();
         for i in 0..5000u32 {
             let ip = format!("10.2.{i}.1");
-            wide.push(obs(&ip, "aa:aa:aa:aa:aa:01", ArpOperation::Request, false, 1_000));
+            wide.push(obs(
+                &ip,
+                "aa:aa:aa:aa:aa:01",
+                ArpOperation::Request,
+                false,
+                1_000,
+            ));
         }
         assert_eq!(host_inventory(&wide).len(), MAX_INVENTORY_HOSTS);
     }
@@ -418,9 +532,21 @@ mod tests {
     #[test]
     fn empty_or_broadcast_sender_data_is_ignored() {
         let obs_list = vec![
-            obs("0.0.0.0", "aa:aa:aa:aa:aa:01", ArpOperation::Request, false, 100),
+            obs(
+                "0.0.0.0",
+                "aa:aa:aa:aa:aa:01",
+                ArpOperation::Request,
+                false,
+                100,
+            ),
             obs("10.0.0.3", "", ArpOperation::Request, false, 200),
-            obs("255.255.255.255", "bb:bb:bb:bb:bb:02", ArpOperation::Reply, true, 300),
+            obs(
+                "255.255.255.255",
+                "bb:bb:bb:bb:bb:02",
+                ArpOperation::Reply,
+                true,
+                300,
+            ),
         ];
         assert!(analyze_arp(&obs_list, None).is_empty());
         assert!(host_inventory(&obs_list).is_empty());

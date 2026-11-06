@@ -7,9 +7,8 @@
 // contract and the documented breakpoints it uses.
 
 use cyberdeck_packet::os_hints::{
-    classify, OsHint, StackSignature, MAX_OPTION_ORDER, OPTION_KIND_MSS,
-    OPTION_KIND_SACK_BLOCKS, OPTION_KIND_SACK_PERMITTED, OPTION_KIND_TIMESTAMPS,
-    OPTION_KIND_WINDOW_SCALE,
+    classify, OsHint, StackSignature, MAX_OPTION_ORDER, OPTION_KIND_MSS, OPTION_KIND_SACK_BLOCKS,
+    OPTION_KIND_SACK_PERMITTED, OPTION_KIND_TIMESTAMPS, OPTION_KIND_WINDOW_SCALE,
 };
 use serde::Serialize;
 use tauri::State;
@@ -90,10 +89,10 @@ pub(crate) fn signature_from(
     let window = text_of(layers, "TCP receive window (raw)")
         .and_then(|value| value.parse::<u16>().ok())
         .unwrap_or(0);
-    let mss = text_of(layers, "TCP maximum segment size")
-        .and_then(|value| value.parse::<u16>().ok());
-    let window_scale = text_of(layers, "TCP window scale")
-        .and_then(|value| value.parse::<u8>().ok());
+    let mss =
+        text_of(layers, "TCP maximum segment size").and_then(|value| value.parse::<u16>().ok());
+    let window_scale =
+        text_of(layers, "TCP window scale").and_then(|value| value.parse::<u8>().ok());
     // Option order: TCP option layers precede the transport summary layer in
     // the dissection output, so the walk stops at the first transport layer.
     let mut option_order = Vec::new();
@@ -178,13 +177,34 @@ mod tests {
 
     fn layers() -> Vec<Layer> {
         vec![
-            Layer { label: "Internet Protocol Version 4".into(), value: "10.0.0.1 → 10.0.0.2".into() },
-            Layer { label: "ttl".into(), value: "64".into() },
-            Layer { label: "TCP maximum segment size".into(), value: "1460".into() },
-            Layer { label: "TCP window scale".into(), value: "7".into() },
-            Layer { label: "TCP SACK permitted".into(), value: "yes".into() },
-            Layer { label: "Transmission Control Protocol".into(), value: "syn".into() },
-            Layer { label: "TCP receive window (raw)".into(), value: "64240".into() },
+            Layer {
+                label: "Internet Protocol Version 4".into(),
+                value: "10.0.0.1 → 10.0.0.2".into(),
+            },
+            Layer {
+                label: "ttl".into(),
+                value: "64".into(),
+            },
+            Layer {
+                label: "TCP maximum segment size".into(),
+                value: "1460".into(),
+            },
+            Layer {
+                label: "TCP window scale".into(),
+                value: "7".into(),
+            },
+            Layer {
+                label: "TCP SACK permitted".into(),
+                value: "yes".into(),
+            },
+            Layer {
+                label: "Transmission Control Protocol".into(),
+                value: "syn".into(),
+            },
+            Layer {
+                label: "TCP receive window (raw)".into(),
+                value: "64240".into(),
+            },
         ]
     }
 

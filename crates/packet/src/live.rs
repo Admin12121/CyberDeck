@@ -293,9 +293,7 @@ impl CaptureFilter {
         if text.is_empty() {
             return Ok(CaptureFilter::default());
         }
-        let refusal = |message: String| {
-            CaptureError::new(CaptureErrorCode::InvalidConfig, message)
-        };
+        let refusal = |message: String| CaptureError::new(CaptureErrorCode::InvalidConfig, message);
         if text.chars().count() > MAX_FILTER_CHARS {
             return Err(refusal(format!(
                 "capture filter exceeds {MAX_FILTER_CHARS} characters"
@@ -316,9 +314,7 @@ impl CaptureFilter {
                     // `and` only joins two terms; leading or trailing use is
                     // a syntax error, not a silently ignored token.
                     if index == 0 || index + 1 == terms.len() {
-                        return Err(refusal(
-                            "capture filter 'and' must join two terms".into(),
-                        ));
+                        return Err(refusal("capture filter 'and' must join two terms".into()));
                     }
                 }
                 "host" => {
@@ -1666,7 +1662,10 @@ mod tests {
             }
         );
         assert_eq!(filter("any").protocol(), Some(TcpUdpIcmpAny::Any));
-        assert_eq!(filter("  tcp   and   host 10.0.0.1  "), filter("tcp and host 10.0.0.1"));
+        assert_eq!(
+            filter("  tcp   and   host 10.0.0.1  "),
+            filter("tcp and host 10.0.0.1")
+        );
         let v6 = filter("host 2001:db8::1").host();
         assert_eq!(
             v6,
@@ -1727,7 +1726,7 @@ mod tests {
         let mut frame = vec![0u8; 14]; // Ethernet header
         frame[12..14].copy_from_slice(&0x0800u16.to_be_bytes());
         frame.push(0x45); // version 4, IHL 5
-        // tos, total length, identification, flags+fragment offset.
+                          // tos, total length, identification, flags+fragment offset.
         frame.extend_from_slice(&[0, 0, 0, 0, 0, 0, 0]);
         frame.push(64); // ttl
         frame.push(protocol);
@@ -1776,13 +1775,22 @@ mod tests {
         assert!(host.matches_ethernet(&icmp));
         // Truncated below the address fields: nothing can match.
         assert!(!host.matches_ethernet(&icmp[..20]));
-        assert!(!host.matches_ethernet(&arp), "non-IP frames match no host clause");
+        assert!(
+            !host.matches_ethernet(&arp),
+            "non-IP frames match no host clause"
+        );
         assert!(!host.matches_ethernet(&v6));
 
         let port = filter("port 443");
         assert!(port.matches_ethernet(&tcp));
-        assert!(!port.matches_ethernet(&udp), "udp/53 does not carry port 443");
-        assert!(!port.matches_ethernet(&icmp), "non-TCP/UDP frames match no port clause");
+        assert!(
+            !port.matches_ethernet(&udp),
+            "udp/53 does not carry port 443"
+        );
+        assert!(
+            !port.matches_ethernet(&icmp),
+            "non-TCP/UDP frames match no port clause"
+        );
         assert!(!port.matches_ethernet(&arp));
 
         let tcp_only = filter("tcp");
@@ -1792,7 +1800,10 @@ mod tests {
 
         let v6_host = filter("host 2001:db8::1");
         assert!(v6_host.matches_ethernet(&v6));
-        assert!(!v6_host.matches_ethernet(&tcp), "a v6 host never matches a v4 frame");
+        assert!(
+            !v6_host.matches_ethernet(&tcp),
+            "a v6 host never matches a v4 frame"
+        );
 
         // Conjunctions AND their clauses.
         let combined = filter("tcp and host 10.0.0.1 and port 443");
@@ -1921,9 +1932,11 @@ mod tests {
                 let expected = parsed.matches_ethernet(frame);
                 let accepted = run_bpf(&program, frame) > 0;
                 assert_eq!(
-                    accepted, expected,
+                    accepted,
+                    expected,
                     "filter {index} ({:?}) diverged on a {}-byte frame",
-                    parsed, frame.len()
+                    parsed,
+                    frame.len()
                 );
             }
         }
@@ -1976,7 +1989,10 @@ mod debug_dump {
     fn dump_host_program() {
         let f = CaptureFilter::parse("host 10.0.0.1").unwrap();
         for (i, ins) in f.to_bpf_program().iter().enumerate() {
-            println!("{}: code={:#06x} jt={} jf={} k={:#010x}", i, ins.code, ins.jt, ins.jf, ins.k);
+            println!(
+                "{}: code={:#06x} jt={} jf={} k={:#010x}",
+                i, ins.code, ins.jt, ins.jf, ins.k
+            );
         }
         let frame = {
             let mut frame = vec![0u8; 14];

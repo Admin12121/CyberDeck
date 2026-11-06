@@ -65,26 +65,8 @@ struct Reply {
 /// only attempted where the name suggests a filesystem or path semantic.
 fn file_like_name(name: &str) -> bool {
     const PARTS: &[&str] = &[
-        "file",
-        "path",
-        "page",
-        "doc",
-        "template",
-        "load",
-        "include",
-        "download",
-        "img",
-        "image",
-        "view",
-        "dir",
-        "folder",
-        "resource",
-        "lang",
-        "theme",
-        "module",
-        "src",
-        "target",
-        "url",
+        "file", "path", "page", "doc", "template", "load", "include", "download", "img", "image",
+        "view", "dir", "folder", "resource", "lang", "theme", "module", "src", "target", "url",
     ];
     let lower = name.to_ascii_lowercase();
     PARTS.iter().any(|part| lower.contains(part))
@@ -375,7 +357,8 @@ pub(super) async fn run_active_injection_with_budget(
                     "../../../../../../etc/passwd",
                     "..\\..\\..\\..\\..\\..\\windows\\win.ini",
                 ] {
-                    if let Ok(candidate) = fetch(client, appended(&url, vector.index, payload)?).await
+                    if let Ok(candidate) =
+                        fetch(client, appended(&url, vector.index, payload)?).await
                     {
                         if let Some(signature) =
                             traversal_signature(&baseline.body, &candidate.body)
@@ -417,7 +400,11 @@ mod tests {
             .unwrap_or_default()
     }
 
-    async fn serve<F>(requests: usize, query: &str, handler: F) -> (Url, tokio::task::JoinHandle<()>)
+    async fn serve<F>(
+        requests: usize,
+        query: &str,
+        handler: F,
+    ) -> (Url, tokio::task::JoinHandle<()>)
     where
         F: Fn(&str) -> String + Send + 'static,
     {
@@ -480,9 +467,10 @@ mod tests {
             }
         })
         .await;
-        let found = run_active_injection_with_budget(&client(), url, Policy::SqlError, 1, &|_, _| {})
-            .await
-            .unwrap();
+        let found =
+            run_active_injection_with_budget(&client(), url, Policy::SqlError, 1, &|_, _| {})
+                .await
+                .unwrap();
         server.await.unwrap();
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].severity, "medium");
@@ -499,9 +487,10 @@ mod tests {
             "<html>You have an error in your SQL syntax</html>".into()
         })
         .await;
-        let found = run_active_injection_with_budget(&client(), url, Policy::SqlError, 1, &|_, _| {})
-            .await
-            .unwrap();
+        let found =
+            run_active_injection_with_budget(&client(), url, Policy::SqlError, 1, &|_, _| {})
+                .await
+                .unwrap();
         server.await.unwrap();
         assert!(found.is_empty());
     }
@@ -536,9 +525,10 @@ mod tests {
     #[tokio::test]
     async fn traversal_rejects_targets_without_a_file_like_parameter() {
         let url = Url::parse("https://private.invalid/?q=test").unwrap();
-        let error = run_active_injection_with_budget(&client(), url, Policy::Traversal, 1, &|_, _| {})
-            .await
-            .unwrap_err();
+        let error =
+            run_active_injection_with_budget(&client(), url, Policy::Traversal, 1, &|_, _| {})
+                .await
+                .unwrap_err();
         assert!(error.contains("file-like"));
     }
 
@@ -553,35 +543,24 @@ mod tests {
             }
         })
         .await;
-        let found = run_active_injection_with_budget(
-            &client(),
-            url,
-            Policy::SqlBoolean,
-            1,
-            &|_, _| {},
-        )
-        .await
-        .unwrap();
+        let found =
+            run_active_injection_with_budget(&client(), url, Policy::SqlBoolean, 1, &|_, _| {})
+                .await
+                .unwrap();
         server.await.unwrap();
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].severity, "low");
-        assert!(!serde_json::to_string(&found)
-            .unwrap()
-            .contains("' AND '"));
+        assert!(!serde_json::to_string(&found).unwrap().contains("' AND '"));
     }
 
     #[tokio::test]
     async fn boolean_probe_ignores_identical_responses() {
-        let (url, server) = serve(3, "q=baseline", |_| "<html>stable page body</html>".into()).await;
-        let found = run_active_injection_with_budget(
-            &client(),
-            url,
-            Policy::SqlBoolean,
-            1,
-            &|_, _| {},
-        )
-        .await
-        .unwrap();
+        let (url, server) =
+            serve(3, "q=baseline", |_| "<html>stable page body</html>".into()).await;
+        let found =
+            run_active_injection_with_budget(&client(), url, Policy::SqlBoolean, 1, &|_, _| {})
+                .await
+                .unwrap();
         server.await.unwrap();
         assert!(found.is_empty());
     }
@@ -589,9 +568,10 @@ mod tests {
     #[tokio::test]
     async fn credential_parameters_are_never_probed() {
         let url = Url::parse("https://private.invalid/?auth_token=SECRET&csrf=TOKEN").unwrap();
-        let error = run_active_injection_with_budget(&client(), url, Policy::SqlError, 1, &|_, _| {})
-            .await
-            .unwrap_err();
+        let error =
+            run_active_injection_with_budget(&client(), url, Policy::SqlError, 1, &|_, _| {})
+                .await
+                .unwrap_err();
         assert!(error.contains("protected or unsupported"));
     }
 }

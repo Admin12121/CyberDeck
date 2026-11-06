@@ -300,7 +300,12 @@ pub fn analyze_dns(observations: &[DnsObservation]) -> DnsMonitorReport {
 mod tests {
     use super::*;
 
-    fn obs(timestamp_ms: u64, is_response: bool, name: &str, answers: Vec<(&str, &str)>) -> DnsObservation {
+    fn obs(
+        timestamp_ms: u64,
+        is_response: bool,
+        name: &str,
+        answers: Vec<(&str, &str)>,
+    ) -> DnsObservation {
         DnsObservation {
             timestamp_ms,
             is_response,
@@ -331,7 +336,9 @@ mod tests {
         assert!(report.findings.is_empty());
         assert_eq!(report.queried_names, 1);
         // And a lone query with no response at all also produces nothing.
-        assert!(analyze_dns(&[obs(100, false, "example.com", vec![])]).findings.is_empty());
+        assert!(analyze_dns(&[obs(100, false, "example.com", vec![])])
+            .findings
+            .is_empty());
     }
 
     #[test]
@@ -423,7 +430,12 @@ mod tests {
             .collect();
         assert_eq!(
             names,
-            vec!["evil.example", "rebind.example", "v6.example", "v6loop.example"]
+            vec![
+                "evil.example",
+                "rebind.example",
+                "v6.example",
+                "v6loop.example"
+            ]
         );
         assert!(suspicious[0].detail.contains("169.254.169.254"));
         // A repeat of the same poisoned answer does not spam a second finding.

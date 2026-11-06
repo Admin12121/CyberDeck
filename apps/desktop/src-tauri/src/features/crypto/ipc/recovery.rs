@@ -1,12 +1,12 @@
 //! Additive, cancellable native SHA-256 CPU/OpenCL recovery IPC.
 //! Only masked progress and summaries are sent automatically. A plaintext
 //! reveal requires a separate native operator confirmation and active scope.
+#[path = "../application/autopilot.rs"]
+mod autopilot;
 #[path = "../application/embedded_hashcat.rs"]
 mod embedded_hashcat;
 #[path = "../application/recovery_backend.rs"]
 mod recovery_backend;
-#[path = "../application/autopilot.rs"]
-mod autopilot;
 // Library modules are shared with ipc/library.rs; each include is a pure,
 // stateless view over the same verified resource files.
 // Twin includes of the library modules: this instance uses only the resolve/
@@ -169,9 +169,7 @@ fn sanitize_hash_lines(text: &str) -> Result<Vec<String>, String> {
             let length = line.len();
             if let Some(existing) = raw_shape {
                 if length != existing {
-                    return Err(
-                        "hash file mixes raw digest lengths; split it by algorithm".into(),
-                    );
+                    return Err("hash file mixes raw digest lengths; split it by algorithm".into());
                 }
             }
             raw_shape = Some(length);
@@ -478,7 +476,13 @@ fn start_recovery_with_wordlist_engine(
                 |progress| forward(progress),
             )
         } else if let Some(compiled) = rules {
-            execute_path_with_rules(&request, &wordlist, &token, |progress| forward(progress), compiled)
+            execute_path_with_rules(
+                &request,
+                &wordlist,
+                &token,
+                |progress| forward(progress),
+                compiled,
+            )
         } else {
             execute_path(&request, &wordlist, &token, |progress| forward(progress))
         }
@@ -715,7 +719,9 @@ pub fn recovery_start_v1(
     let scope = RecoveryCtx::scope_from_session(&session)?;
     if let Some(input) = hash_input {
         if !matches!(request.backend, recovery_backend::BackendSelection::Cpu) {
-            return Err("hash-file recovery runs on the native CPU backend only; select CPU".into());
+            return Err(
+                "hash-file recovery runs on the native CPU backend only; select CPU".into(),
+            );
         }
         let request = apply_hash_input(request, input)?;
         if resume_from > 0 && compiled.is_none() {
@@ -734,11 +740,21 @@ pub fn recovery_start_v1(
                   -> Result<RecoveryRun, String> {
                 let _ = sink;
                 recovery_backend::execute_path_resumable(
-                    &request, &path, resume_from, &worker_token,
+                    &request,
+                    &path,
+                    resume_from,
+                    &worker_token,
                     |progress| forward(progress),
                 )
             };
-            spawn_recovery_worker(registry, job_id, scope, token, emit_channel(on_event), worker);
+            spawn_recovery_worker(
+                registry,
+                job_id,
+                scope,
+                token,
+                emit_channel(on_event),
+                worker,
+            );
             return Ok(job_id);
         }
         start_recovery_with_wordlist_engine(
@@ -769,11 +785,21 @@ pub fn recovery_start_v1(
               -> Result<RecoveryRun, String> {
             let _ = sink;
             recovery_backend::execute_path_resumable(
-                &request, &path, resume_from, &worker_token,
+                &request,
+                &path,
+                resume_from,
+                &worker_token,
                 |progress| forward(progress),
             )
         };
-        spawn_recovery_worker(registry, job_id, scope, token, emit_channel(on_event), worker);
+        spawn_recovery_worker(
+            registry,
+            job_id,
+            scope,
+            token,
+            emit_channel(on_event),
+            worker,
+        );
         Ok(job_id)
     } else {
         start_recovery_with_wordlist_engine(
@@ -1252,12 +1278,9 @@ pub async fn recovery_autopilot_v1(
                             compiled.rules,
                         )
                     }
-                    None => recovery_backend::execute_path(
-                        &request,
-                        &path,
-                        &token,
-                        progress_with_stage,
-                    ),
+                    None => {
+                        recovery_backend::execute_path(&request, &path, &token, progress_with_stage)
+                    }
                 }
             };
             let run = result.map_err(|error| format!("stage '{}': {error}", stage.label))?;
@@ -1369,16 +1392,19 @@ pub fn recovery_hash_status_v1(
     session: State<'_, CaseSessionCtx>,
 ) -> Result<Option<RecoveryHashInputStatus>, String> {
     state.with_active(&session, |registry, _| {
-        Ok(registry.selected_hash_input.as_ref().map(|input| match input {
-            SelectedHashInput::File { count, .. } => RecoveryHashInputStatus {
-                count: *count,
-                source: "file",
-            },
-            SelectedHashInput::Text(lines) => RecoveryHashInputStatus {
-                count: lines.len(),
-                source: "text",
-            },
-        }))
+        Ok(registry
+            .selected_hash_input
+            .as_ref()
+            .map(|input| match input {
+                SelectedHashInput::File { count, .. } => RecoveryHashInputStatus {
+                    count: *count,
+                    source: "file",
+                },
+                SelectedHashInput::Text(lines) => RecoveryHashInputStatus {
+                    count: lines.len(),
+                    source: "text",
+                },
+            }))
     })
 }
 
@@ -1418,7 +1444,14 @@ pub fn recovery_mask_v1(
             |progress| forward(progress),
         )
     };
-    spawn_recovery_worker(registry, job_id, scope, token, emit_channel(on_event), worker);
+    spawn_recovery_worker(
+        registry,
+        job_id,
+        scope,
+        token,
+        emit_channel(on_event),
+        worker,
+    );
     Ok(job_id)
 }
 

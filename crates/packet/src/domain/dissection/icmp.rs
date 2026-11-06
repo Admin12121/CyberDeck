@@ -138,7 +138,10 @@ pub(super) fn dissect_icmpv4(transport: &[u8], layers: Vec<Layer>) -> Dissected 
     if type_number == 3 && transport.len() > 8 {
         out_layers.push(Layer {
             label: "quoted datagram".into(),
-            value: format!("{} byte(s) of the original packet follow the header", transport.len() - 8),
+            value: format!(
+                "{} byte(s) of the original packet follow the header",
+                transport.len() - 8
+            ),
         });
     }
     let info = format!("ICMP {description}");

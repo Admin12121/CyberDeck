@@ -358,10 +358,14 @@ fn hydrate_history(
     if case_id == "scratchpad" || case_id.is_empty() {
         return Ok(Vec::new());
     }
-    let store = evidence.store.lock().map_err(|_| "case store unavailable")?;
+    let store = evidence
+        .store
+        .lock()
+        .map_err(|_| "case store unavailable")?;
     let findings = store.list_findings(&case_id)?;
     drop(store);
-    let mut sessions: std::collections::BTreeMap<u64, ScanHistoryItem> = std::collections::BTreeMap::new();
+    let mut sessions: std::collections::BTreeMap<u64, ScanHistoryItem> =
+        std::collections::BTreeMap::new();
     let mut hosts_seen: std::collections::HashMap<u64, std::collections::BTreeSet<String>> =
         std::collections::HashMap::new();
     let mut open_ports: std::collections::HashMap<u64, usize> = std::collections::HashMap::new();
@@ -380,7 +384,12 @@ fn hydrate_history(
         let entry = sessions.entry(id).or_insert_with(|| ScanHistoryItem {
             id,
             targets: "hydrated from case findings".into(),
-            ports: if finding.source == "network.udp" { "udp" } else { "tcp" }.into(),
+            ports: if finding.source == "network.udp" {
+                "udp"
+            } else {
+                "tcp"
+            }
+            .into(),
             hosts_scanned: 0,
             open_ports: 0,
             duration_ms: 0,

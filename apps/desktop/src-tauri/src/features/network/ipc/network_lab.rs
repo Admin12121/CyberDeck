@@ -178,7 +178,9 @@ fn analyze_capture(
         if observations.len() >= MAX_LAB_OBSERVATIONS {
             break;
         }
-        if let Some(obs) = observation_from_dissected(&meta.dissected, frame_timestamp_ms(meta, nanosecond)) {
+        if let Some(obs) =
+            observation_from_dissected(&meta.dissected, frame_timestamp_ms(meta, nanosecond))
+        {
             observations.push(obs);
         }
     }
@@ -247,7 +249,9 @@ fn normalize_scope_entries(list: &[String], group: &str) -> Result<Vec<String>, 
     let mut normalized: Vec<String> = Vec::with_capacity(list.len());
     for entry in list {
         if normalized.len() >= MAX_SCOPE_ENTRIES {
-            return Err(format!("{group} exceeds the {MAX_SCOPE_ENTRIES}-entry lab scope cap"));
+            return Err(format!(
+                "{group} exceeds the {MAX_SCOPE_ENTRIES}-entry lab scope cap"
+            ));
         }
         let value = validate_scope_entry(entry)?;
         if !normalized.contains(&value) {
@@ -276,7 +280,10 @@ pub fn network_lab_set_scope_v1(
         .scope
         .lock()
         .map_err(|_| "lab scope unavailable".to_string())?;
-    *guard = Some(NetworkLabScope { targets_t1, targets_t2 });
+    *guard = Some(NetworkLabScope {
+        targets_t1,
+        targets_t2,
+    });
     Ok(scope_wire(guard.as_ref()))
 }
 
@@ -364,25 +371,16 @@ mod tests {
         let frames = vec![
             meta(
                 1_000,
-                &arp_frame(
-                    [0xaa; 6],
-                    2,
-                    [0xaa; 6],
-                    [10, 0, 0, 9],
-                    [10, 0, 0, 2],
-                ),
+                &arp_frame([0xaa; 6], 2, [0xaa; 6], [10, 0, 0, 9], [10, 0, 0, 2]),
             ),
             meta(
                 2_000,
-                &arp_frame(
-                    [0xbb; 6],
-                    2,
-                    [0xbb; 6],
-                    [10, 0, 0, 9],
-                    [10, 0, 0, 3],
-                ),
+                &arp_frame([0xbb; 6], 2, [0xbb; 6], [10, 0, 0, 9], [10, 0, 0, 3]),
             ),
-            meta(3_000, &arp_frame([0xaa; 6], 1, [0xaa; 6], [10, 0, 0, 9], [10, 0, 0, 1])),
+            meta(
+                3_000,
+                &arp_frame([0xaa; 6], 1, [0xaa; 6], [10, 0, 0, 9], [10, 0, 0, 1]),
+            ),
         ];
         let wire = analyze_capture(&capture_with(frames), None).expect("analysis succeeds");
         assert_eq!(wire.arp_frame_count, 3);
@@ -411,13 +409,7 @@ mod tests {
         for i in 0..12u64 {
             frames.push(meta(
                 i * 2_000,
-                &arp_frame(
-                    [0xcc; 6],
-                    2,
-                    [0xcc; 6],
-                    [10, 0, 0, 4],
-                    [10, 0, 0, 4],
-                ),
+                &arp_frame([0xcc; 6], 2, [0xcc; 6], [10, 0, 0, 4], [10, 0, 0, 4]),
             ));
         }
         let wire = analyze_capture(&capture_with(frames), None).expect("analysis succeeds");
@@ -455,7 +447,15 @@ mod tests {
     fn non_arp_and_unattributable_frames_are_skipped() {
         let mut truncated = arp_frame([0xaa; 6], 2, [0xaa; 6], [10, 0, 0, 9], [10, 0, 0, 2]);
         truncated.truncate(20); // malformed ARP: dissect marks it MALFORMED
-        let frames = vec![meta(1_000, &truncated), meta(2_000, &[0x45, 0, 0, 20, 0, 0, 0, 0, 64, 1, 0, 0, 192, 0, 2, 1, 192, 0, 2, 2])];
+        let frames = vec![
+            meta(1_000, &truncated),
+            meta(
+                2_000,
+                &[
+                    0x45, 0, 0, 20, 0, 0, 0, 0, 64, 1, 0, 0, 192, 0, 2, 1, 192, 0, 2, 2,
+                ],
+            ),
+        ];
         let wire = analyze_capture(&capture_with(frames), None).expect("analysis succeeds");
         assert_eq!(wire.arp_frame_count, 0);
         assert_eq!(wire.observation_count, 0);
@@ -496,7 +496,10 @@ mod tests {
             validate_scope_entry(" 192.168.1.0/24 ").as_deref(),
             Ok("192.168.1.0/24")
         );
-        assert_eq!(validate_scope_entry("2001:db8::1").as_deref(), Ok("2001:db8::1"));
+        assert_eq!(
+            validate_scope_entry("2001:db8::1").as_deref(),
+            Ok("2001:db8::1")
+        );
         assert!(validate_scope_entry("router.local").is_err());
         assert!(validate_scope_entry("10.0.0.0/33").is_err());
         assert!(validate_scope_entry("10.0.0.1 /24").is_err());
@@ -615,7 +618,13 @@ mod tests {
                 &udp_dns_frame(
                     [10, 0, 0, 1],
                     [10, 0, 0, 5],
-                    &dns_message(0x1235, true, 0, "bank.example", &[([198, 51, 100, 66], 300)]),
+                    &dns_message(
+                        0x1235,
+                        true,
+                        0,
+                        "bank.example",
+                        &[([198, 51, 100, 66], 300)],
+                    ),
                 ),
             ),
         ];
@@ -702,7 +711,6 @@ mod tests {
         assert_eq!(suspicious.first_seen_ms, 1_000);
     }
 }
-
 
 // --- Bettercap-mode event timeline (passive) ---------------------------------
 

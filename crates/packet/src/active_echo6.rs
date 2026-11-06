@@ -390,14 +390,13 @@ mod linux {
             }
             let (identifier, sequence) = random_request_id()?;
             let datagram = crate::scan_packets::ipv6_icmp_echo(
-                source,
-                target,
-                identifier,
-                sequence,
-                hop as u8,
+                source, target, identifier, sequence, hop as u8,
             )
             .map_err(|_| {
-                Echo6Error::new(Echo6ErrorCode::InvalidScope, "invalid scoped ICMPv6 echo bytes")
+                Echo6Error::new(
+                    Echo6ErrorCode::InvalidScope,
+                    "invalid scoped ICMPv6 echo bytes",
+                )
             })?;
             let dst = SockAddrIn6 {
                 family: AF_INET6 as u16,
@@ -452,7 +451,11 @@ mod linux {
                     revents: 0,
                 };
                 let ready = unsafe {
-                    poll(&raw mut fds, 1, remaining.as_millis().min(50).max(1) as c_int)
+                    poll(
+                        &raw mut fds,
+                        1,
+                        remaining.as_millis().min(50).max(1) as c_int,
+                    )
                 };
                 if ready < 0 {
                     if io::Error::last_os_error().kind() == io::ErrorKind::Interrupted {

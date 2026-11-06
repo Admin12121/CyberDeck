@@ -263,7 +263,9 @@ pub async fn fetch(
         downloaded_bytes: downloaded,
         total_bytes: total,
     });
-    Ok(sha256_hex(&std::fs::read(&final_path).map_err(|e| format!("cannot verify download: {e}"))?))
+    Ok(sha256_hex(
+        &std::fs::read(&final_path).map_err(|e| format!("cannot verify download: {e}"))?,
+    ))
 }
 
 /// Wrap the shared wordlist inspection (regular file, size cap) for a
@@ -302,8 +304,7 @@ mod tests {
 
     #[test]
     fn bundled_wordlist_is_present_and_nonempty() {
-        let dev =
-            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("resources/wordlists");
+        let dev = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("resources/wordlists");
         let path = dev.join(bundled_name());
         let data = std::fs::read(&path).expect("bundled wordlist must exist");
         assert!(data.len() > 1024);

@@ -53,9 +53,11 @@ fn hpack_block(body: &[u8], flags: u8) -> Result<&[u8], &'static str> {
     let mut at = 0usize;
     let mut pad = 0usize;
     if flags & FLAG_PADDED != 0 {
-        pad = usize::from(*body
-            .first()
-            .ok_or("PADDED flag set but the frame body is empty")?);
+        pad = usize::from(
+            *body
+                .first()
+                .ok_or("PADDED flag set but the frame body is empty")?,
+        );
         at += 1;
     }
     if flags & FLAG_PRIORITY != 0 {
@@ -233,7 +235,10 @@ mod tests {
     }
 
     fn header_layers(d: &Dissected) -> Vec<&Layer> {
-        d.layers.iter().filter(|l| l.label == "HTTP/2 header").collect()
+        d.layers
+            .iter()
+            .filter(|l| l.label == "HTTP/2 header")
+            .collect()
     }
 
     fn error_layer(d: &Dissected) -> Option<&Layer> {
@@ -245,15 +250,24 @@ mod tests {
         let payload = with_magic(&[frame(4, 0, &[0, 1])]);
         let d = dissect_http2(&payload, Vec::new()).expect("http2");
         assert_eq!(d.protocol, "HTTP2");
-        assert!(d.layers.iter().any(|l| l.label == "HTTP/2" && l.value.contains("preface")));
-        assert!(d.layers.iter().any(|l| l.label == "HTTP/2 frame" && l.value.contains("SETTINGS") && l.value.contains("stream=0")));
+        assert!(d
+            .layers
+            .iter()
+            .any(|l| l.label == "HTTP/2" && l.value.contains("preface")));
+        assert!(d.layers.iter().any(|l| l.label == "HTTP/2 frame"
+            && l.value.contains("SETTINGS")
+            && l.value.contains("stream=0")));
     }
 
     #[test]
     fn multiple_frames_parse_in_order_up_to_the_cap() {
         let payload = with_magic(&[frame(4, 0, &[]), frame(8, 0, &[]), frame(1, 1, &[0xaa])]);
         let d = dissect_http2(&payload, Vec::new()).unwrap();
-        let frames: Vec<_> = d.layers.iter().filter(|l| l.label == "HTTP/2 frame").collect();
+        let frames: Vec<_> = d
+            .layers
+            .iter()
+            .filter(|l| l.label == "HTTP/2 frame")
+            .collect();
         assert_eq!(frames.len(), 3);
         assert!(frames[0].value.contains("SETTINGS"));
         assert!(frames[1].value.contains("WINDOW_UPDATE"));
@@ -265,7 +279,9 @@ mod tests {
         let mut payload = with_magic(&[frame(4, 0, &[0, 1, 2, 3])]);
         payload.truncate(MAGIC.len() + FRAME_HEADER_LEN + 2); // header present, body cut
         let d = dissect_http2(&payload, Vec::new()).unwrap();
-        assert!(d.layers.iter().any(|l| l.label == "HTTP/2 frame" && l.value.contains("truncated at capture boundary")));
+        assert!(d.layers.iter().any(
+            |l| l.label == "HTTP/2 frame" && l.value.contains("truncated at capture boundary")
+        ));
     }
 
     #[test]
@@ -308,7 +324,10 @@ mod tests {
         let payload = with_magic(&[headers_frame(1, 0, &body)]);
         let d = dissect_http2(&payload, Vec::new()).unwrap();
         assert_eq!(
-            header_layers(&d).iter().map(|l| l.value.as_str()).collect::<Vec<_>>(),
+            header_layers(&d)
+                .iter()
+                .map(|l| l.value.as_str())
+                .collect::<Vec<_>>(),
             ["custom-key: custom-value"]
         );
     }
@@ -320,7 +339,10 @@ mod tests {
         let payload = with_magic(&[headers_frame(1, 0, &[0xbe])]);
         let d = dissect_http2(&payload, Vec::new()).unwrap();
         assert_eq!(
-            header_layers(&d).iter().map(|l| l.value.as_str()).collect::<Vec<_>>(),
+            header_layers(&d)
+                .iter()
+                .map(|l| l.value.as_str())
+                .collect::<Vec<_>>(),
             ["dynamic table entry 62: (state unavailable)"]
         );
     }
@@ -336,7 +358,10 @@ mod tests {
         let payload = with_magic(&[headers_frame(1, 0, &body)]);
         let d = dissect_http2(&payload, Vec::new()).unwrap();
         assert_eq!(
-            header_layers(&d).iter().map(|l| l.value.as_str()).collect::<Vec<_>>(),
+            header_layers(&d)
+                .iter()
+                .map(|l| l.value.as_str())
+                .collect::<Vec<_>>(),
             ["host: <Huffman-encoded (not decoded)>"]
         );
     }
@@ -347,10 +372,16 @@ mod tests {
     fn truncated_hpack_block_degrades_to_single_error_layer() {
         let payload = with_magic(&[headers_frame(1, 0, &[0x40, 0x0a, b'a'])]);
         let d = dissect_http2(&payload, Vec::new()).unwrap();
-        assert!(d.layers.iter().any(|l| l.label == "HTTP/2 frame" && l.value.contains("HEADERS")));
+        assert!(d
+            .layers
+            .iter()
+            .any(|l| l.label == "HTTP/2 frame" && l.value.contains("HEADERS")));
         let err = error_layer(&d).expect("degraded header layer");
         assert!(err.value.contains("truncated"), "{}", err.value);
-        assert!(header_layers(&d).is_empty(), "no partial headers may be invented");
+        assert!(
+            header_layers(&d).is_empty(),
+            "no partial headers may be invented"
+        );
     }
 
     /// PADDED (0x08) and PRIORITY (0x20) framing is stripped before decoding;
@@ -361,7 +392,10 @@ mod tests {
         let payload = with_magic(&[headers_frame(1, 0x08, &[0x00, 0x82])]);
         let d = dissect_http2(&payload, Vec::new()).unwrap();
         assert_eq!(
-            header_layers(&d).iter().map(|l| l.value.as_str()).collect::<Vec<_>>(),
+            header_layers(&d)
+                .iter()
+                .map(|l| l.value.as_str())
+                .collect::<Vec<_>>(),
             [":method: GET"]
         );
 
@@ -373,7 +407,10 @@ mod tests {
         let payload = with_magic(&[headers_frame(3, 0x28, &body)]);
         let d = dissect_http2(&payload, Vec::new()).unwrap();
         assert_eq!(
-            header_layers(&d).iter().map(|l| l.value.as_str()).collect::<Vec<_>>(),
+            header_layers(&d)
+                .iter()
+                .map(|l| l.value.as_str())
+                .collect::<Vec<_>>(),
             [":method: GET"]
         );
 

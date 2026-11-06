@@ -33,12 +33,8 @@ pub enum PcapWriteError {
 impl std::fmt::Display for PcapWriteError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let message = match self {
-            PcapWriteError::TooManyRecords => {
-                "selection exceeds the capture record limit"
-            }
-            PcapWriteError::RecordTooLarge => {
-                "a frame exceeds the per-record capture limit"
-            }
+            PcapWriteError::TooManyRecords => "selection exceeds the capture record limit",
+            PcapWriteError::RecordTooLarge => "a frame exceeds the per-record capture limit",
             PcapWriteError::EmptyRecord => "a frame contains no bytes",
             PcapWriteError::SubsecondOutOfRange => {
                 "a timestamp sub-second value exceeds microsecond resolution"
@@ -76,7 +72,9 @@ pub fn write_pcap(linktype: u32, records: &[(u32, u32, &[u8])]) -> Result<Vec<u8
         let record_len = RECORD_HEADER_LEN
             .checked_add(frame.len())
             .ok_or(PcapWriteError::LengthOverflow)?;
-        total = total.checked_add(record_len).ok_or(PcapWriteError::LengthOverflow)?;
+        total = total
+            .checked_add(record_len)
+            .ok_or(PcapWriteError::LengthOverflow)?;
     }
     for (_, subsecond, _) in records {
         if *subsecond >= MAX_USEC_SUBSECOND {
@@ -124,7 +122,9 @@ mod tests {
     #[test]
     fn write_then_parse_round_trips_linktype_timestamps_and_bytes() {
         let first = arp_frame();
-        let second = vec![0x45, 0, 0, 20, 0, 0, 0, 0, 64, 1, 0, 0, 192, 0, 2, 1, 192, 0, 2, 2];
+        let second = vec![
+            0x45, 0, 0, 20, 0, 0, 0, 0, 64, 1, 0, 0, 192, 0, 2, 1, 192, 0, 2, 2,
+        ];
         let records = [
             (1_700_000_000u32, 0u32, first.as_slice()),
             (1_700_000_001, 123_456, second.as_slice()),

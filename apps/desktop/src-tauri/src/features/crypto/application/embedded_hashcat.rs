@@ -533,11 +533,29 @@ pub(super) fn validate_embedded_request(request: &RecoveryRequest) -> Result<u32
         // already validated the family against the requested mode.
         RecoveryTarget::Kdf { .. } => {
             const KDF_MODES: &[&str] = &[
-                "phpass", "md5crypt", "sha512crypt", "bcrypt", "sha256crypt", "mscash",
-                "mscash2", "netntlm-v1", "netntlm-v2", "mssql-2005", "mssql-2012",
-                "descrypt", "winzip-aes", "7zip", "zip-legacy",
-                "office-97-2003", "office-2007", "office-2013", "pdf-1.1-1.3",
-                "pdf-1.4-1.6", "bitcoin", "keepass", "ethereum-pbkdf2",
+                "phpass",
+                "md5crypt",
+                "sha512crypt",
+                "bcrypt",
+                "sha256crypt",
+                "mscash",
+                "mscash2",
+                "netntlm-v1",
+                "netntlm-v2",
+                "mssql-2005",
+                "mssql-2012",
+                "descrypt",
+                "winzip-aes",
+                "7zip",
+                "zip-legacy",
+                "office-97-2003",
+                "office-2007",
+                "office-2013",
+                "pdf-1.1-1.3",
+                "pdf-1.4-1.6",
+                "bitcoin",
+                "keepass",
+                "ethereum-pbkdf2",
                 "ethereum-scrypt",
             ];
             if KDF_MODES.contains(&request.algorithm.as_str()) {
@@ -590,11 +608,41 @@ fn frame_mode(
     }
     if !matches!(
         hash_mode,
-        0 | 10 | 20 | 50 | 60 | 100 | 110 | 120 | 132 | 400 | 500 | 1000 | 1100 | 1400 | 1500
-        | 1700 | 1731 | 1800 | 2100 | 3200 | 5500 | 5600 | 7400
-        | 11600 | 13600 | 17200 | 17210
-        | 9400 | 9600 | 9700 | 10400 | 10500
-        | 11300 | 13400 | 15600 | 15700
+        0 | 10
+            | 20
+            | 50
+            | 60
+            | 100
+            | 110
+            | 120
+            | 132
+            | 400
+            | 500
+            | 1000
+            | 1100
+            | 1400
+            | 1500
+            | 1700
+            | 1731
+            | 1800
+            | 2100
+            | 3200
+            | 5500
+            | 5600
+            | 7400
+            | 11600
+            | 13600
+            | 17200
+            | 17210
+            | 9400
+            | 9600
+            | 9700
+            | 10400
+            | 10500
+            | 11300
+            | 13400
+            | 15600
+            | 15700
     ) {
         return Err("embedded Hashcat mode unsupported".into());
     }
@@ -868,9 +916,8 @@ mod tests {
         // Batch-3 archive containers passed their on-device KATs on the same
         // hardware (RTX 4060, 2026-11-05); they must keep passing.
         for required in [
-            0u32, 100, 1000, 1400, 1700, 500, 1800, 3200, 400, 1100, 2100,
-            13600, 11600, 17200, 17210, 9700, 9400, 9600, 10400, 10500,
-            11300, 13400, 15600, 15700,
+            0u32, 100, 1000, 1400, 1700, 500, 1800, 3200, 400, 1100, 2100, 13600, 11600, 17200,
+            17210, 9700, 9400, 9600, 10400, 10500, 11300, 13400, 15600, 15700,
         ] {
             assert!(
                 modes.contains(&required),

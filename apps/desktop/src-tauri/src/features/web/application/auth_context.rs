@@ -36,10 +36,7 @@ pub(super) struct AuthContext {
 impl AuthContext {
     /// Validates and freezes operator input. Every rejection message is
     /// static: it never echoes a header name or value.
-    pub(super) fn new(
-        cookies: Option<&str>,
-        headers: &[(String, String)],
-    ) -> Result<Self, String> {
+    pub(super) fn new(cookies: Option<&str>, headers: &[(String, String)]) -> Result<Self, String> {
         if headers.len() > MAX_HEADERS {
             return Err(format!(
                 "at most {MAX_HEADERS} session headers are supported"
@@ -84,15 +81,11 @@ impl AuthContext {
             }
             let header_name = HeaderName::from_bytes(name.as_bytes())
                 .map_err(|_| "session header name is not a valid HTTP token".to_string())?;
-            if parsed
-                .iter()
-                .any(|(existing, _)| *existing == header_name)
-            {
+            if parsed.iter().any(|(existing, _)| *existing == header_name) {
                 return Err("duplicate session header".into());
             }
-            let header_value = HeaderValue::from_str(value).map_err(|_| {
-                "session header value is not a valid HTTP header value".to_string()
-            })?;
+            let header_value = HeaderValue::from_str(value)
+                .map_err(|_| "session header value is not a valid HTTP header value".to_string())?;
             if header_value.is_empty() {
                 return Err("session header value is required".into());
             }
@@ -170,24 +163,13 @@ mod tests {
             .map(|index| header(&format!("X-{index}"), "v"))
             .collect::<Vec<_>>();
         assert!(AuthContext::new(None, &nine).is_err());
-        assert!(AuthContext::new(
-            Some("a".repeat(MAX_COOKIE_BYTES + 1).as_str()),
-            &[]
-        )
-        .is_err());
+        assert!(AuthContext::new(Some("a".repeat(MAX_COOKIE_BYTES + 1).as_str()), &[]).is_err());
         assert!(AuthContext::new(
             None,
             &[header("X-A", "v".repeat(MAX_VALUE_BYTES + 1).as_str())]
         )
         .is_err());
-        assert!(AuthContext::new(
-            None,
-            &[
-                header("X-Dup", "1"),
-                header("x-dup", "2")
-            ]
-        )
-        .is_err());
+        assert!(AuthContext::new(None, &[header("X-Dup", "1"), header("x-dup", "2")]).is_err());
     }
 
     #[test]
@@ -199,7 +181,10 @@ mod tests {
 
         let cookie_only = AuthContext::new(Some("sid=SECRET"), &[]).unwrap();
         assert_eq!(cookie_only.header_map().len(), 1);
-        assert_eq!(cookie_only.summary(), " with an operator-supplied session cookie");
+        assert_eq!(
+            cookie_only.summary(),
+            " with an operator-supplied session cookie"
+        );
 
         let headers_only =
             AuthContext::new(None, &[header("Authorization", "Bearer SECRET")]).unwrap();

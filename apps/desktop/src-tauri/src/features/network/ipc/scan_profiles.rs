@@ -49,9 +49,7 @@ pub fn validate_profile_name(name: &str) -> Result<String, String> {
         return Err("profile name must not be empty".into());
     }
     if trimmed.len() > MAX_NAME_LEN {
-        return Err(format!(
-            "profile name exceeds {MAX_NAME_LEN} characters"
-        ));
+        return Err(format!("profile name exceeds {MAX_NAME_LEN} characters"));
     }
     if !trimmed
         .chars()

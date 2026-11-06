@@ -53,7 +53,10 @@ fn push_u64(out: &mut Vec<u8>, value: u64) {
 /// frame) so untrusted metadata can never inflate the output. The original
 /// length field is written equal to the captured length: the export persists
 /// exactly the bytes it was given and never claims evidence it does not hold.
-pub fn write_pcapng(linktype: u32, records: &[(u32, u32, &[u8])]) -> Result<Vec<u8>, PcapWriteError> {
+pub fn write_pcapng(
+    linktype: u32,
+    records: &[(u32, u32, &[u8])],
+) -> Result<Vec<u8>, PcapWriteError> {
     if records.len() > MAX_CAPTURE_PACKETS {
         return Err(PcapWriteError::TooManyRecords);
     }
@@ -75,7 +78,9 @@ pub fn write_pcapng(linktype: u32, records: &[(u32, u32, &[u8])]) -> Result<Vec<
             .checked_add(padded)
             .and_then(|len| len.checked_add(4))
             .ok_or(PcapWriteError::LengthOverflow)?;
-        total = total.checked_add(block_len).ok_or(PcapWriteError::LengthOverflow)?;
+        total = total
+            .checked_add(block_len)
+            .ok_or(PcapWriteError::LengthOverflow)?;
     }
     let mut out = Vec::with_capacity(total);
 
@@ -94,7 +99,10 @@ pub fn write_pcapng(linktype: u32, records: &[(u32, u32, &[u8])]) -> Result<Vec<
     let idb_start = out.len();
     push_u32(&mut out, IDB_BLOCK_TYPE);
     push_u32(&mut out, IDB_LEN as u32);
-    push_u16(&mut out, u16::try_from(linktype).map_err(|_| PcapWriteError::LengthOverflow)?);
+    push_u16(
+        &mut out,
+        u16::try_from(linktype).map_err(|_| PcapWriteError::LengthOverflow)?,
+    );
     push_u16(&mut out, 0); // reserved
     push_u32(&mut out, MAX_PACKET_BYTES as u32); // snapshot length
     push_u16(&mut out, 9); // if_tsresol
@@ -177,13 +185,19 @@ mod tests {
         let too_many: Vec<(u32, u32, &[u8])> = (0..=MAX_CAPTURE_PACKETS)
             .map(|i| (i as u32, 0, frame.as_slice()))
             .collect();
-        assert_eq!(write_pcapng(1, &too_many), Err(PcapWriteError::TooManyRecords));
+        assert_eq!(
+            write_pcapng(1, &too_many),
+            Err(PcapWriteError::TooManyRecords)
+        );
         let oversized = vec![0u8; MAX_PACKET_BYTES + 1];
         assert_eq!(
             write_pcapng(1, &[(0, 0, oversized.as_slice())]),
             Err(PcapWriteError::RecordTooLarge)
         );
-        assert_eq!(write_pcapng(1, &[(0, 0, &[])]), Err(PcapWriteError::EmptyRecord));
+        assert_eq!(
+            write_pcapng(1, &[(0, 0, &[])]),
+            Err(PcapWriteError::EmptyRecord)
+        );
         assert_eq!(
             write_pcapng(1, &[(0, MAX_USEC_SUBSECOND, frame.as_slice())]),
             Err(PcapWriteError::SubsecondOutOfRange)
@@ -206,7 +220,9 @@ mod tests {
 
     #[test]
     fn non_ethernet_linktype_round_trips() {
-        let raw_ip = [0x45u8, 0, 0, 20, 0, 0, 0, 0, 64, 1, 0, 0, 192, 0, 2, 1, 192, 0, 2, 2];
+        let raw_ip = [
+            0x45u8, 0, 0, 20, 0, 0, 0, 0, 64, 1, 0, 0, 192, 0, 2, 1, 192, 0, 2, 2,
+        ];
         let bytes = write_pcapng(101, &[(9, 1, raw_ip.as_slice())]).unwrap();
         let parsed = parse_pcapng(&bytes).unwrap();
         assert_eq!(parsed.linktype, 101);

@@ -33,15 +33,17 @@ use analysis::{
 
 #[path = "../application/extraction.rs"]
 mod extraction;
-use extraction::{extract_archive_from_evidence, extract_gzip_from_evidence, extract_nested_from_evidence};
 #[cfg(test)]
 use extraction::import_archive_batch;
+use extraction::{
+    extract_archive_from_evidence, extract_gzip_from_evidence, extract_nested_from_evidence,
+};
 
 #[path = "../application/imports.rs"]
 mod imports;
-use imports::{import_bytes_with_events, import_derived, import_file_from_path, list_artifacts};
 #[cfg(test)]
 use imports::import_bytes;
+use imports::{import_bytes_with_events, import_derived, import_file_from_path, list_artifacts};
 
 #[path = "models.rs"]
 mod ipc_models;

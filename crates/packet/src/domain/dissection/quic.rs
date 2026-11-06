@@ -202,7 +202,10 @@ pub fn dissect_quic(payload: &[u8], mut layers: Vec<Layer>) -> Dissected {
         return dissected(layers, format!("{info}, SCID refused"));
     }
     let Some(scid_end) = cursor.checked_add(usize::from(scid_len)) else {
-        layers.push(layer("source connection id", "length overflow; not decoded"));
+        layers.push(layer(
+            "source connection id",
+            "length overflow; not decoded",
+        ));
         return dissected(layers, format!("{info}, header incomplete"));
     };
     if scid_end > payload.len() {
@@ -221,10 +224,7 @@ pub fn dissect_quic(payload: &[u8], mut layers: Vec<Layer>) -> Dissected {
     if type_name == "Initial" {
         match varint(payload, cursor) {
             None => {
-                layers.push(layer(
-                    "token",
-                    "length varint truncated; token not decoded",
-                ));
+                layers.push(layer("token", "length varint truncated; token not decoded"));
                 return dissected(layers, format!("{info}, token length truncated"));
             }
             // The 4- and 8-byte varint forms are not decoded for the token.
@@ -298,7 +298,10 @@ pub fn dissect_quic(payload: &[u8], mut layers: Vec<Layer>) -> Dissected {
         ));
         layers.push(layer(
             "coalesced",
-            format!("{} byte(s) after the frame; not decoded", remaining - declared),
+            format!(
+                "{} byte(s) after the frame; not decoded",
+                remaining - declared
+            ),
         ));
         return dissected(
             layers,
@@ -337,14 +340,31 @@ mod tests {
         datagram.extend_from_slice(&[0u8; 8]); // protected payload
         let dissected = dissect_quic(&datagram, Vec::new());
         assert_eq!(dissected.protocol, "QUIC");
-        assert!(dissected.layers.iter().any(|l| l.label == "version" && l.value.contains("RFC 9000")));
-        assert!(dissected.layers.iter().any(|l| l.label == "packet type" && l.value == "Initial"));
-        assert!(dissected.layers.iter().any(|l| l.label == "destination connection id" && l.value == "aabbccdd"));
-        assert!(dissected.layers.iter().any(|l| l.label == "QUIC protected payload" && l.value == "8 byte(s), keys unavailable"));
-        assert!(dissected.layers.iter().any(|l| l.label == "token" && l.value == "no token"));
+        assert!(dissected
+            .layers
+            .iter()
+            .any(|l| l.label == "version" && l.value.contains("RFC 9000")));
+        assert!(dissected
+            .layers
+            .iter()
+            .any(|l| l.label == "packet type" && l.value == "Initial"));
+        assert!(dissected
+            .layers
+            .iter()
+            .any(|l| l.label == "destination connection id" && l.value == "aabbccdd"));
+        assert!(dissected.layers.iter().any(
+            |l| l.label == "QUIC protected payload" && l.value == "8 byte(s), keys unavailable"
+        ));
+        assert!(dissected
+            .layers
+            .iter()
+            .any(|l| l.label == "token" && l.value == "no token"));
         assert!(dissected.info.contains("8 protected byte(s)"));
         // Never claims decrypted contents.
-        assert!(dissected.layers.iter().all(|l| !l.value.to_lowercase().contains("sni")));
+        assert!(dissected
+            .layers
+            .iter()
+            .all(|l| !l.value.to_lowercase().contains("sni")));
     }
 
     #[test]
@@ -354,11 +374,19 @@ mod tests {
         handshake.push(0x02); // frame length varint: 2
         handshake.extend([0xde, 0xad]);
         let d = dissect_quic(&handshake, Vec::new());
-        assert!(d.layers.iter().any(|l| l.label == "packet type" && l.value == "Handshake"));
-        assert!(d.layers.iter().any(|l| l.label == "QUIC protected payload" && l.value == "2 byte(s), keys unavailable"));
+        assert!(d
+            .layers
+            .iter()
+            .any(|l| l.label == "packet type" && l.value == "Handshake"));
+        assert!(d.layers.iter().any(
+            |l| l.label == "QUIC protected payload" && l.value == "2 byte(s), keys unavailable"
+        ));
         let short = vec![0x40, 0xaa, 0xbb, 0x01, 0x02, 0x03];
         let d = dissect_quic(&short, Vec::new());
-        assert!(d.layers.iter().any(|l| l.label == "QUIC" && l.value.contains("short header")));
+        assert!(d
+            .layers
+            .iter()
+            .any(|l| l.label == "QUIC" && l.value.contains("short header")));
         assert!(d.info.contains("short header"));
         assert!(d.info.contains("DCID not recoverable"));
     }
@@ -367,8 +395,14 @@ mod tests {
     fn version_negotiation_is_named() {
         let vn = long_header(VERSION_NEGOTIATION, 0, &[0x01]);
         let d = dissect_quic(&vn, Vec::new());
-        assert!(d.layers.iter().any(|l| l.label == "packet type" && l.value == "version negotiation"));
-        assert!(d.layers.iter().any(|l| l.label == "version" && l.value.contains("version negotiation")));
+        assert!(d
+            .layers
+            .iter()
+            .any(|l| l.label == "packet type" && l.value == "version negotiation"));
+        assert!(d
+            .layers
+            .iter()
+            .any(|l| l.label == "version" && l.value.contains("version negotiation")));
     }
 
     #[test]
@@ -376,7 +410,10 @@ mod tests {
         let oversized = long_header(VERSION_V1, 0, &[0xaa; 21]);
         let d = dissect_quic(&oversized, Vec::new());
         assert_eq!(d.protocol, "QUIC");
-        assert!(d.layers.iter().any(|l| l.label == "destination connection id" && l.value.contains("refused")));
+        assert!(d
+            .layers
+            .iter()
+            .any(|l| l.label == "destination connection id" && l.value.contains("refused")));
         assert!(d.info.contains("DCID refused"));
 
         let truncated = long_header(VERSION_V1, 0, &[0xaa, 0xbb]);
@@ -384,13 +421,18 @@ mod tests {
         cut.pop();
         let d = dissect_quic(&cut, Vec::new());
         assert_eq!(d.protocol, "QUIC");
-        assert!(d.layers.iter().any(|l| l.label == "destination connection id" && l.value.contains("truncated")));
+        assert!(d
+            .layers
+            .iter()
+            .any(|l| l.label == "destination connection id" && l.value.contains("truncated")));
 
         let tiny = vec![0xc0, 0x00];
         let d = dissect_quic(&tiny, Vec::new());
         assert_eq!(d.protocol, "QUIC");
         assert!(d.info.contains("incomplete"));
-        assert!(dissect_quic(&[], Vec::new()).info.contains("no captured payload"));
+        assert!(dissect_quic(&[], Vec::new())
+            .info
+            .contains("no captured payload"));
     }
 
     #[test]
@@ -401,7 +443,11 @@ mod tests {
         datagram.push(0x04); // frame length varint: 4
         datagram.extend_from_slice(&[0u8; 4]); // protected payload
         let d = dissect_quic(&datagram, Vec::new());
-        let dcid = d.layers.iter().find(|l| l.label == "destination connection id").unwrap();
+        let dcid = d
+            .layers
+            .iter()
+            .find(|l| l.label == "destination connection id")
+            .unwrap();
         assert_eq!(dcid.value.len(), 40);
     }
 
@@ -415,8 +461,13 @@ mod tests {
         datagram.push(0x03); // frame length varint: 3
         datagram.extend([0x01, 0x02, 0x03]);
         let d = dissect_quic(&datagram, Vec::new());
-        assert!(d.layers.iter().any(|l| l.label == "token" && l.value == "token 2 byte(s) (not decoded)"));
-        assert!(d.layers.iter().any(|l| l.label == "QUIC protected payload" && l.value == "3 byte(s), keys unavailable"));
+        assert!(d
+            .layers
+            .iter()
+            .any(|l| l.label == "token" && l.value == "token 2 byte(s) (not decoded)"));
+        assert!(d.layers.iter().any(
+            |l| l.label == "QUIC protected payload" && l.value == "3 byte(s), keys unavailable"
+        ));
         assert!(d.info.contains("token 2 byte(s)"));
     }
 
@@ -428,7 +479,10 @@ mod tests {
         datagram.extend([0x00, 0x00, 0x10, 0x00]);
         datagram.extend_from_slice(&[0u8; 8]);
         let d = dissect_quic(&datagram, Vec::new());
-        assert!(d.layers.iter().any(|l| l.label == "token" && l.value == "long token (not decoded)"));
+        assert!(d
+            .layers
+            .iter()
+            .any(|l| l.label == "token" && l.value == "long token (not decoded)"));
         assert!(d.info.contains("long token"));
         // Without a decoded token length there is no frame-length claim.
         assert!(d.layers.iter().all(|l| l.label != "QUIC protected payload"));
@@ -442,7 +496,10 @@ mod tests {
         datagram.extend([0x40, 0x40]); // frame length varint: 64
         datagram.extend([0x01, 0x02, 0x03, 0x04]); // only 4 captured
         let d = dissect_quic(&datagram, Vec::new());
-        assert!(d.layers.iter().any(|l| l.label == "QUIC protected payload" && l.value.contains("frame declares 64")));
+        assert!(d
+            .layers
+            .iter()
+            .any(|l| l.label == "QUIC protected payload" && l.value.contains("frame declares 64")));
         assert!(d.info.contains("4 of 64 protected byte(s) captured"));
     }
 }

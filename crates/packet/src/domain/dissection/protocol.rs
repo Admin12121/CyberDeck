@@ -94,10 +94,18 @@ pub fn http_fields(data: &[u8]) -> Option<HttpFields> {
     if let Some(status) = start.split_whitespace().nth(1) {
         fields.status_code = status.parse::<u16>().ok();
     }
-    let mut cursor = data.iter().take(MAX_HTTP_HEADER_BLOCK).position(|b| *b == b'\n')? + 1;
+    let mut cursor = data
+        .iter()
+        .take(MAX_HTTP_HEADER_BLOCK)
+        .position(|b| *b == b'\n')?
+        + 1;
     let block_end = (cursor + MAX_HTTP_HEADER_BLOCK).min(data.len());
     for _ in 0..MAX_HTTP_HEADERS {
-        let line_end = data.get(cursor..block_end)?.iter().position(|b| *b == b'\n')? + cursor;
+        let line_end = data
+            .get(cursor..block_end)?
+            .iter()
+            .position(|b| *b == b'\n')?
+            + cursor;
         let line = &data[cursor..line_end];
         cursor = line_end + 1;
         // Strip the carriage return; a bare CRLF line ends the header block.
@@ -106,13 +114,18 @@ pub fn http_fields(data: &[u8]) -> Option<HttpFields> {
             break;
         }
         // Stable Rust has no slice split_once; find the first ": " separator.
-        let separator = (0..line.len().saturating_sub(1)).find(|i| line[*i] == b':' && line[*i + 1] == b' ');
+        let separator =
+            (0..line.len().saturating_sub(1)).find(|i| line[*i] == b':' && line[*i + 1] == b' ');
         let Some(separator) = separator else { break };
         let name = &line[..separator];
         // An unusable name or value skips that header; extraction of the
         // remaining block continues — one bad line never erases the rest.
-        let Ok(name) = std::str::from_utf8(name) else { continue };
-        let Some(value) = header_value(&line[separator + 2..]) else { continue };
+        let Ok(name) = std::str::from_utf8(name) else {
+            continue;
+        };
+        let Some(value) = header_value(&line[separator + 2..]) else {
+            continue;
+        };
         match name.to_ascii_lowercase().as_str() {
             "host" => fields.host = Some(value),
             "user-agent" => fields.user_agent = Some(value),
@@ -372,7 +385,8 @@ mod tests {
     }
     #[test]
     fn http_fields_extract_request_and_response_headers_bounded() {
-        let request = b"GET /api/evidence HTTP/1.1\r\nHost: lab.test\r\nUser-Agent: CyberDeck/1\r\n\r\nbody";
+        let request =
+            b"GET /api/evidence HTTP/1.1\r\nHost: lab.test\r\nUser-Agent: CyberDeck/1\r\n\r\nbody";
         let fields = http_fields(request).unwrap();
         assert_eq!(fields.host.as_deref(), Some("lab.test"));
         assert_eq!(fields.user_agent.as_deref(), Some("CyberDeck/1"));

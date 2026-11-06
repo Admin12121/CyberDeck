@@ -552,8 +552,13 @@ pub fn execute_mask<P: FnMut(RecoveryProgressWire)>(
         if part.is_empty() {
             continue;
         }
-        let (slot, set) = part.split_once('=').ok_or("charset definition must be N=chars")?;
-        let slot = slot.trim().parse::<u8>().map_err(|_| "charset slot must be 1-9")?;
+        let (slot, set) = part
+            .split_once('=')
+            .ok_or("charset definition must be N=chars")?;
+        let slot = slot
+            .trim()
+            .parse::<u8>()
+            .map_err(|_| "charset slot must be 1-9")?;
         if !(b'1'..=b'9').contains(&slot) || set.len() > 256 {
             return Err("charset slot must be 1-9 with at most 256 ASCII bytes".into());
         }

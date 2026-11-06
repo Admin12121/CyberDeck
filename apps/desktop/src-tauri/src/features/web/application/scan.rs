@@ -21,19 +21,31 @@ const INTERESTING_PATHS: &[(&str, &str)] = &[
     ),
     ("/.env", ".env file exposed: secrets leak"),
     ("/.git/HEAD", ".git directory exposed: source leak"),
-    ("/.git/config", ".git configuration exposed: remote and branch metadata"),
+    (
+        "/.git/config",
+        ".git configuration exposed: remote and branch metadata",
+    ),
     ("/.svn/entries", ".svn directory exposed: source leak"),
     ("/.DS_Store", "Finder metadata exposed: file name leak"),
     ("/WEB-INF/web.xml", "Java web deployment descriptor exposed"),
-    ("/actuator/env", "Spring Actuator environment exposed: configuration leak"),
-    ("/actuator/health", "Spring Actuator health endpoint reachable"),
+    (
+        "/actuator/env",
+        "Spring Actuator environment exposed: configuration leak",
+    ),
+    (
+        "/actuator/health",
+        "Spring Actuator health endpoint reachable",
+    ),
     ("/swagger-ui.html", "API documentation UI reachable"),
     ("/openapi.json", "OpenAPI description exposed"),
     ("/phpmyadmin", "phpMyAdmin reachable"),
     ("/wp-login.php", "WordPress login reachable"),
     ("/admin", "/admin responded; review authentication"),
     ("/phpinfo.php", "PHP configuration page exposed"),
-    ("/server-status", "Apache server-status reachable: request metadata leak"),
+    (
+        "/server-status",
+        "Apache server-status reachable: request metadata leak",
+    ),
     ("/elmah.axd", "ELMAH error log handler reachable"),
     ("/backup.zip", "archive backup exposed"),
     ("/backup.sql", "database dump exposed"),
@@ -227,7 +239,8 @@ pub(super) async fn run_scan_with_progress(
                 findings.push(Finding {
                     severity: "info".to_string(),
                     title: "server banner disclosed".to_string(),
-                    detail: "the Server header reveals software and version; suppress it".to_string(),
+                    detail: "the Server header reveals software and version; suppress it"
+                        .to_string(),
                     evidence: format!("server: {server}"),
                 });
             }
@@ -286,7 +299,11 @@ pub(super) async fn run_scan_with_progress(
         {
             let diagnostic: Vec<&str> = ["TRACE", "CONNECT"]
                 .into_iter()
-                .filter(|verb| allow.split(',').any(|m| m.trim().eq_ignore_ascii_case(verb)))
+                .filter(|verb| {
+                    allow
+                        .split(',')
+                        .any(|m| m.trim().eq_ignore_ascii_case(verb))
+                })
                 .collect();
             if !diagnostic.is_empty() {
                 findings.push(Finding {
@@ -441,7 +458,9 @@ mod cors_probe_tests {
     #[test]
     fn login_redirect_and_rejection_detection_is_bounded() {
         assert!(redirects_to_login(Some("/login?next=/admin")));
-        assert!(redirects_to_login(Some("https://id.example.test/sso/start")));
+        assert!(redirects_to_login(Some(
+            "https://id.example.test/sso/start"
+        )));
         assert!(redirects_to_login(Some("/account/login")));
         assert!(!redirects_to_login(Some("/dashboard")));
         assert!(!redirects_to_login(None));

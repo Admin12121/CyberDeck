@@ -75,7 +75,10 @@ impl std::fmt::Display for HpackError {
                 write!(f, "HPACK integer at byte {at} exceeds the decoding bound")
             }
             Self::InvalidIndex { index } => {
-                write!(f, "HPACK index {index} is outside the decodable table range")
+                write!(
+                    f,
+                    "HPACK index {index} is outside the decodable table range"
+                )
             }
         }
     }
@@ -174,9 +177,10 @@ fn decode_integer(
     }
     let mut shift = 0u32;
     loop {
-        let byte = *block
-            .get(*pos)
-            .ok_or(HpackError::Truncated { detail: "integer", at: *pos })?;
+        let byte = *block.get(*pos).ok_or(HpackError::Truncated {
+            detail: "integer",
+            at: *pos,
+        })?;
         *pos += 1;
         value += u64::from(byte & 0x7f) << shift;
         shift += 7;
@@ -203,22 +207,34 @@ fn decode_string(
     pos: &mut usize,
     field: &'static str,
 ) -> Result<RawString, HpackError> {
-    let first = *block
-        .get(*pos)
-        .ok_or(HpackError::Truncated { detail: "string", at: *pos })?;
+    let first = *block.get(*pos).ok_or(HpackError::Truncated {
+        detail: "string",
+        at: *pos,
+    })?;
     *pos += 1;
     let huffman = first & 0x80 != 0;
     let length = decode_integer(block, pos, first & 0x7f, 7)?;
     if length > MAX_VALUE_BYTES as u64 {
-        return Err(HpackError::StringTooLong { field, size: length, max: MAX_VALUE_BYTES });
+        return Err(HpackError::StringTooLong {
+            field,
+            size: length,
+            max: MAX_VALUE_BYTES,
+        });
     }
     let length = length as usize;
     if length > block.len().saturating_sub(*pos) {
-        return Err(HpackError::Truncated { detail: "string", at: *pos });
+        return Err(HpackError::Truncated {
+            detail: "string",
+            at: *pos,
+        });
     }
     let bytes = block[*pos..*pos + length].to_vec();
     *pos += length;
-    Ok(if huffman { RawString::Huffman } else { RawString::Plain(bytes) })
+    Ok(if huffman {
+        RawString::Huffman
+    } else {
+        RawString::Plain(bytes)
+    })
 }
 
 /// Render a decoded string for display. Plain bytes that are not valid UTF-8
@@ -269,7 +285,10 @@ fn push_indexed(headers: &mut Vec<(String, String)>, index: u64) -> Result<(), H
     if let Some((name, value)) = static_entry(index) {
         headers.push((name.to_owned(), value.to_owned()));
     } else {
-        headers.push((format!("dynamic table entry {index}"), "(state unavailable)".into()));
+        headers.push((
+            format!("dynamic table entry {index}"),
+            "(state unavailable)".into(),
+        ));
     }
     Ok(())
 }
@@ -289,7 +308,10 @@ pub fn decode_header_block(
     max_headers: usize,
 ) -> Result<Vec<(String, String)>, HpackError> {
     if block.len() > MAX_BLOCK_BYTES {
-        return Err(HpackError::BlockTooLarge { size: block.len(), max: MAX_BLOCK_BYTES });
+        return Err(HpackError::BlockTooLarge {
+            size: block.len(),
+            max: MAX_BLOCK_BYTES,
+        });
     }
     let max_headers = max_headers.min(MAX_HEADERS);
     let mut headers = Vec::new();
@@ -342,7 +364,10 @@ mod tests {
     #[test]
     fn c1_integer_encoding_1337_with_continuations() {
         let mut pos = 1;
-        assert_eq!(decode_integer(&[0x1f, 0x9a, 0x0a], &mut pos, 0x1f, 5).unwrap(), 1337);
+        assert_eq!(
+            decode_integer(&[0x1f, 0x9a, 0x0a], &mut pos, 0x1f, 5).unwrap(),
+            1337
+        );
         assert_eq!(pos, 3);
     }
 
@@ -359,7 +384,10 @@ mod tests {
     #[test]
     fn integer_256_needs_one_continuation_byte() {
         let mut pos = 1;
-        assert_eq!(decode_integer(&[0x7f, 0x81, 0x01], &mut pos, 0x7f, 7).unwrap(), 256);
+        assert_eq!(
+            decode_integer(&[0x7f, 0x81, 0x01], &mut pos, 0x7f, 7).unwrap(),
+            256
+        );
         assert_eq!(pos, 3);
     }
 
@@ -463,7 +491,10 @@ mod tests {
         // 0xbe = 1xxxxxxx, index 62: the first dynamic-table entry.
         assert_eq!(
             decode_header_block(&[0xbe], MAX_HEADERS).unwrap(),
-            vec![("dynamic table entry 62".to_owned(), "(state unavailable)".to_owned())]
+            vec![(
+                "dynamic table entry 62".to_owned(),
+                "(state unavailable)".to_owned()
+            )]
         );
     }
 
@@ -490,7 +521,10 @@ mod tests {
     #[test]
     fn dynamic_table_size_update_is_consumed_without_output() {
         // 0x3f 0x0a: 5-bit prefix all-ones + continuation 10 -> size 41.
-        assert_eq!(decode_header_block(&[0x3f, 0x0a], MAX_HEADERS).unwrap(), vec![]);
+        assert_eq!(
+            decode_header_block(&[0x3f, 0x0a], MAX_HEADERS).unwrap(),
+            vec![]
+        );
     }
 
     /// A block cut mid-field is refused, not guessed: missing integer
@@ -501,22 +535,34 @@ mod tests {
         // Indexed instruction whose integer continuation never arrives.
         assert_eq!(
             decode_header_block(&[0xff], MAX_HEADERS),
-            Err(HpackError::Truncated { detail: "integer", at: 1 })
+            Err(HpackError::Truncated {
+                detail: "integer",
+                at: 1
+            })
         );
         // Literal instruction announcing a string that never arrives.
         assert_eq!(
             decode_header_block(&[0x40, 0x0a, b'a'], MAX_HEADERS),
-            Err(HpackError::Truncated { detail: "string", at: 2 })
+            Err(HpackError::Truncated {
+                detail: "string",
+                at: 2
+            })
         );
         // Literal instruction whose string length byte is missing.
         assert_eq!(
             decode_header_block(&[0x40], MAX_HEADERS),
-            Err(HpackError::Truncated { detail: "string", at: 1 })
+            Err(HpackError::Truncated {
+                detail: "string",
+                at: 1
+            })
         );
         // Declared string length runs past the end of the block.
         assert_eq!(
             decode_header_block(&[0x00, 0x8a, b'a', b'b', b'c'], MAX_HEADERS),
-            Err(HpackError::Truncated { detail: "string", at: 2 })
+            Err(HpackError::Truncated {
+                detail: "string",
+                at: 2
+            })
         );
     }
 
@@ -547,21 +593,32 @@ mod tests {
         let big = vec![0u8; MAX_BLOCK_BYTES + 1];
         assert_eq!(
             decode_header_block(&big, MAX_HEADERS),
-            Err(HpackError::BlockTooLarge { size: big.len(), max: MAX_BLOCK_BYTES })
+            Err(HpackError::BlockTooLarge {
+                size: big.len(),
+                max: MAX_BLOCK_BYTES
+            })
         );
         // A name of 257 bytes (127 + 2 + 1*128) is refused.
         let mut long_name = vec![0x00, 0x7f, 0x82, 0x01];
         long_name.extend(std::iter::repeat(b'a').take(257));
         assert_eq!(
             decode_header_block(&long_name, MAX_HEADERS),
-            Err(HpackError::StringTooLong { field: "name", size: 257, max: MAX_NAME_BYTES })
+            Err(HpackError::StringTooLong {
+                field: "name",
+                size: 257,
+                max: MAX_NAME_BYTES
+            })
         );
         // A value of 300 bytes (127 + 45 + 1*128) is refused.
         let mut long_value = vec![0x00, 0x03, b'a', b'b', b'c', 0x7f, 0xad, 0x01];
         long_value.extend(std::iter::repeat(b'v').take(300));
         assert_eq!(
             decode_header_block(&long_value, MAX_HEADERS),
-            Err(HpackError::StringTooLong { field: "value", size: 300, max: MAX_VALUE_BYTES })
+            Err(HpackError::StringTooLong {
+                field: "value",
+                size: 300,
+                max: MAX_VALUE_BYTES
+            })
         );
     }
 
@@ -601,7 +658,10 @@ mod tests {
         assert_eq!(STATIC_TABLE[60], ("www-authenticate", ""));
         // Every index 1..=61 resolves; index 62 does not.
         for index in 1..=61u64 {
-            assert!(static_entry(index).is_some(), "static index {index} missing");
+            assert!(
+                static_entry(index).is_some(),
+                "static index {index} missing"
+            );
         }
         assert!(static_entry(62).is_none());
     }

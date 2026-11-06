@@ -1,8 +1,8 @@
 //! Bounded TCP and UDP metadata, payload and passive application hints.
 use super::link::{color_for, empty_frame};
-use super::{http2, quic};
 use super::protocol;
 use super::protocol::HttpFields;
+use super::{http2, quic};
 use crate::{dns, Dissected, Layer, TcpMeta};
 
 fn well_known_name(proto: u8, src_port: u16, dst_port: u16) -> &'static str {
@@ -112,21 +112,42 @@ pub(super) fn dissect_tcp(
         // Header fields come from the same captured segment as the start
         // line; a segment boundary ends extraction without inventing data.
         if let Some(fields) = protocol::http_fields(&payload) {
-            let HttpFields { host, user_agent, status_code, content_type, location } = fields;
+            let HttpFields {
+                host,
+                user_agent,
+                status_code,
+                content_type,
+                location,
+            } = fields;
             if let Some(host) = host {
-                layers.push(Layer { label: "HTTP Host".into(), value: host });
+                layers.push(Layer {
+                    label: "HTTP Host".into(),
+                    value: host,
+                });
             }
             if let Some(agent) = user_agent {
-                layers.push(Layer { label: "HTTP User-Agent".into(), value: agent });
+                layers.push(Layer {
+                    label: "HTTP User-Agent".into(),
+                    value: agent,
+                });
             }
             if let Some(code) = status_code {
-                layers.push(Layer { label: "HTTP status".into(), value: code.to_string() });
+                layers.push(Layer {
+                    label: "HTTP status".into(),
+                    value: code.to_string(),
+                });
             }
             if let Some(kind) = content_type {
-                layers.push(Layer { label: "HTTP Content-Type".into(), value: kind });
+                layers.push(Layer {
+                    label: "HTTP Content-Type".into(),
+                    value: kind,
+                });
             }
             if let Some(target) = location {
-                layers.push(Layer { label: "HTTP Location".into(), value: target });
+                layers.push(Layer {
+                    label: "HTTP Location".into(),
+                    value: target,
+                });
             }
         }
     }

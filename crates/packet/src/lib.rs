@@ -2,26 +2,27 @@
 //! Guard rails: length fields validated, malformed tails flagged.
 
 pub mod active_arp;
-pub mod active_scan_types;
-pub mod arp_watch;
 pub mod active_echo;
 pub mod active_echo6;
 pub mod active_ndp;
+pub mod active_scan_types;
 pub mod active_syn;
 pub mod active_syn6;
 pub mod application;
+pub mod arp_watch;
 pub mod dns;
+pub mod dns_monitor;
 pub mod domain;
 pub mod fragments;
-pub mod infrastructure;
-pub mod dns_monitor;
-pub mod pcap_write;
-pub mod os_hints;
-pub mod pcapng_write;
-pub mod inventory;
 pub mod hpack;
+pub mod infrastructure;
+pub mod inventory;
 pub mod lab_events;
+pub mod lab_report;
 pub mod live;
+pub mod os_hints;
+pub mod pcap_write;
+pub mod pcapng_write;
 pub mod scan_packets;
 pub mod scan_replies;
 pub mod service_checks;

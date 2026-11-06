@@ -536,7 +536,6 @@ pub async fn netscan_icmp6_discover_v1(
     }
 }
 
-
 /// Scoped, operator-confirmed IPv6 ICMP traceroute. Mirrors the IPv4 flow:
 /// single-lease gate, saved-case scope, native confirmation, bounded hops,
 /// findings persisted. Linux only (raw ICMPv6 + AF_PACKET).

@@ -5,9 +5,9 @@ use crate::features::shared::session::{CaseSessionCtx, CaseSessionWire};
 use cyberdeck_packet::application::live_session::{
     CapturePage, CaptureSessionManager, CaptureStatus, FramePage, Phase,
 };
-use cyberdeck_packet::PacketMeta;
 use cyberdeck_packet::inventory::{FlowObservation, HostObservation};
 use cyberdeck_packet::live::{self, CaptureInterface, CaptureLimits, FrameProvenance};
+use cyberdeck_packet::PacketMeta;
 use cyberdeck_storage::NetworkCaptureSource;
 use serde::Deserialize;
 use serde::Serialize;
@@ -347,9 +347,10 @@ pub async fn capture_start_v1(
         #[cfg(target_os = "linux")]
         let parsed_filter = match filter.as_deref() {
             None | Some("") => None,
-            Some(text) => Some(live::CaptureFilter::parse(text).map_err(|e| {
-                format!("{:?}: {}", e.code, e.message)
-            })?),
+            Some(text) => Some(
+                live::CaptureFilter::parse(text)
+                    .map_err(|e| format!("{:?}: {}", e.code, e.message))?,
+            ),
         };
         let status = capture
             .manager

@@ -185,7 +185,9 @@ fn decode_rdata(packet: &[u8], start: usize, end: usize, kind: u16) -> Option<St
             }
             let serial = read_u32(packet, after_rname)?;
             let minimum = read_u32(packet, after_rname + 16)?;
-            Some(format!("{mname} {rname} serial={serial} minimum={minimum}s"))
+            Some(format!(
+                "{mname} {rname} serial={serial} minimum={minimum}s"
+            ))
         }
         16 => {
             let mut pos = 0usize;
