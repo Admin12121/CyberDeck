@@ -33,7 +33,7 @@ test("static table covers all 61 RFC 7541 Appendix A entries", () => {
 
 test("dynamic-table references degrade honestly, never guessed", () => {
   assert.match(hpackSource, /dynamic table entry \{index\} \(state unavailable\)/);
-  assert.match(hpackSource, /dynamic table entry \{index\}"\), "\(state unavailable\)"/);
+  assert.match(hpackSource, /dynamic table entry \{index\} \(state unavailable\)"/);
   // The unavailable marker must appear as the indexed-refusal value too.
   assert.match(hpackSource, /"\(state unavailable\)"/);
 });

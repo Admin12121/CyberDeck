@@ -173,7 +173,7 @@ test("NSE-lite checks are a bounded registry over probe evidence, never a script
   const canonical = read("../../../lib/ipc.ts");
   const view = read("ScanView.tsx");
   // Fixed registry with a hard cap: no user-supplied scripts, no eval.
-  assert.match(registry, /static REGISTRY: \[CheckDefinition; 8\]/);
+  assert.match(registry, /static REGISTRY: \[CheckDefinition; 13\]/);
   assert.match(registry, /MAX_CHECKS: usize = 16/);
   assert.match(registry, /MAX_FINDINGS: usize = 16/);
   // No dynamic code evaluation primitives anywhere in the registry.
