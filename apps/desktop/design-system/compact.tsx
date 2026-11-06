@@ -13,9 +13,9 @@ import type { ReactNode } from "react";
 import { Chip } from "./panes";
 
 /**
- * Horizontal icon navigation for a workspace with several modes (Bettercap
- * style). One icon + short label per mode, optional count badge, orange
- * underline marks the active mode. Keyboard focusable; `ariaLabel` per item.
+ * Compact icon-only mode rail (Bettercap style): left-aligned square pills,
+ * icon per mode, tooltip = label, active = orange pill background. Deliberately
+ * NOT a tab bar: no full-width stretch, no underline, no labels underneath.
  */
 export function IconRail({
   items,
@@ -29,7 +29,7 @@ export function IconRail({
   ariaLabel: string;
 }) {
   return (
-    <nav aria-label={ariaLabel} className="flex shrink-0 items-stretch gap-0 overflow-x-auto border-b border-line bg-panel">
+    <div role="toolbar" aria-label={ariaLabel} className="flex shrink-0 items-center gap-1 px-2 py-1.5">
       {items.map((item) => {
         const activeItem = item.id === active;
         return (
@@ -40,24 +40,22 @@ export function IconRail({
             aria-pressed={activeItem}
             aria-label={item.label}
             title={item.label}
-            className={`relative flex min-w-16 flex-col items-center gap-0.5 px-3 py-2 text-[10px] leading-tight transition-colors focus-visible:outline focus-visible:outline-1 focus-visible:outline-ring ${
-              activeItem ? "text-fg" : "text-fg-muted hover:text-fg-dim"
+            className={`relative inline-flex h-8 w-8 items-center justify-center rounded-md transition-colors focus-visible:outline focus-visible:outline-1 focus-visible:outline-ring ${
+              activeItem
+                ? "bg-orange/15 text-orange"
+                : "text-fg-muted hover:bg-raised hover:text-fg-dim"
             }`}
           >
-            <span className="relative">
-              <item.icon size={17} strokeWidth={activeItem ? 2 : 1.5} />
-              {item.badge !== undefined && item.badge !== 0 && item.badge !== "" ? (
-                <span className="absolute -right-2 -top-1.5 min-w-3.5 rounded-full bg-err px-1 text-center font-mono text-[9px] leading-3.5 text-white">
-                  {item.badge}
-                </span>
-              ) : null}
-            </span>
-            <span className="whitespace-nowrap">{item.label}</span>
-            {activeItem ? <span className="absolute inset-x-2 bottom-0 h-0.5 bg-orange" /> : null}
+            <item.icon size={15} strokeWidth={activeItem ? 2 : 1.5} />
+            {item.badge !== undefined && item.badge !== 0 && item.badge !== "" ? (
+              <span className="absolute -right-1 -top-1 min-w-3.5 rounded-full bg-err px-1 text-center font-mono text-[9px] leading-3.5 text-white">
+                {item.badge}
+              </span>
+            ) : null}
           </button>
         );
       })}
-    </nav>
+    </div>
   );
 }
 

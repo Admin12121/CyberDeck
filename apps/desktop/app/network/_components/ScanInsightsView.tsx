@@ -13,12 +13,11 @@
  * screen shows controls and results, not text walls.
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { useRouter } from "next/navigation";
-import { FolderPlus, GitCompare, Network, Play } from "lucide-react";
-import { Chip, EmptyState, Select, ToolButton } from "@ds/panes";
+import { GitCompare, Network, Play } from "lucide-react";
+import { Chip, EmptyState, Select } from "@ds/panes";
 import { IconRail, IconButton, InfoTip, StatusStrip } from "@ds/compact";
 import {
-  caseCreate, isDesktop, netscanHistory, netscanDiffV1, netscanTopologyV1,
+  isDesktop, netscanHistory, netscanDiffV1, netscanTopologyV1,
   type ScanHistoryItemWire, type ScanDiffWire, type ScanTopologyWire,
 } from "@lib/ipc";
 import { useWorkbench, useWorkbenchCase } from "@state/workbench";
@@ -60,46 +59,21 @@ const MODE_RAIL_ITEMS = [
  */
 function CaseGate({ activity }: { activity: string }) {
   const { caseId, caseSession, setCaseId } = useWorkbenchCase();
-  const router = useRouter();
-  const [creating, setCreating] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const create = async () => {
-    if (!isDesktop() || creating) return;
-    setCreating(true);
-    setError(null);
-    try {
-      const record = await caseCreate(
-        activity + " · " + new Date().toLocaleString(),
-        "Investigation created explicitly before " + activity.toLowerCase(),
-      );
-      // The shared workbench performs the authoritative native session selection.
-      setCaseId(record.id);
-    } catch (reason) {
-      setError(reason instanceof Error ? reason.message : String(reason));
-    } finally {
-      setCreating(false);
-    }
-  };
   return (
-    <div className="flex shrink-0 flex-wrap items-center gap-2 border-b border-line bg-panel px-2 py-1.5" role="status">
-      <span className="text-xs font-medium text-fg">
-        {caseId === "scratchpad" ? "Select or create an investigation case" : "Waiting for the selected investigation"}
+    <div className="flex shrink-0 items-center gap-2 px-3 py-1.5" role="status">
+      <span className="text-xs text-fg-muted">
+        {caseId === "scratchpad"
+          ? "No case selected — pick one in the Case section"
+          : "Waiting for the selected investigation"}
       </span>
       <InfoTip
-        text={activity + " requires a saved case so results, permissions and evidence stay isolated. Creating a case does not begin an active operation."}
+        text={activity + " needs a saved case so results, permissions and evidence stay isolated. Cases are managed in the Case section, not here."}
       />
-      <span className="flex-1" />
-      <ToolButton onClick={() => void create()} disabled={!isDesktop() || creating} title="Create a saved investigation case and select it">
-        <FolderPlus size={13} strokeWidth={1.5} aria-hidden="true" />
-        {creating ? "Creating case…" : "Create case"}
-      </ToolButton>
-      <ToolButton onClick={() => router.push("/cases")} title="Pick an existing investigation case">
-        Choose existing
-      </ToolButton>
       {caseSession.phase === "error" && caseSession.error
-        ? <span role="alert" className="w-full font-mono text-[10px] text-err">{caseSession.error}</span>
+        ? <span role="alert" className="font-mono text-[10px] text-err">{caseSession.error}</span>
         : null}
-      {error ? <span role="alert" className="w-full font-mono text-[10px] text-err">{error}</span> : null}
+      {error ? <span role="alert" className="font-mono text-[10px] text-err">{error}</span> : null}
     </div>
   );
 }
@@ -270,14 +244,16 @@ export function ScanInsightsView() {
 
   return (
     <div className="flex h-full min-h-0 flex-col">
+      <div className="flex shrink-0 items-center bg-panel">
       <IconRail
         items={MODE_RAIL_ITEMS}
         active={mode}
         onChange={(id) => setMode(id as InsightsMode)}
         ariaLabel="Insights mode"
       />
+      <span className="mx-1 h-5 w-px bg-line" aria-hidden="true" />
       {mode === "diff" ? (
-        <div className="cd-workspace-toolbar shrink-0 items-center gap-2 px-2">
+        <div className="flex min-w-0 flex-1 flex-wrap items-center gap-2 py-1.5 pr-2">
           <Select
             value={baselineId}
             onChange={setBaselineId}
@@ -306,7 +282,7 @@ export function ScanInsightsView() {
           <span className="ml-auto"><InfoTip text={HONESTY_NOTE} /></span>
         </div>
       ) : (
-        <div className="cd-workspace-toolbar shrink-0 items-center gap-2 px-2">
+        <div className="flex min-w-0 flex-1 flex-wrap items-center gap-2 py-1.5 pr-2">
           <Select
             value={topologyId}
             onChange={setTopologyId}
@@ -319,11 +295,10 @@ export function ScanInsightsView() {
           <span className="ml-auto"><InfoTip text={TOPOLOGY_NOTE} /></span>
         </div>
       )}
+      </div>
       {error ? <div className="border-b border-err/50 bg-err/10 px-2 py-1 font-mono text-[10px] text-err">{error}</div> : null}
       {statusItems.some((item) => item !== null) ? (
-        <div className="shrink-0 border-b border-line bg-panel">
-          <StatusStrip items={statusItems} />
-        </div>
+        <StatusStrip items={statusItems} />
       ) : null}
       {revision === null ? <CaseGate activity="Scan insights" /> : null}
       <div className="flex min-h-0 flex-1 flex-col bg-panel">
