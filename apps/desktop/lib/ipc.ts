@@ -978,9 +978,13 @@ export async function captureInterfacesV1(): Promise<CaptureInterfaceV1[]> {
 /** Starts only after backend case selection and a native OS confirmation;
  * permission failures are returned by the native capture status. No privilege elevation.
  */
-export async function captureStartV1(interfaceName: string, limits: CaptureLimitsV1): Promise<CaptureStatusV1> {
+export async function captureStartV1(
+  interfaceName: string,
+  limits: CaptureLimitsV1,
+  filter?: string,
+): Promise<CaptureStatusV1> {
   if (!inTauri) throw new Error("Native capture requires the desktop runtime");
-  return invoke<CaptureStatusV1>("capture_start_v1", { interfaceName, limits });
+  return invoke<CaptureStatusV1>("capture_start_v1", { interfaceName, limits, filter: filter ?? null });
 }
 export async function captureStatusV1(sessionId: number): Promise<CaptureStatusV1> {
   if (!inTauri) throw new Error("Native capture requires the desktop runtime");
@@ -1064,6 +1068,8 @@ export interface PcapOpenWire {
   malformed_tail: boolean;
   file_name: string;
   packets: PcapPacketWire[];
+  /** Additive open-time summary of the bounded fragment reassembly pass. */
+  reassembly?: ReassemblySummaryWire | null;
 }
 
 export async function pcapOpenDialog(): Promise<PcapOpenWire> {
@@ -1190,6 +1196,108 @@ export async function networkLabSetScopeV1(
 export async function networkLabScopeV1(): Promise<NetworkLabScopeWire> {
   if (!inTauri) throw new Error("Lab scope status requires the desktop runtime");
   return invoke<NetworkLabScopeWire>("network_lab_scope_v1", {});
+}
+
+// --- Packet Studio export view -> case ---------------------------------------
+// Wire types mirror features/network/ipc/pcap_export.rs and pcap_wire.rs.
+
+/** Receipt for pcap_export_view_v1: identity and size only, never bytes. */
+export interface PcapExportReceiptWire {
+  artifact_id: string;
+  sha256: string;
+  byte_len: number;
+  packet_count: number;
+  file_name: string;
+}
+
+/** Additive reassembly summary on the pcap open wire (serde default: null). */
+export interface ReassemblySummaryWire {
+  datagram_count: number;
+  flagged_overlap_count: number;
+  first_datagram_ids: string[];
+}
+
+/** Mirrors the backend selection cap (MAX_CAPTURE_PACKETS in the packet crate). */
+export const PCAP_EXPORT_MAX_PACKETS = 200_000;
+
+/**
+ * Export the given packet indices of the currently opened capture as an
+ * immutable classic-PCAP case artifact. The backend re-validates everything:
+ * indices against the opened capture cache, the saved selected case, and the
+ * Ethernet/frame-size/total-size bounds of the evidence importer.
+ */
+/** PCAPNG container variant; identical gating and receipt shape. */
+export async function pcapExportViewNgV1(indices: number[]): Promise<PcapExportReceiptWire> {
+  if (!inTauri) throw new Error("case artifact export requires the desktop runtime");
+  if (indices.length === 0 || indices.length > PCAP_EXPORT_MAX_PACKETS) {
+    throw new Error("export selection must contain 1..200000 packet indices");
+  }
+  return invoke<PcapExportReceiptWire>("pcap_export_view_ng_v1", { indices });
+}
+
+export async function pcapExportViewV1(indices: number[]): Promise<PcapExportReceiptWire> {
+  if (!inTauri) throw new Error("case artifact export requires the desktop runtime");
+  if (indices.length === 0 || indices.length > PCAP_EXPORT_MAX_PACKETS) {
+    throw new Error("export selection must contain 1..200000 packet indices");
+  }
+  return invoke<PcapExportReceiptWire>("pcap_export_view_v1", { indices });
+}
+
+// --- passive OS-family hints over the opened capture --------------------------
+// Wire types mirror features/network/ipc/os_hints_ipc.rs; hints are always
+// low/very-low confidence with evidence, never verdicts.
+
+export interface OsHintWire {
+  family: string;
+  confidence: string;
+  evidence: string[];
+}
+
+export interface OsHintObservationWire {
+  source: string;
+  destination: string;
+  syn_ack: boolean;
+  hint: OsHintWire;
+}
+
+export interface OsHintsWire {
+  hints: OsHintObservationWire[];
+  /** Total handshake segments seen, including any beyond the returned cap. */
+  sampled: number;
+  /** The bound applied to `hints`; `sampled` may exceed it. */
+  cap: number;
+}
+
+/** Read-only handshake analysis of the opened capture; transmits nothing. */
+export async function captureOsHintsV1(): Promise<OsHintsWire> {
+  if (!inTauri) throw new Error("OS hints require the desktop runtime");
+  return invoke<OsHintsWire>("capture_os_hints_v1", {});
+}
+
+// --- saved scan profiles (in-memory, session-scoped) --------------------------
+// Wire types mirror features/network/ipc/scan_profiles.rs; params_json is an
+// opaque JSON object string whose schema the frontend owns.
+
+export interface ScanProfileWire {
+  name: string;
+  params_json: string;
+  created_at_ms: number;
+  updated_at_ms: number;
+}
+
+export async function netscanProfileSaveV1(name: string, paramsJson: string): Promise<ScanProfileWire> {
+  if (!inTauri) throw new Error("saving scan profiles requires the desktop runtime");
+  return invoke<ScanProfileWire>("netscan_profile_save_v1", { name, paramsJson });
+}
+
+export async function netscanProfileListV1(): Promise<ScanProfileWire[]> {
+  if (!inTauri) throw new Error("scan profiles require the desktop runtime");
+  return invoke<ScanProfileWire[]>("netscan_profile_list_v1", {});
+}
+
+export async function netscanProfileDeleteV1(name: string): Promise<boolean> {
+  if (!inTauri) throw new Error("deleting scan profiles requires the desktop runtime");
+  return invoke<boolean>("netscan_profile_delete_v1", { name });
 }
 
 // --- recovery + file digests --------------------------------------------------

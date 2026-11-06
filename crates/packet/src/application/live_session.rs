@@ -149,6 +149,19 @@ impl CaptureSessionManager {
         interface_name: &str,
         limits: CaptureLimits,
     ) -> Result<CaptureStatus, SessionError> {
+        self.start_linux_filtered(case_id, interface_name, limits, None)
+    }
+
+    /// Linux capture with an optional kernel-side filter (AF_PACKET
+    /// SO_ATTACH_FILTER). `Some` filter is validated before the session
+    /// starts so an invalid expression never opens the device.
+    pub fn start_linux_filtered(
+        &self,
+        case_id: &str,
+        interface_name: &str,
+        limits: CaptureLimits,
+        filter: Option<crate::live::CaptureFilter>,
+    ) -> Result<CaptureStatus, SessionError> {
         limits
             .validate()
             .map_err(|e| SessionError::new(SessionErrorCode::InvalidPage, e.message))?;
@@ -159,7 +172,13 @@ impl CaptureSessionManager {
         let interface = selected.name;
         let worker_interface = interface.clone();
         self.start_with(case_id, &interface, move |cancel, progress| {
-            live::capture_linux_with_progress(&worker_interface, &limits, &cancel, progress)
+            live::capture_linux_with_progress_filtered(
+                &worker_interface,
+                filter.as_ref(),
+                &limits,
+                &cancel,
+                progress,
+            )
         })
     }
 

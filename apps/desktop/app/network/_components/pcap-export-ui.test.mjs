@@ -13,7 +13,10 @@ import { fileURLToPath } from "node:url";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const studioSource = readFileSync(join(here, "PacketStudioView.tsx"), "utf8");
-const pendingClientSource = readFileSync(join(here, "pcap-export-ipc.ts"), "utf8");
+// The canonical invoke client + wire types live in lib/ipc.ts; the local
+// module re-exports them and keeps only pure helpers.
+const pendingClientSource = readFileSync(join(here, "../../../lib/ipc.ts"), "utf8");
+const helperSource = readFileSync(join(here, "pcap-export-ipc.ts"), "utf8");
 const exportCommandSource = readFileSync(
   join(here, "../../../src-tauri/src/features/network/ipc/pcap_export.rs"),
   "utf8",
@@ -41,17 +44,20 @@ test("offline toolbar carries the Export view -> case control, gated and busy-la
     studioSource,
     /disabled=\{!capture \|\| exporting \|\| !savedCaseReady\}/,
   );
-  assert.match(studioSource, /exporting \? "exporting…" : "Export view → case"/);
+  assert.match(studioSource, /"Export view → case \(PCAP\)"/);
+  assert.match(studioSource, /"Export view → case \(PCAPNG\)"/);
   // The honest reason is visible via the tooltip for each disabled state.
   assert.match(studioSource, /Select a saved case to export the view into/);
   assert.match(studioSource, /Open a capture to export its filtered view/);
 });
 
 test("export sends the currently FILTERED packet indices and renders a result chip", () => {
-  const handler = /const exportView = async \(\) => \{([\s\S]*?)\n  \};/.exec(studioSource);
+  const handler = /const exportView = async \(format: "pcap" \| "pcapng"\) => \{([\s\S]*?)\n  \};/.exec(studioSource);
   assert.ok(handler, "exportView handler missing from PacketStudioView.tsx");
   assert.match(handler[1], /if \(!capture\) return;/);
-  assert.match(handler[1], /pcapExportViewV1\(filtered\.map\(\(packet\) => packet\.index\)\)/);
+  assert.match(handler[1], /const indices = filtered\.map\(\(packet\) => packet\.index\)/);
+  assert.match(handler[1], /format === "pcapng"\s*\? await pcapExportViewNgV1\(indices\)/);
+  assert.match(handler[1], /: await pcapExportViewV1\(indices\)/);
   // The chip reports the exported count plus a short artifact id only —
   // never a stored path, file bytes or a case secret.
   const chip = /\{exportResult \? \(\s*<Chip tone="ok">([\s\S]*?)<\/Chip>\s*\) : null\}/.exec(studioSource);
@@ -134,7 +140,7 @@ test("opened captures surface a dismissible fragment-reassembly banner", () => {
 });
 
 test("banner text summarizes count, overlap conflicts and first datagram ids", () => {
-  const helper = /export function reassemblyBannerText\([\s\S]*?\n\}/.exec(pendingClientSource);
+  const helper = /export function reassemblyBannerText\([\s\S]*?\n\}/.exec(helperSource);
   assert.ok(helper, "reassemblyBannerText helper missing");
   assert.match(helper[0], /summary\.datagram_count/);
   assert.match(helper[0], /summary\.flagged_overlap_count/);

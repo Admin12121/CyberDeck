@@ -7,7 +7,8 @@
 use crate::features::forensics::ipc::evidence::EvidenceCtx;
 use crate::features::shared::session::{CaseSessionCtx, CaseSessionWire};
 use cyberdeck_packet::{
-    pcap_write, PCAP_MAGIC_BE_NSEC, PCAP_MAGIC_LE_NSEC, MAX_CAPTURE_PACKETS,
+    pcap_write, pcapng_write, PCAP_MAGIC_BE_NSEC, PCAP_MAGIC_LE_NSEC,
+    MAX_CAPTURE_PACKETS,
 };
 use cyberdeck_storage::{NetworkCaptureSource, MAX_ORIGINAL_PCAP_BYTES};
 use serde::Serialize;
@@ -205,5 +206,105 @@ pub fn pcap_export_view_v1(
         byte_len: record.size,
         packet_count,
         file_name: format!("packet-studio-export-{packet_count}.pcap"),
+    })
+}
+
+/// PCAPNG variant of [`pcap_export_view_v1`]: identical gating, selection
+/// validation and evidence pipeline; the container is the native writer's
+/// single-section output (SHB + one microsecond IDB + EPBs), which the
+/// bundled reader parses back identically.
+#[tauri::command]
+pub fn pcap_export_view_ng_v1(
+    indices: Vec<u32>,
+    session: State<'_, CaseSessionCtx>,
+    evidence: State<'_, EvidenceCtx>,
+    ctx: State<'_, PcapCtx>,
+) -> Result<ExportReceiptWire, String> {
+    let (scope, case_id) = selected_saved_case(&session)?;
+    let guard = ctx
+        .current
+        .lock()
+        .map_err(|_| "capture cache unavailable".to_string())?;
+    let capture = guard.as_ref().ok_or("no capture is open")?;
+    if capture.linktype != ETHERNET_LINKTYPE {
+        return Err(
+            "only Ethernet captures can be exported as case artifacts this arc".into(),
+        );
+    }
+
+    let mut indices = indices;
+    indices.sort_unstable();
+    indices.dedup();
+    if indices.is_empty() {
+        return Err("select at least one packet before exporting".into());
+    }
+    if indices.len() > MAX_CAPTURE_PACKETS {
+        return Err(format!(
+            "export selection exceeds the {} record capture limit",
+            MAX_CAPTURE_PACKETS
+        ));
+    }
+
+    let nanosecond = subsecond_unit_is_nanoseconds(&capture.bytes);
+    let mut records: Vec<(u32, u32, &[u8])> = Vec::with_capacity(indices.len());
+    for index in &indices {
+        let meta = &capture.packets[*index as usize];
+        let end = meta
+            .offset
+            .checked_add(meta.incl_len)
+            .ok_or("capture bytes truncated")?;
+        let frame = capture
+            .bytes
+            .get(meta.offset..end)
+            .ok_or("capture bytes truncated")?;
+        if meta.incl_len == 0 {
+            return Err(format!("capture frame {} is empty; export refused", index));
+        }
+        let ts_sec = u32::try_from(meta.ts_sec).unwrap_or(u32::MAX);
+        let micro = if nanosecond {
+            meta.ts_subsec / 1_000
+        } else {
+            meta.ts_subsec
+        };
+        records.push((ts_sec, micro, frame));
+    }
+    let pcapng_bytes = pcapng_write::write_pcapng(capture.linktype, &records)
+        .map_err(|error| format!("pcapng export refused: {error}"))?;
+
+    // EPB payload offsets: SHB (28) + IDB (32), then per block a 28-byte
+    // header before the frame and a 4-byte trailer after the padded payload.
+    let mut frame_offsets: Vec<usize> = Vec::with_capacity(records.len());
+    let mut cursor = 28usize + 32usize;
+    for (_, _, frame) in &records {
+        let padded = frame.len().saturating_add(3) & !3;
+        frame_offsets.push(cursor + 28);
+        cursor = cursor
+            .checked_add(28)
+            .and_then(|c| c.checked_add(padded))
+            .and_then(|c| c.checked_add(4))
+            .ok_or("export size overflowed the addressable range")?;
+    }
+
+    let source = NetworkCaptureSource {
+        session_id: EXPORT_PROVENANCE_SESSION,
+        interface: EXPORT_PROVENANCE_INTERFACE,
+        frame_offsets: &frame_offsets,
+        bytes: &pcapng_bytes,
+    };
+    let store = evidence
+        .store
+        .lock()
+        .map_err(|_| "case evidence store unavailable")?;
+    let record = session.with_current_publication(&scope, || {
+        store.import_original_network_capture(&evidence.artifacts_dir, &case_id, &source)
+    })?;
+    let packet_count = records.len();
+    drop(store);
+    Ok(ExportReceiptWire {
+        artifact_id: record.id,
+        sha256: record.sha256,
+        byte_len: record.size,
+        packet_count,
+        file_name: format!("packet-studio-export-{packet_count}.pcapng"),
     })
 }

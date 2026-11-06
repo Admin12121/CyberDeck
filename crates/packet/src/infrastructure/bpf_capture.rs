@@ -82,6 +82,10 @@ const fn iowr<T>(group: u8, num: u8) -> c_ulong {
 const BIOCSBLEN: c_ulong = iowr::<u32>(b'B', 102);
 const BIOCGBLEN: c_ulong = ior::<u32>(b'B', 102);
 const BIOCGDLT: c_ulong = ior::<u32>(b'B', 106);
+/// Install a kernel filter program (struct bpf_program: u32 len + pointer).
+/// Darwin encodes BIOCSETF as _IOW('B', 103, struct bpf_program); 111 is
+/// BIOCGSTATS and would read statistics instead of installing the program.
+const BIOCSSETF: c_ulong = iow::<BpfProgramRaw>(b'B', 103);
 const BIOCSETIF: c_ulong = iow::<IfReq>(b'B', 108);
 const BIOCIMMEDIATE: c_ulong = iow::<u32>(b'B', 112);
 const FIONREAD: c_ulong = ior::<c_int>(b'f', 127);
@@ -684,6 +688,59 @@ pub fn capture_with_progress(
     capture_from_with_progress(&mut device, selected, limits, cancel, progress)
 }
 
+/// Kernel-side classic BPF program: `struct bpf_program` in sys/net/bpf.h.
+/// The instruction layout is shared with Linux's sock_filter, so the same
+/// builder output serves both backends.
+#[repr(C)]
+struct BpfProgramRaw {
+    bf_len: u32,
+    bf_insns: *const crate::live::BpfInstruction,
+}
+
+impl BpfDevice {
+    /// Install a classic BPF filter program (BIOCSSETF) so the kernel drops
+    /// non-matching frames before the bounded engine ever sees them. The
+    /// program must come from `CaptureFilter::to_bpf_program`, whose
+    /// predicate is cross-checked by the in-module interpreter tests.
+    fn set_filter(&self, program: &[crate::live::BpfInstruction]) -> Result<(), CaptureError> {
+        let len = u32::try_from(program.len())
+            .map_err(|_| CaptureError::new(CaptureErrorCode::InvalidConfig, "filter program too large"))?;
+        let raw = BpfProgramRaw {
+            bf_len: len,
+            bf_insns: program.as_ptr(),
+        };
+        if unsafe { ioctl(self.device.as_raw_fd(), BIOCSSETF, (&raw as *const BpfProgramRaw).cast::<core::ffi::c_void>().cast_mut()) } != 0 {
+            return Err(io_error(
+                "install BPF capture filter (BIOCSSETF)",
+                io::Error::last_os_error(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// macOS capture with an optional kernel-side BPF filter installed through
+/// BIOCSSETF before the bounded engine reads its first batch. Same contract
+/// as `capture_with_progress`: one synchronous run, caller-owned
+/// cancellation, identical caps and progress events.
+pub fn capture_with_progress_filtered(
+    interface_name: &str,
+    filter: Option<&crate::live::CaptureFilter>,
+    limits: &CaptureLimits,
+    cancel: &AtomicBool,
+    progress: impl FnMut(CaptureProgress),
+) -> Result<CaptureResult, CaptureError> {
+    limits.validate()?;
+    let selected = select_interface(&discover_interfaces()?, interface_name)?;
+    let mut device = BpfDevice::open(&selected.name)?;
+    if let Some(filter) = filter {
+        // open() already refused non-Ethernet link types; the filter program
+        // additionally assumes Ethernet field offsets, so both agree.
+        device.set_filter(&filter.to_bpf_program())?;
+    }
+    capture_from_with_progress(&mut device, selected, limits, cancel, progress)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -694,6 +751,7 @@ mod tests {
     fn ioctl_request_codes_match_darwin_abi() {
         assert_eq!(BIOCSBLEN, 0xC004_4266);
         assert_eq!(BIOCGBLEN, 0x4004_4266);
+        assert_eq!(BIOCSSETF, 0x8010_4267);
         assert_eq!(BIOCGDLT, 0x4004_426A);
         assert_eq!(BIOCSETIF, 0x8020_426C);
         assert_eq!(BIOCIMMEDIATE, 0x8004_4270);
