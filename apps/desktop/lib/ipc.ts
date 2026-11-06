@@ -86,7 +86,11 @@ export type HashcatRawAlgorithmV1 =
   | "office-2007"
   | "office-2013"
   | "pdf-1.1-1.3"
-  | "pdf-1.4-1.6";
+  | "pdf-1.4-1.6"
+  | "bitcoin"
+  | "keepass"
+  | "ethereum-pbkdf2"
+  | "ethereum-scrypt";
 /** Native Rust CPU digest coverage (embedded Hashcat is raw 5 modes only). */
 export type RecoveryRawAlgorithmV1 =
   | HashcatRawAlgorithmV1

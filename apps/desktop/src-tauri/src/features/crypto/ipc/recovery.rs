@@ -848,6 +848,11 @@ fn bundled_hashcat_modes() -> Vec<EmbeddedHashcatMode> {
         ("descrypt", 1500, 0),
         ("mssql-2005", 132, 0),
         ("mssql-2012", 1731, 0),
+        // Batch-5 wallets (KeePass, Bitcoin, Ethereum).
+        ("bitcoin", 11300, 0),
+        ("keepass", 13400, 0),
+        ("ethereum-pbkdf2", 15600, 0),
+        ("ethereum-scrypt", 15700, 0),
         // Batch-4 documents (MS Office and PDF).
         ("office-97-2003", 9700, 0),
         ("office-2007", 9400, 0),

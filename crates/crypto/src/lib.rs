@@ -22,6 +22,7 @@ pub mod shadow;
 pub mod windows_auth;
 pub mod archives;
 pub mod documents;
+pub mod wallets;
 
 use base64::Engine as _;
 use hmac::{Hmac, Mac};
@@ -284,6 +285,14 @@ pub fn kdf_format(hash: &str) -> Option<&'static str> {
         Some("pdf-1.1-1.3")
     } else if hash.starts_with("$pdf$2*3*128*") || hash.starts_with("$pdf$4*4*128*") {
         Some("pdf-1.4-1.6")
+    } else if hash.starts_with("$bitcoin$") {
+        Some("bitcoin")
+    } else if hash.starts_with("$keepass$") {
+        Some("keepass")
+    } else if hash.starts_with("$ethereum$p*") {
+        Some("ethereum-pbkdf2")
+    } else if hash.starts_with("$ethereum$s*") {
+        Some("ethereum-scrypt")
     } else if hash.starts_with("WPA*01*") {
         Some("wpa-pmkid")
     } else if hash.starts_with("$NETNTLMv2$") {
@@ -441,6 +450,23 @@ pub fn verify_kdf_format(format: &str, hash: &str, candidate: &str) -> Result<bo
         }
         "pdf-1.4-1.6" => {
             let parsed = documents::PdfR34::parse(hash)?;
+            parsed.verify(candidate)
+        }
+        // Wallet containers (format batch B3).
+        "bitcoin" => {
+            let parsed = wallets::BitcoinWallet::parse(hash)?;
+            parsed.verify(candidate)
+        }
+        "keepass" => {
+            let parsed = wallets::KeePass::parse(hash)?;
+            parsed.verify(candidate)
+        }
+        "ethereum-pbkdf2" => {
+            let parsed = wallets::EthereumPbkdf2::parse(hash)?;
+            parsed.verify(candidate)
+        }
+        "ethereum-scrypt" => {
+            let parsed = wallets::EthereumScrypt::parse(hash)?;
             parsed.verify(candidate)
         }
         // Composed salted/HMAC digests carry an explicit algorithm hint; the

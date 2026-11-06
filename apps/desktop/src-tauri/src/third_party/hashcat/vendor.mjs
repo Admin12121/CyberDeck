@@ -61,7 +61,7 @@ if (mode === "--import") {
   dirFiles("include", (name) => name.endsWith(".h") || name.endsWith(".def"));
   // The complete host EMU object family uses almost all common inc_ sources,
   // not only the kernel for hash mode 1400.
-  const bundledModePrefixes = ["00000", "00010", "00020", "00050", "00060", "00100", "00110", "00120", "00132", "00400", "00500", "01100", "01400", "01500", "01700", "01731", "01800", "02100", "03200", "05500", "05600", "07400", "11600", "13600", "17200", "17210", "09400", "09600", "09700", "10400", "10500"];
+  const bundledModePrefixes = ["00000", "00010", "00020", "00050", "00060", "00100", "00110", "00120", "00132", "00400", "00500", "01100", "01400", "01500", "01700", "01731", "01800", "02100", "03200", "05500", "05600", "07400", "11600", "13600", "17200", "17210", "09400", "09600", "09700", "10400", "10500", "11300", "13400", "15600", "15700"];
   dirFiles("OpenCL", (name) => {
     if (name.endsWith(".h")) return true;
     if (!name.endsWith(".cl")) return false;
@@ -110,8 +110,14 @@ if (mode === "--import") {
   for (const mode of ["09400", "09600", "09700", "10400", "10500"]) {
     add("src/modules/module_" + mode + ".c");
   }
+  // Batch-5 wallets: KeePass KDBX v2/v3 (13400), Bitcoin wallet.dat (11300),
+  // Ethereum PBKDF2 (15600) and Ethereum scrypt (15700).
+  for (const mode of ["11300", "13400", "15600", "15700"]) {
+    add("src/modules/module_" + mode + ".c");
+  }
   // Shared module-common sources included verbatim by batch modules.
   add("src/modules/blowfish_common.c");
+  add("src/modules/scrypt_common.c");
   // Candidate-feed plugins: the wordlist reader (and siblings) are loadable
   // plugins in this hashcat; a wordlist attack cannot start without them.
   dirFiles("src/feeds", (name) => name.endsWith(".c") || name.endsWith(".h"));
@@ -125,6 +131,12 @@ if (mode === "--import") {
   // oldoffice and PDF 1.1-1.3 ship optimized-only kernel families.
   dirFiles("OpenCL", (name) =>
     /^m(09400|09600|09700|10400|10500)[-a-z0-9_]*\.cl$/.test(name));
+  // Batch-5 wallet kernels: all four wallet modes are pure-only.
+  dirFiles("OpenCL", (name) =>
+    /^m(11300|13400|15600|15700)[-a-z0-9_]*\.cl$/.test(name));
+  // Apple Metal/OpenCL extension sources pinned for macOS runtime parity.
+  add("src/ext_metal.m");
+  add("src/ext_iokit.m");
   for (const kernel of [
     "OpenCL/m00400-optimized.cl",
     "OpenCL/m00500-optimized.cl",

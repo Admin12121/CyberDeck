@@ -271,6 +271,15 @@
       "desktop_routed": true
     },
     {
+      "id": 11300,
+      "algorithm": "bitcoin",
+      "digest_hex_length": 0,
+      "source_build": true,
+      "desktop_available": false,
+      "hardware_verified": false,
+      "desktop_routed": true
+    },
+    {
       "id": 11600,
       "algorithm": "7zip",
       "digest_hex_length": 0,
@@ -280,8 +289,35 @@
       "desktop_routed": true
     },
     {
+      "id": 13400,
+      "algorithm": "keepass",
+      "digest_hex_length": 0,
+      "source_build": true,
+      "desktop_available": false,
+      "hardware_verified": false,
+      "desktop_routed": true
+    },
+    {
       "id": 13600,
       "algorithm": "winzip-aes",
+      "digest_hex_length": 0,
+      "source_build": true,
+      "desktop_available": false,
+      "hardware_verified": false,
+      "desktop_routed": true
+    },
+    {
+      "id": 15600,
+      "algorithm": "ethereum-pbkdf2",
+      "digest_hex_length": 0,
+      "source_build": true,
+      "desktop_available": false,
+      "hardware_verified": false,
+      "desktop_routed": true
+    },
+    {
+      "id": 15700,
+      "algorithm": "ethereum-scrypt",
       "digest_hex_length": 0,
       "source_build": true,
       "desktop_available": false,
