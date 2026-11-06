@@ -515,11 +515,13 @@ mod tests {
 
     #[test]
     fn byte_budget_hard_bounds_the_output_and_appends_the_marker() {
-        // Long details on the maximum event + host counts force the byte
-        // budget, not a section cap, to end the render.
-        let long_detail = "e".repeat(4_000);
+        // Per-line clamps bound every item line, so the byte budget is forced
+        // by maximum item counts with maximally wide subjects and clamped
+        // details: the events section nearly fills the budget and the host
+        // section crosses it mid-render.
+        let wide_subject = format!("10.0.0.{}", "9".repeat(57)); // 64 chars
         let events: Vec<LabEvent> = (0..MAX_REPORT_EVENTS)
-            .map(|i| event(i as u64, &format!("10.0.{i}.1"), &long_detail))
+            .map(|i| event(i as u64, &wide_subject, &"e".repeat(150)))
             .collect();
         let hosts: Vec<ArpHost> = (0..MAX_REPORT_HOSTS)
             .map(|i| host(&format!("10.1.{i}.1"), false))
@@ -527,7 +529,11 @@ mod tests {
         let report = build_report(&[], &events, &hosts, &[], 0);
         let markdown = report.render_markdown();
         assert!(markdown.len() <= MAX_REPORT_MARKDOWN_BYTES);
-        assert!(markdown.ends_with(REPORT_TRUNCATION_MARKER));
+        // The marker is the report's final line: the render stopped there.
+        assert_eq!(
+            markdown.lines().last(),
+            Some(REPORT_TRUNCATION_MARKER)
+        );
         // The budget marker is the global signal the IPC receipt checks.
         assert!(markdown.contains(REPORT_TRUNCATION_MARKER));
     }
@@ -541,10 +547,11 @@ mod tests {
         );
         let report = build_report(&[], &[hostile], &[], &[], 0);
         let markdown = report.render_markdown();
-        // The control characters never reach the output as line breaks.
+        // The control characters never reach the output as line breaks; the
+        // printable "##" stays but cannot start a forged heading line.
         assert!(!markdown.contains("injected\r"));
         assert!(!markdown.contains("\n## forged"));
-        assert!(markdown.contains("injected  forged heading with tab and é"));
+        assert!(markdown.contains("injected  ## forged heading with tab and é"));
         // Over-long details clamp with an ellipsis instead of eating budget.
         let long = event(2, "10.0.0.9", &"x".repeat(500));
         let report = build_report(&[], &[long], &[], &[], 0);
