@@ -62,7 +62,7 @@ pub struct NetworkLabAnalysisWire {
 /// Mirror the capture parser's timestamp normalization: classic pcap subsec
 /// fields are native (us or ns per magic), pcapng fractions are normalized
 /// to nanoseconds by the pcapng parser.
-fn capture_nanosecond(bytes: &[u8]) -> bool {
+pub(crate) fn capture_nanosecond(bytes: &[u8]) -> bool {
     if bytes.starts_with(&[0x0a, 0x0d, 0x0d, 0x0a]) {
         return true;
     }
@@ -76,7 +76,7 @@ fn capture_nanosecond(bytes: &[u8]) -> bool {
     )
 }
 
-fn frame_timestamp_ms(meta: &PacketMeta, nanosecond: bool) -> u64 {
+pub(crate) fn frame_timestamp_ms(meta: &PacketMeta, nanosecond: bool) -> u64 {
     let sub_ms: u32 = if nanosecond {
         meta.ts_subsec / 1_000_000
     } else {
@@ -112,7 +112,10 @@ fn layer_value<'a>(dissected: &'a Dissected, label: &str) -> Option<&'a str> {
 ///     their sender binding);
 ///   - requests without an Ethernet header (Linux SLL/raw captures), where
 ///     the sender MAC is not recoverable from the dissection.
-fn observation_from_dissected(dissected: &Dissected, timestamp_ms: u64) -> Option<ArpObservation> {
+pub(crate) fn observation_from_dissected(
+    dissected: &Dissected,
+    timestamp_ms: u64,
+) -> Option<ArpObservation> {
     if dissected.protocol != "ARP" {
         return None;
     }
@@ -152,7 +155,7 @@ fn observation_from_dissected(dissected: &Dissected, timestamp_ms: u64) -> Optio
 
 /// Pure analysis core over a cached capture (no Tauri types): the command is
 /// a thin lock-and-forward around this.
-fn analyze_capture(
+pub(crate) fn analyze_capture(
     capture: &CachedCapture,
     router_ip: Option<&str>,
 ) -> Result<NetworkLabAnalysisWire, String> {
@@ -787,7 +790,7 @@ fn dns_observation_from_dissected(
 /// Pure analysis core over a cached capture (no Tauri types): walk the
 /// packets, reduce UDP DNS summaries into observations in capture order, run
 /// the passive monitor. Same reduction style as the ARP analyzer above.
-fn dns_monitor_capture(capture: &CachedCapture) -> DnsMonitorWire {
+pub(crate) fn dns_monitor_capture(capture: &CachedCapture) -> DnsMonitorWire {
     let nanosecond = capture_nanosecond(&capture.bytes);
     let mut observations: Vec<cyberdeck_packet::dns_monitor::DnsObservation> = Vec::new();
     for meta in &capture.packets {
