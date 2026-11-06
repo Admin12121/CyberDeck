@@ -60,7 +60,7 @@ fn rc4(key: &[u8], data: &[u8]) -> Vec<u8> {
     out
 }
 
-fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+pub(crate) fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     a.len() == b.len()
         && a.iter()
             .zip(b.iter())
@@ -418,7 +418,7 @@ fn pdf_user_key(
 
 // ------------------------------------------------------------- AES helpers
 
-fn aes_decrypt_block(key: &[u8], ciphertext: &[u8]) -> Result<[u8; 16], String> {
+pub(crate) fn aes_decrypt_block(key: &[u8], ciphertext: &[u8]) -> Result<[u8; 16], String> {
     let mut block = *GenericArray::from_slice(&ciphertext[..16]);
     match key.len() {
         16 => aes::Aes128::new_from_slice(key)

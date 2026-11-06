@@ -279,6 +279,25 @@ impl RecoveryTarget {
                         }
                     }
                 }
+                "bitcoin" | "keepass" | "ethereum-pbkdf2" | "ethereum-scrypt" => {
+                    // Wallet containers (batch B3): fail-fast shape
+                    // validation; Twofish KeePass and out-of-policy scrypt
+                    // costs are rejected at parse time.
+                    match format {
+                        "bitcoin" => {
+                            super::wallets::BitcoinWallet::parse(text)?;
+                        }
+                        "keepass" => {
+                            super::wallets::KeePass::parse(text)?;
+                        }
+                        "ethereum-pbkdf2" => {
+                            super::wallets::EthereumPbkdf2::parse(text)?;
+                        }
+                        _ => {
+                            super::wallets::EthereumScrypt::parse(text)?;
+                        }
+                    }
+                }
                 "mscash" => {
                     if !text.contains('#') {
                         return Err("invalid mscash encoding".into());

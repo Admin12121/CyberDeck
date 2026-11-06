@@ -79,6 +79,7 @@ fn read_request(mut reader: impl Read) -> io::Result<Request> {
         | 1700 | 1731 | 1800 | 2100 | 3200 | 5500 | 5600 | 7400
         | 11600 | 13600 | 17200 | 17210
         | 9400 | 9600 | 9700 | 10400 | 10500
+        | 11300 | 13400 | 15600 | 15700
     ) {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,

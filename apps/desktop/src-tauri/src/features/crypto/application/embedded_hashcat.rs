@@ -141,7 +141,12 @@ pub fn runtime_available(root: &Path) -> Result<(), String> {
     // per mode instead of the a0/a1/a3 triplet.
     // Document batch (B2): Office 2007/2013 and PDF 1.4-1.6 are pure-only;
     // oldoffice and PDF 1.1-1.3 ship optimized-only kernel families.
+    // Wallet batch (B3): all four wallet modes are pure-only.
     for (mode, kernels) in [
+        (11300u32, &["m11300-pure.cl"] as &[&str]),
+        (13400, &["m13400-pure.cl"] as &[&str]),
+        (15600, &["m15600-pure.cl"] as &[&str]),
+        (15700, &["m15700-pure.cl"] as &[&str]),
         (9400u32, &["m09400-pure.cl"] as &[&str]),
         (9600, &["m09600-pure.cl"] as &[&str]),
         (
@@ -290,7 +295,15 @@ const PUBLIC_KATS: &[(u32, &str, &str)] = &[
     (9400, "hashcat", "$office$*2007*20*128*16*18410007331073848057180885845227*944c70a5ee6e5ab2a6a86ff54b5f621a*e6650f1f2630c27fd8fc0f5e56e2e01f99784b9f"),
     (9600, "hashcat", "$office$*2013*100000*256*16*67805436882475302087847656644837*0c392d3b9ca889656d1e615c54f9f3c9*612b79e33b96322c3253fc8a0f314463cd76bc4efe1352f7efffca0f374f7e4b"),
     (10400, "hashcat", "$pdf$1*2*40*-1*0*16*01221086741440841668371056103222*32*27c3fecef6d46a78eb61b8b4dbc690f5f8a2912bbb9afc842c12d79481568b74*32*0000000000000000000000000000000000000000000000000000000000000000"),
-    (10500, "hashcat", "$pdf$2*3*128*-4*1*16*62888255846156252261477183186121*32*6879919b1afd520bd3b7dbcc0868a0a500000000000000000000000000000000*32*0000000000000000000000000000000000000000000000000000000000000000"),];
+    (10500, "hashcat", "$pdf$2*3*128*-4*1*16*62888255846156252261477183186121*32*6879919b1afd520bd3b7dbcc0868a0a500000000000000000000000000000000*32*0000000000000000000000000000000000000000000000000000000000000000"),
+    // Batch-5 wallets: upstream hashcat example hashes
+    // (module ST_HASH/ST_PASS, pass "hashcat"), independently verified by
+    // the native CPU verifiers in cyberdeck-crypto/src/wallets.rs.
+    (11300, "hashcat", "$bitcoin$96$c265931309b4a59307921cf054b4ec6b6e4554369be79802e94e16477645777d948ae1d375191831efc78e5acd1f0443$16$8017214013543185$200460$96$480008005625057442352316337722323437108374245623701184230273883222762730232857701607167815448714$66$014754433300175043011633205413774877455616682000536368706315333388"),
+    (13400, "hashcat", "$keepass$*2*24569*0*c40432355cce7348c48053ceea0a28e7d18859c4ea47e3a799c6300861f64b95*265dafcc42e1537ff42e97e1e283c70014133be0fe2d420b4d24c6d57c9d2207*a00e20a852694c15aabb074d61b902fa*48dd553fb96f7996635f2414bfe6a1a8429ef0ffb71a1752abbef31853172c35*a44ae659958ad7fae8c8952cb83f3cf03fec2371ce22a8bf7fac1e687af2f249*1*64*5a26ea376cc5afc955104c334571d30486acbac512a94b75ca82a9e31dd97bf7"),
+    (15600, "hashcat", "$ethereum$p*1024*38353131353831333338313138363430*a8b4dfe92687dbc0afeb5dae7863f18964241e96b264f09959903c8c924583fc*0a9252861d1e235994ce33dbca91c98231764d8ecb4950015a8ae20d6415b986"),
+    (15700, "hashcat", "$ethereum$s*262144*8*1*3134313837333434333838303231333633373433323633373534333136363537*73da7f80ec3bd4f2a128c3a815cfb4d576ecb1a9b47024c902e62ea926f7795b*910e0f8dc1f7ba41959e1089bb769f3e919109591913cc33ba03953d7a905efd"),
+];
 type Readiness = Result<Vec<u32>, String>;
 static READINESS_CACHE: OnceLock<Mutex<HashMap<PathBuf, Readiness>>> = OnceLock::new();
 
@@ -388,6 +401,8 @@ fn self_test_mode(root: &Path, mode: u32, word: &str, digest: &str) -> Result<()
             13600 | 11600 | 17200 | 17210 => "kdf",
             // Document containers verify through cyberdeck-crypto/documents.
             9700 | 9400 | 9600 | 10400 | 10500 => "kdf",
+            // Wallet containers verify through cyberdeck-crypto/wallets.
+            11300 | 13400 | 15600 | 15700 => "kdf",
             1100 => "mscash",
             1500 => "descrypt",
             _ => return Err("Hashcat self-test mode unsupported".into()),
@@ -499,6 +514,10 @@ pub(super) fn validate_embedded_request(request: &RecoveryRequest) -> Result<u32
         "office-2013" => 9600,
         "pdf-1.1-1.3" => 10400,
         "pdf-1.4-1.6" => 10500,
+        "bitcoin" => 11300,
+        "keepass" => 13400,
+        "ethereum-pbkdf2" => 15600,
+        "ethereum-scrypt" => 15700,
         "winzip-aes" => 13600,
         "7zip" => 11600,
         // Legacy ZipCrypto runs as 17200 (deflate) or 17210 (stored),
@@ -518,7 +537,8 @@ pub(super) fn validate_embedded_request(request: &RecoveryRequest) -> Result<u32
                 "mscash2", "netntlm-v1", "netntlm-v2", "mssql-2005", "mssql-2012",
                 "descrypt", "winzip-aes", "7zip", "zip-legacy",
                 "office-97-2003", "office-2007", "office-2013", "pdf-1.1-1.3",
-                "pdf-1.4-1.6",
+                "pdf-1.4-1.6", "bitcoin", "keepass", "ethereum-pbkdf2",
+                "ethereum-scrypt",
             ];
             if KDF_MODES.contains(&request.algorithm.as_str()) {
                 Ok(mode)
@@ -574,6 +594,7 @@ fn frame_mode(
         | 1700 | 1731 | 1800 | 2100 | 3200 | 5500 | 5600 | 7400
         | 11600 | 13600 | 17200 | 17210
         | 9400 | 9600 | 9700 | 10400 | 10500
+        | 11300 | 13400 | 15600 | 15700
     ) {
         return Err("embedded Hashcat mode unsupported".into());
     }
@@ -793,7 +814,7 @@ mod tests {
     use super::*;
     #[test]
     fn every_public_native_mode_fixture_is_independently_verifiable_without_gpu() {
-        assert_eq!(PUBLIC_KATS.len(), 32);
+        assert_eq!(PUBLIC_KATS.len(), 36);
         for &(mode, word, hash) in PUBLIC_KATS {
             let algorithm = match mode {
                 0 => "md5",
@@ -811,6 +832,8 @@ mod tests {
                 13600 | 11600 | 17200 | 17210 => "kdf",
                 // Document containers likewise.
                 9700 | 9400 | 9600 | 10400 | 10500 => "kdf",
+                // Wallet containers likewise.
+                11300 | 13400 | 15600 | 15700 => "kdf",
                 // Hint-driven composed targets: the wire shape is ambiguous.
                 10 => "md5-pass-salt",
                 20 => "md5-salt-pass",
@@ -847,6 +870,7 @@ mod tests {
         for required in [
             0u32, 100, 1000, 1400, 1700, 500, 1800, 3200, 400, 1100, 2100,
             13600, 11600, 17200, 17210, 9700, 9400, 9600, 10400, 10500,
+            11300, 13400, 15600, 15700,
         ] {
             assert!(
                 modes.contains(&required),
