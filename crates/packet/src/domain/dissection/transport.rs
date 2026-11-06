@@ -238,16 +238,6 @@ pub(super) fn dissect_udp(
     }
     let src_port = u16::from_be_bytes([transport[0], transport[1]]);
     let dst_port = u16::from_be_bytes([transport[2], transport[3]]);
-    // QUIC rides on UDP/443; the bounded header dissector replaces the
-    // plain-UDP projection when the payload carries a QUIC shape.
-    if (src_port == 443 || dst_port == 443) && transport.len() > 8 {
-        let dissected = quic::dissect_quic(&transport[8..], layers);
-        return Dissected {
-            source: source.to_string(),
-            destination: destination.to_string(),
-            ..dissected
-        };
-    }
     let length = u16::from_be_bytes([transport[4], transport[5]]);
     if length < 8 {
         return empty_frame();
@@ -287,6 +277,31 @@ pub(super) fn dissect_udp(
     let service = well_known_name(17, src_port, dst_port);
     let protocol = if service.is_empty() { "UDP" } else { service };
     let mut info = format!("{src_port} → {dst_port} Len={}", length.saturating_sub(8));
+    // QUIC rides on UDP/443; the bounded header dissector replaces the
+    // plain-UDP projection. Dispatch after the UDP length checks so the
+    // dissector only ever sees the declared datagram payload — never
+    // Ethernet padding or bytes beyond the length field — and keep the
+    // UDP evidence layers in front of the QUIC layers like DNS/STUN rows.
+    if src_port == 443 || dst_port == 443 {
+        layers.push(Layer {
+            label: "User Datagram Protocol".into(),
+            value: info.clone(),
+        });
+        layers.push(Layer {
+            label: "source port".into(),
+            value: src_port.to_string(),
+        });
+        layers.push(Layer {
+            label: "destination port".into(),
+            value: dst_port.to_string(),
+        });
+        let dissected = quic::dissect_quic(&payload, layers);
+        return Dissected {
+            source: source.to_string(),
+            destination: destination.to_string(),
+            ..dissected
+        };
+    }
     let decoded_service = if matches!(src_port, 67 | 68) || matches!(dst_port, 67 | 68) {
         super::udp_services::dhcp(&payload)
     } else if src_port == 123 || dst_port == 123 {
