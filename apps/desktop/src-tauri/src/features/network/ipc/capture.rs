@@ -3,8 +3,9 @@
 use crate::features::forensics::ipc::evidence::EvidenceCtx;
 use crate::features::shared::session::{CaseSessionCtx, CaseSessionWire};
 use cyberdeck_packet::application::live_session::{
-    CapturePage, CaptureSessionManager, CaptureStatus, FramePage,
+    CapturePage, CaptureSessionManager, CaptureStatus, FramePage, Phase,
 };
+use cyberdeck_packet::PacketMeta;
 use cyberdeck_packet::inventory::{FlowObservation, HostObservation};
 use cyberdeck_packet::live::{self, CaptureInterface, CaptureLimits, FrameProvenance};
 use cyberdeck_storage::NetworkCaptureSource;
@@ -85,6 +86,72 @@ impl CaptureCtx {
         }
         Ok(result)
     }
+
+    /// Read-only packet snapshot for lab modules that subscribe to a capture
+    /// session they do not own (Bettercap's one-capture-many-modules model).
+    /// Gated by exactly the same case-revision ownership as every other
+    /// session read: `owner_for` before the read, `valid_after` after it.
+    /// While a capture is running the manager intentionally retains only
+    /// progress counters (original bytes stay worker-local until completion),
+    /// so `packets` carries the dissected frames from the session's retained
+    /// completed result when one exists and is empty while running. Never
+    /// serializes raw frame bytes over IPC.
+    pub fn packet_snapshot(
+        &self,
+        session: &CaseSessionCtx,
+        session_id: u64,
+    ) -> Result<LabPacketSnapshot, String> {
+        let owner = self.owner_for(session, session_id)?;
+        let case = owner.scope.case_id.as_deref().unwrap_or("");
+        let status = self
+            .manager
+            .status(case, session_id)
+            .map_err(|e| format!("{:?}: {}", e.code, e.message))?;
+        // Same read path capture_hosts_v1/provenance use: the session's
+        // retained, bounded in-memory result. parse_capture re-derives the
+        // exact dissections the lab engine consumes; it is pure and bounded
+        // by the capture limits the session was started with.
+        let (packets, nanosecond) = if status.results_available {
+            let result = self
+                .manager
+                .completed_for_case(case, session_id)
+                .map_err(|e| format!("{:?}: {}", e.code, e.message))?;
+            let parsed = cyberdeck_packet::parse_capture(&result.pcap_bytes)
+                .map_err(|e| format!("captured packets could not be re-parsed: {e}"))?;
+            (parsed.packets, parsed.nanosecond)
+        } else {
+            (Vec::new(), false)
+        };
+        self.valid_after(
+            session,
+            &owner,
+            LabPacketSnapshot {
+                active: matches!(status.phase, Phase::Running | Phase::Stopping),
+                phase: status.phase,
+                interface: status.interface,
+                progress_packets: status.progress.packets,
+                packets,
+                nanosecond,
+            },
+        )
+    }
+}
+
+/// Lab-facing snapshot of one capture session: live phase and progress plus
+/// the dissected packets derived from the session's retained result. Owned by
+/// `packet_snapshot`; the lab derives events/ARP findings from `packets` and
+/// never receives original frame bytes.
+pub struct LabPacketSnapshot {
+    /// True while the session is running or stopping (worth polling again).
+    pub active: bool,
+    pub phase: Phase,
+    pub interface: String,
+    /// Live progress counter: packets captured so far, honest even while the
+    /// dissection result does not exist yet.
+    pub progress_packets: usize,
+    pub packets: Vec<PacketMeta>,
+    /// Subsecond units of the retained capture (live captures are usec).
+    pub nanosecond: bool,
 }
 
 /// Existing interface fields stay compatible; support is independently reported

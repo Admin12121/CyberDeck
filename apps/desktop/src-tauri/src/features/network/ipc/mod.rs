@@ -11,3 +11,4 @@ pub mod network_lab;
 pub mod scan_insights;
 pub mod os_hints_ipc;
 pub mod scan_profiles;
+pub mod network_lab_live;

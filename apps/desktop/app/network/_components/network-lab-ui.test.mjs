@@ -192,7 +192,7 @@ test("live monitor is passive, capture-gated and renders the event timeline", ()
   const backend = read("../../../src-tauri/src/features/network/ipc/network_lab.rs");
   const engine = read("../../../../../crates/packet/src/lab_events.rs");
   // The pane exists, is gated on an opened capture, and transmits nothing.
-  assert.match(view, /Live monitor \(passive timeline over the opened capture\)/);
+  assert.match(view, /Live monitor \(passive event timeline\)/);
   assert.match(view, /networkLabEventsV1\(routerIp\.trim\(\) \|\| null\)/);
   assert.match(canonical, /Passive timeline over the opened capture; transmits nothing/);
   assert.match(backend, /pub fn network_lab_events_v1/);

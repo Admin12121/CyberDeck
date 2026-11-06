@@ -19,9 +19,15 @@ import {
   networkLabEventsV1,
   pcapOpenDialog,
   type LabEventKindWire,
+  type LabEventWire,
   type LabEventsWire,
   type PcapOpenWire,
 } from "@lib/ipc";
+import {
+  isValidLiveSessionId,
+  networkLabLiveStatusV1,
+  type LabLiveStatusWire,
+} from "@lib/network-lab-live-ipc";
 import { useWorkbench } from "@state/workbench";
 import {
   networkLabAnalyzePcapV1,
@@ -52,6 +58,14 @@ export function NetworkLabView() {
   // state like every other capture-derived view value.
   const [timeline, setTimeline] = useState<LabEventsWire | null>(null);
   const [timelineBusy, setTimelineBusy] = useState(false);
+  // Live source: the lab either derives over the opened capture or
+  // SUBSCRIBES to Packet Studio's running capture session (one capture,
+  // many modules). It never starts or stops a capture of its own.
+  const [liveSource, setLiveSource] = useState<"opened" | "session">("opened");
+  const [liveSessionId, setLiveSessionId] = useState("");
+  const [liveStatus, setLiveStatus] = useState<LabLiveStatusWire | null>(null);
+  const [livePolling, setLivePolling] = useState(false);
+  const [liveError, setLiveError] = useState<string | null>(null);
   const [routerIp, setRouterIp] = useState("");
   const [targetsT1, setTargetsT1] = useState("");
   const [targetsT2, setTargetsT2] = useState("");
@@ -88,7 +102,75 @@ export function NetworkLabView() {
     setAnalyzing(false);
     setOpenError(null);
     setAnalysisError(null);
+    // A case switch revokes the capture session's ownership on the backend,
+    // so the live subscription is meaningless: stop polling and drop the
+    // stale status instead of letting it render against the new revision.
+    setLivePolling(false);
+    setLiveStatus(null);
+    setLiveError(null);
   }, [wb.caseId]);
+
+  // Live subscription poll: every ~2s while enabled. A self-rescheduling
+  // timeout (not a bare interval) keeps overlapping polls from piling up if
+  // the backend is slow; the cleanup clears the pending timer on unmount,
+  // case switch or when polling is switched off. The command is read-only
+  // and stateless, so an abandoned subscription simply stops asking.
+  useEffect(() => {
+    if (!desktop || liveSource !== "session" || !livePolling) return;
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const poll = () => {
+      networkLabLiveStatusV1(Number(liveSessionId), routerIp.trim() || null)
+        .then((wire) => {
+          if (cancelled) return;
+          setLiveStatus(wire);
+          setLiveError(null);
+        })
+        .catch((cause) => {
+          if (cancelled) return;
+          setLiveError(
+            "Live subscription failed: " +
+              (cause instanceof Error ? cause.message : String(cause)),
+          );
+        })
+        .finally(() => {
+          if (!cancelled) timer = setTimeout(poll, 2000);
+        });
+    };
+    poll();
+    return () => {
+      cancelled = true;
+      if (timer !== null) clearTimeout(timer);
+    };
+  }, [desktop, liveSource, livePolling, liveSessionId, routerIp, wb.caseId]);
+
+  const switchLiveSource = (source: "opened" | "session") => {
+    setLiveSource(source);
+    // Leaving the running-session source ends the subscription honestly.
+    if (source === "opened") {
+      setLivePolling(false);
+      setLiveStatus(null);
+      setLiveError(null);
+    }
+  };
+
+  const startLiveSubscription = () => {
+    if (!isValidLiveSessionId(liveSessionId)) return;
+    setLiveError(null);
+    setLiveStatus(null);
+    setLivePolling(true);
+  };
+
+  const stopLiveSubscription = () => {
+    // Stop clears the poll only; the lab never stops Packet Studio's capture.
+    setLivePolling(false);
+  };
+
+  // The rendered timeline comes from the active source: the opened-capture
+  // derivation, or the latest polled status of the subscribed session
+  // (LabLiveStatusWire carries every LabEventsWire field).
+  const displayTimeline: LabEventsWire | null =
+    liveSource === "session" ? liveStatus : timeline;
 
   const openCapture = async (): Promise<PcapOpenWire | null> => {
     const caseId = wb.caseId;
@@ -389,72 +471,95 @@ export function NetworkLabView() {
           )}
         </Pane>
 
-        <Pane title="Live monitor (passive timeline over the opened capture)">
+        <Pane title="Live monitor (passive event timeline)">
           <div className="space-y-2 p-3">
             <div className="flex flex-wrap items-center gap-2">
-              <ToolButton
-                disabled={!desktop || !capture || timelineBusy}
-                title={capture
-                  ? "Derive the event timeline: new hosts, first services, ARP conflicts, gateway changes"
-                  : "Open a capture first — the timeline derives from the opened capture"}
-                onClick={() => {
-                  setTimelineBusy(true);
-                  networkLabEventsV1(routerIp.trim() || null)
-                    .then((wire) => setTimeline(wire))
-                    .catch((cause) =>
-                      setAnalysisError(
-                        "Lab timeline failed: " + (cause instanceof Error ? cause.message : String(cause)),
-                      ),
-                    )
-                    .finally(() => setTimelineBusy(false));
-                }}
-              >
-                <Radar size={11} /> {timelineBusy ? "deriving…" : "Derive event timeline"}
-              </ToolButton>
-              {timeline ? (
+              <label className="flex items-center gap-1 text-xs text-fg-dim">
+                <span className="font-medium uppercase tracking-wider text-fg-muted">Live source</span>
+                <select
+                  value={liveSource}
+                  onChange={(event) =>
+                    switchLiveSource(event.target.value === "session" ? "session" : "opened")
+                  }
+                  aria-label="Live timeline source: opened capture or running capture session"
+                  className="rounded border border-line bg-panel px-2 py-1 text-xs text-fg outline-none focus:outline-none"
+                >
+                  <option value="opened">Opened capture</option>
+                  <option value="session">Running capture session</option>
+                </select>
+              </label>
+              {liveSource === "session" ? (
                 <>
-                  <Chip tone="ok">{timeline.new_hosts} new hosts</Chip>
-                  <Chip tone="ok">{timeline.new_services} services</Chip>
-                  {timeline.conflicts > 0 ? <Chip tone="err">{timeline.conflicts} ARP conflicts</Chip> : null}
-                  {timeline.gateway_changes > 0 ? <Chip tone="err">{timeline.gateway_changes} gateway changes</Chip> : null}
-                  {timeline.truncated ? <Chip tone="muted">timeline capped at 512</Chip> : null}
+                  <TextInput
+                    value={liveSessionId}
+                    onChange={(text) => setLiveSessionId(text.replace(/[^0-9]/g, "").slice(0, 15))}
+                    placeholder="session id (Packet Studio)"
+                    ariaLabel="Capture session id to subscribe to"
+                    className="w-44"
+                  />
+                  {livePolling ? (
+                    <ToolButton
+                      onClick={stopLiveSubscription}
+                      title="Stop polling the subscribed session. The lab never stops Packet Studio's capture itself"
+                    >
+                      Stop live subscription
+                    </ToolButton>
+                  ) : (
+                    <ToolButton
+                      tone="primary"
+                      disabled={!desktop || !isValidLiveSessionId(liveSessionId)}
+                      onClick={startLiveSubscription}
+                      title="Subscribe to the running capture session: poll its passive lab status every 2 seconds. Requires Packet Studio's live capture to be running"
+                    >
+                      Subscribe
+                    </ToolButton>
+                  )}
+                  {liveStatus ? (
+                    <Chip tone={liveStatus.active ? "ok" : "muted"}>
+                      session {liveSessionId} · {liveStatus.interface} · {liveStatus.phase} ·{" "}
+                      {liveStatus.captured_packets} captured
+                      {liveStatus.active ? "" : " · not running"}
+                    </Chip>
+                  ) : null}
                 </>
               ) : (
-                <Chip>no timeline yet</Chip>
+                <ToolButton
+                  disabled={!desktop || !capture || timelineBusy}
+                  title={capture
+                    ? "Derive the event timeline: new hosts, first services, ARP conflicts, gateway changes"
+                    : "Open a capture first — the timeline derives from the opened capture"}
+                  onClick={() => {
+                    setTimelineBusy(true);
+                    networkLabEventsV1(routerIp.trim() || null)
+                      .then((wire) => setTimeline(wire))
+                      .catch((cause) =>
+                        setAnalysisError(
+                          "Lab timeline failed: " + (cause instanceof Error ? cause.message : String(cause)),
+                        ),
+                      )
+                      .finally(() => setTimelineBusy(false));
+                  }}
+                >
+                  <Radar size={11} /> {timelineBusy ? "deriving…" : "Derive event timeline"}
+                </ToolButton>
               )}
+              <TimelineChips wire={displayTimeline} />
             </div>
-            {timeline && timeline.events.length > 0 ? (
-              <div className="max-h-64 overflow-auto">
-                <table className="data-table">
-                  <thead>
-                    <tr>
-                      <th className="w-24">Time</th>
-                      <th className="w-32">Event</th>
-                      <th className="w-40">Subject</th>
-                      <th>Detail</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {timeline.events.map((event, index) => (
-                      <tr key={`${event.timestamp_ms}-${event.kind}-${index}`}>
-                        <td className="font-mono text-[11px]">{formatSeenMs(event.timestamp_ms)}</td>
-                        <td>
-                          <Chip tone={event.kind === "arp_conflict" || event.kind === "gateway_changed" ? "err" : "muted"}>
-                            {labEventKindLabel(event.kind)}
-                          </Chip>
-                        </td>
-                        <td className="font-mono text-[11px]">{event.subject}</td>
-                        <td className="text-fg-muted">{event.detail}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            ) : timeline ? (
-              <p className="text-xs text-fg-muted">
-                no events in this capture — a timeline needs parseable IP endpoints, services or ARP claims
+            {liveSource === "session" ? (
+              <p className="text-xs leading-relaxed text-fg-dim">
+                Bettercap-style one-capture-many-modules subscription: the lab subscribes to Packet
+                Studio's running capture and never starts its own capture, and Packet Studio's capture
+                must be running for live counts. The lab transmits nothing; Packet Studio owns the
+                capture lifecycle, the lab only reads its status. While the session runs, the captured
+                counter tracks it live; the event timeline derives from the session's retained frames.
               </p>
             ) : null}
+            {liveError ? (
+              <div role="alert" className="border-b border-err/50 bg-err/10 px-3 py-1 font-mono text-[10px] text-err">
+                {liveError}
+              </div>
+            ) : null}
+            <TimelineTable wire={displayTimeline} />
           </div>
         </Pane>
 
@@ -506,4 +611,66 @@ export function labEventKindLabel(kind: LabEventKindWire): string {
     case "gateway_changed":
       return "Gateway changed";
   }
+}
+
+/** Count chips shared by both live sources; honest about the 512-event cap. */
+export function TimelineChips({ wire }: { wire: LabEventsWire | null }) {
+  if (!wire) return <Chip>no timeline yet</Chip>;
+  return (
+    <>
+      <Chip tone="ok">{wire.new_hosts} new hosts</Chip>
+      <Chip tone="ok">{wire.new_services} services</Chip>
+      {wire.conflicts > 0 ? <Chip tone="err">{wire.conflicts} ARP conflicts</Chip> : null}
+      {wire.gateway_changes > 0 ? <Chip tone="err">{wire.gateway_changes} gateway changes</Chip> : null}
+      {wire.truncated ? <Chip tone="muted">timeline capped at 512</Chip> : null}
+    </>
+  );
+}
+
+/** Timeline table shared by both live sources (same rows, same styling). */
+export function TimelineTable({ wire }: { wire: LabEventsWire | null }) {
+  if (wire && wire.events.length > 0) {
+    return (
+      <div className="max-h-64 overflow-auto">
+        <table className="data-table">
+          <thead>
+            <tr>
+              <th className="w-24">Time</th>
+              <th className="w-32">Event</th>
+              <th className="w-40">Subject</th>
+              <th>Detail</th>
+            </tr>
+          </thead>
+          <tbody>
+            {wire.events.map((event, index) => (
+              <TimelineRow key={`${event.timestamp_ms}-${event.kind}-${index}`} event={event} />
+            ))}
+          </tbody>
+        </table>
+      </div>
+    );
+  }
+  if (wire) {
+    return (
+      <p className="text-xs text-fg-muted">
+        no events in this source — a timeline needs parseable IP endpoints, services or ARP claims
+      </p>
+    );
+  }
+  return null;
+}
+
+function TimelineRow({ event }: { event: LabEventWire }) {
+  return (
+    <tr>
+      <td className="font-mono text-[11px]">{formatSeenMs(event.timestamp_ms)}</td>
+      <td>
+        <Chip tone={event.kind === "arp_conflict" || event.kind === "gateway_changed" ? "err" : "muted"}>
+          {labEventKindLabel(event.kind)}
+        </Chip>
+      </td>
+      <td className="font-mono text-[11px]">{event.subject}</td>
+      <td className="text-fg-muted">{event.detail}</td>
+    </tr>
+  );
 }
