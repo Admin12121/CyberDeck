@@ -36,6 +36,10 @@ import {
   type ScanObservationPageWire,
   type ScanProgressWire,
   type NetscanStatusWire,
+  netscanProfileSaveV1,
+  netscanProfileListV1,
+  netscanProfileDeleteV1,
+  type ScanProfileWire,
 } from "@lib/ipc";
 import { useWorkbench, useWorkbenchCase } from "@state/workbench";
 import { AuthorizedCaseAction } from "@/app/_components/AuthorizedCaseAction";
@@ -116,6 +120,32 @@ async function netscanServiceProbeV1(
   return invoke<ServiceProbeResultWire>("netscan_service_probe_v1", { host, port, authorized, caseId });
 }
 
+// --- os-depth II slice: saved scan profiles + timing templates ----------------
+
+type TimingTemplateWire = "paranoid" | "sneaky" | "polite" | "normal" | "aggressive";
+const TIMING_TEMPLATES: { value: TimingTemplateWire; label: string }[] = [
+  { value: "paranoid", label: "Paranoid (T0)" },
+  { value: "sneaky", label: "Sneaky (T1)" },
+  { value: "polite", label: "Polite (T2)" },
+  { value: "normal", label: "Normal (T3)" },
+  { value: "aggressive", label: "Aggressive (T4)" },
+];
+
+/**
+ * Honesty contract for the template selector, verbatim in the tooltip. The
+ * backend keeps ONE adaptive per-host latency budget (an EWMA of measured
+ * probe durations clamped to TCP 300-1800 ms / UDP 300-1200 ms,
+ * application/timing.rs). Only "normal" is adaptive today; the other labels
+ * are recorded with saved profiles and describe how the SAME bounds will be
+ * clamped once backend support lands (slower templates hold the max,
+ * aggressive holds the min). Until then they change no probe behavior, and
+ * the UI must never suggest otherwise.
+ */
+const TIMING_TOOLTIP =
+  "Only Normal is adaptive today: the backend per-host budget is an EWMA of measured probe durations clamped to TCP 300-1800 ms / UDP 300-1200 ms. "
+  + "Paranoid/Sneaky/Polite are recorded with the profile and would hold the max bound; Aggressive would hold the min. "
+  + "Selecting them changes no probe behavior today.";
+
 export function ScanView() {
   const desktop = isDesktop();
   const [capabilities, setCapabilities] = useState<NetworkRuntimeCapabilitiesV1 | null>(null);
@@ -180,6 +210,16 @@ export function ScanView() {
   const [stealthFindings, setStealthFindings] = useState<StealthFindingWire[] | null>(null);
   const [probeBusy, setProbeBusy] = useState<string | null>(null);
   const [probeResults, setProbeResults] = useState<Record<string, ServiceProbeResultWire>>({});
+  // Timing template + saved profiles: session-local presets over the backend's
+  // bounded in-memory store (max 32 profiles, 4 KiB parameters each). Saving
+  // and loading never touches the network, so no authorization is required.
+  const [timing, setTiming] = useWorkspaceDraft<TimingTemplateWire>(
+    wb.caseId, "network", "scan-timing-template", "normal",
+  );
+  const [profiles, setProfiles] = useState<ScanProfileWire[]>([]);
+  const [selectedProfile, setSelectedProfile] = useState("");
+  const [profileName, setProfileName] = useState("");
+  const [profileBusy, setProfileBusy] = useState(false);
   const [arpNeighbors, setArpNeighbors] = useState<ArpNeighborWire[] | null>(null);
   const [observationPage, setObservationPage] = useState<ScanObservationPageWire | null>(null);
   const [observationOffset, setObservationOffset] = useState(0);
@@ -230,7 +270,16 @@ export function ScanView() {
     // Operator authorization is tied to one backend-selected case revision.
     setAuthorized(false);
     setStatus({ running: false, results: 0, saved_findings: 0, save_error: null });
-  }, [identity]);
+    if (desktop) {
+      // Profiles are session-scoped; refresh on every case re-selection and
+      // silently ignore refresh failures (the store is in-memory only).
+      void netscanProfileListV1()
+        .then((rows) => setProfiles(rows))
+        .catch(() => setProfiles([]));
+    } else {
+      setProfiles([]);
+    }
+  }, [identity, desktop]);
 
   useEffect(() => {
     if (!desktop) return;
@@ -269,6 +318,73 @@ export function ScanView() {
       if (isCurrent()) setError("Scanner status unavailable: " + String(cause));
     }
   }, [identity, revision, observationOffset]);
+
+  // Profiles are global session state (not case evidence): a failed listing
+  // degrades to an empty picker instead of a scan error banner.
+  const refreshProfiles = useCallback(async () => {
+    if (!desktop) return;
+    try {
+      setProfiles(await netscanProfileListV1());
+    } catch {
+      setProfiles([]);
+    }
+  }, [desktop]);
+  useEffect(() => { void refreshProfiles(); }, [refreshProfiles]);
+
+  const saveProfile = async () => {
+    const name = profileName.trim();
+    if (!desktop || profileBusy || !name || !target.trim()) return;
+    setProfileBusy(true);
+    setError(null);
+    try {
+      const saved = await netscanProfileSaveV1(name, JSON.stringify({
+        target, ports, transport, timing,
+      }));
+      setProfileName("");
+      setSelectedProfile(saved.name);
+      await refreshProfiles();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setProfileBusy(false);
+    }
+  };
+
+  const loadSelectedProfile = () => {
+    const profile = profiles.find((p) => p.name === selectedProfile);
+    if (!profile) return;
+    setError(null);
+    // Stored parameters are an opaque JSON envelope; every field is checked
+    // individually so a malformed or older profile can only be partially
+    // applied, never crash the view or widen the form beyond valid values.
+    try {
+      const params = JSON.parse(profile.params_json) as Record<string, unknown>;
+      if (typeof params.target === "string") setTarget(params.target);
+      if (typeof params.ports === "string") setPorts(params.ports);
+      if (params.transport === "udp" || params.transport === "tcp") setTransport(params.transport);
+      if (TIMING_TEMPLATES.some((t) => t.value === params.timing)) {
+        setTiming(params.timing as TimingTemplateWire);
+      }
+    } catch {
+      setError("Saved profile parameters are not valid JSON; profile not loaded");
+    }
+  };
+
+  const deleteSelectedProfile = async () => {
+    if (!desktop || profileBusy || !selectedProfile) return;
+    setProfileBusy(true);
+    setError(null);
+    try {
+      await netscanProfileDeleteV1(selectedProfile);
+      setSelectedProfile("");
+      await refreshProfiles();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setProfileBusy(false);
+    }
+  };
+
 
   useEffect(() => {
     if (!desktop || revision === null) return;
@@ -677,6 +793,56 @@ export function ScanView() {
           </>
         ) : null}
         <span className="ml-auto font-mono text-[10px] text-fg-muted">{openCount} open / {observedCount} observed</span>
+      </div>
+      <div className="cd-workspace-toolbar shrink-0 items-center gap-2  px-2">
+        <span className="font-mono text-[10px] uppercase text-fg-muted">timing</span>
+        <Select
+          value={timing}
+          onChange={(value) => setTiming(value as TimingTemplateWire)}
+          options={TIMING_TEMPLATES}
+          ariaLabel="Timing template"
+          className="w-40"
+        />
+        <span className="font-mono text-[10px] uppercase text-fg-muted">profile</span>
+        <Select
+          value={selectedProfile}
+          onChange={setSelectedProfile}
+          options={[
+            { value: "", label: "No profile selected" },
+            ...profiles.map((profile) => ({ value: profile.name, label: profile.name })),
+          ]}
+          ariaLabel="Saved scan profile"
+          className="w-44"
+        />
+        <ToolButton
+          onClick={() => void saveProfile()}
+          disabled={!desktop || profileBusy || !profileName.trim() || !target.trim()}
+          title="Save the current target, ports, transport and timing template as a named profile. Session-local, max 32 profiles and 4 KiB of parameters each; saving never touches the network or the case store.">
+          Save profile
+        </ToolButton>
+        <ToolButton
+          onClick={loadSelectedProfile}
+          disabled={!selectedProfile || profileBusy}
+          title="Load the saved profile into target, ports, transport and timing template">
+          Load
+        </ToolButton>
+        <ToolButton
+          tone="danger"
+          onClick={() => void deleteSelectedProfile()}
+          disabled={!selectedProfile || profileBusy}
+          title="Delete the selected saved profile from the session-local store">
+          Delete
+        </ToolButton>
+        <TextInput
+          value={profileName}
+          onChange={setProfileName}
+          placeholder="profile name"
+          ariaLabel="New profile name"
+          className="w-40"
+        />
+        <span className="ml-auto font-mono text-[10px] text-fg-muted" title={TIMING_TOOLTIP}>
+          {timing} · {profiles.length}/32 profiles · session-local
+        </span>
       </div>
       {error ? <div className="border-b border-err/50 bg-err/10 px-2 py-1 font-mono text-[10px] text-err">{error}</div> : null}
       {revision === null && <AuthorizedCaseAction activity="Network scanning" />}

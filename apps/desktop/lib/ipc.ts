@@ -1254,6 +1254,32 @@ export async function captureOsHintsV1(): Promise<OsHintsWire> {
   return invoke<OsHintsWire>("capture_os_hints_v1", {});
 }
 
+// --- saved scan profiles (in-memory, session-scoped) --------------------------
+// Wire types mirror features/network/ipc/scan_profiles.rs; params_json is an
+// opaque JSON object string whose schema the frontend owns.
+
+export interface ScanProfileWire {
+  name: string;
+  params_json: string;
+  created_at_ms: number;
+  updated_at_ms: number;
+}
+
+export async function netscanProfileSaveV1(name: string, paramsJson: string): Promise<ScanProfileWire> {
+  if (!inTauri) throw new Error("saving scan profiles requires the desktop runtime");
+  return invoke<ScanProfileWire>("netscan_profile_save_v1", { name, paramsJson });
+}
+
+export async function netscanProfileListV1(): Promise<ScanProfileWire[]> {
+  if (!inTauri) throw new Error("scan profiles require the desktop runtime");
+  return invoke<ScanProfileWire[]>("netscan_profile_list_v1", {});
+}
+
+export async function netscanProfileDeleteV1(name: string): Promise<boolean> {
+  if (!inTauri) throw new Error("deleting scan profiles requires the desktop runtime");
+  return invoke<boolean>("netscan_profile_delete_v1", { name });
+}
+
 // --- recovery + file digests --------------------------------------------------
 
 export interface CrackMatchWire {
