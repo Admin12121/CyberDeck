@@ -1222,6 +1222,33 @@ export async function networkLabEventsV1(routerIp: string | null): Promise<LabEv
   return invoke<LabEventsWire>("network_lab_events_v1", { routerIp });
 }
 
+// --- Network Lab passive DNS-response monitor (Bettercap-mode) ---------------
+// Wire types mirror crates/packet/src/dns_monitor.rs and network_lab.rs.
+
+export type DnsFindingKindWire =
+  | "answer_inconsistency" | "suspicious_target" | "nxdomain_injection";
+export interface DnsAnswerSetWire { values: string[]; seen_ms: number; }
+export interface DnsFindingWire {
+  kind: DnsFindingKindWire;
+  question_name: string;
+  question_type: number;
+  baseline: DnsAnswerSetWire | null;
+  later: DnsAnswerSetWire | null;
+  first_seen_ms: number;
+  last_seen_ms: number;
+  detail: string;
+}
+export interface DnsMonitorWire {
+  observations_seen: number;
+  findings: DnsFindingWire[];
+  queried_names: number;
+}
+/** Passive DNS-response monitoring over the opened capture; transmits nothing. */
+export async function networkLabDnsMonitorV1(): Promise<DnsMonitorWire> {
+  if (!inTauri) throw new Error("DNS monitoring requires the desktop runtime");
+  return invoke<DnsMonitorWire>("network_lab_dns_monitor_v1", {});
+}
+
 // --- Packet Studio export view -> case ---------------------------------------
 // Wire types mirror features/network/ipc/pcap_export.rs and pcap_wire.rs.
 

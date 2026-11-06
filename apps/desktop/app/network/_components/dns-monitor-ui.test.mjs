@@ -12,7 +12,7 @@ import { fileURLToPath } from "node:url";
 const here = dirname(fileURLToPath(import.meta.url));
 const read = (file) => readFileSync(join(here, file), "utf8");
 const viewSource = readFileSync(join(here, "NetworkLabView.tsx"), "utf8");
-const ipcSource = readFileSync(join(here, "network-lab-dns-ipc.ts"), "utf8");
+const ipcSource = readFileSync(join(here, "../../../lib/ipc.ts"), "utf8");
 const commandSource = readFileSync(
   join(here, "../../../src-tauri/src/features/network/ipc/network_lab.rs"),
   "utf8",
@@ -118,7 +118,7 @@ test("wire type mirrors the Rust DnsMonitorWire field names exactly", () => {
   }
   // The invoke targets the registered command name and the client never
   // transmits: it is an invoke wrapper plus pure helpers.
-  assert.match(ipcSource, /invoke<DnsMonitorWire>\("network_lab_dns_monitor_v1"\)/);
+  assert.match(ipcSource, /invoke<DnsMonitorWire>\("network_lab_dns_monitor_v1"/);
   assert.doesNotMatch(ipcSource, /fetch\(|XMLHttpRequest|WebSocket/);
 });
 

@@ -28,12 +28,11 @@ import {
   networkLabLiveStatusV1,
   type LabLiveStatusWire,
 } from "@lib/network-lab-live-ipc";
+import { networkLabDnsMonitorV1, type DnsMonitorWire } from "@lib/ipc";
 import {
   dnsFindingKindLabel,
   formatAnswerSet,
-  networkLabDnsMonitorV1,
   questionTypeLabel,
-  type DnsMonitorWire,
 } from "./network-lab-dns-ipc";
 import { useWorkbench } from "@state/workbench";
 import {
