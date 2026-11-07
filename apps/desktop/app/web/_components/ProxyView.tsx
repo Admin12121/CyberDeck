@@ -2,8 +2,8 @@
 import { useEffect, useRef, useState } from "react";
 import { Copy, PlayCircle, Settings2, Square, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { useWorkbenchCase } from "@state/workbench";
-import { AuthorizedCaseAction } from "@/app/_components/AuthorizedCaseAction";
+import { useCaseReady } from "@state/workbench";
+import { CaseGate } from "@ds/case-gate";
 import { Frame, FrameHeader, FramePanel, FrameTitle } from "@/components/ui/frame";
 import { Chip, TextInput, ToolButton } from "@ds/panes";
 import {
@@ -27,8 +27,7 @@ import {
 
 export function ProxyView() {
   const desktop = isDesktop();
-  const { caseId, caseSession } = useWorkbenchCase();
-  const caseReady = caseId !== "scratchpad" && caseSession.phase === "ready" && caseSession.caseId === caseId;
+  const { caseReady } = useCaseReady();
   const [status, setStatus] = useState<ProxyStatusWire>({ running: false, port: 8080, captured: 0 });
   const [port, setPort] = useState("8080");
   const [interceptOn, setInterceptOn] = useState(false);
@@ -282,7 +281,7 @@ export function ProxyView() {
                   Revoke & clear
                 </ToolButton>
               </div>
-              {!caseReady && <AuthorizedCaseAction activity="Private HTTP history capture" />}
+              <CaseGate activity="Private HTTP history capture" />
               {consentError && <p role="alert" className="text-xs text-err">{consentError}</p>}
               <div className="flex flex-wrap items-center gap-3">
                 <span className="text-xs font-semibold">CA trust</span>

@@ -2,9 +2,9 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
-import { useWorkbench } from "@state/workbench";
+import { useCaseReady, useCreateCase, useWorkbench } from "@state/workbench";
 import {
-  caseCreate, caseList, caseLineageScopedV1, caseSearchScopedV1, isDesktop,
+  caseList, caseLineageScopedV1, caseSearchScopedV1, isDesktop,
   type CaseRecordWire, type CaseReportWire, type CaseLineageReportWire,
   type CaseSearchPageWire, type CaseIntegritySummaryWire,
 } from "@lib/ipc";
@@ -31,6 +31,8 @@ export function CasesWorkspace() {
   const wb = useWorkbench();
   const router = useRouter();
   const native = isDesktop();
+  const { caseReady } = useCaseReady();
+  const createNewCase = useCreateCase();
   const [cases, setCases] = useState<CaseRecordWire[]>([]);
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
@@ -50,8 +52,7 @@ export function CasesWorkspace() {
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
   const selected = wb.caseSession;
-  const ready = native && selected.phase === "ready" &&
-    selected.caseId === wb.caseId && wb.caseId !== "scratchpad";
+  const ready = native && caseReady;
   const temporary = native && wb.caseId === "scratchpad" && selected.phase === "idle";
   const selectedKey = ready ? String(selected.caseId) + ":" + String(selected.revision) : "";
 
@@ -96,10 +97,9 @@ export function CasesWorkspace() {
     if (!native || !title.trim() || busy) return;
     setBusy("Creating investigation"); setError("");
     try {
-      const created = await caseCreate(title.trim(), description.trim());
+      await createNewCase(title.trim(), description.trim());
       setTitle(""); setDescription("");
       await refreshCases();
-      wb.setCaseId(created.id);
     } catch (cause) { setError(describeError(cause)); }
     finally { setBusy(""); }
   }

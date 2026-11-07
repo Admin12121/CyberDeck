@@ -17,7 +17,7 @@ import {
 import { CATEGORIES, toolById, type CategoryId, type ToolId } from "@state/tool-registry";
 import { usePathname, useRouter } from "next/navigation";
 import type { RecipeStep } from "@/app/crypto/_components/model";
-import { jobCancel, jobStart } from "@lib/ipc";
+import { caseCreate, jobCancel, jobStart, type CaseRecordWire } from "@lib/ipc";
 import { useNativeCaseSession, type CaseSessionState } from "@state/case-session";
 import { usePanelPreferences } from "@state/panel-preferences";
 import { useTerminalSessions } from "@state/terminal-sessions";
@@ -103,6 +103,45 @@ export function useWorkbenchCase(): WorkbenchCase {
   const state = useContext(CaseContext);
   if (!state) throw new Error("useWorkbenchCase requires WorkbenchProvider");
   return state;
+}
+
+/** Case linkage derived once: a saved case the backend has authoritatively
+ * selected. Tool views consume this instead of re-deriving the predicate —
+ * the single source of "may this surface persist results into a case". */
+export interface CaseReadiness {
+  caseId: string;
+  /** Backend case-session revision; bumps on every selection (may be null
+   * while unavailable). Identity-token for per-view staleness invalidation. */
+  caseRevision: number | null;
+  isScratchpad: boolean;
+  /** True only when a saved case is selected AND backend-linked. */
+  caseReady: boolean;
+}
+
+export function useCaseReady(): CaseReadiness {
+  const { caseId, caseSession } = useWorkbenchCase();
+  return useMemo(() => {
+    const isScratchpad = caseId === "scratchpad";
+    const caseReady = !isScratchpad &&
+      caseSession.phase === "ready" && caseSession.caseId === caseId;
+    return { caseId, caseRevision: caseSession.revision, isScratchpad, caseReady };
+  }, [caseId, caseSession]);
+}
+
+/**
+ * The single case-creation path: create the record, broadcast the list-change
+ * event the shell listens for, and select the new case. Only the central
+ * surfaces (start page, status bar, Cases page) create cases; tool views
+ * route operators there through the shared CaseGate instead.
+ */
+export function useCreateCase(): (title: string, description?: string) => Promise<CaseRecordWire> {
+  const { setCaseId } = useWorkbenchCase();
+  return useCallback(async (title: string, description?: string) => {
+    const record = await caseCreate(title, description ?? "");
+    window.dispatchEvent(new Event("cyberdeck:cases-changed"));
+    setCaseId(record.id);
+    return record;
+  }, [setCaseId]);
 }
 
 export function useWorkbenchJobs(): WorkbenchJobs {

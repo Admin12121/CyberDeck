@@ -24,9 +24,9 @@ import {
 } from "@lib/ipc";
 import { buildSitesTree, filterCaptured, useTarget } from "./controller";
 import { makeGetDraft, useWebWorkflow } from "./WebWorkflow";
-import { useWorkbench, useWorkbenchCase } from "@state/workbench";
+import { useCaseReady, useWorkbench } from "@state/workbench";
 import { useWorkspaceDraft } from "@state/workspace-sessions";
-import { AuthorizedCaseAction } from "@/app/_components/AuthorizedCaseAction";
+import { CaseGate } from "@ds/case-gate";
 import { cancelWebAssessment, startWebAssessment, webAssessmentStatus, waitForWebAssessment, saveWebAssessmentFindings, type WebAssessmentJob } from "./controller/assessment-jobs";
 
 // ----------------------------------------------------------------- spider ---
@@ -34,8 +34,7 @@ import { cancelWebAssessment, startWebAssessment, webAssessmentStatus, waitForWe
 export function SpiderView() {
   const desktop = isDesktop();
   const wb = useWorkbench();
-  const { caseId, caseSession } = useWorkbenchCase();
-  const caseReady = caseId !== "scratchpad" && caseSession.phase === "ready" && caseSession.caseId === caseId;
+  const { caseId, caseRevision, caseReady } = useCaseReady();
   const caseRef = useRef(caseId);
   caseRef.current = caseId;
   const crawlRevision = useRef(0);
@@ -49,12 +48,12 @@ export function SpiderView() {
   const [savedCount, setSavedCount] = useState<number | null>(null);
   const [authorized, setAuthorized] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const lastBinding = useRef({ caseId, caseRevision: caseSession.revision, target: normalized });
+  const lastBinding = useRef({ caseId, caseRevision, target: normalized });
   useEffect(() => {
     const before = lastBinding.current;
     const changed = before.caseId !== caseId ||
-      before.caseRevision !== caseSession.revision || before.target !== normalized;
-    lastBinding.current = { caseId, caseRevision: caseSession.revision, target: normalized };
+      before.caseRevision !== caseRevision || before.target !== normalized;
+    lastBinding.current = { caseId, caseRevision, target: normalized };
     crawlRevision.current += 1;
     if (changed) {
       if (jobId !== null) void cancelWebAssessment(jobId).catch(() => {});
@@ -67,7 +66,7 @@ export function SpiderView() {
     setAuthorized(false);
     setBusy(false);
     setError(null);
-  }, [caseId, caseSession.revision, normalized]);
+  }, [caseId, caseRevision, normalized]);
 
   useEffect(() => {
     if (!desktop || jobId === null) return;
@@ -90,7 +89,7 @@ export function SpiderView() {
     void poll();
     const timer = setInterval(() => void poll(), 650);
     return () => { disposed = true; clearInterval(timer); };
-  }, [desktop, jobId, caseId, caseSession.revision]);
+  }, [desktop, jobId, caseId, caseRevision]);
 
   const crawl = async () => {
     if (busy || job?.state === "running" || !normalized || !authorized || !caseReady) return;
@@ -169,7 +168,7 @@ export function SpiderView() {
           {job ? `${job.state} · ${job.processed} pages · ${job.discovered} URLs` : `${links.length} URLs`}
         </span>
       </div>
-      {!caseReady && <AuthorizedCaseAction activity="Web site discovery" />}
+      <CaseGate activity="Web site discovery" />
       {error ? <div className="border-b border-err/50 bg-err/10 px-2 py-1 font-mono text-[10px] text-err">{error}</div> : null}
       <label className="flex items-center gap-2 border-b border-line bg-panel px-3 py-2 text-xs text-fg-dim">
         <input type="checkbox" checked={authorized} onChange={(e) => setAuthorized(e.target.checked)} className="accent-[var(--color-orange)]" />

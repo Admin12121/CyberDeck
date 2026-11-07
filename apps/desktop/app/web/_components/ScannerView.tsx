@@ -4,9 +4,9 @@ import { Play, Square } from "lucide-react";
 import { Chip, EmptyState, Pane, TextInput, ToolButton } from "@ds/panes";
 import { isDesktop } from "@lib/ipc";
 import { useWebWorkflow } from "./WebWorkflow";
-import { useWorkbench, useWorkbenchCase } from "@state/workbench";
+import { useCaseReady, useWorkbench } from "@state/workbench";
 import { useWorkspaceDraft } from "@state/workspace-sessions";
-import { AuthorizedCaseAction } from "@/app/_components/AuthorizedCaseAction";
+import { CaseGate } from "@ds/case-gate";
 import {
   cancelWebAssessment, startWebAssessment, webAssessmentStatus, waitForWebAssessment, saveWebAssessmentFindings,
   type WebAssessmentJob,
@@ -25,7 +25,7 @@ function parseSessionHeaders(text: string): { name: string; value: string }[] {
 export function ScannerView() {
   const desktop = isDesktop();
   const wb = useWorkbench();
-  const { caseId, caseSession } = useWorkbenchCase();
+  const { caseId, caseRevision, caseReady } = useCaseReady();
   const { target, setTarget, normalized } = useWebWorkflow();
   const [jobId, setJobId] = useWorkspaceDraft<number | null>(caseId, "web", "scanner-job", null);
   const [job, setJob] = useState<WebAssessmentJob | null>(null);
@@ -49,11 +49,10 @@ export function ScannerView() {
   const [savedCount, setSavedCount] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const context = useRef({ caseId, target: normalized, revision: 0 });
-  const lastBinding = useRef({ caseId, caseRevision: caseSession.revision, target: normalized });
+  const lastBinding = useRef({ caseId, caseRevision, target: normalized });
   context.current.caseId = caseId;
   context.current.target = normalized;
   const running = busy || job?.state === "running";
-  const caseReady = caseId !== "scratchpad" && caseSession.phase === "ready" && caseSession.caseId === caseId;
   const hasQuery = (() => {
     try { return new URL(normalized).searchParams.size > 0; }
     catch { return false; }
@@ -63,8 +62,8 @@ export function ScannerView() {
   useEffect(() => {
     const previous = lastBinding.current;
     const changed = previous.caseId !== caseId ||
-      previous.caseRevision !== caseSession.revision || previous.target !== normalized;
-    lastBinding.current = { caseId, caseRevision: caseSession.revision, target: normalized };
+      previous.caseRevision !== caseRevision || previous.target !== normalized;
+    lastBinding.current = { caseId, caseRevision, target: normalized };
     context.current.revision++;
     if (changed) {
       // A target or native scope transition must not leave an old active
@@ -77,7 +76,7 @@ export function ScannerView() {
     setPostTemplate(""); setPostRiskApproved(false);
     setSessionCookie(""); setSessionHeaders("");
     setBusy(false); setError(null);
-  }, [caseId, caseSession.revision, normalized]);
+  }, [caseId, caseRevision, normalized]);
 
   useEffect(() => {
     if (!desktop || jobId === null) return;
@@ -96,7 +95,7 @@ export function ScannerView() {
     void read();
     const timer = setInterval(() => void read(), 650);
     return () => { disposed = true; clearInterval(timer); };
-  }, [desktop, jobId, caseId, caseSession.revision]);
+  }, [desktop, jobId, caseId, caseRevision]);
 
   const start = async (kind: "scanner" | "active-query" | "active-form" | "active-json" | "active-sql" | "active-sql-boolean" | "active-traversal" | "active-oast" = "scanner") => {
     if (!desktop || running || !normalized || !authorized || !caseReady) return;
@@ -236,7 +235,7 @@ export function ScannerView() {
         </span>}
       </div>
     )}
-    {!caseReady && <AuthorizedCaseAction activity="Web security assessment" />}
+    <CaseGate activity="Web security assessment" />
     <label className="flex items-center gap-2 border-b border-line px-2 py-1.5 text-[11px] text-fg-dim">
       <input type="checkbox" checked={authorized} onChange={(e) => setAuthorized(e.target.checked)} />
       Authorized target · native approval required

@@ -115,19 +115,16 @@ test("the two-session hint is a StatusStrip item shown only when fewer than 2 se
   assert.match(viewSource, /nodes · \$\{topology\.edges\.length\} edges/);
 });
 
-test("case gate is a pointer line only — no case management here (user directive)", () => {
-  // Cases are managed in the Case section; the view shows ONE muted line.
-  // The footer bar already shows case state: the gate renders NOTHING
-  // (no pointer line, no explanation) except errors.
+test("case gate routes to the central case surfaces — no in-view case management", () => {
+  // The shared gate strip is the only case UI here; creation lives on the
+  // start page and the Cases page, and the status bar switches cases.
   assert.doesNotMatch(viewSource, /No case selected/);
   assert.doesNotMatch(viewSource, /pick one in the Case section/);
-  assert.doesNotMatch(viewSource, /Waiting for the selected investigation/);
   assert.doesNotMatch(viewSource, /Create case/);
-  assert.doesNotMatch(viewSource, /Choose existing/);
   assert.doesNotMatch(viewSource, /caseCreate\(/);
-  // No stacked section gate anymore.
+  // No stacked section gate and no local gate clone anymore.
   assert.doesNotMatch(viewSource, /AuthorizedCaseAction/);
-  assert.match(viewSource, /revision === null \? <CaseGate activity="Scan insights" \/> : null/);
+  assert.match(viewSource, /<CaseGate activity="Scan insights" \/>/);
 });
 
 test("frontend clients target the registered insights command names", () => {

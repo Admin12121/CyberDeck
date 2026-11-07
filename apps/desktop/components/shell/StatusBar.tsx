@@ -1,14 +1,16 @@
 "use client";
 /** Status bar: transport, workspace, job state, engine status (§3.5). */
-import { caseCreate, caseList, isDesktop, type CaseRecordWire } from "@lib/ipc";
+import { caseList, isDesktop, type CaseRecordWire } from "@lib/ipc";
 import { useEffect, useState } from "react";
-import { useWorkbenchCase } from "@state/workbench";
+import { useCaseReady, useCreateCase, useWorkbenchCase } from "@state/workbench";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "@/components/ui/select";
 
 export function StatusBar() {
   const wb = useWorkbenchCase();
+  const { caseReady } = useCaseReady();
+  const createCase = useCreateCase();
   const [cases, setCases] = useState<CaseRecordWire[]>([]);
   const [runtime, setRuntime] = useState<"checking" | "native" | "browser">("checking");
   useEffect(() => { setRuntime(isDesktop() ? "native" : "browser"); }, []);
@@ -41,20 +43,18 @@ export function StatusBar() {
   // Never select a different case because a stale case-list snapshot lacks the
   // current ID. Backend session selection remains the authority for validity.
 
-  const createCase = async () => {
+  const createNewCase = async () => {
     if (!caseTitle.trim()) return;
     try {
-      const created = await caseCreate(caseTitle.trim());
+      const created = await createCase(caseTitle.trim());
       setCases((previous) => [created, ...previous]);
-      window.dispatchEvent(new Event("cyberdeck:cases-changed"));
-      wb.setCaseId(created.id);
       setCaseTitle("");
       setCreating(false);
       setCaseError(null);
     } catch (error) { setCaseError(String(error)); }
   };
 
-  const linked = wb.caseSession.phase === "ready" && wb.caseSession.caseId === wb.caseId;
+  const linked = caseReady;
   return (
     <footer className="flex min-h-9 shrink-0 items-center gap-2 overflow-x-auto whitespace-nowrap border-t border-line bg-sidebar px-3 text-xs text-fg-muted" aria-label="Case and runtime status">
       <div className="flex shrink-0 items-center gap-2">
@@ -83,7 +83,7 @@ export function StatusBar() {
         </Select>
       </div>
       {creating ? (
-        <form onSubmit={(event) => { event.preventDefault(); void createCase(); }}
+        <form onSubmit={(event) => { event.preventDefault(); void createNewCase(); }}
           className="flex items-center gap-1">
           <Input size="sm" value={caseTitle} onChange={(event) => setCaseTitle(event.target.value)}
             maxLength={120} aria-label="New case title" placeholder="Case title"

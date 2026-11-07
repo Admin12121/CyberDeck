@@ -89,8 +89,10 @@ test("authorization is the native confirmation dialog — no on-screen checkbox"
   // No full-width authorization section and no in-view case management.
   assert.ok(!/Authorization \(§9\.3\)/.test(scanViewSource));
   assert.ok(!/AuthorizedCaseAction/.test(scanViewSource));
-  // Without a case the view shows one muted line pointing at the Case section.
-  assert.match(scanViewSource, /Select a case in the Case section to enable scanning/);
+  // The shared gate strip routes to the central case surfaces; the muted
+  // empty line points at it instead of a dead "Case section".
+  assert.match(scanViewSource, /<CaseGate activity="Network scanning" \/>/);
+  assert.match(scanViewSource, /Choose a saved case in the gate above to enable scanning/);
 });
 
 test("stealth and service-probe flows are gated behind authorization and a saved case", () => {

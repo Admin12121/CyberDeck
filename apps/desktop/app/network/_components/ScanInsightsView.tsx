@@ -20,7 +20,8 @@ import {
   isDesktop, netscanHistory, netscanDiffV1, netscanTopologyV1,
   type ScanHistoryItemWire, type ScanDiffWire, type ScanTopologyWire,
 } from "@lib/ipc";
-import { useWorkbench, useWorkbenchCase } from "@state/workbench";
+import { useCaseReady } from "@state/workbench";
+import { CaseGate } from "@ds/case-gate";
 import {
   hostChangeCount,
   formatSessionLabel,
@@ -51,41 +52,11 @@ const MODE_RAIL_ITEMS = [
   { id: "topology", label: "Topology", icon: Network },
 ];
 
-/**
- * Compact case gate: a one-line status with the two working actions; the
- * two-sentence rationale lives in the InfoTip. Creating a case performs the
- * same native case-create + workbench session selection the shared gate uses,
- * so the secure constraint (saved case before native reads) is unchanged.
- */
-function CaseGate({ activity }: { activity: string }) {
-  const { caseSession } = useWorkbenchCase();
-  const [error] = useState<string | null>(null);
-  // The footer bar already shows case state; no explanation here. Errors
-  // are the only thing this gate ever renders.
-  if (caseSession.phase === "error" && caseSession.error) {
-    return (
-      <div className="px-3 py-1.5">
-        <span role="alert" className="font-mono text-[10px] text-err">{caseSession.error}</span>
-      </div>
-    );
-  }
-  if (error) {
-    return (
-      <div className="px-3 py-1.5">
-        <span role="alert" className="font-mono text-[10px] text-err">{error}</span>
-      </div>
-    );
-  }
-  return null;
-}
-
 export function ScanInsightsView() {
   const desktop = isDesktop();
-  const wb = useWorkbench();
-  const { caseSession } = useWorkbenchCase();
-  const revision = caseSession.phase === "ready" && caseSession.caseId === wb.caseId
-    ? caseSession.revision : null;
-  const identity = wb.caseId + ":" + String(revision);
+  const { caseId, caseRevision, caseReady } = useCaseReady();
+  const revision = caseReady ? caseRevision : null;
+  const identity = caseId + ":" + String(revision);
 
   const [mode, setMode] = useState<InsightsMode>("diff");
   const [history, setHistory] = useState<ScanHistoryItemWire[]>([]);
@@ -296,7 +267,7 @@ export function ScanInsightsView() {
       status={statusItems.some((item) => item !== null) ? <StatusStrip items={statusItems} /> : undefined}
     >
       {error ? <div className="border-b border-err/50 bg-err/10 px-2 py-1 font-mono text-[10px] text-err">{error}</div> : null}
-      {revision === null ? <CaseGate activity="Scan insights" /> : null}
+      <CaseGate activity="Scan insights" />
       <div className="flex min-h-0 flex-1 flex-col bg-panel">
         {!desktop ? (
           <EmptyState

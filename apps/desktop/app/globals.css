@@ -143,6 +143,12 @@
   --font-sans: Inter, "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
   --font-mono: "Geist Mono", "JetBrains Mono", "Cascadia Mono", Consolas, monospace;
   --default-font-family: var(--font-sans);
+  /* Dense chrome type scale: replaces the arbitrary text-[10px]/text-[11px] */
+  /* utilities that drifted across every view. */
+  --text-3xs: 0.625rem;
+  --text-3xs--line-height: 1rem;
+  --text-2xs: 0.6875rem;
+  --text-2xs--line-height: 1.1;
   --animate-skeleton: skeleton 2s -1s infinite linear;
   --animate-caret-blink: 1s ease-out infinite caret-blink;
   --animate-toast-success-odd: toast-success-odd 0.32s cubic-bezier(0.5, 1, 0.89, 1);

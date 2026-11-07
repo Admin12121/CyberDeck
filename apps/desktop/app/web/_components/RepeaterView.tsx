@@ -5,8 +5,8 @@ import { Chip, EmptyState, Pane, ToolButton } from "@ds/panes";
 import { httpSend, isDesktop, type HttpResponseWire } from "@lib/ipc";
 import { hexDump } from "@lib/hex";
 import { useWebWorkflow } from "./WebWorkflow";
-import { useWorkbenchCase } from "@state/workbench";
-import { AuthorizedCaseAction } from "@/app/_components/AuthorizedCaseAction";
+import { useCaseReady } from "@state/workbench";
+import { CaseGate } from "@ds/case-gate";
 
 interface RepeaterTab {
   name: string;
@@ -34,14 +34,13 @@ function binaryResponseBytes(reply: HttpResponseWire): Uint8Array {
 export function RepeaterView() {
   const desktop = isDesktop();
   const { repeaterHandoff } = useWebWorkflow();
-  const { caseId, caseSession } = useWorkbenchCase();
-  const caseReady = caseId !== "scratchpad" && caseSession.phase === "ready" && caseSession.caseId === caseId;
+  const { caseId, caseRevision, caseReady } = useCaseReady();
   const caseRef = useRef(caseId);
   caseRef.current = caseId;
   const inFlightRevision = useRef(0);
   const nextTabId = useRef(2);
   const lastHandoff = useRef(0);
-  const lastCaseIdentity = useRef({ caseId, revision: caseSession.revision });
+  const lastCaseIdentity = useRef({ caseId, revision: caseRevision });
   const [tabs, setTabs] = useState<RepeaterTab[]>([{ name: "R1", request: SAMPLE_REQUEST, response: null, error: null }]);
   const [active, setActive] = useState(0);
   const [busy, setBusy] = useState(false);
@@ -51,8 +50,8 @@ export function RepeaterView() {
   // requests, responses or in-flight jobs from one case revision to another.
   useEffect(() => {
     const changed = lastCaseIdentity.current.caseId !== caseId ||
-      lastCaseIdentity.current.revision !== caseSession.revision;
-    lastCaseIdentity.current = { caseId, revision: caseSession.revision };
+      lastCaseIdentity.current.revision !== caseRevision;
+    lastCaseIdentity.current = { caseId, revision: caseRevision };
     if (changed) {
       inFlightRevision.current += 1;
       lastHandoff.current = repeaterHandoff?.id ?? 0;
@@ -61,7 +60,7 @@ export function RepeaterView() {
       nextTabId.current = 2;
       setBusy(false);
     }
-  }, [caseId, caseSession.revision, repeaterHandoff?.id]);
+  }, [caseId, caseRevision, repeaterHandoff?.id]);
 
   useEffect(() => {
     if (!repeaterHandoff || repeaterHandoff.id === lastHandoff.current) return;
@@ -139,7 +138,7 @@ export function RepeaterView() {
           {current.response ? `${current.response.status} · ${current.response.size} B · ${current.response.duration_ms} ms` : "Native approval · scoped private/loopback IP only"}
         </span>
       </div>
-      {!caseReady && <AuthorizedCaseAction activity="Web request replay" />}
+      <CaseGate activity="Web request replay" />
       <div className="flex min-h-0 flex-1 gap-px bg-line">
         <Pane title={`Request: ${current.name}`} className="min-w-0 flex-1" bodyClassName="p-0">
           <textarea

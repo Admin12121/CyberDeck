@@ -4,18 +4,19 @@ import { useEffect, useMemo, useState } from "react";
 import { ArrowRight, History } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Frame, FrameHeader, FramePanel } from "@/components/ui/frame";
-import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Radio, RadioGroup } from "@/components/ui/radio-group";
-import { caseCreate, caseList, isDesktop, type CaseRecordWire } from "@lib/ipc";
+import { caseList, isDesktop, type CaseRecordWire } from "@lib/ipc";
 import { CATEGORIES, toolById, type ToolId } from "@state/tool-registry";
-import { useWorkbench } from "@state/workbench";
+import { useCreateCase, useWorkbench } from "@state/workbench";
+import { CaseCreateFields } from "./CaseCreateFields";
 import Image from "next/image";
 
 type StartupChoice = "temporary" | "new" | "existing";
 
 export function StartProject() {
   const wb = useWorkbench();
+  const createCase = useCreateCase();
   const [choice, setChoice] = useState<StartupChoice>("temporary");
   const [cases, setCases] = useState<CaseRecordWire[]>([]);
   const [selectedId, setSelectedId] = useState("");
@@ -67,6 +68,18 @@ export function StartProject() {
   }, []);
 
   const recent = useMemo(() => cases.slice(0, 8), [cases]);
+
+  // Deep link from the shared CaseGate: preselect the create form and focus it.
+  useEffect(() => {
+    if (!new URLSearchParams(window.location.search).has("new")) return;
+    setNative(isDesktop());
+    setChoice("new");
+    requestAnimationFrame(() => {
+      const input = document.getElementById("cyberdeck-new-case-name");
+      if (input instanceof HTMLInputElement) input.focus();
+    });
+  }, []);
+
   const actionable =
     !submitting &&
     native &&
@@ -87,9 +100,7 @@ export function StartProject() {
     setSubmitting(true);
     try {
       if (choice === "new") {
-        const record = await caseCreate(title.trim(), description.trim());
-        window.dispatchEvent(new Event("cyberdeck:cases-changed"));
-        wb.setCaseId(record.id);
+        await createCase(title.trim(), description.trim());
         openTool("forensics.files");
       } else if (choice === "existing") {
         if (!cases.some((record) => record.id === selectedId))
@@ -123,7 +134,7 @@ export function StartProject() {
                 alt=""
                 width={50}
                 height={50}
-                className="size-8=10 shrink-0 object-contain grayscale"
+                className="size-10 shrink-0 object-contain grayscale"
               />
               <div className="min-w-0">
                 <h1 className="text-sm font-semibold">Welcome to CyberDeck</h1>
@@ -177,36 +188,14 @@ export function StartProject() {
                     New investigation case
                   </Label>
                 </div>
-                <div className="ml-7 mt-3 grid gap-2 sm:grid-cols-[105px_1fr] sm:items-center">
-                  <Label
-                    htmlFor="cyberdeck-new-case-name"
-                    className="text-xs text-fg-muted"
-                  >
-                    Name
-                  </Label>
-                  <Input
-                    id="cyberdeck-new-case-name"
-                    value={title}
-                    size="sm"
-                    onChange={(e) => setTitle(e.target.value)}
+                <div className="ml-7 mt-3">
+                  <CaseCreateFields
+                    idPrefix="cyberdeck-new-case"
+                    title={title}
+                    description={description}
+                    onTitleChange={setTitle}
+                    onDescriptionChange={setDescription}
                     disabled={!native || choice !== "new"}
-                    maxLength={120}
-                    placeholder="Investigation name"
-                  />
-                  <Label
-                    htmlFor="cyberdeck-new-case-description"
-                    className="text-xs text-fg-muted"
-                  >
-                    Description
-                  </Label>
-                  <Input
-                    id="cyberdeck-new-case-description"
-                    size="sm"
-                    value={description}
-                    onChange={(e) => setDescription(e.target.value)}
-                    disabled={!native || choice !== "new"}
-                    maxLength={500}
-                    placeholder="Optional"
                   />
                 </div>
               </div>

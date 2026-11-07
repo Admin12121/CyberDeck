@@ -32,7 +32,9 @@ test("coss ui primitives are installed and used in route-local Home", () => {
   const ui = path.join(desktop, "components/ui");
   assert.ok(fs.readdirSync(ui).filter((f) => f.endsWith(".tsx")).length >= 50);
   assert.match(read("app/_components/StartProject.tsx"), /from "@\/components\/ui\/button"/);
-  assert.match(read("app/_components/StartProject.tsx"), /from "@\/components\/ui\/input"/);
+  // The create fields live in the shared component so the Cases page and the
+  // start page render the identical case-creation form.
+  assert.match(read("app/_components/StartProject.tsx"), /from "\.\/CaseCreateFields"/);
   assert.match(read("app/_components/StartProject.tsx"), /Temporary workspace in memory/);
 });
 

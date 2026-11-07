@@ -19,7 +19,7 @@ import {
   type PcapPacketWire,
   type StreamTranscriptWire,
 } from "@lib/ipc";
-import { useWorkbench } from "@state/workbench";
+import { useCaseReady, useWorkbench } from "@state/workbench";
 import { useWorkspaceDraft } from "@state/workspace-sessions";
 import {
   pcapExportViewNgV1,
@@ -119,9 +119,8 @@ function ImportedCaptureView() {
   // Mirrors ScanView: a case counts as saved-selected only when the native
   // session is ready for the workbench's current case id. Case artifact
   // exports are refused by the backend without one.
-  const savedCaseReady = wb.caseSession.phase === "ready"
-    && wb.caseSession.caseId === wb.caseId
-    && wb.caseSession.revision !== null;
+  const { caseReady, caseRevision } = useCaseReady();
+  const savedCaseReady = caseReady && caseRevision !== null;
 
   const packets = capture?.packets ?? (showSample ? SAMPLE_DISPLAY : []);
 

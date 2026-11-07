@@ -37,8 +37,10 @@ test("Recovery V1 real route uses existing typed native calls and authorized rev
     assert.match(rust, new RegExp("pub (?:async )?fn " + command + "\\("));
     assert.match(ui, new RegExp("\\b" + name + "\\b"));
   }
-  assert.match(ui, /caseSession\.phase === "ready"/);
-  assert.match(ui, /caseSession\.revision/);
+  // Recovery scopes derive from the shared case-readiness hook; the revision
+  // stays pinned into the scope so secrets never cross a case boundary.
+  assert.match(ui, /useCaseReady\(\)/);
+  assert.match(ui, /const scope = caseReady \? caseId \+ ":" \+ String\(caseRevision\) : null/);
   assert.match(ui, /status\?\.reveal_available/);
   assert.match(ui, /window\.setTimeout\(clearReveal, 30000\)/);
   assert.match(ui, /currentJob.*scope/);

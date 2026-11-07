@@ -7,10 +7,10 @@ import {
   isDesktop, proxyHistory, webCaptureConsentStatusV1,
   type CapturedRequestWire, type HttpResponseWire,
 } from "@lib/ipc";
-import { useWorkbenchCase } from "@state/workbench";
+import { useCaseReady } from "@state/workbench";
 import { useWebWorkflow } from "./WebWorkflow";
 import { PassiveRulesPanel } from "./PassiveRulesPanel";
-import { AuthorizedCaseAction } from "@/app/_components/AuthorizedCaseAction";
+import { CaseGate } from "@ds/case-gate";
 import {
   decodedBody, editableHistoryDraft, protectedHistoryAccess,
   type ProtectedHistoryDetail,
@@ -37,9 +37,7 @@ function BinaryPreview({ data, truncated }: { data: string | null; truncated: bo
 
 export function HistoryView() {
   const desktop = isDesktop();
-  const { caseId, caseSession } = useWorkbenchCase();
-  const nativeRevision = caseSession.revision;
-  const caseReady = caseId !== "scratchpad" && caseSession.phase === "ready" && caseSession.caseId === caseId;
+  const { caseId, caseRevision: nativeRevision, caseReady } = useCaseReady();
   const { draftInRepeater } = useWebWorkflow();
   const [rows, setRows] = useState<CapturedRequestWire[]>([]);
   const [query, setQuery] = useState("");
@@ -148,7 +146,7 @@ export function HistoryView() {
 
   return (
     <div className="flex h-full min-h-0 flex-col bg-line">
-      {!caseReady && <AuthorizedCaseAction activity="Private Web history" />}
+      <CaseGate activity="Private Web history" />
       <PassiveRulesPanel enabled={Boolean(desktop && captureGeneration)} caseId={caseId}
         revision={nativeRevision} generation={captureGeneration} />
       <div className="flex min-h-0 flex-1 gap-px">

@@ -8,7 +8,7 @@ import { hasCurrentRecoveryScope, recoveryDisplay } from "./recovery-presentatio
 import { chooseRecoveryBackend, DEFAULT_CANDIDATES, DEFAULT_MATCHES, DEFAULT_OPENCL_BATCH } from "./recovery-auto";
 import { Button } from "@/components/ui/button";
 import { Select } from "@ds/panes";
-import { useWorkbenchCase } from "@state/workbench";
+import { useCaseReady, useWorkbenchCase } from "@state/workbench";
 import {
   isDesktop, recoveryCancelV1, recoveryDevicesV1, recoveryDiscardV1,
   recoverySelectWordlistV1, recoveryWordlistStatusV1, type RecoveryWordlistV1,
@@ -87,10 +87,10 @@ let currentJob: { scope: string; id: number } | null = null;
 
 function useRecoveryController(targetHash: string, onCaseCreated?: (caseId: string) => void) {
   const { caseId, caseSession } = useWorkbenchCase();
+  const { caseReady, caseRevision } = useCaseReady();
   const [desktop, setDesktop] = useState(false);
   useEffect(() => setDesktop(isDesktop()), []);
-  const scope = caseSession.phase === "ready" && caseSession.caseId === caseId
-    ? caseId + ":" + String(caseSession.revision) : null;
+  const scope = caseReady ? caseId + ":" + String(caseRevision) : null;
   const scopeRef = useRef(scope);
   scopeRef.current = scope;
   const [backend, setBackend] = useState("auto");
@@ -614,7 +614,7 @@ export function NativeRecoveryControls() {
     );
   }
   const statusText = !r.scope
-    ? "Select a case in the status bar."
+    ? "Choose a saved case to authorize recovery — status-bar switcher or start page."
     : r.wordlistError
       ? r.wordlistError
       : null;

@@ -1,0 +1,11 @@
+# Normalize source files to LF in the working tree. The colocated node:test
+# contract suites read worktree files directly and assert LF-sensitive
+# patterns; core.autocrlf smudging to CRLF has repeatedly broken them on
+# Windows checkouts. Vendored third_party sources are intentionally excluded.
+*.ts text eol=lf
+*.tsx text eol=lf
+*.mts text eol=lf
+*.mjs text eol=lf
+*.js text eol=lf
+*.rs text eol=lf
+*.css text eol=lf

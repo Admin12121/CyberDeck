@@ -25,7 +25,7 @@ import {
   toggleStep,
 } from "./controller";
 import { b64, fileImportDerived, isDesktop, recipeRun, type RecipeRunWire } from "@lib/ipc";
-import { useWorkbench } from "@state/workbench";
+import { useCaseReady, useWorkbench } from "@state/workbench";
 import { useWorkspaceDraft } from "@state/workspace-sessions";
 import { outputCapabilities, recipeResultIdentity } from "./recipe-output-policy";
 import { canUseNativeRecipe } from "./native-recipe-policy";
@@ -174,8 +174,7 @@ export function RecipesView() {
     && typeof navigator.clipboard?.write === "function" && typeof ClipboardItem !== "undefined";
   const output = outputCapabilities(result, outMode, decodedImage?.mime ?? null, supportsImageClipboard);
   const copyEnabled = output.canCopy && (outMode === "image" ? supportsImageClipboard : supportsTextClipboard);
-  const caseLinked = wb.caseId !== "scratchpad"
-    && wb.caseSession.phase === "ready" && wb.caseSession.caseId === wb.caseId;
+  const { caseReady: caseLinked } = useCaseReady();
   const imageSrc = decodedImage
     ? `data:${decodedImage.mime};base64,${b64.encode(decodedImage.bytes)}`
     : null;

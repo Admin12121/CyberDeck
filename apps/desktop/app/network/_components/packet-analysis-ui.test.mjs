@@ -46,7 +46,7 @@ test("native capture retains original provenance, authorized save and parsed pac
   assert.match(live, /Original captured frame/);
   assert.match(live, /captureSaveV1\(/);
   assert.match(live, /Save Capture to Case/);
-  assert.match(live, /caseSession\.phase === "ready"/);
+  assert.match(live, /useCaseReady\(\)/);
   assert.doesNotMatch(start, /Demonstration packets/);
   assert.match(studio, /DEMO: sample packets/);
   assert.match(studio, /Send to Recipes/);

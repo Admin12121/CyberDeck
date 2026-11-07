@@ -48,7 +48,8 @@ import {
   netscanProfileDeleteV1,
   type ScanProfileWire,
 } from "@lib/ipc";
-import { useWorkbench, useWorkbenchCase } from "@state/workbench";
+import { useCaseReady, useWorkbench } from "@state/workbench";
+import { CaseGate } from "@ds/case-gate";
 import { useWorkspaceDraft } from "@state/workspace-sessions";import { invoke, Channel } from "@tauri-apps/api/core";
 
 
@@ -195,17 +196,16 @@ export function ScanView() {
     return () => { live = false; };
   }, [desktop]);
   const wb = useWorkbench();
-  const { caseSession } = useWorkbenchCase();
-  const revision = caseSession.phase === "ready" && caseSession.caseId === wb.caseId
-    ? caseSession.revision : null;
-  const identity = wb.caseId + ":" + String(revision);
+  const { caseId, caseRevision, caseReady } = useCaseReady();
+  const revision = caseReady ? caseRevision : null;
+  const identity = caseId + ":" + String(revision);
   const [retainedRevision, setRetainedRevision] = useWorkspaceDraft<number | null>(
-    wb.caseId, "network", "scan-session-revision", null,
+    caseId, "network", "scan-session-revision", null,
   );
-  const [target, setTarget] = useWorkspaceDraft(wb.caseId, "network", "scan-target", "127.0.0.1");
-  const [ports, setPorts] = useWorkspaceDraft(wb.caseId, "network", "scan-ports", "top25");
+  const [target, setTarget] = useWorkspaceDraft(caseId, "network", "scan-target", "127.0.0.1");
+  const [ports, setPorts] = useWorkspaceDraft(caseId, "network", "scan-ports", "top25");
   const [transport, setTransport] = useWorkspaceDraft<"tcp" | "udp">(
-    wb.caseId, "network", "scan-transport", "tcp",
+    caseId, "network", "scan-transport", "tcp",
   );
   const [running, setRunning] = useState(false);
   const [progress, setProgress] = useState<ScanProgressWire | null>(null);
@@ -852,12 +852,12 @@ export function ScanView() {
     || ndpNeighbors !== null || arpNeighbors !== null || discovered !== null;
 
   // Empty state: one short title + one muted line, centered in a card.
-  // Case selection happens in the Case section, never inside this view.
+  // Case selection happens in the shared gate strip and status bar, never inside this view.
   const emptyTitle = running
     ? "Scanning…"
     : revision === null ? "No case selected" : "Ready to scan";
   const emptyLine = revision === null
-    ? "Select a case in the Case section to enable scanning."
+    ? "Choose a saved case in the gate above to enable scanning."
     : running
       ? "Results appear here as probes complete."
       : "Enter a target and press Run scan.";
@@ -1175,6 +1175,7 @@ export function ScanView() {
           <Laptop size={12} strokeWidth={1.5} />
         </span>
       </div>
+      <CaseGate activity="Network scanning" />
       <StatusStrip items={statusItems} />
       {error ? <div role="alert" className="shrink-0 bg-err/10 px-3 py-1 font-mono text-[10px] text-err">{error}</div> : null}
       {progress ? (

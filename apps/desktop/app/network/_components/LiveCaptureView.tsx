@@ -6,7 +6,6 @@ import { Router } from "@lucasmarkes/hairline/react";
 import { Button } from "@/components/ui/button";
 import { Chip, EmptyState, Select, TextInput, ToolButton, WorkspaceTabs } from "@ds/panes";
 import { PacketTable } from "./PacketTable";
-import { AuthorizedCaseAction } from "@/app/_components/AuthorizedCaseAction";
 import { PacketPaneSplit } from "./PacketPaneSplit";
 import { CaptureActivity, type CaptureActivityPoint } from "./CaptureActivity";
 import { nativeCapturePacketRow } from "./packet-row-model";
@@ -19,7 +18,8 @@ import {
   type CaptureFrameProvenanceV1, type CaptureHostV1, type CaptureFlowV1,
   type CaptureFramePageV1, type PcapPacketWire, type StreamTranscriptWire,
 } from "@lib/ipc";
-import { useWorkbenchCase } from "@state/workbench";
+import { useCaseReady, useWorkbenchCase } from "@state/workbench";
+import { CaseGate } from "@ds/case-gate";
 import { useWorkspaceDraft } from "@state/workspace-sessions";
 import { activeCaptureId, boundedPageOffset, captureLimits, captureInterfaceEligible, matchesCaptureIdentity } from "./capture-view-policy";
 import { currentNativeSession, dropNativeSession, rememberNativeSession, subscribeNativeSessions } from "./capture-session-registry";
@@ -72,8 +72,9 @@ export function LiveCaptureView({ presentation = "full", onCaptureStarted, onRet
       .catch((error) => { if (live) setNativeCaptureStatus("Native capability inventory unavailable: " + message(error)); });
     return () => { live = false; };
   }, [desktop]);
-  const { caseId, caseSession } = useWorkbenchCase();
-  const revision = caseSession.phase === "ready" && caseSession.caseId === caseId ? caseSession.revision : null;
+  const { caseId, caseRevision, caseReady } = useCaseReady();
+  const { caseSession } = useWorkbenchCase();
+  const revision = caseReady ? caseRevision : null;
   const identity = caseId + ":" + String(revision);
   const currentIdentity = useRef(identity);
   currentIdentity.current = identity;
@@ -385,7 +386,7 @@ export function LiveCaptureView({ presentation = "full", onCaptureStarted, onRet
             )}
           </div>
         )}
-        {revision === null && eligible.length > 0 && <AuthorizedCaseAction activity="Live packet capture" />}
+        {revision === null && eligible.length > 0 && <CaseGate activity="Live packet capture" />}
         <div className="mt-3 flex flex-wrap items-center gap-2">
           {running && sessionId !== null && (
             <Button variant="destructive-outline" size="sm" disabled={working || status?.phase === "stopping"}
