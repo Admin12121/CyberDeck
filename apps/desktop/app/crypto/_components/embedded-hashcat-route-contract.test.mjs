@@ -16,7 +16,7 @@ test("Normal desktop build owns version-pinned C/shim/Rust-worker source graph",
   assert.ok(build.includes('"--install"'));
   assert.equal(manifest.commit, "1994b513b550edfe3e7fcaa1103759a9343e57a4");
   // Vendored set grows with each bundled-mode batch (batch-5 wallets added).
-  assert.equal(Object.keys(manifest.files).length, 725);
+  assert.equal(Object.keys(manifest.files).length, 776);
   assert.ok(manifest.files["src/modules/module_00000.c"], "upstream startup dependency must be pinned");
   assert.ok(manifest.files["src/modules/module_01400.c"], "SHA-256 selected mode must be pinned");
   assert.ok(manifest.files["src/modules/module_01000.c"], "NTLM module must be pinned to upstream");
@@ -162,7 +162,11 @@ test("Hashcat candidate presets are case-private, bounded and explicit across UI
   assert.ok(supervisor.includes("preset::generate("));
   assert.ok(supervisor.includes("|| cancel.is_cancelled()"));
   assert.ok(supervisor.includes("preset::read_line_bounded"));
-  assert.ok(supervisor.includes('File::open(active_wordlist)'));
+  // Chunked sessions: oversized wordlists split into bounded chunk files
+  // and the supervisor loops the worker; ordinals are proven per chunk.
+  assert.ok(supervisor.includes('write_wordlist_chunks'));
+  assert.ok(supervisor.includes('File::open(chunk_path)'));
+  assert.ok(supervisor.includes('forward_progress_frames(&frame_recv, submitted, total_budget, &mut progress)'));
   assert.ok(preset.includes("MAX_DERIVED_BYTES: u64 = 64 * 1024 * 1024"));
   assert.ok(preset.includes("create_new(true)"));
   assert.ok(preset.includes("read_line_bounded"));

@@ -4,14 +4,14 @@
 use super::recovery_backend::{
     self, RecoveryCancel, RecoveryProgressWire, RecoveryRequest, RecoveryRun,
 };
-use cyberdeck_crypto::recovery::RecoveryTarget;
+use cyberdeck_crypto::recovery::{RecoveryTarget, MAX_FAST_CANDIDATES};
 #[path = "embedded_hashcat_preset.rs"]
 mod preset;
 pub use preset::WordlistPreset;
 
 use std::collections::{HashMap, HashSet};
-use std::fs::{self, File};
-use std::io::{BufReader, Read, Write};
+use std::fs::{self, File, OpenOptions};
+use std::io::{BufReader, BufWriter, Read, Write};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -26,6 +26,9 @@ use sha2::{Digest, Sha256};
 const MAGIC: &[u8; 8] = b"CDHC0001";
 const MAX_PRIVATE_OUTPUT: u64 = 1 << 20;
 const HARD_DEADLINE: Duration = Duration::from_secs(315);
+/// Per-session candidate cap, mirroring the worker protocol's own bound.
+/// Chunked sessions never exceed this; only the session COUNT grows.
+const WORKER_SESSION_CANDIDATES: u64 = 1_000_000;
 
 /// Safe, stable diagnostics for a sealed child process. Never include the
 /// worker's stdout/stderr because upstream libraries may print target data.
@@ -699,8 +702,10 @@ pub(super) fn validate_embedded_request(request: &RecoveryRequest) -> Result<u32
     ) {
         return Err("embedded Hashcat requires Hashcat-managed device selection".into());
     }
+    // max_candidates is the operator's TOTAL budget across chunked sessions;
+    // each worker session stays bounded by the protocol's 1M-candidate cap.
     if request.max_candidates == 0
-        || request.max_candidates > 1_000_000
+        || request.max_candidates > MAX_FAST_CANDIDATES
         || request.max_matches == 0
         || request.max_matches > 4
     {
@@ -909,24 +914,95 @@ impl ProgressFrames {
 /// Drain all GPU progress frames that arrived since the last poll and
 /// forward them as aggregate progress wires. Frame counters are never
 /// trusted for matches; the authoritative result remains the verified
-/// outfile processed after the worker exits successfully.
+/// outfile processed after the worker exits successfully. `offset` is the
+/// candidates already submitted in earlier chunks and `total_budget` the
+/// operator's whole-run budget, so the UI sees one continuous counter
+/// instead of a per-chunk reset.
 fn forward_progress_frames<P: FnMut(RecoveryProgressWire)>(
     frame_recv: &mpsc::Receiver<(u64, u64, u32)>,
+    offset: u64,
+    total_budget: u64,
     progress: &mut P,
 ) {
-    while let Ok((tried, budget, cracked)) = frame_recv.try_recv() {
+    while let Ok((tried, _chunk_budget, cracked)) = frame_recv.try_recv() {
         progress(RecoveryProgressWire {
-            tried,
-            budget,
+            tried: offset + tried,
+            budget: total_budget,
             matches: cracked as usize,
             stage: None,
         });
     }
 }
 
+/// Split the operator wordlist into private chunk files of at most
+/// `MAX_CANDIDATES` candidates each, bounded by `total_budget` candidates
+/// overall. The worker protocol keeps its per-session 1M/300s safety
+/// bounds; big wordlists run as a sequence of bounded sessions instead of
+/// being silently truncated at the first million candidates. Returns the
+/// chunk files in order with their candidate counts.
+fn write_wordlist_chunks(
+    wordlist: &Path,
+    scratch: &Path,
+    total_budget: u64,
+    cancel: &RecoveryCancel,
+) -> Result<Vec<(PathBuf, u64)>, String> {
+    let input = File::open(wordlist).map_err(|_| "wordlist became unavailable")?;
+    let mut reader = BufReader::new(input);
+    let mut chunks = Vec::new();
+    let mut line = Vec::new();
+    let mut total = 0u64;
+    let mut index = 0u64;
+    while total < total_budget {
+        if cancel.is_cancelled() {
+            return Err("recovery cancelled".into());
+        }
+        let path = scratch.join(format!("words.{index}.chunk"));
+        let output = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .map_err(|_| "private chunk wordlist unavailable")?;
+        let mut writer = BufWriter::new(output);
+        let mut chunk_count = 0u64;
+        while chunk_count < WORKER_SESSION_CANDIDATES && total < total_budget {
+            if !preset::read_line_bounded(&mut reader, &mut line)? {
+                break;
+            }
+            let data = line.strip_suffix(b"\n").unwrap_or(&line);
+            let data = data.strip_suffix(b"\r").unwrap_or(data);
+            if data.len() > 4096 {
+                return Err("wordlist candidate exceeds recovery bound".into());
+            }
+            writer
+                .write_all(data)
+                .and_then(|_| writer.write_all(b"\n"))
+                .map_err(|_| "cannot write private chunk wordlist")?;
+            chunk_count += 1;
+            total += 1;
+        }
+        writer.flush().map_err(|_| "cannot flush private chunk wordlist")?;
+        if chunk_count == 0 {
+            // Empty trailing chunk (budget not reached): drop and stop.
+            let _ = fs::remove_file(&path);
+            break;
+        }
+        chunks.push((path, chunk_count));
+        index += 1;
+    }
+    Ok(chunks)
+}
+
 /// Executes selected bundled MD5/SHA-1/NTLM/SHA-256/SHA-512 wordlist mode. This function
 /// does not assume Hashcat's device identifiers match CyberDeck's Rust OpenCL
 /// inventory. Automatic GPU selection must not be certified without a KAT.
+///
+/// Wordlists larger than the worker protocol's per-session 1M-candidate bound
+/// run as a sequence of bounded worker sessions over private chunk files; the
+/// first independently verified match stops the sequence, cancellation is
+/// honored between sessions, and progress frames are aggregated so the UI
+/// sees one continuous tried/budget counter. A session that exhausts its
+/// 300-second runtime leaves the tail of its chunk untried; the operator
+/// budget governs the whole run.
 pub fn execute_path<P: FnMut(RecoveryProgressWire)>(
     request: &RecoveryRequest,
     wordlist: &Path,
@@ -948,7 +1024,6 @@ pub fn execute_path<P: FnMut(RecoveryProgressWire)>(
         .tempdir()
         .map_err(|_| "cannot create private Hashcat workspace")?;
     let hash = scratch.path().join("target.rawhash");
-    let output = scratch.path().join("recovered.tmp");
     // Bounded candidate transforms are prepared only in private job scratch.
     // The packaged Hashcat worker still executes the same native wordlist
     // attack, with no arbitrary rules/flags. Never mutate original evidence.
@@ -981,184 +1056,215 @@ pub fn execute_path<P: FnMut(RecoveryProgressWire)>(
             0,
         ));
     }
-    let active_wordlist = if generated.is_some() {
-        generated_path.as_path()
-    } else {
-        wordlist
-    };
     let mut file = File::create(&hash).map_err(|_| "cannot create private target file")?;
     file.write_all(request.target_hash.as_bytes())
         .and_then(|_| file.write_all(b"\n"))
         .map_err(|_| "cannot write private target file")?;
     drop(file);
 
-    let bytes = frame_mode(
-        runtime,
-        &hash,
-        active_wordlist,
-        &output,
-        request.max_candidates,
-        300,
-        device_id,
-        hash_mode,
-    )?;
-    let mut child = PrivateChild(
-        Command::new(runtime.join(worker_name()))
-            .current_dir(scratch.path())
-            .env("HOME", scratch.path())
-            // Hashcat may derive its profile from passwd(5), ignoring HOME.
-            // Keep potfiles, session metadata and cache under private scratch.
-            .env("XDG_DATA_HOME", scratch.path())
-            .env("XDG_CACHE_HOME", scratch.path())
-            .env("XDG_CONFIG_HOME", scratch.path())
-            .env("APPDATA", scratch.path())
-            .env("LOCALAPPDATA", scratch.path())
-            .env("TMP", scratch.path())
-            .env("TEMP", scratch.path())
-            .stdin(Stdio::piped())
-            // GPU progress frames are consumed from stdout; the worker's
-            // diagnostics stay on the redacted stderr channel.
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
-            .map_err(|_| "could not start bundled Hashcat worker")?,
-    );
-    {
-        let mut pipe = child
-            .0
-            .stdin
-            .take()
-            .ok_or("private worker stdin unavailable")?;
-        pipe.write_all(&bytes)
-            .map_err(|_| "private Hashcat worker protocol write failed")?;
-    }
-    // GPU progress: the worker emits fixed CDHC0003 counter frames on stdout
-    // during the session. A dedicated reader thread turns the blocking pipe
-    // into a channel so the poll loop below keeps its exact cancellation and
-    // deadline cadence (incremental availability is drained via try_recv).
-    // Frames are aggregates only; matches still come exclusively from the
-    // verified outfile, and the final outcome is still the exit code. A
-    // worker build without frame support simply writes nothing to stdout and
-    // the reader thread sees EOF, so progress stays empty rather than
-    // failing the session.
-    let (frame_send, frame_recv) = mpsc::channel::<(u64, u64, u32)>();
-    if let Some(mut pipe) = child.0.stdout.take() {
-        thread::spawn(move || {
-            let mut parser = ProgressFrames::new();
-            let mut chunk = [0u8; 512];
-            loop {
-                match pipe.read(&mut chunk) {
-                    Ok(0) | Err(_) => break, // EOF: the session is ending.
-                    Ok(read_len) => {
-                        for (tried, budget, cracked) in parser.absorb(&chunk[..read_len]) {
-                            if frame_send.send((tried, budget, cracked)).is_err() {
-                                // Supervisor gone; stop reading.
-                                return;
+    // Bounded transformed lists stay a single session (they are capped at the
+    // operator budget by construction). The original wordlist is split into
+    // protocol-bounded chunk files, so lists far larger than the worker's
+    // 1M-candidate session bound run as a sequence of sessions instead of
+    // being silently truncated.
+    let chunks: Vec<(PathBuf, u64)> = match generated {
+        Some(count) => vec![(generated_path.clone(), count)],
+        None => write_wordlist_chunks(wordlist, scratch.path(), request.max_candidates, cancel)?,
+    };
+    let total_budget: u64 = chunks.iter().map(|(_, count)| *count).sum();
+    let run_started = Instant::now();
+    let mut matches: Vec<(u64, Vec<u8>)> = Vec::new();
+    let mut submitted: u64 = 0;
+    let mut cancelled = false;
+    'chunks: for (index, (chunk_path, chunk_candidates)) in chunks.iter().enumerate() {
+        if cancel.is_cancelled() {
+            cancelled = true;
+            break;
+        }
+        // The worker refuses an existing outfile: one private scratch output
+        // per session, deleted with the workspace at the end.
+        let output = scratch.path().join(format!("recovered.{index}.tmp"));
+        let bytes = frame_mode(
+            runtime,
+            &hash,
+            chunk_path,
+            &output,
+            *chunk_candidates,
+            300,
+            device_id,
+            hash_mode,
+        )?;
+        let mut child = PrivateChild(
+            Command::new(runtime.join(worker_name()))
+                .current_dir(scratch.path())
+                .env("HOME", scratch.path())
+                // Hashcat may derive its profile from passwd(5), ignoring HOME.
+                // Keep potfiles, session metadata and cache under private scratch.
+                .env("XDG_DATA_HOME", scratch.path())
+                .env("XDG_CACHE_HOME", scratch.path())
+                .env("XDG_CONFIG_HOME", scratch.path())
+                .env("APPDATA", scratch.path())
+                .env("LOCALAPPDATA", scratch.path())
+                .env("TMP", scratch.path())
+                .env("TEMP", scratch.path())
+                .stdin(Stdio::piped())
+                // GPU progress frames are consumed from stdout; the worker's
+                // diagnostics stay on the redacted stderr channel.
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null())
+                .spawn()
+                .map_err(|_| "could not start bundled Hashcat worker")?,
+        );
+        {
+            let mut pipe = child
+                .0
+                .stdin
+                .take()
+                .ok_or("private worker stdin unavailable")?;
+            pipe.write_all(&bytes)
+                .map_err(|_| "private Hashcat worker protocol write failed")?;
+        }
+        // GPU progress: the worker emits fixed CDHC0003 counter frames on stdout
+        // during the session. A dedicated reader thread turns the blocking pipe
+        // into a channel so the poll loop below keeps its exact cancellation and
+        // deadline cadence (incremental availability is drained via try_recv).
+        // Frames are aggregates only; matches still come exclusively from the
+        // verified outfile, and the final outcome is still the exit code. A
+        // worker build without frame support simply writes nothing to stdout and
+        // the reader thread sees EOF, so progress stays empty rather than
+        // failing the session.
+        let (frame_send, frame_recv) = mpsc::channel::<(u64, u64, u32)>();
+        if let Some(mut pipe) = child.0.stdout.take() {
+            thread::spawn(move || {
+                let mut parser = ProgressFrames::new();
+                let mut chunk = [0u8; 512];
+                loop {
+                    match pipe.read(&mut chunk) {
+                        Ok(0) | Err(_) => break, // EOF: the session is ending.
+                        Ok(read_len) => {
+                            for (tried, budget, cracked) in parser.absorb(&chunk[..read_len]) {
+                                if frame_send.send((tried, budget, cracked)).is_err() {
+                                    // Supervisor gone; stop reading.
+                                    return;
+                                }
                             }
+                            // After malformed frames the parser is poisoned and
+                            // this loop keeps draining stdout to EOF so the
+                            // worker never sees a broken pipe mid-session.
                         }
-                        // After malformed frames the parser is poisoned and
-                        // this loop keeps draining stdout to EOF so the
-                        // worker never sees a broken pipe mid-session.
                     }
                 }
+            });
+        }
+        let started = Instant::now();
+        let session_cancelled = loop {
+            if cancel.is_cancelled() {
+                break true;
             }
-        });
-    }
-    let started = Instant::now();
-    let cancelled = loop {
-        if cancel.is_cancelled() {
-            break true;
-        }
-        if started.elapsed() > HARD_DEADLINE {
-            return Err("Hashcat worker timed out and was terminated".into());
-        }
-        forward_progress_frames(&frame_recv, &mut progress);
-        match child.0.try_wait() {
-            Ok(Some(status)) => {
-                if !status.success() {
-                    return Err(worker_failure(status.code()).into());
+            if started.elapsed() > HARD_DEADLINE {
+                return Err("Hashcat worker timed out and was terminated".into());
+            }
+            forward_progress_frames(&frame_recv, submitted, total_budget, &mut progress);
+            match child.0.try_wait() {
+                Ok(Some(status)) => {
+                    if !status.success() {
+                        return Err(worker_failure(status.code()).into());
+                    }
+                    break false;
                 }
-                break false;
+                Ok(None) => thread::sleep(Duration::from_millis(75)),
+                Err(_) => return Err("Hashcat worker status unavailable".into()),
             }
-            Ok(None) => thread::sleep(Duration::from_millis(75)),
-            Err(_) => return Err("Hashcat worker status unavailable".into()),
+        };
+        // Drop terminates any remaining child and waits before TempDir deletes
+        // sensitive inputs/output, including on timeout and case cancellation.
+        drop(child);
+        // Deliver final frames that completed before exit so the UI's last
+        // counters approach the real totals before the summary lands.
+        forward_progress_frames(&frame_recv, submitted, total_budget, &mut progress);
+        if session_cancelled || cancel.is_cancelled() {
+            cancelled = true;
+            break 'chunks;
         }
-    };
-    // Drop terminates any remaining child and waits before TempDir deletes
-    // sensitive inputs/output, including on timeout and case cancellation.
-    drop(child);
-    // Deliver final frames that completed before exit so the UI's last
-    // counters approach the real totals before the summary lands.
-    forward_progress_frames(&frame_recv, &mut progress);
-    if cancelled || cancel.is_cancelled() {
+        let mut chunk_matches: Vec<(u64, Vec<u8>)> = Vec::new();
+        if output.exists() {
+            if fs::metadata(&output)
+                .map_err(|_| "recovery output metadata unavailable")?
+                .len()
+                > MAX_PRIVATE_OUTPUT
+            {
+                return Err("Hashcat result output exceeded strict limit".into());
+            }
+            let target = RecoveryTarget::parse(&request.algorithm, &request.target_hash)?;
+            let content =
+                SensitiveBytes(fs::read(&output).map_err(|_| "cannot read bounded private output")?);
+            for candidate in content.0.split(|b| *b == b'\n') {
+                let candidate = candidate.strip_suffix(b"\r").unwrap_or(candidate);
+                if candidate.is_empty() {
+                    continue;
+                }
+                if !target.is_match(candidate)? {
+                    return Err("Hashcat candidate failed independent Rust digest verification".into());
+                }
+                // Find the real candidate ordinal inside this chunk (plus the
+                // candidates already submitted in earlier chunks), rather than
+                // fabricating work counters.
+                let file = File::open(chunk_path).map_err(|_| "wordlist became unavailable")?;
+                let mut reader = BufReader::new(file);
+                let mut line = Vec::new();
+                let mut index = 0u64;
+                let found_index = loop {
+                    line.clear();
+                    if !preset::read_line_bounded(&mut reader, &mut line)? {
+                        break None;
+                    }
+                    if line.len() > 4096 {
+                        return Err("wordlist candidate exceeds recovery bound".into());
+                    }
+                    let data = line.strip_suffix(b"\n").unwrap_or(&line);
+                    let data = data.strip_suffix(b"\r").unwrap_or(data);
+                    if data == candidate {
+                        break Some(index);
+                    }
+                    index += 1;
+                    if index >= *chunk_candidates {
+                        break None;
+                    }
+                };
+                let Some(found_index) = found_index else {
+                    return Err("Hashcat output is not a verified original wordlist candidate".into());
+                };
+                let global_index = submitted + found_index;
+                if chunk_matches.iter().any(|(old, _)| *old == global_index) {
+                    continue;
+                }
+                chunk_matches.push((global_index, candidate.to_vec()));
+                if chunk_matches.len() >= request.max_matches {
+                    break;
+                }
+            }
+            matches.extend(chunk_matches);
+            if !matches.is_empty() {
+                // First match stops the sequence, matching the autopilot's
+                // one-match-stops semantics across GPU stages.
+                break 'chunks;
+            }
+        }
+        submitted += chunk_candidates;
+    }
+    if cancelled {
         return Ok(recovery_backend::embedded_result(
             request,
             Vec::new(),
             true,
-            started.elapsed().as_millis() as u64,
+            run_started.elapsed().as_millis() as u64,
         ));
-    }
-    let mut matches = Vec::new();
-    if output.exists() {
-        if fs::metadata(&output)
-            .map_err(|_| "recovery output metadata unavailable")?
-            .len()
-            > MAX_PRIVATE_OUTPUT
-        {
-            return Err("Hashcat result output exceeded strict limit".into());
-        }
-        let target = RecoveryTarget::parse(&request.algorithm, &request.target_hash)?;
-        let content =
-            SensitiveBytes(fs::read(&output).map_err(|_| "cannot read bounded private output")?);
-        for candidate in content.0.split(|b| *b == b'\n') {
-            let candidate = candidate.strip_suffix(b"\r").unwrap_or(candidate);
-            if candidate.is_empty() {
-                continue;
-            }
-            if !target.is_match(candidate)? {
-                return Err("Hashcat candidate failed independent Rust digest verification".into());
-            }
-            // Find the real candidate ordinal in original wordlist where
-            // possible, rather than fabricating work counters.
-            let file = File::open(active_wordlist).map_err(|_| "wordlist became unavailable")?;
-            let mut reader = BufReader::new(file);
-            let mut line = Vec::new();
-            let mut index = 0u64;
-            let found_index = loop {
-                line.clear();
-                if !preset::read_line_bounded(&mut reader, &mut line)? {
-                    break None;
-                }
-                if line.len() > 4096 {
-                    return Err("wordlist candidate exceeds recovery bound".into());
-                }
-                let data = line.strip_suffix(b"\n").unwrap_or(&line);
-                let data = data.strip_suffix(b"\r").unwrap_or(data);
-                if data == candidate {
-                    break Some(index);
-                }
-                index += 1;
-                if index >= request.max_candidates {
-                    break None;
-                }
-            };
-            let Some(index) = found_index else {
-                return Err("Hashcat output is not a verified original wordlist candidate".into());
-            };
-            if matches.iter().any(|(old, _)| *old == index) {
-                continue;
-            }
-            matches.push((index, candidate.to_vec()));
-            if matches.len() >= request.max_matches {
-                break;
-            }
-        }
     }
     Ok(recovery_backend::embedded_result(
         request,
         matches,
         false,
-        started.elapsed().as_millis() as u64,
+        run_started.elapsed().as_millis() as u64,
     ))
 }
 

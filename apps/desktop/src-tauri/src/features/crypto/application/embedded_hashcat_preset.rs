@@ -64,11 +64,14 @@ pub fn generate(
     preset: WordlistPreset,
     mut cancelled: impl FnMut() -> bool,
 ) -> Result<Option<u64>, String> {
-    if budget == 0 || budget > MAX_CANDIDATES {
-        return Err("invalid candidate budget".into());
-    }
+    // Plain passes the operator list through untransformed; its size is
+    // bounded by the chunked sessions in execute_path, not by the transform
+    // budget, so check the budget only for generating presets.
     if preset == WordlistPreset::Plain {
         return Ok(None);
+    }
+    if budget == 0 || budget > MAX_CANDIDATES {
+        return Err("invalid candidate budget".into());
     }
     let input = File::open(source).map_err(|_| "wordlist became unavailable")?;
     // Never overwrite an existing evidence file, even inside private scratch.

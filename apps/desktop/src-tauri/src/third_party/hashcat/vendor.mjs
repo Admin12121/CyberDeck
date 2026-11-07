@@ -61,7 +61,7 @@ if (mode === "--import") {
   dirFiles("include", (name) => name.endsWith(".h") || name.endsWith(".def"));
   // The complete host EMU object family uses almost all common inc_ sources,
   // not only the kernel for hash mode 1400.
-  const bundledModePrefixes = ["00000", "00010", "00020", "00050", "00060", "00100", "00110", "00120", "00132", "00400", "00500", "01100", "01400", "01500", "01700", "01731", "01800", "02100", "03200", "05500", "05600", "07400", "11600", "13600", "17200", "17210", "09400", "09600", "09700", "10400", "10500", "11300", "13400", "15600", "15700", "13100", "18200", "22100"];
+  const bundledModePrefixes = ["00000", "00010", "00020", "00050", "00060", "00100", "00110", "00120", "00130", "00132", "00300", "00400", "00500", "01100", "01400", "01500", "01700", "01731", "01800", "02100", "03100", "03200", "05500", "05600", "07400", "11600", "12500", "13000", "13600", "17200", "17210", "09400", "09600", "09700", "10400", "10500", "11300", "13400", "15600", "15700", "13100", "18200", "22100"];
   dirFiles("OpenCL", (name) => {
     if (name.endsWith(".h")) return true;
     if (!name.endsWith(".cl")) return false;
@@ -100,9 +100,9 @@ if (mode === "--import") {
                       "01100", "02100", "05500", "05600", "07400", "01500", "00132", "01731"]) {
     add("src/modules/module_" + mode + ".c");
   }
-  // Batch-3 archive containers: WinZip AES (13600), 7-Zip (11600) and PKZIP
-  // legacy ZipCrypto (17200/17210).
-  for (const mode of ["11600", "13600", "17200", "17210"]) {
+  // Batch-3 archive containers: 7-Zip (11600), RAR3-hp (12500), RAR5 (13000),
+  // WinZip AES (13600) and PKZIP legacy ZipCrypto (17200/17210).
+  for (const mode of ["11600", "12500", "13000", "13600", "17200", "17210"]) {
     add("src/modules/module_" + mode + ".c");
   }
   // Batch-4 documents: MS Office 97/2003 MD5+RC4 (9700), Office 2007 (9400),
@@ -119,18 +119,32 @@ if (mode === "--import") {
   for (const mode of ["13100", "18200", "22100"]) {
     add("src/modules/module_" + mode + ".c");
   }
+  // Batch-7 databases: MSSQL (2000) is 131 but resolves KERN_TYPE 130, shared
+  // with the already-bundled MSSQL (2005) 132; MySQL 4.1/MySQL5 is 300 and
+  // Oracle H: Type (Oracle 7+) is 3100.
+  for (const mode of ["00131", "00300", "03100"]) {
+    add("src/modules/module_" + mode + ".c");
+  }
+  // Batch-8 os-and-apps: macOS v10.4-10.6 salted SHA1 (122, KERN_TYPE 120
+  // shared with the bundled mode 120), Kerberos 5 etype 17/18 TGS-REP
+  // (19600/19700) and KeePass KDBX v4 Argon2/AESKDF (34300/34301).
+  for (const mode of ["00122", "19600", "19700", "34300", "34301"]) {
+    add("src/modules/module_" + mode + ".c");
+  }
   // Shared module-common sources included verbatim by batch modules.
   add("src/modules/blowfish_common.c");
   add("src/modules/scrypt_common.c");
+  add("src/modules/argon2_common.c");
   // Candidate-feed plugins: the wordlist reader (and siblings) are loadable
   // plugins in this hashcat; a wordlist attack cannot start without them.
   dirFiles("src/feeds", (name) => name.endsWith(".c") || name.endsWith(".h"));
   dirFiles("OpenCL", (name) =>
     /^m(00010|00020|00050|00060|00110|00120|01100|02100|05500|05600|07400|01500|00132|01731)[-_a-z0-9]*\.cl$/.test(name));
   // Batch-3 archive kernels: WinZip and PKZIP are pure-only; 7-Zip also has
-  // the suffix-less optimized kernel.
+  // the suffix-less optimized kernel, RAR3-hp ships pure + optimized and
+  // RAR5 is pure-only.
   dirFiles("OpenCL", (name) =>
-    /^m(11600|13600|17200|17210)[-a-z0-9_]*\.cl$/.test(name));
+    /^m(11600|12500|13000|13600|17200|17210)[-a-z0-9_]*\.cl$/.test(name));
   // Batch-4 document kernels: Office 2007/2013 and PDF 1.4-1.6 are pure-only;
   // oldoffice and PDF 1.1-1.3 ship optimized-only kernel families.
   dirFiles("OpenCL", (name) =>
@@ -142,6 +156,32 @@ if (mode === "--import") {
   // BitLocker is pure-only.
   dirFiles("OpenCL", (name) =>
     /^m(13100|18200|22100)[-a-z0-9_]*\.cl$/.test(name));
+  // Batch-7 database kernels: MSSQL 2000 (131) and 2005 (132) share the
+  // m00130 optimized family (no m00131/m00132 kernels exist upstream, so
+  // staging prefix 00130 also completes the already-bundled mode 132);
+  // MySQL 4.1/5 (300) and Oracle H (3100) ship optimized-only families,
+  // Oracle including the a4 straight variant.
+  dirFiles("OpenCL", (name) =>
+    /^m(00130|00300|03100)[-a-z0-9_]*\.cl$/.test(name));
+  // Batch-8 os-and-apps kernels: macOS 122 reuses the staged m00120 optimized
+  // family (KERN_TYPE 120, no m00122 kernel exists upstream); Kerberos etype
+  // 17/18 and KeePass KDBX v4 are pure-only.
+  dirFiles("OpenCL", (name) =>
+    /^m(19600|19700|34300|34301)[-a-z0-9_]*\.cl$/.test(name));
+  // Batch-9 salted variants: SMF > v1.1 (121, KERN_TYPE 120 — shared with the
+  // staged m00120 family, no m00121 kernel exists upstream), PDF 1.7 Level 3
+  // (10600, KERN_TYPE 1410 — the shared m01410 optimized-only family),
+  // WPA-PMKID-PBKDF2 (16800, pure-only), the unified WPA-PBKDF2-PMKID+EAPOL
+  // (22000, pure-only), LUKS v1 (14600 — dynamic per-header kernel dispatch
+  // across the m14611..m14643 SHA1/SHA256/SHA512/RIPEMD160 x AES/Serpent/
+  // Twofish families; the Whirlpool KDF combos 14651-14653 have no upstream
+  // kernel files and are not staged) and its streamlined RIPEMD-160 + AES
+  // form (29541, KERN_TYPE 14641 — shared with the m14641 LUKS kernel).
+  for (const mode of ["00121", "10600", "16800", "22000", "14600", "29541"]) {
+    add("src/modules/module_" + mode + ".c");
+  }
+  dirFiles("OpenCL", (name) =>
+    /^m(01410|16800|22000|14611|14612|14613|14621|14622|14623|14631|14632|14633|14641|14642|14643)[-a-z0-9_]*\.cl$/.test(name));
   // Apple Metal/OpenCL extension sources pinned for macOS runtime parity.
   add("src/ext_metal.m");
   add("src/ext_iokit.m");
@@ -225,8 +265,8 @@ if (mode === "--import") {
     version: "v8.0.0-development",
     build: "SHARED=1 PRODUCTION=1 ENABLE_BRAIN=0 ENABLE_CUBIN=0; module_00000 bootstrap + module_01400",
     supportedModesPlanned: [1400],
-    includes: ["C core Makefile object closure", "all public and internal C headers", "host EMU kernel includes", "SHA-256 kernels and amplifiers", "batch-1 KDF kernels (phpass/md5crypt/sha512crypt/bcrypt)", "batch-3 archive kernels (7z/WinZip/PKZIP)", "OpenCL headers", "sse2neon compatibility", "runtime tunings", "licenses"],
-    excludes: ["standalone hashcat CLI", "hash modules beyond the bundled batch-3 set (0,10,20,50,60,100,110,120,132,400,500,1000,1100,1400,1500,1700,1731,1800,2100,3200,5500,5600,7400,11600,13600,17200,17210)", "other mode kernels", "Python", "FPGA", "unused bridges and feeds", "docs/examples/test suites"],
+    includes: ["C core Makefile object closure", "all public and internal C headers", "host EMU kernel includes", "SHA-256 kernels and amplifiers", "batch-1 KDF kernels (phpass/md5crypt/sha512crypt/bcrypt)", "batch-3 archive kernels (7z/RAR3-hp/RAR5/WinZip/PKZIP)", "OpenCL headers", "sse2neon compatibility", "runtime tunings", "licenses"],
+    excludes: ["standalone hashcat CLI", "hash modules beyond the bundled batch-3 set (0,10,20,50,60,100,110,120,132,400,500,1000,1100,1400,1500,1700,1731,1800,2100,3200,5500,5600,7400,11600,12500,13000,13600,17200,17210)", "other mode kernels", "Python", "FPGA", "unused bridges and feeds", "docs/examples/test suites"],
     files,
   }, null, 2) + "\n");
   console.log("Imported " + paths.length + " pinned source and license files (" + core.length + " C core objects).");
