@@ -59,6 +59,9 @@ test("active interaction gate is one compact cluster in the mode toolbar row: a 
   assert.match(body, /ARP cache poisoning/);
   assert.match(body, /Master Plan/);
   assert.match(body, /passive observations only/);
+  // The gate is scoped: referenced only in the Scope mode branch, never
+  // repeated across the passive mode rows.
+  assert.equal(viewSource.match(/\{gateCluster\}/g)?.length, 1);
 });
 
 test("lab scope controls exist and the set-scope action is authorization-gated", () => {
@@ -82,6 +85,11 @@ test("analysis section wires the passive analyzer over the opened capture", () =
     viewSource,
   );
   assert.ok(analyzeButton, "Analyze button missing");
+  // Idle state: the analyzer controls live inside the centered ModeCard
+  // (Scope-exemplar Frame pattern); once data exists the same controls move
+  // to the minimal toolbar row above the full-width tables.
+  assert.match(viewSource, /<ModeCard\s+title="ARP analysis"/);
+  assert.match(viewSource, /\{arpControls\}/);
   // Without a capture the same handler goes through the pcap_open_dialog
   // flow (delegated to openCapture, which is the PacketStudioView flow).
   const analyze = /const runAnalysis = async \(\) => \{([\s\S]*?)\n  \};/.exec(viewSource);

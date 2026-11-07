@@ -2,24 +2,25 @@
 /**
  * Network Lab (Ettercap-inspired mode, passive/defensive arc).
  *
- * UX revision: a compact left-aligned icon-only pill rail (34px buttons,
- * tooltip = label, active = orange filled pill) merged into ONE toolbar row
- * per mode — Scope, ARP, Live, DNS, Report — with exactly one mode rendered
- * at a time. Row = rail pills + the mode's h-8 controls + one InfoTip (the
- * long explanation that used to be body text) + the active-interaction gate
- * cluster (disabled control + passive-arc chip + Master Plan tooltip) + a
- * single state chip. Content area: a centered card when empty, full-bleed
- * tables when data. No separator lines between rows; spacing only.
+ * UX revision: a slim icon-only pill rail switcher row (34px buttons,
+ * tooltip = label, active = orange filled pill) sits above the active mode —
+ * exactly one of Scope, ARP, Live, DNS, Report renders at a time. Scope is
+ * the exemplar: controls live INSIDE a centered Frame card (FrameTitle +
+ * state chip header, FrameDescription with the honesty wording, FramePanel
+ * with the controls); ARP, Live and DNS use the same ModeCard when idle and
+ * switch to a minimal toolbar row (only the still-needed controls) above
+ * full-width result tables once data exists. The active-interaction gate
+ * cluster lives only in the Scope mode. Long explanations are card
+ * descriptions / tooltips, never body prose walls.
  *
  * Gates (unchanged, Master Plan §5.1): scope entries are IP/CIDR strings held
- * in memory only behind an explicit authorization checkbox (the checkbox
- * stays in the Scope mode only — the backend set-scope/sweep commands refuse
- * without it; the passive analysis modes carry zero auth chrome); ARP
+ * in memory only; the authorization acknowledgment happens through the
+ * backend's native confirmation dialogs, not on-screen checkbox chrome; ARP
  * analysis, the DNS monitor and the event timeline are passive reductions
  * over the opened capture or a subscribed Packet Studio session; the lab
  * never transmits.
  */
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { Ban, Crosshair, FileText, FolderOpen, Globe, Network, Radar } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import { Chip, Select, TextInput, ToolButton } from "@ds/panes";
@@ -100,6 +101,40 @@ function LabEmptyCard({ icon: Icon, title, line }: { icon: LucideIcon; title: st
         <FramePanel className="rounded-lg bg-background px-4 pb-5 pt-4">
           <p className="text-xs leading-relaxed text-fg-muted">{line}</p>
         </FramePanel>
+      </Frame>
+    </div>
+  );
+}
+
+/**
+ * Idle control card for a lab mode (Scope-exemplar pattern): centered Frame,
+ * header = FrameTitle + single state chip, FrameDescription carries the long
+ * honesty wording, FramePanel holds the mode's controls. Once a run exists
+ * the results render full-width below the slim rail row instead, with only
+ * the still-needed controls in a toolbar row.
+ */
+function ModeCard({
+  title,
+  state,
+  stateTone,
+  description,
+  children,
+}: {
+  title: string;
+  state: string;
+  stateTone: "muted" | "orange" | "ok" | "err";
+  description: string;
+  children: ReactNode;
+}) {
+  return (
+    <div className="flex min-h-0 flex-1 items-start justify-center overflow-y-auto p-4 sm:p-6">
+      <Frame className="mx-auto w-full max-w-3xl rounded-xl bg-muted/72 p-1">
+        <FrameHeader className="flex-row items-center justify-between gap-3 px-4 py-3">
+          <FrameTitle>{title}</FrameTitle>
+          <Chip tone={stateTone}>{state}</Chip>
+        </FrameHeader>
+        <FrameDescription>{description}</FrameDescription>
+        <FramePanel className="space-y-4 rounded-lg bg-background px-4 pb-5 pt-4">{children}</FramePanel>
       </Frame>
     </div>
   );
@@ -346,9 +381,9 @@ export function NetworkLabView() {
     </nav>
   );
 
-  // Active interaction gate: ONE compact cluster at the end of every mode's
-  // toolbar row (no separate banner row). The full Master Plan gate wording
-  // lives in the InfoTip.
+  // Active interaction gate: ONE compact cluster, rendered only in the Scope
+  // mode (where the gated sweep lives) — no repetition across mode rows. The
+  // full Master Plan gate wording lives in the InfoTip.
   const gateCluster = (
     <>
       <IconButton
@@ -358,6 +393,131 @@ export function NetworkLabView() {
       />
       <Chip>passive arc</Chip>
       <InfoTip text="Active traffic manipulation — ARP cache poisoning, on-path (MITM) interaction, packet injection — requires a user-configured authorized lab scope, explicit confirmation, compatible privileges and a visible stop/emergency-disengage control (Master Plan §5.1). This arc ships passive observations only, so these controls stay disabled." />
+    </>
+  );
+
+  // ARP controls: shared by the idle control card and the data-state toolbar
+  // (open a different capture, re-analyze, refine the gateway hint).
+  const arpControls = (
+    <>
+      <ToolButton
+        onClick={() => void openCapture()}
+        disabled={!desktop || opening}
+        title={desktop ? "Open a PCAP or PCAPNG capture using the native Rust parser" : "Opening captures requires the desktop runtime"}
+      >
+        <FolderOpen size={11} /> {opening ? "opening…" : "Open capture…"}
+      </ToolButton>
+      <ToolButton
+        tone="primary"
+        onClick={() => void runAnalysis()}
+        disabled={!desktop || opening || analyzing}
+        title="Run passive ARP anomaly analysis over the opened capture; opens a file picker first if none is open"
+      >
+        {analyzing ? "analyzing…" : "Analyze"}
+      </ToolButton>
+      <TextInput
+        value={routerIp}
+        onChange={setRouterIp}
+        placeholder="gateway IP (optional)"
+        ariaLabel="Gateway IP for gateway-impersonation detection"
+        className="h-8 w-44 sm:h-7"
+      />
+    </>
+  );
+
+  // Live controls: shared by the idle control card and the data-state toolbar
+  // (switch the source, re-derive, subscribe or stop the subscription).
+  const liveControls = (
+    <>
+      <label className="flex items-center gap-1.5 text-xs text-fg-dim">
+        <span className="text-fg-muted">Source</span>
+        <select
+          value={liveSource}
+          onChange={(event) =>
+            switchLiveSource(event.target.value === "session" ? "session" : "opened")
+          }
+          aria-label="Live timeline source: opened capture or running capture session"
+          className="h-8 rounded border border-line bg-panel px-2 text-xs text-fg outline-none focus:outline-none sm:h-7"
+        >
+          <option value="opened">Opened capture</option>
+          <option value="session">Running capture session</option>
+        </select>
+      </label>
+      {liveSource === "session" ? (
+        <>
+          <TextInput
+            value={liveSessionId}
+            onChange={(text) => setLiveSessionId(text.replace(/[^0-9]/g, "").slice(0, 15))}
+            placeholder="session id (Packet Studio)"
+            ariaLabel="Capture session id to subscribe to"
+            className="h-8 w-44 sm:h-7"
+          />
+          {livePolling ? (
+            <ToolButton
+              onClick={stopLiveSubscription}
+              title="Stop polling the subscribed session. The lab never stops Packet Studio's capture itself"
+            >
+              Stop
+            </ToolButton>
+          ) : (
+            <ToolButton
+              tone="primary"
+              disabled={!desktop || !isValidLiveSessionId(liveSessionId)}
+              onClick={startLiveSubscription}
+              title="Subscribe to the running capture session: poll its passive lab status every 2 seconds. Requires Packet Studio's live capture to be running"
+            >
+              Subscribe
+            </ToolButton>
+          )}
+        </>
+      ) : (
+        <ToolButton
+          disabled={!desktop || !capture || timelineBusy}
+          title={capture
+            ? "Derive the event timeline: new hosts, first services, ARP conflicts, gateway changes"
+            : "Open a capture first — the timeline derives from the opened capture"}
+          onClick={() => {
+            setTimelineBusy(true);
+            networkLabEventsV1(routerIp.trim() || null)
+              .then((wire) => setTimeline(wire))
+              .catch((cause) =>
+                setAnalysisError(
+                  "Lab timeline failed: " + (cause instanceof Error ? cause.message : String(cause)),
+                ),
+              )
+              .finally(() => setTimelineBusy(false));
+          }}
+        >
+          {timelineBusy ? "deriving…" : "Derive timeline"}
+        </ToolButton>
+      )}
+    </>
+  );
+
+  // DNS controls: shared by the idle control card and the data-state toolbar.
+  const dnsControls = (
+    <>
+      {!capture ? (
+        <ToolButton
+          onClick={() => void openCapture()}
+          disabled={!desktop || opening}
+          title={desktop ? "Open a PCAP or PCAPNG capture using the native Rust parser" : "Opening captures requires the desktop runtime"}
+        >
+          <FolderOpen size={11} /> Open capture…
+        </ToolButton>
+      ) : null}
+      <ToolButton
+        tone="primary"
+        disabled={!desktop || !capture || dnsBusy}
+        title={
+          capture
+            ? "Run the passive DNS-response monitor over the opened capture: answer inconsistencies, loopback/link-local answer targets and NXDOMAIN injection"
+            : "Open a capture first — the DNS monitor reads the opened capture"
+        }
+        onClick={() => void runDnsMonitor()}
+      >
+        {dnsBusy ? "analyzing…" : "Analyze DNS"}
+      </ToolButton>
     </>
   );
 
@@ -663,39 +823,7 @@ export function NetworkLabView() {
 
       {mode === "arp" && (
         <section aria-label="ARP analysis" className="flex min-h-0 flex-1 flex-col">
-          <div className={TOOLBAR_ROW}>
-            {railPills}
-            <ToolButton
-              onClick={() => void openCapture()}
-              disabled={!desktop || opening}
-              title={desktop ? "Open a PCAP or PCAPNG capture using the native Rust parser" : "Opening captures requires the desktop runtime"}
-            >
-              <FolderOpen size={11} /> {opening ? "opening…" : "Open capture…"}
-            </ToolButton>
-            <ToolButton
-              tone="primary"
-              onClick={() => void runAnalysis()}
-              disabled={!desktop || opening || analyzing}
-              title="Run passive ARP anomaly analysis over the opened capture; opens a file picker first if none is open"
-            >
-              {analyzing ? "analyzing…" : "Analyze"}
-            </ToolButton>
-            <TextInput
-              value={routerIp}
-              onChange={setRouterIp}
-              placeholder="gateway IP (optional)"
-              ariaLabel="Gateway IP for gateway-impersonation detection"
-              className="h-8 w-44 sm:h-7"
-            />
-            <InfoTip text="Passive ARP anomaly analysis over the opened capture: duplicate IP→MAC claims, gratuitous ARP bursts and gateway impersonation, plus a unified host inventory. The analyzer never transmits a packet." />
-            <span className="flex-1" />
-            {gateCluster}
-            <Chip tone={capture ? "ok" : "muted"}>
-              {capture
-                ? `${capture.file_name} · ${capture.format.toUpperCase()} · ${capture.packet_count} packets`
-                : "no capture"}
-            </Chip>
-          </div>
+          <div className="flex shrink-0 items-center px-3 py-1.5">{railPills}</div>
           {openError ? (
             <div role="alert" className="mx-3 border border-err/50 bg-err/10 px-3 py-1 font-mono text-[10px] text-err">
               {openError}
@@ -707,13 +835,30 @@ export function NetworkLabView() {
             </div>
           ) : null}
           {!analysis ? (
-            <LabEmptyCard
-              icon={Radar}
-              title="No passive analysis yet"
-              line="Open a capture or press Analyze."
-            />
+            <ModeCard
+              title="ARP analysis"
+              state={
+                capture
+                  ? `${capture.file_name} · ${capture.format.toUpperCase()} · ${capture.packet_count} packets`
+                  : "no capture"
+              }
+              stateTone={capture ? "ok" : "muted"}
+              description="Passive ARP anomaly analysis over the opened capture: duplicate IP→MAC claims, gratuitous ARP bursts and gateway impersonation, plus a unified host inventory. The analyzer never transmits a packet."
+            >
+              <div className="flex flex-wrap items-center gap-3">{arpControls}</div>
+            </ModeCard>
           ) : (
-            <div className="min-h-0 flex-1 overflow-y-auto pb-4">
+            <>
+              <div className={TOOLBAR_ROW}>
+                {arpControls}
+                <span className="flex-1" />
+                <Chip tone={capture ? "ok" : "muted"}>
+                  {capture
+                    ? `${capture.file_name} · ${capture.format.toUpperCase()} · ${capture.packet_count} packets`
+                    : "no capture"}
+                </Chip>
+              </div>
+              <div className="min-h-0 flex-1 overflow-y-auto pb-4">
               <p className="px-3 pt-2 font-mono text-[10px] text-fg-muted">
                 {analysis.arp_frame_count} ARP frames · {analysis.observation_count} attributable
                 observations · {analysis.findings.length} finding
@@ -802,148 +947,74 @@ export function NetworkLabView() {
                   ) : null}
                 </tbody>
               </table>
-            </div>
+              </div>
+            </>
           )}
         </section>
       )}
 
       {mode === "live" && (
         <section aria-label="Live monitor" className="flex min-h-0 flex-1 flex-col">
-          <div className={TOOLBAR_ROW}>
-            {railPills}
-            <label className="flex items-center gap-1.5 text-xs text-fg-dim">
-              <span className="text-fg-muted">Source</span>
-              <select
-                value={liveSource}
-                onChange={(event) =>
-                  switchLiveSource(event.target.value === "session" ? "session" : "opened")
-                }
-                aria-label="Live timeline source: opened capture or running capture session"
-                className="h-8 rounded border border-line bg-panel px-2 text-xs text-fg outline-none focus:outline-none sm:h-7"
-              >
-                <option value="opened">Opened capture</option>
-                <option value="session">Running capture session</option>
-              </select>
-            </label>
-            {liveSource === "session" ? (
-              <>
-                <TextInput
-                  value={liveSessionId}
-                  onChange={(text) => setLiveSessionId(text.replace(/[^0-9]/g, "").slice(0, 15))}
-                  placeholder="session id (Packet Studio)"
-                  ariaLabel="Capture session id to subscribe to"
-                  className="h-8 w-44 sm:h-7"
-                />
-                {livePolling ? (
-                  <ToolButton
-                    onClick={stopLiveSubscription}
-                    title="Stop polling the subscribed session. The lab never stops Packet Studio's capture itself"
-                  >
-                    Stop
-                  </ToolButton>
-                ) : (
-                  <ToolButton
-                    tone="primary"
-                    disabled={!desktop || !isValidLiveSessionId(liveSessionId)}
-                    onClick={startLiveSubscription}
-                    title="Subscribe to the running capture session: poll its passive lab status every 2 seconds. Requires Packet Studio's live capture to be running"
-                  >
-                    Subscribe
-                  </ToolButton>
-                )}
-              </>
-            ) : (
-              <ToolButton
-                disabled={!desktop || !capture || timelineBusy}
-                title={capture
-                  ? "Derive the event timeline: new hosts, first services, ARP conflicts, gateway changes"
-                  : "Open a capture first — the timeline derives from the opened capture"}
-                onClick={() => {
-                  setTimelineBusy(true);
-                  networkLabEventsV1(routerIp.trim() || null)
-                    .then((wire) => setTimeline(wire))
-                    .catch((cause) =>
-                      setAnalysisError(
-                        "Lab timeline failed: " + (cause instanceof Error ? cause.message : String(cause)),
-                      ),
-                    )
-                    .finally(() => setTimelineBusy(false));
-                }}
-              >
-                {timelineBusy ? "deriving…" : "Derive timeline"}
-              </ToolButton>
-            )}
-            <InfoTip text="Bettercap-style one-capture-many-modules subscription: the lab subscribes to Packet Studio's running capture and never starts its own capture, and Packet Studio's capture must be running for live counts. The lab transmits nothing; Packet Studio owns the capture lifecycle, the lab only reads its status. While the session runs, the captured counter tracks it live; the event timeline derives from the session's retained frames." />
-            <span className="flex-1" />
-            {gateCluster}
-            <Chip tone={liveStateTone}>{liveState}</Chip>
-          </div>
+          <div className="flex shrink-0 items-center px-3 py-1.5">{railPills}</div>
           {liveError ? (
             <div role="alert" className="mx-3 border border-err/50 bg-err/10 px-3 py-1 font-mono text-[10px] text-err">
               {liveError}
             </div>
           ) : null}
           {!displayTimeline ? (
-            <LabEmptyCard
-              icon={Radar}
-              title="No timeline yet"
-              line="Derive from the opened capture or subscribe to a session."
-            />
+            <ModeCard
+              title="Live monitor"
+              state={liveState}
+              stateTone={liveStateTone}
+              description="Bettercap-style one-capture-many-modules subscription: the lab subscribes to Packet Studio's running capture and never starts its own capture, and Packet Studio's capture must be running for live counts. The lab transmits nothing; Packet Studio owns the capture lifecycle, the lab only reads its status. While the session runs, the captured counter tracks it live; the event timeline derives from the session's retained frames."
+            >
+              <div className="flex flex-wrap items-center gap-3">{liveControls}</div>
+            </ModeCard>
           ) : (
-            <div className="min-h-0 flex-1 overflow-y-auto pb-4">
-              <StatusStrip items={liveStripItems} />
-              <TimelineTable wire={displayTimeline} />
-            </div>
+            <>
+              <div className={TOOLBAR_ROW}>
+                {liveControls}
+                <span className="flex-1" />
+                <Chip tone={liveStateTone}>{liveState}</Chip>
+              </div>
+              <div className="min-h-0 flex-1 overflow-y-auto pb-4">
+                <StatusStrip items={liveStripItems} />
+                <TimelineTable wire={displayTimeline} />
+              </div>
+            </>
           )}
         </section>
       )}
 
       {mode === "dns" && (
         <section aria-label="DNS monitor" className="flex min-h-0 flex-1 flex-col">
-          <div className={TOOLBAR_ROW}>
-            {railPills}
-            {!capture ? (
-              <ToolButton
-                onClick={() => void openCapture()}
-                disabled={!desktop || opening}
-                title={desktop ? "Open a PCAP or PCAPNG capture using the native Rust parser" : "Opening captures requires the desktop runtime"}
-              >
-                <FolderOpen size={11} /> Open capture…
-              </ToolButton>
-            ) : null}
-            <ToolButton
-              tone="primary"
-              disabled={!desktop || !capture || dnsBusy}
-              title={
-                capture
-                  ? "Run the passive DNS-response monitor over the opened capture: answer inconsistencies, loopback/link-local answer targets and NXDOMAIN injection"
-                  : "Open a capture first — the DNS monitor reads the opened capture"
-              }
-              onClick={() => void runDnsMonitor()}
-            >
-              {dnsBusy ? "analyzing…" : "Analyze DNS"}
-            </ToolButton>
-            <InfoTip text="Passive DNS-response monitor over the opened capture (dns-spoofing counterpart): answer inconsistencies, loopback/link-local answer targets and NXDOMAIN injection. Read-only — the monitor reads the opened capture and never transmits anything." />
-            <span className="flex-1" />
-            {gateCluster}
-            <Chip tone={dnsStateTone}>{dnsState}</Chip>
-          </div>
+          <div className="flex shrink-0 items-center px-3 py-1.5">{railPills}</div>
           {dnsError ? (
             <div role="alert" className="mx-3 border border-err/50 bg-err/10 px-3 py-1 font-mono text-[10px] text-err">
               {dnsError}
             </div>
           ) : null}
           {!dnsResult ? (
-            <LabEmptyCard
-              icon={Globe}
-              title="No DNS analysis yet"
-              line="Run the monitor over the opened capture."
-            />
+            <ModeCard
+              title="DNS monitor"
+              state={dnsState}
+              stateTone={dnsStateTone}
+              description="Passive DNS-response monitor over the opened capture (dns-spoofing counterpart): answer inconsistencies, loopback/link-local answer targets and NXDOMAIN injection. Read-only — the monitor reads the opened capture and never transmits anything."
+            >
+              <div className="flex flex-wrap items-center gap-3">{dnsControls}</div>
+            </ModeCard>
           ) : (
-            <div className="min-h-0 flex-1 overflow-y-auto pb-4">
-              <StatusStrip items={dnsStatusItems(dnsResult)} />
-              <DnsFindingsTable wire={dnsResult} />
-            </div>
+            <>
+              <div className={TOOLBAR_ROW}>
+                {dnsControls}
+                <span className="flex-1" />
+                <Chip tone={dnsStateTone}>{dnsState}</Chip>
+              </div>
+              <div className="min-h-0 flex-1 overflow-y-auto pb-4">
+                <StatusStrip items={dnsStatusItems(dnsResult)} />
+                <DnsFindingsTable wire={dnsResult} />
+              </div>
+            </>
           )}
         </section>
       )}
@@ -987,7 +1058,6 @@ export function NetworkLabView() {
               <ReportReceiptChip receipt={reportReceipt} />
               <InfoTip text="One structured artifact (ARP findings, event timeline, host inventory, DNS findings) rendered to bounded markdown and persisted as ONE case finding in the backend-selected saved case. Read-only over the capture; the frontend only ever receives a receipt." />
               <span className="flex-1" />
-              {gateCluster}
             </div>
           </div>
           {reportError ? (

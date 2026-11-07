@@ -57,8 +57,11 @@ test("rail badges count real state: ARP conflicts, live gateway changes, DNS fin
 // ------------------------------------------------------------- live monitor ---
 
 test("live monitor is passive, capture-gated and renders the event timeline", () => {
-  // The mode exists with its long explanation in one InfoTip, not body prose.
+  // The mode exists as an idle control card (Scope-exemplar Frame pattern);
+  // its long explanation is the card description, not body prose.
   assert.match(view, /\{mode === "live" && \(/);
+  assert.match(view, /<ModeCard\s+title="Live monitor"/);
+  assert.match(view, /\{liveControls\}/);
   assert.match(view, /networkLabEventsV1\(routerIp\.trim\(\) \|\| null\)/);
   assert.match(canonical, /Passive timeline over the opened capture; transmits nothing/);
   assert.match(backend, /pub fn network_lab_events_v1/);

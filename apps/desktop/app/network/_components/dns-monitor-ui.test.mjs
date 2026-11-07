@@ -30,6 +30,10 @@ test("DNS monitor is its own rail mode and is capture-gated", () => {
     viewSource,
   );
   assert.ok(section, "DNS monitor mode missing");
+  // Idle state: the monitor controls live inside the centered ModeCard
+  // (Scope-exemplar Frame pattern).
+  assert.match(viewSource, /<ModeCard\s+title="DNS monitor"/);
+  assert.match(viewSource, /\{dnsControls\}/);
   assert.match(viewSource, /<DnsFindingsTable wire=\{dnsResult\} \/>/);
   // Same read-only capture gate as the timeline derivation: the button is
   // disabled until a capture is open and explains why in its tooltip.
