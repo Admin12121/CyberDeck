@@ -894,6 +894,26 @@ fn bundled_hashcat_modes() -> Vec<EmbeddedHashcatMode> {
         ("7zip", 11600, 0),
         ("zip-legacy", 17200, 0),
         ("zip-legacy", 17210, 0),
+        // Batch-7 databases (MSSQL 2000, MySQL 4.1, Oracle H:).
+        ("smf", 121, 0),
+        ("macos-salted-sha1", 122, 0),
+        ("mssql-2000", 131, 0),
+        ("mysql4.1", 300, 0),
+        ("oracle-h", 3100, 0),
+        // Batch-8 os-and-apps: RAR3-hp/RAR5, Kerberos etype 17/18 and KDBX
+        // v4 (one algorithm, mode chosen by the parsed KDF UUID).
+        ("rar3-hp", 12500, 0),
+        ("rar5", 13000, 0),
+        ("kerberos-tgs-rep-17", 19600, 0),
+        ("kerberos-tgs-rep-18", 19700, 0),
+        ("keepass-kdbx4", 34300, 0),
+        ("keepass-kdbx4", 34301, 0),
+        // Batch-9 salted variants: PDF 1.7 Level 3, WPA-PMKID, unified WPA
+        // and the LUKS v1 RIPEMD-160 + AES text form.
+        ("pdf-1.7", 10600, 0),
+        ("wpa-pmkid", 16800, 0),
+        ("wpa", 22000, 0),
+        ("luks", 29541, 0),
     ]
     .into_iter()
     .map(|(algorithm, mode, digest_hex_length)| EmbeddedHashcatMode {

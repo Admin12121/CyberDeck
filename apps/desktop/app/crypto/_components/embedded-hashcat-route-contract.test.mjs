@@ -27,7 +27,7 @@ test("Normal desktop build owns version-pinned C/shim/Rust-worker source graph",
 
   assert.ok(manifest.files["OpenCL/m04000-pure.cl"], "required upstream startup kernel must be pinned");
   const caps = JSON.parse(read(hc + "/capability-manifest.json"));
-  assert.deepEqual(caps.hash_modes.map(({id}) => id), [0,10,20,50,60,100,110,120,132,400,500,1000,1100,1400,1500,1700,1731,1800,2100,3200,5500,5600,7400,9400,9600,9700,10400,10500,11300,11600,13100,13400,13600,15600,15700,17200,17210,18200,22100]);
+  assert.deepEqual(caps.hash_modes.map(({id}) => id), [0,10,20,50,60,100,110,120,121,122,131,132,300,400,500,1000,1100,1400,1500,1700,1731,1800,2100,3100,3200,5500,5600,7400,9400,9600,9700,10400,10500,10600,11300,11600,12500,13000,13100,13400,13600,15600,15700,16800,17200,17210,18200,19600,19700,22000,22100,29541,34300,34301]);
   assert.ok(caps.hash_modes.every(({hardware_verified}) => hardware_verified === false));
   assert.ok(caps.attack_modes.every(({id}) => id === 0), "only wordlist currently worker-connected");
   assert.ok(native.includes('modulePaths'), "every selected module must be compiled");

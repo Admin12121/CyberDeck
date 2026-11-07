@@ -384,6 +384,30 @@ pub(super) fn embedded_result(
                         Err(_) => "embedded_hashcat_unsupported",
                     }
                 }
+                // Batch-7 databases.
+                "smf" => "embedded_hashcat_00121",
+                "macos-salted-sha1" => "embedded_hashcat_00122",
+                "mssql-2000" => "embedded_hashcat_00131",
+                "mysql4.1" => "embedded_hashcat_00300",
+                "oracle-h" => "embedded_hashcat_03100",
+                // Batch-8 os-and-apps archives, Kerberos etype 17/18 and
+                // KDBX v4 (mode chosen by the parsed KDF UUID, 34300/34301).
+                "rar3-hp" => "embedded_hashcat_12500",
+                "rar5" => "embedded_hashcat_13000",
+                "kerberos-tgs-rep-17" => "embedded_hashcat_19600",
+                "kerberos-tgs-rep-18" => "embedded_hashcat_19700",
+                "keepass-kdbx4" => {
+                    match cyberdeck_crypto::kdbx4::Kdbx4::parse(&request.target_hash) {
+                        Ok(parsed) if parsed.gpu_mode() == 34300 => "embedded_hashcat_34300",
+                        Ok(_) => "embedded_hashcat_34301",
+                        Err(_) => "embedded_hashcat_unsupported",
+                    }
+                }
+                // Batch-9 salted variants.
+                "pdf-1.7" => "embedded_hashcat_10600",
+                "wpa-pmkid" => "embedded_hashcat_16800",
+                "wpa" => "embedded_hashcat_22000",
+                "luks" => "embedded_hashcat_29541",
                 _ => "embedded_hashcat_unsupported",
             }
             .into(),

@@ -42,6 +42,25 @@ const ARCHIVE_KERNELS = {
     "m18200_a4-pure.cl",
   ],
   22100: ["m22100-pure.cl"],
+  // Batch-7/8/9 modes. 121/122 share the staged m00120 optimized family
+  // (KERN_TYPE 120), 131 the m00130 family, 10600 the m01410 family and
+  // 29541 the m14641 LUKS kernel; 3100 ships an a4 straight variant and
+  // RAR3-hp a suffix-less optimized kernel.
+  121: ["m00120_a0-optimized.cl", "m00120_a1-optimized.cl", "m00120_a3-optimized.cl"],
+  122: ["m00120_a0-optimized.cl", "m00120_a1-optimized.cl", "m00120_a3-optimized.cl"],
+  131: ["m00130_a0-optimized.cl", "m00130_a1-optimized.cl", "m00130_a3-optimized.cl"],
+  300: ["m00300_a0-optimized.cl", "m00300_a1-optimized.cl", "m00300_a3-optimized.cl"],
+  3100: ["m03100_a0-optimized.cl", "m03100_a1-optimized.cl", "m03100_a3-optimized.cl", "m03100_a4-optimized.cl"],
+  10600: ["m01410_a0-optimized.cl", "m01410_a1-optimized.cl", "m01410_a3-optimized.cl"],
+  12500: ["m12500-optimized.cl", "m12500-pure.cl"],
+  13000: ["m13000-pure.cl"],
+  16800: ["m16800-pure.cl"],
+  19600: ["m19600-pure.cl"],
+  19700: ["m19700-pure.cl"],
+  22000: ["m22000-pure.cl"],
+  29541: ["m14641-pure.cl"],
+  34300: ["m34300-pure.cl"],
+  34301: ["m34301-pure.cl"],
 };
 
 test("only approved pinned module+kernel sources are bundled", () => {
@@ -51,7 +70,7 @@ test("only approved pinned module+kernel sources are bundled", () => {
   assert.equal(manifest.commit, supported.source_commit);
   assert.equal(supported.abi_version, 4);
   assert.deepEqual(supported.hash_modes.map(m => m.id),
-    [0, 10, 20, 50, 60, 100, 110, 120, 132, 400, 500, 1000, 1100, 1400, 1500, 1700, 1731, 1800, 2100, 3200, 5500, 5600, 7400, 9400, 9600, 9700, 10400, 10500, 11300, 11600, 13100, 13400, 13600, 15600, 15700, 17200, 17210, 18200, 22100]);
+    [0, 10, 20, 50, 60, 100, 110, 120, 121, 122, 131, 132, 300, 400, 500, 1000, 1100, 1400, 1500, 1700, 1731, 1800, 2100, 3100, 3200, 5500, 5600, 7400, 9400, 9600, 9700, 10400, 10500, 10600, 11300, 11600, 12500, 13000, 13100, 13400, 13600, 15600, 15700, 16800, 17200, 17210, 18200, 19600, 19700, 22000, 22100, 29541, 34300, 34301]);
   for (const m of supported.hash_modes) {
     assert.ok(manifest.files["src/modules/module_" + String(m.id).padStart(5, "0") + ".c"],
       "missing module " + m.id);
@@ -76,7 +95,7 @@ test("the C shim, FFI and worker use the same bounded selected-mode contract", (
   const ffi = read("native/hashcat_ffi.rs");
   const worker = read("native/recovery_worker.rs");
   const supervisor = read("../../features/crypto/application/embedded_hashcat.rs");
-  const modes = "0 | 10 | 20 | 50 | 60 | 100 | 110 | 120 | 132 | 400 | 1500 | 1731 | 500 | 1000 | 1400 | 1700 | 1800 | 3200 | 7400 | 1100 | 2100 | 5500 | 5600 | 11600 | 13600 | 17200 | 17210 | 9400 | 9600 | 9700 | 10400 | 10500 | 11300 | 13400 | 15600 | 15700 | 13100 | 18200 | 22100";
+  const modes = "0 | 10 | 20 | 50 | 60 | 100 | 110 | 120 | 132 | 400 | 1500 | 1731 | 500 | 1000 | 1400 | 1700 | 1800 | 3200 | 7400 | 1100 | 2100 | 5500 | 5600 | 11600 | 13600 | 17200 | 17210 | 9400 | 9600 | 9700 | 10400 | 10500 | 11300 | 13400 | 15600 | 15700 | 13100 | 18200 | 22100 | 121 | 122 | 131 | 300 | 3100 | 10600 | 12500 | 13000 | 16800 | 19600 | 19700 | 22000 | 29541 | 34300 | 34301";
   assert.match(c, /case 11600: case 13600: case 17200: case 17210:/);
   for (const mode of modes.split(" | ")) {
     const boundary = new RegExp("\\b" + mode + "\\b");

@@ -93,7 +93,21 @@ export type HashcatRawAlgorithmV1 =
   | "ethereum-scrypt"
   | "kerberos-tgs-rep"
   | "kerberos-as-rep"
-  | "bitlocker";
+  | "bitlocker"
+  | "smf"
+  | "macos-salted-sha1"
+  | "mssql-2000"
+  | "mysql4.1"
+  | "oracle-h"
+  | "rar3-hp"
+  | "rar5"
+  | "kerberos-tgs-rep-17"
+  | "kerberos-tgs-rep-18"
+  | "keepass-kdbx4"
+  | "pdf-1.7"
+  | "wpa-pmkid"
+  | "wpa"
+  | "luks";
 /** Native Rust CPU digest coverage (embedded Hashcat is raw 5 modes only). */
 export type RecoveryRawAlgorithmV1 =
   | HashcatRawAlgorithmV1

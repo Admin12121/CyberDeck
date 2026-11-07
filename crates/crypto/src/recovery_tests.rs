@@ -632,3 +632,47 @@ fn yescrypt_cancel_and_global_candidate_cap_without_prefetch() {
     )
     .is_err());
 }
+
+#[test]
+fn batch7_9_targets_self_detect_or_verify_via_hints() {
+    use crate::kdf_format;
+    // The unified WPA record (mode 22000) supersedes the legacy 40-hex
+    // PMKID form: the old windows_auth vector still verifies through the
+    // new salted_variants verifier after the detection reroute.
+    let legacy_pmkid = "WPA*01*8f1bddadd02e1417163f03af545892cc6998eff4*aabbccddeeff*112233445566*546573744e6574****";
+    assert_eq!(kdf_format(legacy_pmkid), Some("wpa"));
+    let target = RecoveryTarget::parse("", legacy_pmkid).unwrap();
+    assert!(target.is_match(b"cyberdeck").unwrap());
+    assert!(!target.is_match(b"Cyberdeck").unwrap());
+    // The four-field PMKID capture (mode 16800) self-detects by shape.
+    let pmkid = "2582a8281bf9d4308d6f5731d0e61c61:4604ba734d4e:89acf0e761f4:ed487162465a774bfba60eb603a39f3a";
+    assert_eq!(kdf_format(pmkid), Some("wpa-pmkid"));
+    assert!(RecoveryTarget::parse("", pmkid).unwrap().is_match(b"hashcat!").unwrap());
+    // Self-describing batch 7/8/9 wires route through their verifiers.
+    assert_eq!(kdf_format("0x01004b617433000000000000000000000000000000000000000051c88bd2152a6c7862d3db9c9b011e0513fbd941"), Some("mssql-2000"));
+    assert!(RecoveryTarget::parse("", "0x01004b617433000000000000000000000000000000000000000051c88bd2152a6c7862d3db9c9b011e0513fbd941").unwrap().is_match(b"cyberdeck").unwrap());
+    assert_eq!(kdf_format("$luks$1$ripemd160$aes$bad"), Some("luks"));
+    assert_eq!(kdf_format("$rar5$16$00$00$00$00"), Some("rar5"));
+    assert_eq!(kdf_format("$RAR3$*0*00*00"), Some("rar3-hp"));
+    assert_eq!(kdf_format("$keepass$*4*2*ef636ddf*67108864*19*2*00*00*00*00"), Some("keepass-kdbx4"));
+    assert_eq!(kdf_format("$keepass$*2*24569*0*a*b*c*d"), Some("keepass"));
+    assert_eq!(kdf_format("$krb5tgs$17$user$realm$00$00"), Some("kerberos-tgs-rep-17"));
+    assert_eq!(kdf_format("$krb5tgs$18$user$realm$00$00"), Some("kerberos-tgs-rep-18"));
+    assert_eq!(kdf_format("$krb5tgs$23$user$realm$00$00"), Some("kerberos-tgs-rep"));
+    assert_eq!(kdf_format("$pdf$5*5*256*0*0*16*00*32*00*0*00*0*00*0*00"), Some("pdf-1.7"));
+    assert_eq!(kdf_format("$pdf$1*2*40*x"), Some("pdf-1.1-1.3"));
+    // Bare-digest salted variants are hint-driven and verify via the
+    // stored-format path exactly like the existing hint-driven ones.
+    for (hint, encoded, password) in [
+        ("mysql4.1", "87c7b8262d3208503687a0b37014057a334c19e4", "cyberdeck"),
+        ("oracle-h", "ED122223D01263D6:cyberdeck", "cyberdeck"),
+        ("smf", "d27c0a627a45db487af161fcc3a4005d88eb8a1f:25551135", "hashcat"),
+        ("macos-salted-sha1", "86586886b8bd3c379d2e176243a7225e6aae969d293fe9a9", "hashcat"),
+    ] {
+        let target = RecoveryTarget::parse(hint, encoded).unwrap();
+        assert!(target.is_match(password.as_bytes()).unwrap(), "{hint}");
+        assert!(!target.is_match(b"not-the-solution").unwrap(), "{hint}");
+    }
+    assert!(kdf_format("87c7b8262d3208503687a0b37014057a334c19e4").is_none());
+}
+

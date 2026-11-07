@@ -91,8 +91,44 @@
       "desktop_routed": true
     },
     {
+      "id": 121,
+      "algorithm": "smf",
+      "digest_hex_length": 0,
+      "source_build": true,
+      "desktop_available": false,
+      "hardware_verified": false,
+      "desktop_routed": true
+    },
+    {
+      "id": 122,
+      "algorithm": "macos-salted-sha1",
+      "digest_hex_length": 0,
+      "source_build": true,
+      "desktop_available": false,
+      "hardware_verified": false,
+      "desktop_routed": true
+    },
+    {
+      "id": 131,
+      "algorithm": "mssql-2000",
+      "digest_hex_length": 0,
+      "source_build": true,
+      "desktop_available": false,
+      "hardware_verified": false,
+      "desktop_routed": true
+    },
+    {
       "id": 132,
       "algorithm": "mssql-2005",
+      "digest_hex_length": 0,
+      "source_build": true,
+      "desktop_available": false,
+      "hardware_verified": false,
+      "desktop_routed": true
+    },
+    {
+      "id": 300,
+      "algorithm": "mysql4.1",
       "digest_hex_length": 0,
       "source_build": true,
       "desktop_available": false,
@@ -190,6 +226,15 @@
       "desktop_routed": true
     },
     {
+      "id": 3100,
+      "algorithm": "oracle-h",
+      "digest_hex_length": 0,
+      "source_build": true,
+      "desktop_available": false,
+      "hardware_verified": false,
+      "desktop_routed": true
+    },
+    {
       "id": 3200,
       "algorithm": "bcrypt",
       "digest_hex_length": 0,
@@ -271,6 +316,15 @@
       "desktop_routed": true
     },
     {
+      "id": 10600,
+      "algorithm": "pdf-1.7",
+      "digest_hex_length": 0,
+      "source_build": true,
+      "desktop_available": false,
+      "hardware_verified": false,
+      "desktop_routed": true
+    },
+    {
       "id": 11300,
       "algorithm": "bitcoin",
       "digest_hex_length": 0,
@@ -282,6 +336,24 @@
     {
       "id": 11600,
       "algorithm": "7zip",
+      "digest_hex_length": 0,
+      "source_build": true,
+      "desktop_available": false,
+      "hardware_verified": false,
+      "desktop_routed": true
+    },
+    {
+      "id": 12500,
+      "algorithm": "rar3-hp",
+      "digest_hex_length": 0,
+      "source_build": true,
+      "desktop_available": false,
+      "hardware_verified": false,
+      "desktop_routed": true
+    },
+    {
+      "id": 13000,
+      "algorithm": "rar5",
       "digest_hex_length": 0,
       "source_build": true,
       "desktop_available": false,
@@ -334,6 +406,15 @@
       "desktop_routed": true
     },
     {
+      "id": 16800,
+      "algorithm": "wpa-pmkid",
+      "digest_hex_length": 0,
+      "source_build": true,
+      "desktop_available": false,
+      "hardware_verified": false,
+      "desktop_routed": true
+    },
+    {
       "id": 17200,
       "algorithm": "zip-legacy",
       "digest_hex_length": 0,
@@ -361,8 +442,62 @@
       "desktop_routed": true
     },
     {
+      "id": 19600,
+      "algorithm": "kerberos-tgs-rep-17",
+      "digest_hex_length": 0,
+      "source_build": true,
+      "desktop_available": false,
+      "hardware_verified": false,
+      "desktop_routed": true
+    },
+    {
+      "id": 19700,
+      "algorithm": "kerberos-tgs-rep-18",
+      "digest_hex_length": 0,
+      "source_build": true,
+      "desktop_available": false,
+      "hardware_verified": false,
+      "desktop_routed": true
+    },
+    {
+      "id": 22000,
+      "algorithm": "wpa",
+      "digest_hex_length": 0,
+      "source_build": true,
+      "desktop_available": false,
+      "hardware_verified": false,
+      "desktop_routed": true
+    },
+    {
       "id": 22100,
       "algorithm": "bitlocker",
+      "digest_hex_length": 0,
+      "source_build": true,
+      "desktop_available": false,
+      "hardware_verified": false,
+      "desktop_routed": true
+    },
+    {
+      "id": 29541,
+      "algorithm": "luks",
+      "digest_hex_length": 0,
+      "source_build": true,
+      "desktop_available": false,
+      "hardware_verified": false,
+      "desktop_routed": true
+    },
+    {
+      "id": 34300,
+      "algorithm": "keepass-kdbx4",
+      "digest_hex_length": 0,
+      "source_build": true,
+      "desktop_available": false,
+      "hardware_verified": false,
+      "desktop_routed": true
+    },
+    {
+      "id": 34301,
+      "algorithm": "keepass-kdbx4",
       "digest_hex_length": 0,
       "source_build": true,
       "desktop_available": false,

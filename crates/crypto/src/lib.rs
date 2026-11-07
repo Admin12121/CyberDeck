@@ -25,6 +25,13 @@ pub mod documents;
 pub mod wallets;
 pub mod bitlocker;
 pub mod kerberos;
+pub mod databases;
+pub mod kdbx4;
+pub mod kerberos_etype1718;
+pub mod macos_salted_sha1;
+pub mod rar;
+pub mod salted_variants;
+pub mod simd_digest;
 
 use base64::Engine as _;
 use hmac::{Hmac, Mac};
@@ -271,6 +278,18 @@ pub fn kdf_format(hash: &str) -> Option<&'static str> {
         Some("mssql-2012")
     } else if hash.starts_with("0x0100") && hash.len() == 54 {
         Some("mssql-2005")
+    } else if hash.starts_with("0x0100") && hash.len() == 94 {
+        Some("mssql-2000")
+    } else if hash.starts_with("$pdf$5*5*256*") {
+        Some("pdf-1.7")
+    } else if hash.starts_with("$RAR3$*0*") {
+        Some("rar3-hp")
+    } else if hash.starts_with("$rar5$") {
+        Some("rar5")
+    } else if hash.starts_with("$luks$") {
+        Some("luks")
+    } else if hash.starts_with("$keepass$*4*") {
+        Some("keepass-kdbx4")
     } else if hash.starts_with("$zip2$") && hash.ends_with("$/zip2$") {
         Some("winzip-aes")
     } else if hash.starts_with("$7z$") {
@@ -297,11 +316,19 @@ pub fn kdf_format(hash: &str) -> Option<&'static str> {
         Some("ethereum-scrypt")
     } else if hash.starts_with("$bitlocker$") {
         Some("bitlocker")
+    } else if hash.starts_with("$krb5tgs$17$") {
+        Some("kerberos-tgs-rep-17")
+    } else if hash.starts_with("$krb5tgs$18$") {
+        Some("kerberos-tgs-rep-18")
     } else if hash.starts_with("$krb5tgs$") {
         Some("kerberos-tgs-rep")
     } else if hash.starts_with("$krb5asrep$") {
         Some("kerberos-as-rep")
-    } else if hash.starts_with("WPA*01*") {
+    } else if hash.starts_with("WPA*0") {
+        // The unified WPA record (mode 22000, types 01..04) supersedes the
+        // legacy 40-hex PMKID form; the same verifier proves both.
+        Some("wpa")
+    } else if wpa_pmkid_capture_shape(hash) {
         Some("wpa-pmkid")
     } else if hash.starts_with("$NETNTLMv2$") {
         Some("netntlm-v2")
@@ -349,6 +376,21 @@ fn netntlm_capture_shape(hash: &str) -> bool {
         && fields[5].len() >= 16
         && fields[4].bytes().all(|b| b.is_ascii_hexdigit())
         && fields[5].bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+/// Shape check for the four-field PMKID capture (hashcat mode 16800): a
+/// 32-hex PMKID, two 12-hex MACs and an even-length hex ESSID.
+fn wpa_pmkid_capture_shape(hash: &str) -> bool {
+    let fields: Vec<&str> = hash.split(':').collect();
+    fields.len() == 4
+        && fields[0].len() == 32
+        && fields[1].len() == 12
+        && fields[2].len() == 12
+        && fields[3].len() <= 64
+        && fields[3].len() % 2 == 0
+        && fields
+            .iter()
+            .all(|field| field.bytes().all(|b| b.is_ascii_hexdigit()))
 }
 
 /// Verify a candidate password against a bcrypt, argon2, scrypt or pbkdf2
@@ -423,7 +465,6 @@ pub fn verify_kdf_format(format: &str, hash: &str, candidate: &str) -> Result<bo
         "mscash" => windows_auth::verify_mscash(hash, candidate),
         "mscash2" => windows_auth::verify_mscash2(hash, candidate),
         "netntlm-v1" => windows_auth::verify_netntlmv1(hash, candidate),
-        "wpa-pmkid" => windows_auth::verify_wpa_pmkid(hash, candidate),
         "netntlm-v2" => windows_auth::verify_netntlmv2(hash, candidate),
         // Archive containers (format batch B1): the parsed wire form carries
         // its own key-derivation parameters and check bytes.
@@ -489,6 +530,67 @@ pub fn verify_kdf_format(format: &str, hash: &str, candidate: &str) -> Result<bo
         }
         "kerberos-as-rep" => {
             let parsed = kerberos::KerberosAsRep::parse(hash)?;
+            parsed.verify(candidate)
+        }
+        // Database servers (format batch 7).
+        "mssql-2000" => {
+            let parsed = databases::Mssql2000::parse(hash)?;
+            parsed.verify(candidate)
+        }
+        "mysql4.1" => {
+            let parsed = databases::Mysql41::parse(hash)?;
+            parsed.verify(candidate)
+        }
+        "oracle-h" => {
+            let parsed = databases::OracleH::parse(hash)?;
+            parsed.verify(candidate)
+        }
+        // Archives and os-and-apps formats (format batches 8/9).
+        "rar3-hp" => {
+            let parsed = rar::Rar3Hp::parse(hash)?;
+            parsed.verify(candidate)
+        }
+        "rar5" => {
+            let parsed = rar::Rar5::parse(hash)?;
+            parsed.verify(candidate)
+        }
+        "keepass-kdbx4" => {
+            let parsed = kdbx4::Kdbx4::parse(hash)?;
+            parsed.verify(candidate)
+        }
+        "macos-salted-sha1" => {
+            let parsed = macos_salted_sha1::MacOsSaltedSha1::parse(hash)?;
+            parsed.verify(candidate)
+        }
+        "kerberos-tgs-rep-17" | "kerberos-tgs-rep-18" => {
+            let parsed = kerberos_etype1718::KerberosTgs1718::parse(hash)?;
+            parsed.verify(candidate)
+        }
+        "smf" => {
+            let parsed = salted_variants::Smf::parse(hash)?;
+            parsed.verify(candidate)
+        }
+        "pdf-1.7" => {
+            let parsed = salted_variants::Pdf17L3::parse(hash)?;
+            parsed.verify(candidate)
+        }
+        "wpa-pmkid" => {
+            let parsed = salted_variants::WpaPmkid::parse(hash)?;
+            parsed.verify(candidate)
+        }
+        "wpa" => {
+            // The frozen 22000 verifier owns the canonical eight-field wire;
+            // the batch-2 nine-token 40-hex PMKID capture predates it and
+            // keeps its original windows_auth parser and check.
+            match salted_variants::Wpa::parse(hash) {
+                Ok(parsed) => parsed.verify(candidate),
+                Err(_) => windows_auth::verify_wpa_pmkid(hash, candidate),
+            }
+        }
+        // LUKS v1 streamlined RIPEMD-160 + AES text form (mode 29541); the
+        // binary 14600 header has no text RecoveryTarget and stays deferred.
+        "luks" => {
+            let parsed = salted_variants::LuksRipemd160Aes::parse(hash)?;
             parsed.verify(candidate)
         }
         // Composed salted/HMAC digests carry an explicit algorithm hint; the

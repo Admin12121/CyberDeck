@@ -191,6 +191,14 @@ impl RecoveryTarget {
     if algo == "descrypt" {
         return Ok(Self::Kdf { format: "descrypt", encoded: text.to_string() });
     }
+    // Bare-digest salted variants are hint-driven: their wire shapes overlap
+    // other digest families, so self-detection cannot identify them.
+    if matches!(algo, "smf" | "macos-salted-sha1" | "mysql4.1" | "oracle-h") {
+        return Ok(Self::Kdf {
+            format: Box::leak(algo.to_ascii_lowercase().into_boxed_str()),
+            encoded: text.to_string(),
+        });
+    }
     // mscash is hint-driven when the wire shape is "digest:salt" (hashcat);
     // the tagged "user#digest" and "M$user#digest" shapes self-detect.
     if algo == "mscash" {
@@ -239,9 +247,47 @@ impl RecoveryTarget {
                 "md5crypt" | "apr1" => {
                     super::unix_crypt::validate_md5_crypt(text)?;
                 }
-                "mssql-2005" | "mssql-2012" => {
+                "mssql-2005" | "mssql-2012" | "mssql-2000" => {
                     // Prefix and length checks happen in kdf_format; the
                     // verifier enforces the rest.
+                }
+                "rar3-hp" => {
+                    // Archive containers (batch 9): the strict wire-shape
+                    // parsers fail fast before any GPU work is scheduled.
+                    super::rar::Rar3Hp::parse(text)?;
+                }
+                "rar5" => {
+                    super::rar::Rar5::parse(text)?;
+                }
+                "keepass-kdbx4" => {
+                    // KDBX v4 container: KDF UUID, cost policy and header
+                    // shape are enforced at parse time.
+                    super::kdbx4::Kdbx4::parse(text)?;
+                }
+                "pdf-1.7" => {
+                    // Document container (batch 9): revision 5 Level 3 only.
+                    super::salted_variants::Pdf17L3::parse(text)?;
+                }
+                "luks" => {
+                    // LUKS v1 RIPEMD-160 + AES text form (batch 9): key
+                    // material size and cipher/mode combos are enforced here.
+                    super::salted_variants::LuksRipemd160Aes::parse(text)?;
+                }
+                "wpa-pmkid" => {
+                    // PMKID captures (batch 9): the strict wire-shape parser
+                    // fails fast before any GPU work is scheduled.
+                    super::salted_variants::WpaPmkid::parse(text)?;
+                }
+                "wpa" => {
+                    // Unified 22000 records (batch 9): field shapes are
+                    // enforced by the verifiers on match — the batch-2
+                    // nine-token PMKID capture keeps its original parser —
+                    // and nothing secret is computed at parse time.
+                }
+                "kerberos-tgs-rep-17" | "kerberos-tgs-rep-18" => {
+                    // Kerberos etype 17/18 (batch 8): ticket field shapes are
+                    // enforced at parse time.
+                    super::kerberos_etype1718::KerberosTgs1718::parse(text)?;
                 }
                 "winzip-aes" | "7zip" | "zip-legacy" => {
                     // Archive containers: the strict wire-shape parsers fail

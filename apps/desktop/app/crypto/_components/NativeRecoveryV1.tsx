@@ -67,6 +67,20 @@ const EMBEDDED_MODES: readonly { value: HashcatRawAlgorithmV1; label: string; di
   { value: "winzip-aes", label: "WinZip AES ($zip2$) · mode 13600", digits: 0 },
   { value: "7zip", label: "7-Zip ($7z$) · mode 11600", digits: 0 },
   { value: "zip-legacy", label: "ZIP legacy (ZipCrypto) · modes 17200/17210", digits: 0 },
+  { value: "smf", label: "SMF > v1.1 (sha1(lower(salt).pass)) · mode 121", digits: 0 },
+  { value: "macos-salted-sha1", label: "macOS 10.4-10.6 salted SHA-1 · mode 122", digits: 0 },
+  { value: "mssql-2000", label: "MSSQL 2000 (0x0100) · mode 131", digits: 0 },
+  { value: "mysql4.1", label: "MySQL 4.1/5 (sha1(sha1)) · mode 300", digits: 0 },
+  { value: "oracle-h", label: "Oracle 7+ H: (digest:username) · mode 3100", digits: 0 },
+  { value: "rar3-hp", label: "RAR3-hp ($RAR3$*0*) · mode 12500", digits: 0 },
+  { value: "rar5", label: "RAR5 ($rar5$) · mode 13000", digits: 0 },
+  { value: "kerberos-tgs-rep-17", label: "Kerberos TGS-REP etype 17 · mode 19600", digits: 0 },
+  { value: "kerberos-tgs-rep-18", label: "Kerberos TGS-REP etype 18 · mode 19700", digits: 0 },
+  { value: "keepass-kdbx4", label: "KeePass KDBX v4 · modes 34300/34301", digits: 0 },
+  { value: "pdf-1.7", label: "PDF 1.7 Level 3 ($pdf$ V5/R5) · mode 10600", digits: 0 },
+  { value: "wpa-pmkid", label: "WPA-PMKID (pmkid:ap:sta:essid) · mode 16800", digits: 0 },
+  { value: "wpa", label: "WPA-PMKID+EAPOL (WPA*0X*) · mode 22000", digits: 0 },
+  { value: "luks", label: "LUKS v1 RIPEMD-160 + AES ($luks$) · mode 29541", digits: 0 },
 ];
 const RUST_MODES: readonly { value: RecoveryRawAlgorithmV1; label: string; digits: number; pwMax?: number | null }[] = [
   ...EMBEDDED_MODES,
@@ -133,14 +147,15 @@ function useRecoveryController(targetHash: string, onCaseCreated?: (caseId: stri
   const KDF_PREFIXES = [
     "$2a$", "$2b$", "$2y$", "$2x$", "$argon2", "$y$", "$7$", "$gy$", "$G$",
     "$scrypt$", "$pbkdf2", "$6$", "$5$", "$1$", "$apr1$", "$sha1$", "$P$",
-    "$H$", "$NT$", "$DCC2$", "DCC2#", "M$", "$NETNTLM", "WPA*01*", "0x0100",
+    "$H$", "$NT$", "$DCC2$", "DCC2#", "M$", "$NETNTLM", "WPA*0", "0x0100",
     "0x0200", "$zip2$", "$7z$", "$pkzip2$", "$pkzip$",
     "$oldoffice$", "$office$", "$pdf$", "$bitcoin$", "$keepass$", "$ethwallet$",
     "$krb5tgs$", "$krb5asrep$", "$bitlocker$",
+    "$RAR3$", "$rar5$", "$luks$",
   ];
   const isKdfHash =
     (hash.startsWith("$") && KDF_PREFIXES.some((prefix) => hash.startsWith(prefix))) ||
-    hash.startsWith("WPA*01*") ||
+    hash.startsWith("WPA*0") ||
     hash.startsWith("0x0100") ||
     hash.startsWith("0x0200") ||
     hash.startsWith("DCC2#") ||
@@ -159,9 +174,13 @@ function useRecoveryController(targetHash: string, onCaseCreated?: (caseId: stri
         "$2a$": "bcrypt", "$2b$": "bcrypt", "$2y$": "bcrypt",
         "$P$": "phpass", "$H$": "phpass",
         "$zip2$": "winzip-aes", "$7z$": "7zip", "$pkzip2$": "zip-legacy", "$pkzip$": "zip-legacy",
-        "$oldoffice$": "office-97-2003", "$office$": "office-2007", "$pdf$": "pdf-1.1-1.3",
-        "$bitcoin$": "bitcoin", "$keepass$": "keepass",
+        "$oldoffice$": "office-97-2003", "$office$": "office-2007",
+        "$pdf$5*5*": "pdf-1.7", "$pdf$": "pdf-1.1-1.3",
+        "$bitcoin$": "bitcoin", "$keepass$*4*": "keepass-kdbx4", "$keepass$": "keepass",
+        "$krb5tgs$17$": "kerberos-tgs-rep-17", "$krb5tgs$18$": "kerberos-tgs-rep-18",
         "$krb5tgs$": "kerberos-tgs-rep", "$krb5asrep$": "kerberos-as-rep", "$bitlocker$": "bitlocker",
+        "$RAR3$": "rar3-hp", "$rar5$": "rar5", "$luks$": "luks",
+        "WPA*0": "wpa",
       };
       const match = Object.entries(kdfSuggestion).find(([prefix]) => hash.startsWith(prefix));
       if (match && match[1]) {
