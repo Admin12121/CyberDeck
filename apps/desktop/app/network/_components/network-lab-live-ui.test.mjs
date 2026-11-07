@@ -71,7 +71,7 @@ test("live monitor is passive, capture-gated and renders the event timeline", ()
   assert.match(engine, /fn arp_conflict_fires_when_a_second_mac_claims_the_same_ip/);
   // Honesty wording survives in tooltips, not as body prose.
   assert.match(view, /passive observations only/);
-  assert.match(view, /The lab transmits nothing; Packet Studio owns the capture lifecycle/);
+  assert.match(view, /the lab transmits nothing; Packet Studio owns the capture lifecycle/);
   assert.match(view, /<TimelineTable wire=\{displayTimeline\} \/>/);
 });
 

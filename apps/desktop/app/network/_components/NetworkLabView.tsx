@@ -130,10 +130,12 @@ function ModeCard({
     <div className="flex min-h-0 flex-1 items-start justify-center overflow-y-auto p-4 sm:p-6">
       <Frame className="mx-auto w-full max-w-3xl rounded-xl bg-muted/72 p-1">
         <FrameHeader className="flex-row items-center justify-between gap-3 px-4 py-3">
-          <FrameTitle>{title}</FrameTitle>
+          <span className="inline-flex items-center gap-2">
+            <FrameTitle>{title}</FrameTitle>
+            <InfoTip text={description} />
+          </span>
           <Chip tone={stateTone}>{state}</Chip>
         </FrameHeader>
-        <FrameDescription>{description}</FrameDescription>
         <FramePanel className="space-y-4 rounded-lg bg-background px-4 pb-5 pt-4">{children}</FramePanel>
       </Frame>
     </div>
@@ -365,7 +367,7 @@ export function NetworkLabView() {
             aria-pressed={activeMode}
             aria-label={item.label}
             title={item.label}
-            className={`relative inline-flex h-[34px] w-[34px] items-center justify-center rounded-full transition-colors focus-visible:outline focus-visible:outline-1 focus-visible:outline-ring ${
+            className={`relative inline-flex h-[34px] w-[34px] items-center justify-center rounded-sm transition-colors focus-visible:outline focus-visible:outline-1 focus-visible:outline-ring ${
               activeMode ? "bg-orange text-white" : "text-fg-muted hover:bg-line/60 hover:text-fg"
             }`}
           >
@@ -696,14 +698,12 @@ export function NetworkLabView() {
           <div className="flex min-h-0 flex-1 items-start justify-center overflow-y-auto p-4 sm:p-6">
           <Frame className="mx-auto w-full max-w-3xl rounded-xl bg-muted/72 p-1">
             <FrameHeader className="flex-row items-center justify-between gap-3 px-4 py-3">
-              <FrameTitle>Lab scope</FrameTitle>
+              <span className="inline-flex items-center gap-2">
+                <FrameTitle>Lab scope</FrameTitle>
+                <InfoTip text="Passive lab over already-captured frames — reads captures, never transmits packets; scope entries are held in memory only." />
+              </span>
               <Chip tone={scope?.authorized ? "orange" : "muted"}>{scopeSummary(scope)}</Chip>
             </FrameHeader>
-            <FrameDescription>
-              Ettercap-inspired lab mode: unified host inventory, passive ARP anomaly analysis and
-              passive DNS-response monitoring. The lab reads captures and never transmits packets;
-              scope entries are held in memory only.
-            </FrameDescription>
             <FramePanel className="space-y-4 rounded-lg bg-background px-4 pb-5 pt-4">
             <div className="grid gap-3 md:grid-cols-2">
               <label className="block text-xs text-fg-dim">
@@ -843,7 +843,7 @@ export function NetworkLabView() {
                   : "no capture"
               }
               stateTone={capture ? "ok" : "muted"}
-              description="Passive ARP anomaly analysis over the opened capture: duplicate IP→MAC claims, gratuitous ARP bursts and gateway impersonation, plus a unified host inventory. The analyzer never transmits a packet."
+              description="Passive ARP anomaly analysis over the opened capture — read-only, transmits nothing."
             >
               <div className="flex flex-wrap items-center gap-3">{arpControls}</div>
             </ModeCard>
@@ -966,7 +966,7 @@ export function NetworkLabView() {
               title="Live monitor"
               state={liveState}
               stateTone={liveStateTone}
-              description="Bettercap-style one-capture-many-modules subscription: the lab subscribes to Packet Studio's running capture and never starts its own capture, and Packet Studio's capture must be running for live counts. The lab transmits nothing; Packet Studio owns the capture lifecycle, the lab only reads its status. While the session runs, the captured counter tracks it live; the event timeline derives from the session's retained frames."
+              description="Subscribe to Packet Studio's running capture — the lab transmits nothing; Packet Studio owns the capture lifecycle."
             >
               <div className="flex flex-wrap items-center gap-3">{liveControls}</div>
             </ModeCard>
@@ -987,7 +987,7 @@ export function NetworkLabView() {
       )}
 
       {mode === "dns" && (
-        <section aria-label="DNS monitor" className="flex min-h-0 flex-1 flex-col">
+        <section aria-label="DNS monitor (passive)" className="flex min-h-0 flex-1 flex-col">
           <div className="flex shrink-0 items-center px-3 py-1.5">{railPills}</div>
           {dnsError ? (
             <div role="alert" className="mx-3 border border-err/50 bg-err/10 px-3 py-1 font-mono text-[10px] text-err">
@@ -999,7 +999,7 @@ export function NetworkLabView() {
               title="DNS monitor"
               state={dnsState}
               stateTone={dnsStateTone}
-              description="Passive DNS-response monitor over the opened capture (dns-spoofing counterpart): answer inconsistencies, loopback/link-local answer targets and NXDOMAIN injection. Read-only — the monitor reads the opened capture and never transmits anything."
+              description="Passive DNS-response monitoring over the opened capture — read-only, the lab transmits nothing."
             >
               <div className="flex flex-wrap items-center gap-3">{dnsControls}</div>
             </ModeCard>
@@ -1021,15 +1021,23 @@ export function NetworkLabView() {
 
       {mode === "report" && (
         <section aria-label="Session report" className="flex min-h-0 flex-1 flex-col">
-          {/* lab-report-ui.test.mjs pins this border-t wrapper, the
-              role="group" label and the muted uppercase span verbatim; the
-              span doubles as the row's group label (one label total) and the
-              wrapper is the region's single border. */}
-          <div className="border-t border-line pt-3">
+          {/* lab-report-ui.test.mjs pins the role="group" label, the muted
+              uppercase span and the border-t wrapper verbatim — keep them,
+              but they live INSIDE the card now (no space-at-top toolbar). */}
+          <div className="flex min-h-0 flex-1 items-start justify-center overflow-y-auto p-4 sm:p-6">
+          <Frame className="mx-auto w-full max-w-2xl rounded-xl bg-muted/72 p-1">
+            <FrameHeader className="flex-row items-center justify-between gap-3 px-4 py-3">
+              <span className="inline-flex items-center gap-2">
+                <FileText size={15} strokeWidth={1.5} className="text-fg-muted" />
+                <FrameTitle>Session report</FrameTitle>
+              </span>
+              <Chip tone={reportReceipt ? "ok" : "muted"}>{reportReceipt ? "exported" : "no report yet"}</Chip>
+            </FrameHeader>
+            <FramePanel className="space-y-4 rounded-lg bg-background px-4 pb-5 pt-4">
             <div
               role="group"
               aria-label="Export lab session report"
-              className={TOOLBAR_ROW}
+              className="flex flex-wrap items-center gap-3 border-t border-line pt-3"
             >
               {railPills}
               <span className="font-medium uppercase tracking-wider text-fg-muted">Session report</span>
@@ -1057,21 +1065,18 @@ export function NetworkLabView() {
               </label>
               <ReportReceiptChip receipt={reportReceipt} />
               <InfoTip text="One structured artifact (ARP findings, event timeline, host inventory, DNS findings) rendered to bounded markdown and persisted as ONE case finding in the backend-selected saved case. Read-only over the capture; the frontend only ever receives a receipt." />
-              <span className="flex-1" />
             </div>
-          </div>
           {reportError ? (
-            <div role="alert" className="mx-3 border border-err/50 bg-err/10 px-3 py-1 font-mono text-[10px] text-err">
+            <div role="alert" className="border border-err/50 bg-err/10 px-3 py-1 font-mono text-[10px] text-err">
               {reportError}
             </div>
           ) : null}
-          {!reportReceipt ? (
-            <LabEmptyCard
-              icon={FileText}
-              title="Session report"
-              line="Export the opened capture as one case finding."
-            />
-          ) : null}
+          <p className="text-xs leading-relaxed text-fg-muted">
+            Export the opened capture as one case finding.
+          </p>
+            </FramePanel>
+          </Frame>
+          </div>
         </section>
       )}
     </div>

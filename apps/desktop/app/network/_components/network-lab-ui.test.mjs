@@ -31,7 +31,7 @@ const analyzerSource = readFileSync(
 
 test("Network Lab view is labeled passive-only in both header and body", () => {
   assert.match(viewSource, /passive observations only/);
-  assert.match(viewSource, /never\s*\n?\s*transmits packets|never transmits packets|reads captures and never/);
+  assert.match(viewSource, /never transmits packets|nothing is transmitted|reads captures and never/);
   // The passive framing appears before any table markup, so it is not
   // buried below the fold of a rendered page.
   const passiveIndex = viewSource.indexOf("passive observations only");

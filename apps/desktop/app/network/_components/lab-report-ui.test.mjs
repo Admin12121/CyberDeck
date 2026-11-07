@@ -36,7 +36,7 @@ test("session report section exists as its own block next to the DNS monitor", (
   // border-t sub-section pattern, exactly like the DNS monitor block.
   assert.match(
     viewSource,
-    /className="border-t border-line pt-3">\s*\n\s*<div\s+role="group"/s,
+    /role="group"\n              aria-label="Export lab session report"\n              className="flex flex-wrap items-center gap-3 border-t border-line pt-3"/s,
   );
   assert.match(viewSource, /<span className="font-medium uppercase tracking-wider text-fg-muted">\s*Session report\s*<\/span>/);
 });

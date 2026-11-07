@@ -59,7 +59,7 @@ test("DNS monitor handler is wired to the local IPC module and resets state hone
 });
 
 test("DNS monitor wording stays passive and the section never offers active controls", () => {
-  assert.match(viewSource, /passive DNS-response monitoring/);
+  assert.match(viewSource, /DNS-response monitoring over the opened capture/);
   // The DNS mode renders a read-only button and a table only — none of
   // the active-interaction affordances appear anywhere near it. (The prose
   // legitimately says "NXDOMAIN injection": that is the passive indicator's
