@@ -162,6 +162,7 @@ export function SpiderView() {
               { value: "4", label: "4" },
             ]}
             ariaLabel="Spider depth"
+            className="w-20"
           />
           {job?.state === "running" && jobId !== null
             ? <ToolButton tone="danger" onClick={() => void stop()}><Square size={11} /> Stop</ToolButton>

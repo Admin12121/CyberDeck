@@ -126,6 +126,7 @@ export function CasesWorkspace() {
           : temporary ? { label: "temporary workspace" }
           : { label: "no saved case" },
       ]} />}
+      contentClassName="flex flex-col"
     >
       {error && <div role="alert" className="shrink-0 border-b border-err/50 bg-err/10 px-3 py-1 font-mono text-3xs text-err">{error}</div>}
       <div className="grid min-h-0 flex-1 grid-cols-1 gap-3 overflow-y-auto p-3 lg:grid-cols-[260px_minmax(0,1fr)] lg:overflow-hidden">

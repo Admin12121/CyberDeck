@@ -14,8 +14,8 @@
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { GitCompare, Network, Play } from "lucide-react";
-import { Chip, EmptyState, Select } from "@ds/panes";
-import { ErrorStrip, IconRail, IconButton, InfoTip, StatusStrip, WorkspaceShell } from "@ds/compact";
+import { Chip, Select } from "@ds/panes";
+import { EmptyCard, ErrorStrip, IconRail, IconButton, InfoTip, StatusStrip, WorkspaceShell } from "@ds/compact";
 import {
   isDesktop, netscanHistory, netscanDiffV1, netscanTopologyV1,
   type ScanHistoryItemWire, type ScanDiffWire, type ScanTopologyWire,
@@ -265,21 +265,21 @@ export function ScanInsightsView() {
         </>
       )}
       status={statusItems.some((item) => item !== null) ? <StatusStrip items={statusItems} /> : undefined}
+      contentClassName="flex flex-col"
     >
       {error ? <ErrorStrip>{error}</ErrorStrip> : null}
       <CaseGate activity="Scan insights" />
       <div className="flex min-h-0 flex-1 flex-col bg-panel">
         {!desktop ? (
-          <EmptyState
-            title="Scan insights require the desktop runtime"
-            badge="insights"
-          />
+          <EmptyCard icon={GitCompare} title="Scan insights require the desktop runtime">
+            The desktop runtime collects the scan sessions these views compare.
+          </EmptyCard>
         ) : mode === "diff" ? (
           !diff ? (
-            <EmptyState
-              title={history.length === 0 ? "No completed scan sessions yet" : "Pick a baseline and a compare session"}
-              badge="ndiff semantics"
-            />
+            <EmptyCard icon={GitCompare}
+              title={history.length === 0 ? "No completed scan sessions yet" : "Pick a baseline and a compare session"}>
+              ndiff semantics: pair two completed sessions; ports compare per port/proto.
+            </EmptyCard>
           ) : (
             <div className="min-h-0 flex-1 overflow-auto">
               <table className="data-table">
@@ -354,10 +354,10 @@ export function ScanInsightsView() {
             </div>
           )
         ) : !topology ? (
-          <EmptyState
-            title={topoBusy ? "Rendering topology…" : "No topology rendered"}
-            badge="topology"
-          />
+          <EmptyCard icon={Network}
+            title={topoBusy ? "Rendering topology…" : "No topology rendered"}>
+            Topology renders from a completed scan session's observed hosts.
+          </EmptyCard>
         ) : (
           <div className="flex h-full min-h-0 flex-col">
             {topology.truncated ? (

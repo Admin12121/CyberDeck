@@ -195,7 +195,7 @@ export function EmptyCard({
 }) {
   return (
     <div className="flex min-h-0 flex-1 items-center justify-center p-6">
-      <Frame className="w-full max-w-md">
+      <Frame className="w-full max-w-2xl">
         <FrameHeader>
           <span className="inline-flex items-center gap-2">
             <Icon size={16} strokeWidth={1.5} className="text-fg-muted" />
