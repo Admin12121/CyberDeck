@@ -31,6 +31,11 @@ impl VerifiedScope {
             revision,
         })
     }
+
+    /// Authoritative case id for case-scoped persistence written by this scope.
+    pub(crate) fn case_id(&self) -> &str {
+        &self.case_id
+    }
 }
 
 /// Temporary copy of a revealed candidate. No Serialize, Debug or Clone.

@@ -16,7 +16,7 @@ impl ArtifactStore {
             "PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;",
         )
         .map_err(|e| format!("cannot configure artifact index: {e}"))?;
-        const SCHEMA_VERSION: i64 = 2;
+        const SCHEMA_VERSION: i64 = 3;
         let version: i64 = conn
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .map_err(|e| format!("cannot read artifact index version: {e}"))?;
@@ -182,6 +182,42 @@ impl ArtifactStore {
                 .map_err(|e| format!("cannot set provenance schema version: {e}"))?;
             tx.commit()
                 .map_err(|e| format!("cannot commit provenance migration: {e}"))?;
+        }
+        if version < 3 {
+            let tx = conn
+                .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+                .map_err(|e| format!("cannot start checkpoint migration: {e}"))?;
+            tx.execute_batch(r#"
+                CREATE TABLE IF NOT EXISTS recovery_checkpoints (
+                    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+                    case_id        TEXT NOT NULL REFERENCES cases(id),
+                    run_kind       TEXT NOT NULL,
+                    resume_kind    TEXT NOT NULL,
+                    algorithm      TEXT NOT NULL,
+                    backend        TEXT NOT NULL,
+                    target_hash    TEXT NOT NULL,
+                    total_budget   INTEGER NOT NULL,
+                    max_matches    INTEGER NOT NULL,
+                    submitted      INTEGER NOT NULL,
+                    stage_index    INTEGER NOT NULL,
+                    stage_submitted INTEGER NOT NULL,
+                    wordlist_id    TEXT,
+                    rules_set_id   TEXT,
+                    preset         TEXT NOT NULL,
+                    state          TEXT NOT NULL,
+                    created_ms     INTEGER NOT NULL,
+                    updated_ms     INTEGER NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_recovery_checkpoints_case
+                    ON recovery_checkpoints(case_id, id);
+                CREATE TRIGGER IF NOT EXISTS checkpoint_case_scope BEFORE INSERT ON recovery_checkpoints
+                    WHEN NOT EXISTS(SELECT 1 FROM cases WHERE id=NEW.case_id)
+                    BEGIN SELECT RAISE(ABORT,'checkpoint case missing'); END;
+            "#).map_err(|e| format!("cannot create recovery checkpoint table: {e}"))?;
+            tx.execute_batch("PRAGMA user_version = 3;")
+                .map_err(|e| format!("cannot set checkpoint schema version: {e}"))?;
+            tx.commit()
+                .map_err(|e| format!("cannot commit checkpoint migration: {e}"))?;
         }
         Ok(Self { conn })
     }

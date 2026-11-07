@@ -291,6 +291,58 @@ export async function unshadowV1(): Promise<string> {
   return invoke<string>("unshadow_v1");
 }
 
+// --- durable case-scoped resume checkpoints v1 --------------------------------
+
+export type RecoveryRunKindV1 = "wordlist_cpu" | "wordlist_gpu" | "autopilot";
+export type RecoveryResumeKindV1 =
+  | "sequential"
+  | "chunk_boundary"
+  | "stage"
+  | "restart";
+export type RecoveryRunStateV1 = "running" | "suspended" | "completed" | "cancelled";
+/** One durable resume row. Counters and library wordlist references only —
+ * never candidates, secrets or arbitrary operator paths. */
+export interface RecoveryRunCheckpointV1 {
+  run_id: number;
+  run_kind: RecoveryRunKindV1;
+  /** How a re-issue can honestly skip submitted work. */
+  resume_kind: RecoveryResumeKindV1;
+  algorithm: string;
+  backend: "cpu" | "hashcat_managed";
+  target_hash: string;
+  total_budget: number;
+  max_matches: number;
+  submitted: number;
+  stage_index: number;
+  stage_submitted: number;
+  wordlist_id: string | null;
+  rules_set_id: string | null;
+  preset: string;
+  state: RecoveryRunStateV1;
+  updated_ms: number;
+}
+/** Resumable (suspended or cancelled) runs for the active case. Rows left
+ * running by a dead session are reconciled to suspended on the way out. */
+export async function recoveryRunsListV1(): Promise<RecoveryRunCheckpointV1[]> {
+  if (!inTauri) throw new Error("Recovery run resume requires the desktop runtime");
+  return invoke<RecoveryRunCheckpointV1[]>("recovery_runs_list_v1", {});
+}
+/** Re-issues one suspended/cancelled run: the backend rebuilds the request
+ * from the checkpoint row and skips only work it can honestly skip (CPU
+ * sequential ordinals, GPU 1M session boundaries, autopilot stages). */
+export async function recoveryRunResumeV1(
+  runId: number,
+  onEvent: (event: RecoveryEventV1) => void,
+): Promise<number> {
+  if (!inTauri) throw new Error("Recovery run resume requires the desktop runtime");
+  const channel = new Channel<RecoveryEventV1>();
+  channel.onmessage = onEvent;
+  return invoke<number>("recovery_run_resume_v1", {
+    runId,
+    onEvent: channel,
+  });
+}
+
 // --- wordlist + rules library v1 ---------------------------------------------
 
 export type WordlistLibraryOriginV1 = "bundled" | "downloaded";

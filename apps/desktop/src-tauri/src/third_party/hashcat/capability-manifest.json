@@ -55,15 +55,6 @@
       "desktop_routed": true
     },
     {
-      "id": 60,
-      "algorithm": "hmac-sha1",
-      "digest_hex_length": 0,
-      "source_build": true,
-      "desktop_available": false,
-      "hardware_verified": false,
-      "desktop_routed": true
-    },
-    {
       "id": 100,
       "algorithm": "sha1",
       "digest_hex_length": 40,
@@ -120,6 +111,15 @@
     {
       "id": 132,
       "algorithm": "mssql-2005",
+      "digest_hex_length": 0,
+      "source_build": true,
+      "desktop_available": false,
+      "hardware_verified": false,
+      "desktop_routed": true
+    },
+    {
+      "id": 150,
+      "algorithm": "hmac-sha1",
       "digest_hex_length": 0,
       "source_build": true,
       "desktop_available": false,

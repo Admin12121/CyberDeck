@@ -166,13 +166,29 @@ pub fn build_plan(
     if !detection.kdf {
         for rules in RULES_PREFERENCE {
             if available_rules.iter().any(|available| available == rules) {
+                // Rule escalation rides the GPU when the mode passed its KAT:
+                // the supervisor CPU-expands the rules into a bounded private
+                // file and runs the chunked GPU path; an expansion that
+                // exceeds its bounds falls back to the CPU engine at run time.
+                let engine = if gpu_algorithms.iter().any(|gpu| gpu == primary) {
+                    StageEngine::Gpu
+                } else {
+                    StageEngine::Cpu
+                };
                 stages.push(AutopilotStagePlan {
                     algorithm: (*primary).to_string(),
                     wordlist_id: (*wordlist_id).to_string(),
                     rules_set: Some((*rules).to_string()),
                     mask: None,
-                    engine: StageEngine::Cpu,
-                    label: format!("{wordlist_name} + {rules} rules as {primary} (CPU)"),
+                    engine,
+                    label: format!(
+                        "{wordlist_name} + {rules} rules as {primary} ({})",
+                        if engine == StageEngine::Gpu {
+                            "GPU · rules-expanded"
+                        } else {
+                            "CPU"
+                        }
+                    ),
                 });
             }
         }
@@ -260,8 +276,10 @@ mod tests {
         assert_eq!(plan.stages[1].algorithm, "ntlm");
         assert_eq!(plan.stages[1].engine, StageEngine::Gpu);
         assert_eq!(plan.stages[1].rules_set, None);
-        // Rule escalation and mask fallback always run on the CPU engine.
-        assert_eq!(plan.stages[3].engine, StageEngine::Cpu);
+        // KAT-verified primaries send rule stages through the GPU
+        // rules-expansion route; the mask fallback stays CPU.
+        assert_eq!(plan.stages[3].engine, StageEngine::Gpu);
+        assert!(plan.stages[3].label.contains("(GPU · rules-expanded)"));
         assert_eq!(plan.stages[5].engine, StageEngine::Cpu);
         assert_eq!(plan.stages[2].algorithm, "lm");
         assert_eq!(plan.stages[3].rules_set.as_deref(), Some("best66"));
@@ -297,6 +315,22 @@ mod tests {
         assert_eq!(plan.stages[0].wordlist_id, "cyberdeck-common");
         assert_eq!(plan.stages[0].rules_set, None);
         assert_eq!(plan.stages[1].mask.as_deref(), Some("?d?d?d?d"));
+    }
+
+    #[test]
+    fn rules_stages_stay_cpu_without_kat_verified_modes() {
+        let detection = detect_target("9a0364b9e99bb480dd25e1f0284c8555").unwrap();
+        let plan = build_plan(
+            &detection,
+            &wordlists(&["rockyou"]),
+            &rules(&["best66"]),
+            &[], // no mode passed its known-answer test on this machine
+        )
+        .unwrap();
+        assert_eq!(plan.stages[0].engine, StageEngine::Cpu);
+        assert_eq!(plan.stages[3].rules_set.as_deref(), Some("best66"));
+        assert_eq!(plan.stages[3].engine, StageEngine::Cpu);
+        assert!(plan.stages[3].label.ends_with("(CPU)"));
     }
 
     #[test]

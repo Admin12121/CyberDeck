@@ -189,7 +189,7 @@ fn migration_preserves_legacy_index_and_enforces_cases() {
         .conn
         .pragma_query_value(None, "user_version", |r| r.get(0))
         .unwrap();
-    assert_eq!(v, 2);
+    assert_eq!(v, 3);
     assert!(store.conn.execute("INSERT INTO artifacts SELECT 'orphan','not-a-case',name,stored_path,original_path,size,sha256,md5,sha1,crc32,signature,entropy,imported_at FROM artifacts WHERE id='legacy'", []).is_err());
     assert!(store
         .conn

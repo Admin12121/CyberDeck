@@ -1,0 +1,16 @@
+file:///C:/Dev/admin12121/@26/HackTool/apps/desktop/src-tauri/src/third_party/hashcat/build-native.mjs:183
+    throw new Error(executable + " failed: " + (z.error || "exit " + z.status) + "\n" + tail);
+          ^
+
+Error: make failed: exit 2
+make: *** No rule to make target 'modules/module_01450.dll'.  Stop.
+make: *** Waiting for unfinished jobs....
+
+
+    at checked (file:///C:/Dev/admin12121/@26/HackTool/apps/desktop/src-tauri/src/third_party/hashcat/build-native.mjs:183:11)
+    at file:///C:/Dev/admin12121/@26/HackTool/apps/desktop/src-tauri/src/third_party/hashcat/build-native.mjs:190:1
+    at ModuleJob.run (node:internal/modules/esm/module_job:561:25)
+    at async node:internal/modules/esm/loader:647:26
+    at async asyncRunEntryPointWithESMLoader (node:internal/modules/run_main:101:5)
+
+Node.js v24.20.0

@@ -8,6 +8,10 @@ use cyberdeck_crypto::recovery::{RecoveryTarget, MAX_FAST_CANDIDATES};
 #[path = "embedded_hashcat_preset.rs"]
 mod preset;
 pub use preset::WordlistPreset;
+// Rules expansion and resume tails run supervisor-side before a chunked GPU
+// session; the chunk loop below stays untouched.
+pub use preset::expand_rules;
+pub use preset::write_skip_tail;
 
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File, OpenOptions};
@@ -310,7 +314,7 @@ const PUBLIC_KATS: &[(u32, &str, &str)] = &[
     (10, "cyberdeck", "c51d5447beddf60e68604ca2dbf4e6ad:4242"),
     (20, "cyberdeck", "a944dd5c9a02c5bed3a4b175ac565d7c:4242"),
     (50, "cyberdeck", "dc5b5ad28f4dd280463a5319b976bd50:4242"),
-    (60, "cyberdeck", "3de2a5579621deb8357374953c6a520d4779fc8a:4242"),
+    (150, "cyberdeck", "3de2a5579621deb8357374953c6a520d4779fc8a:4242"),
     (110, "cyberdeck", "047564e24f0e65d25618c3369b98d9602219c03d:4242"),
     (120, "cyberdeck", "0c0ae97e6246815bb0426ba6cff3093561f069b3:4242"),
     (1100, "test1", "64cd29e36a8431a2b111378564a10631:test1"),
@@ -468,7 +472,7 @@ fn self_test_mode(root: &Path, mode: u32, word: &str, digest: &str) -> Result<()
             10 => "md5-pass-salt",
             20 => "md5-salt-pass",
             50 => "hmac-md5",
-            60 => "hmac-sha1",
+            150 => "hmac-sha1",
             110 => "sha1-pass-salt",
             120 => "sha1-salt-pass",
             // KDF fixtures: the modular string carries its own family; the
@@ -763,7 +767,7 @@ pub(super) fn validate_embedded_request(request: &RecoveryRequest) -> Result<u32
         "md5-pass-salt" => 10,
         "md5-salt-pass" => 20,
         "hmac-md5" => 50,
-        "hmac-sha1" => 60,
+        "hmac-sha1" => 150,
         "sha1-pass-salt" => 110,
         "sha1-salt-pass" => 120,
         "mscash" => 1100,
@@ -889,7 +893,7 @@ fn frame_mode(
     }
     if !matches!(
         hash_mode,
-        0 | 10 | 20 | 50 | 60 | 100 | 110 | 120 | 132 | 400 | 500 | 1000 | 1100 | 1400 | 1500
+        0 | 10 | 20 | 50 | 100 | 110 | 120 | 132 | 150 | 400 | 500 | 1000 | 1100 | 1400 | 1500
         | 1700 | 1731 | 1800 | 2100 | 3200 | 5500 | 5600 | 7400
         | 11600 | 13600 | 17200 | 17210
         | 9400 | 9600 | 9700 | 10400 | 10500
@@ -1380,7 +1384,7 @@ mod tests {
                 10 => "md5-pass-salt",
                 20 => "md5-salt-pass",
                 50 => "hmac-md5",
-                60 => "hmac-sha1",
+                150 => "hmac-sha1",
                 110 => "sha1-pass-salt",
                 120 => "sha1-salt-pass",
                 1100 => "mscash",
@@ -1417,6 +1421,22 @@ mod tests {
             assert!(
                 modes.contains(&required),
                 "mode {required} must pass its on-device KAT"
+            );
+        }
+    }
+
+    #[test]
+    fn every_public_kat_mode_passes_its_on_device_worker_kat() {
+        // The strongest gate: the readiness sweep runs a real worker KAT for
+        // every PUBLIC_KAT row. If a mode is advertised as bundled, it must
+        // crack its fixture on the present devices — a mode that cannot is a
+        // packaging or portability defect, not something to advertise.
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("resources/hashcat");
+        let modes = verified_modes(&root).expect("worker readiness run failed");
+        for mode in PUBLIC_KATS.iter().map(|row| row.0) {
+            assert!(
+                modes.contains(&mode),
+                "bundled mode {mode} failed its on-device worker KAT"
             );
         }
     }

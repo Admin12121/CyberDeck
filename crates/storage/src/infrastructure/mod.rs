@@ -7,6 +7,7 @@ mod findings;
 pub(crate) mod orphan_recovery;
 mod provenance;
 mod recovery;
+mod recovery_checkpoints;
 mod schema;
 pub(crate) mod unregistered;
 pub(crate) mod verified_handle;

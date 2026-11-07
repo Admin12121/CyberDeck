@@ -147,3 +147,102 @@ pub struct CrackEntry {
     pub wordlist: Option<String>,
     pub recovered_at: String,
 }
+
+/// Run-state lifecycle of a durable recovery checkpoint row.
+pub const RECOVERY_CHECKPOINT_STATES: &[&str] =
+    &["running", "suspended", "completed", "cancelled"];
+/// Which engine shape produced the run; decides how a re-issue can honestly
+/// skip already-submitted candidates.
+pub const RECOVERY_CHECKPOINT_KINDS: &[&str] = &["wordlist_cpu", "wordlist_gpu", "autopilot"];
+/// Resume capability: sequential ordinals, GPU 1M chunk boundaries, autopilot
+/// stage boundaries, or restart-from-zero only.
+pub const RECOVERY_CHECKPOINT_RESUME_KINDS: &[&str] =
+    &["sequential", "chunk_boundary", "stage", "restart"];
+/// Backend selection kind; device parameters are hardware-local and never persisted.
+pub const RECOVERY_CHECKPOINT_BACKENDS: &[&str] = &["cpu", "hashcat_managed"];
+
+/// Durable case-scoped resume checkpoint for one recovery run. Rows carry
+/// counters and library wordlist references only — never candidates,
+/// recovered secrets, or arbitrary operator file paths.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RecoveryCheckpointRecord {
+    pub id: i64,
+    pub case_id: String,
+    pub run_kind: String,
+    pub resume_kind: String,
+    pub algorithm: String,
+    pub backend: String,
+    /// Operator-owned target hash; case data, not a secret at rest.
+    pub target_hash: String,
+    pub total_budget: u64,
+    pub max_matches: u64,
+    /// Candidates submitted by finished work units (CPU ordinals, GPU chunk
+    /// boundaries, or completed autopilot stages).
+    pub submitted: u64,
+    /// Autopilot only: completed stage count and the in-flight stage's
+    /// submitted candidates.
+    pub stage_index: u64,
+    pub stage_submitted: u64,
+    /// Library wordlist catalog id; absent for runs that cannot be re-issued.
+    pub wordlist_id: Option<String>,
+    /// Library rule preset id for rules stages.
+    pub rules_set_id: Option<String>,
+    /// Embedded transform preset id ("plain", "uppercase", "append_one").
+    pub preset: String,
+    pub state: String,
+    pub created_ms: i64,
+    pub updated_ms: i64,
+}
+
+/// Validated insert payload for a new checkpoint row (state always starts running).
+#[derive(Debug, Clone)]
+pub struct NewRecoveryCheckpoint {
+    pub case_id: String,
+    pub run_kind: String,
+    pub resume_kind: String,
+    pub algorithm: String,
+    pub backend: String,
+    pub target_hash: String,
+    pub total_budget: u64,
+    pub max_matches: u64,
+    pub stage_index: u64,
+    pub stage_submitted: u64,
+    pub wordlist_id: Option<String>,
+    pub rules_set_id: Option<String>,
+    pub preset: String,
+}
+
+impl NewRecoveryCheckpoint {
+    pub(crate) fn validate(&self) -> Result<(), String> {
+        validate_case_id(&self.case_id)?;
+        if !RECOVERY_CHECKPOINT_KINDS.contains(&self.run_kind.as_str())
+            || !RECOVERY_CHECKPOINT_RESUME_KINDS.contains(&self.resume_kind.as_str())
+            || !RECOVERY_CHECKPOINT_BACKENDS.contains(&self.backend.as_str())
+        {
+            return Err("invalid recovery checkpoint kind".into());
+        }
+        if self.algorithm.is_empty()
+            || self.algorithm.len() > 64
+            || self.target_hash.is_empty()
+            || self.target_hash.len() > 8192
+            || self.preset.is_empty()
+            || self.preset.len() > 32
+        {
+            return Err("invalid recovery checkpoint metadata".into());
+        }
+        if let Some(id) = &self.wordlist_id {
+            if id.is_empty() || id.len() > 64 {
+                return Err("invalid recovery checkpoint wordlist id".into());
+            }
+        }
+        if let Some(id) = &self.rules_set_id {
+            if id.is_empty() || id.len() > 64 {
+                return Err("invalid recovery checkpoint rules id".into());
+            }
+        }
+        if self.max_matches == 0 || self.max_matches > 100 {
+            return Err("invalid recovery checkpoint match cap".into());
+        }
+        Ok(())
+    }
+}

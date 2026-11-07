@@ -189,6 +189,8 @@ fn main() {
             features::crypto::ipc::recovery::recovery_select_hash_file_v1,
             features::crypto::ipc::recovery::recovery_hash_status_v1,
             features::crypto::ipc::recovery::recovery_use_hash_text_v1,
+            features::crypto::ipc::recovery::recovery_runs_list_v1,
+            features::crypto::ipc::recovery::recovery_run_resume_v1,
             features::crypto::ipc::library::unshadow_v1,
             features::crypto::ipc::engines::engines_detect,
             features::crypto::ipc::engines::engine_attack,

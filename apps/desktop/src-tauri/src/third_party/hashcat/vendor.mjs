@@ -61,7 +61,7 @@ if (mode === "--import") {
   dirFiles("include", (name) => name.endsWith(".h") || name.endsWith(".def"));
   // The complete host EMU object family uses almost all common inc_ sources,
   // not only the kernel for hash mode 1400.
-  const bundledModePrefixes = ["00000", "00010", "00020", "00050", "00060", "00100", "00110", "00120", "00130", "00132", "00300", "00400", "00500", "01100", "01400", "01500", "01700", "01731", "01800", "02100", "03100", "03200", "05500", "05600", "07400", "11600", "12500", "13000", "13600", "17200", "17210", "09400", "09600", "09700", "10400", "10500", "11300", "13400", "15600", "15700", "13100", "18200", "22100"];
+  const bundledModePrefixes = ["00000", "00010", "00020", "00050", "00100", "00110", "00120", "00130", "00132", "00150", "00300", "00400", "00500", "01100", "01400", "01500", "01700", "01731", "01800", "02100", "03100", "03200", "05500", "05600", "07400", "11600", "12500", "13000", "13600", "17200", "17210", "09400", "09600", "09700", "10400", "10500", "11300", "13400", "15600", "15700", "13100", "18200", "22100"];
   dirFiles("OpenCL", (name) => {
     if (name.endsWith(".h")) return true;
     if (!name.endsWith(".cl")) return false;
@@ -81,6 +81,10 @@ if (mode === "--import") {
   // when the selected attack uses SHA-256 mode 1400.
   add("OpenCL/m04000-pure.cl");
   dirFiles("OpenCL", (name) => name.startsWith("m04000"));
+  // Shared host-side module headers the batch modules include at C compile
+  // time (KDBX4 Argon2 34300/34301 needs argon2_common.h).
+  add("src/modules/argon2_common.h");
+  add("src/modules/wpa_common.c");
   // Upstream initializes its default module 00000 before switching to 1400.
   // It is a native bootstrap dependency, not an exposed CyberDeck mode.
   add("src/modules/module_00000.c");
@@ -96,7 +100,7 @@ if (mode === "--import") {
   }
   // Batch-2 modes: salted digests (10/20/110/120), HMAC (50/60), Windows auth
   // (1100/2100/5500/5600) and sha256crypt (7400).
-  for (const mode of ["00010", "00020", "00050", "00060", "00110", "00120",
+  for (const mode of ["00010", "00020", "00050", "00110", "00120", "00150",
                       "01100", "02100", "05500", "05600", "07400", "01500", "00132", "01731"]) {
     add("src/modules/module_" + mode + ".c");
   }
@@ -139,7 +143,7 @@ if (mode === "--import") {
   // plugins in this hashcat; a wordlist attack cannot start without them.
   dirFiles("src/feeds", (name) => name.endsWith(".c") || name.endsWith(".h"));
   dirFiles("OpenCL", (name) =>
-    /^m(00010|00020|00050|00060|00110|00120|01100|02100|05500|05600|07400|01500|00132|01731)[-_a-z0-9]*\.cl$/.test(name));
+    /^m(00010|00020|00050|00110|00120|01100|02100|05500|05600|07400|00150|01500|00132|01731)[-_a-z0-9]*\.cl$/.test(name));
   // Batch-3 archive kernels: WinZip and PKZIP are pure-only; 7-Zip also has
   // the suffix-less optimized kernel, RAR3-hp ships pure + optimized and
   // RAR5 is pure-only.

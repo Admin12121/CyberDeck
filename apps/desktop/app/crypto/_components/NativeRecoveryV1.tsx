@@ -47,7 +47,7 @@ const EMBEDDED_MODES: readonly { value: HashcatRawAlgorithmV1; label: string; di
   { value: "sha1-pass-salt", label: "sha1($pass.$salt) · mode 110", digits: 0 },
   { value: "sha1-salt-pass", label: "sha1($salt.$pass) · mode 120", digits: 0 },
   { value: "hmac-md5", label: "HMAC-MD5 (key = pass) · mode 50", digits: 0 },
-  { value: "hmac-sha1", label: "HMAC-SHA1 (key = pass) · mode 60", digits: 0 },
+  { value: "hmac-sha1", label: "HMAC-SHA1 (key = pass) · mode 150", digits: 0 },
   { value: "mscash", label: "mscash / DCC1 · mode 1100", digits: 0 },
   { value: "mscash2", label: "mscash2 / DCC2 · mode 2100", digits: 0 },
   { value: "netntlm-v1", label: "NetNTLMv1 · mode 5500", digits: 0 },
