@@ -13,10 +13,17 @@ const scoped = read("../../src-tauri/src/features/cases/ipc/scoped.rs");
 
 test("Cases is a route-local coss workspace, not a duplicate global shell", () => {
   assert.match(page, /CasesWorkspace/);
-  for (const component of ["button", "input", "frame", "tabs", "table"]) {
+  // House style: the same primitives every tool view uses — coss button/
+  // input/frame plus the shared design-system shell, tabs and data-table.
+  // No separate tab/table systems, no bespoke top row.
+  for (const component of ["button", "input", "frame"]) {
     assert.match(view, new RegExp('from "@/components/ui/' + component + '"'));
   }
-  assert.match(view, /cd-workspace-toolbar/);
+  assert.match(view, /from "@ds\/compact"/);
+  assert.match(view, /<WorkspaceShell/);
+  assert.match(view, /from "@ds\/panes"/);
+  assert.match(view, /WorkspaceTabs/);
+  assert.match(view, /data-table/);
   assert.doesNotMatch(view, /@features\/|@\/features\/|FrameFooter/);
 });
 

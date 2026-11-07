@@ -2,7 +2,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { ChevronRight, CornerUpLeft, Download, FileDown, FolderOpen } from "lucide-react";
 import { Chip, EmptyState, TextInput, ToolButton, WorkspaceTabs } from "@ds/panes";
-import { IconButton } from "@ds/compact";
+import { IconButton, WorkspaceShell } from "@ds/compact";
 import { hexDump } from "@lib/hex";
 import {
   isDesktop,
@@ -281,284 +281,290 @@ function ImportedCaptureView() {
         </div>
       </div>
       <div className={screen === "offline" ? "flex min-h-0 flex-1 flex-col" : "hidden"}>
-        <div className="cd-workspace-toolbar shrink-0 items-center gap-2 px-2">
-        <IconButton icon={CornerUpLeft} onClick={() => setScreen("welcome")}
-          title="Return to capture file and interface selection" />
-        <IconButton icon={FolderOpen} onClick={() => void openCapture()} disabled={!desktop || opening}
-          title={desktop ? "Open a PCAP or PCAPNG capture using the native Rust parser" : "Opening captures requires the desktop runtime"} />
-        <IconButton icon={Download} onClick={() => void exportView("pcap")} disabled={!capture || exporting || !savedCaseReady}
-          title={!capture
-            ? "Export view → case (PCAP): open a capture first"
-            : savedCaseReady
-              ? "Export view → case (PCAP): persist the filtered packets as an immutable classic-PCAP case artifact"
-              : "Export view → case (PCAP): select a saved case first"} />
-        <IconButton icon={FileDown} onClick={() => void exportView("pcapng")} disabled={!capture || exporting || !savedCaseReady}
-          title="Export view → case (PCAPNG): native writer, round-trips through the bundled reader" />
-        {exportResult ? (
-          <Chip tone="ok">
-            {exportResult.packet_count} pkts → case · {shortArtifactId(exportResult.artifact_id)}
-          </Chip>
+        <WorkspaceShell
+          toolbar={
+            <>
+            <IconButton icon={CornerUpLeft} onClick={() => setScreen("welcome")}
+              title="Return to capture file and interface selection" />
+            <IconButton icon={FolderOpen} onClick={() => void openCapture()} disabled={!desktop || opening}
+              title={desktop ? "Open a PCAP or PCAPNG capture using the native Rust parser" : "Opening captures requires the desktop runtime"} />
+            <IconButton icon={Download} onClick={() => void exportView("pcap")} disabled={!capture || exporting || !savedCaseReady}
+              title={!capture
+                ? "Export view → case (PCAP): open a capture first"
+                : savedCaseReady
+                  ? "Export view → case (PCAP): persist the filtered packets as an immutable classic-PCAP case artifact"
+                  : "Export view → case (PCAP): select a saved case first"} />
+            <IconButton icon={FileDown} onClick={() => void exportView("pcapng")} disabled={!capture || exporting || !savedCaseReady}
+              title="Export view → case (PCAPNG): native writer, round-trips through the bundled reader" />
+            {exportResult ? (
+              <Chip tone="ok">
+                {exportResult.packet_count} pkts → case · {shortArtifactId(exportResult.artifact_id)}
+              </Chip>
+            ) : null}
+
+            <TextInput
+              value={filter}
+              onChange={setFilter}
+              placeholder="display filter (tcp.port == 443)"
+              ariaLabel="Display filter"
+              className="min-w-0 flex-1"
+            />
+            {capture ? (
+              <Chip tone="ok">{capture.file_name} · {capture.format.toUpperCase()} · {capture.packet_count} packets</Chip>
+            ) : (
+              <Chip>{showSample ? "DEMO: sample packets" : "No capture opened"}</Chip>
+            )}
+            </>
+          }
+          contentClassName="flex flex-col"
+        >
+        {openError ? (
+          <div className="border-b border-err/50 bg-err/10 px-2 py-1 font-mono text-[10px] text-err">{openError}</div>
+        ) : null}
+        {filterProblem ? (
+          <div className="border-b border-warn/40 bg-warn/10 px-2 py-1 font-mono text-[10px] text-warn" role="status" aria-label="Display filter syntax error">
+            {"filter syntax: "}
+            {filterProblem.message}
+            {" · at character "}
+            {filterProblem.position + 1}
+          </div>
+        ) : null}
+        {capture?.malformed_tail ? (
+          <div className="border-b border-warn/40 bg-warn/10 px-2 py-0.5 text-[10px] text-warn">
+            malformed trailing record — earlier packets loaded
+          </div>
+        ) : null}
+        {reassembly && showReassembly ? (
+          <div
+            className="flex items-center justify-between gap-2 border-b border-warn/40 bg-warn/10 px-2 py-1 font-mono text-[10px] text-warn"
+            role="status"
+            aria-label="Fragment reassembly summary"
+          >
+            <span className="truncate">{reassemblyBannerText(reassembly)}</span>
+            <button
+              type="button"
+              className="shrink-0 px-1 font-mono text-[10px] text-warn hover:text-fg"
+              aria-label="Dismiss reassembly summary"
+              onClick={() => setShowReassembly(false)}
+            >
+              ×
+            </button>
+          </div>
         ) : null}
 
-        <TextInput
-          value={filter}
-          onChange={setFilter}
-          placeholder="display filter (tcp.port == 443)"
-          ariaLabel="Display filter"
-          className="min-w-0 flex-1"
-        />
-        {capture ? (
-          <Chip tone="ok">{capture.file_name} · {capture.format.toUpperCase()} · {capture.packet_count} packets</Chip>
-        ) : (
-          <Chip>{showSample ? "DEMO: sample packets" : "No capture opened"}</Chip>
-        )}
-      </div>
-      {openError ? (
-        <div className="border-b border-err/50 bg-err/10 px-2 py-1 font-mono text-[10px] text-err">{openError}</div>
-      ) : null}
-      {filterProblem ? (
-        <div className="border-b border-warn/40 bg-warn/10 px-2 py-1 font-mono text-[10px] text-warn" role="status" aria-label="Display filter syntax error">
-          {"filter syntax: "}
-          {filterProblem.message}
-          {" · at character "}
-          {filterProblem.position + 1}
-        </div>
-      ) : null}
-      {capture?.malformed_tail ? (
-        <div className="border-b border-warn/40 bg-warn/10 px-2 py-0.5 text-[10px] text-warn">
-          malformed trailing record — earlier packets loaded
-        </div>
-      ) : null}
-      {reassembly && showReassembly ? (
-        <div
-          className="flex items-center justify-between gap-2 border-b border-warn/40 bg-warn/10 px-2 py-1 font-mono text-[10px] text-warn"
-          role="status"
-          aria-label="Fragment reassembly summary"
-        >
-          <span className="truncate">{reassemblyBannerText(reassembly)}</span>
-          <button
-            type="button"
-            className="shrink-0 px-1 font-mono text-[10px] text-warn hover:text-fg"
-            aria-label="Dismiss reassembly summary"
-            onClick={() => setShowReassembly(false)}
-          >
-            ×
-          </button>
-        </div>
-      ) : null}
-
-      <PacketPaneSplit
-        list={        <div ref={packetScrollRef}
-          onScroll={(event) => setPacketScrollTop(event.currentTarget.scrollTop)}
-          className="h-full overflow-auto bg-panel">
-          {tab === "packets" ? (
-            <PacketTable
-              rows={filtered.slice(firstVisible, lastVisible).map((p) => ({
-                index: p.index, time: timeLabel(p.time_ms),
-                source: p.source, destination: p.destination,
-                protocol: p.protocol, length: p.length, info: p.info,
-                protocolColor: PROTOCOL_COLORS[p.color_hint] ?? "text-fg-dim",
-              }))}
-              selectedIndex={current?.index ?? null}
-              onSelect={setSelected}
-              topSpacer={firstVisible * rowHeight}
-              bottomSpacer={(filtered.length - lastVisible) * rowHeight}
-              empty={showSample || capture ? "No packets match the display filter" : "No capture loaded"}
-            />
-          ) : tab === "conversations" ? (
-            <table className="data-table">
-              <thead>
-                <tr>
-                  <th>Endpoint A</th>
-                  <th>Endpoint B</th>
-                  <th className="w-16">Packets</th>
-                  <th className="w-24">Bytes</th>
-                  <th>Protocols</th>
-                </tr>
-              </thead>
-              <tbody>
-                {conversationsOf(filtered).map((c) => (
-                  <tr key={c.endpoints.join(" ")}>
-                    <td className="text-fg">{c.endpoints[0]}</td>
-                    <td className="text-fg">{c.endpoints[1]}</td>
-                    <td>{c.packets}</td>
-                    <td>{c.bytes}</td>
-                    <td className="text-fg-muted">{c.protocols.join(", ")}</td>
-                  </tr>
-                ))}
-                {conversationsOf(filtered).length === 0 ? (
-                  <tr><td colSpan={5} className="text-center text-fg-muted">no conversations in the current view</td></tr>
-                ) : null}
-              </tbody>
-            </table>
-          ) : tab === "endpoints" ? (
-            <table className="data-table">
-              <thead>
-                <tr>
-                  <th>Address</th>
-                  <th className="w-24">Family</th>
-                  <th className="w-16">Packets</th>
-                  <th className="w-24">Bytes</th>
-                </tr>
-              </thead>
-              <tbody>
-                {endpoints.map((e) => (
-                  <tr key={`${e.family}:${e.address}`}>
-                    <td>
-                      <button type="button"
-                        className="w-full rounded-sm px-1 py-0.5 text-left font-mono text-[11px] hover:bg-selected focus-visible:outline focus-visible:outline-1 focus-visible:outline-ring"
-                        title={`Filter for address ${e.address}`}
-                        aria-label={`Filter packets for address ${e.address}`}
-                        onClick={() => {
-                          if (e.family === "ip4") setFilter(`ip.addr == ${e.address}`);
-                          else if (e.family === "ip6") setFilter(`ipv6.addr == ${e.address}`);
-                          else setFilter(`eth.addr == ${e.address}`);
-                          setTab("packets");
-                        }}>
-                        {e.address}
-                      </button>
-                    </td>
-                    <td className="text-fg-muted">{e.family === "ip4" ? "IPv4" : e.family === "ip6" ? "IPv6" : "Ethernet"}</td>
-                    <td>{e.packets}</td>
-                    <td>{e.bytes}</td>
-                  </tr>
-                ))}
-                {endpoints.length === 0 ? (
-                  <tr><td colSpan={4} className="text-center text-fg-muted">no endpoints in the current view</td></tr>
-                ) : null}
-              </tbody>
-            </table>
-          ) : tab === "hierarchy" ? (
-            <div className="p-1">
+        <PacketPaneSplit
+          list={        <div ref={packetScrollRef}
+            onScroll={(event) => setPacketScrollTop(event.currentTarget.scrollTop)}
+            className="h-full overflow-auto bg-panel">
+            {tab === "packets" ? (
+              <PacketTable
+                rows={filtered.slice(firstVisible, lastVisible).map((p) => ({
+                  index: p.index, time: timeLabel(p.time_ms),
+                  source: p.source, destination: p.destination,
+                  protocol: p.protocol, length: p.length, info: p.info,
+                  protocolColor: PROTOCOL_COLORS[p.color_hint] ?? "text-fg-dim",
+                }))}
+                selectedIndex={current?.index ?? null}
+                onSelect={setSelected}
+                topSpacer={firstVisible * rowHeight}
+                bottomSpacer={(filtered.length - lastVisible) * rowHeight}
+                empty={showSample || capture ? "No packets match the display filter" : "No capture loaded"}
+              />
+            ) : tab === "conversations" ? (
               <table className="data-table">
                 <thead>
                   <tr>
-                    <th>Protocol</th>
+                    <th>Endpoint A</th>
+                    <th>Endpoint B</th>
                     <th className="w-16">Packets</th>
                     <th className="w-24">Bytes</th>
+                    <th>Protocols</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {conversationsOf(filtered).map((c) => (
+                    <tr key={c.endpoints.join(" ")}>
+                      <td className="text-fg">{c.endpoints[0]}</td>
+                      <td className="text-fg">{c.endpoints[1]}</td>
+                      <td>{c.packets}</td>
+                      <td>{c.bytes}</td>
+                      <td className="text-fg-muted">{c.protocols.join(", ")}</td>
+                    </tr>
+                  ))}
+                  {conversationsOf(filtered).length === 0 ? (
+                    <tr><td colSpan={5} className="text-center text-fg-muted">no conversations in the current view</td></tr>
+                  ) : null}
+                </tbody>
+              </table>
+            ) : tab === "endpoints" ? (
+              <table className="data-table">
+                <thead>
+                  <tr>
+                    <th>Address</th>
+                    <th className="w-24">Family</th>
+                    <th className="w-16">Packets</th>
+                    <th className="w-24">Bytes</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {endpoints.map((e) => (
+                    <tr key={`${e.family}:${e.address}`}>
+                      <td>
+                        <button type="button"
+                          className="w-full rounded-sm px-1 py-0.5 text-left font-mono text-[11px] hover:bg-selected focus-visible:outline focus-visible:outline-1 focus-visible:outline-ring"
+                          title={`Filter for address ${e.address}`}
+                          aria-label={`Filter packets for address ${e.address}`}
+                          onClick={() => {
+                            if (e.family === "ip4") setFilter(`ip.addr == ${e.address}`);
+                            else if (e.family === "ip6") setFilter(`ipv6.addr == ${e.address}`);
+                            else setFilter(`eth.addr == ${e.address}`);
+                            setTab("packets");
+                          }}>
+                          {e.address}
+                        </button>
+                      </td>
+                      <td className="text-fg-muted">{e.family === "ip4" ? "IPv4" : e.family === "ip6" ? "IPv6" : "Ethernet"}</td>
+                      <td>{e.packets}</td>
+                      <td>{e.bytes}</td>
+                    </tr>
+                  ))}
+                  {endpoints.length === 0 ? (
+                    <tr><td colSpan={4} className="text-center text-fg-muted">no endpoints in the current view</td></tr>
+                  ) : null}
+                </tbody>
+              </table>
+            ) : tab === "hierarchy" ? (
+              <div className="p-1">
+                <table className="data-table">
+                  <thead>
+                    <tr>
+                      <th>Protocol</th>
+                      <th className="w-16">Packets</th>
+                      <th className="w-24">Bytes</th>
+                      <th>Share of bytes</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {hierarchy.map((node) => (
+                      <HierarchyRows key={node.protocol} node={node} depth={0} totalBytes={hierarchyBytes} />
+                    ))}
+                    {hierarchy.length === 0 ? (
+                      <tr><td colSpan={4} className="text-center text-fg-muted">no protocols in the current view</td></tr>
+                    ) : null}
+                  </tbody>
+                </table>
+              </div>
+            ) : tab === "io" ? (
+              <IoGraphView buckets={ioBuckets} />
+            ) : tab === "statistics" ? (
+              <table className="data-table">
+                <thead>
+                  <tr>
+                    <th className="w-32">Protocol</th>
+                    <th className="w-24">Packets</th>
+                    <th className="w-28">Bytes</th>
                     <th>Share of bytes</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {hierarchy.map((node) => (
-                    <HierarchyRows key={node.protocol} node={node} depth={0} totalBytes={hierarchyBytes} />
-                  ))}
-                  {hierarchy.length === 0 ? (
-                    <tr><td colSpan={4} className="text-center text-fg-muted">no protocols in the current view</td></tr>
-                  ) : null}
+                  {protocolStats(filtered).map((stat) => {
+                    const totalBytes = filtered.reduce((sum, item) => sum + item.length, 0) || 1;
+                    return (
+                      <tr key={stat.protocol}>
+                        <td>
+                          <button type="button"
+                            className={`w-full rounded-sm px-1 py-0.5 text-left font-mono text-[11px] hover:bg-selected focus-visible:outline focus-visible:outline-1 focus-visible:outline-ring ${PROTOCOL_COLORS[stat.protocol.toLowerCase()] ?? "text-fg-dim"}`}
+                            title={`Filter packets by ${stat.protocol}`}
+                            aria-label={`Show ${stat.protocol} packets`}
+                            onClick={() => inspectProtocol(stat.protocol)}>
+                            {stat.protocol}
+                          </button>
+                        </td>
+                        <td>{stat.packets}</td>
+                        <td>{stat.bytes}</td>
+                        <td>
+                          <div className="h-1.5 w-full max-w-48 border border-line bg-app">
+                            <div className="h-full bg-orange" style={{ width: `${Math.round((stat.bytes / totalBytes) * 100)}%` }} />
+                          </div>
+                        </td>
+                      </tr>
+                    );
+                  })}
                 </tbody>
               </table>
-            </div>
-          ) : tab === "io" ? (
-            <IoGraphView buckets={ioBuckets} />
-          ) : tab === "statistics" ? (
-            <table className="data-table">
-              <thead>
-                <tr>
-                  <th className="w-32">Protocol</th>
-                  <th className="w-24">Packets</th>
-                  <th className="w-28">Bytes</th>
-                  <th>Share of bytes</th>
-                </tr>
-              </thead>
-              <tbody>
-                {protocolStats(filtered).map((stat) => {
-                  const totalBytes = filtered.reduce((sum, item) => sum + item.length, 0) || 1;
-                  return (
-                    <tr key={stat.protocol}>
-                      <td>
-                        <button type="button"
-                          className={`w-full rounded-sm px-1 py-0.5 text-left font-mono text-[11px] hover:bg-selected focus-visible:outline focus-visible:outline-1 focus-visible:outline-ring ${PROTOCOL_COLORS[stat.protocol.toLowerCase()] ?? "text-fg-dim"}`}
-                          title={`Filter packets by ${stat.protocol}`}
-                          aria-label={`Show ${stat.protocol} packets`}
-                          onClick={() => inspectProtocol(stat.protocol)}>
-                          {stat.protocol}
-                        </button>
-                      </td>
-                      <td>{stat.packets}</td>
-                      <td>{stat.bytes}</td>
-                      <td>
-                        <div className="h-1.5 w-full max-w-48 border border-line bg-app">
-                          <div className="h-full bg-orange" style={{ width: `${Math.round((stat.bytes / totalBytes) * 100)}%` }} />
-                        </div>
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          ) : tab === "os-hints" ? (
-            <OsHintsView
-              desktop={desktop}
-              hints={osHints}
-              loading={osHintsLoading}
-              hasCapture={Boolean(capture)}
-              onAnalyze={() => {
-                setOsHintsLoading(true);
-                captureOsHintsV1()
-                  .then((wire) => setOsHints(wire))
-                  .catch((cause) => setOpenError(
-                    "OS hints analysis failed: "
-                      + (cause instanceof Error ? cause.message : String(cause)),
-                  ))
-                  .finally(() => setOsHintsLoading(false));
-              }}
-            />
-          ) : (
-            <FollowStreamView packets={filtered} artifactId={savedArtifactId} />
-          )}
-        </div>
-}
-        detailTitle={`Packet details: ${current ? "frame " + (current.index + 1) : "no selection"}`}
-        details={            <div className="min-h-0 flex-1 overflow-auto p-1">
-              {current ? (
-                capture ? (
-                  current.layers.map((layer, i) => (
-                    <DetailBranch key={i} node={{ label: layer.label, value: layer.value }} depth={0} />
-                  ))
-                ) : (
-                  detailTree(SAMPLE_PACKETS[current.index]).map((node, i) => <DetailBranch key={i} node={node} depth={0} />)
-                )
-              ) : null}
-            </div>}
-        bytesTitle="Packet bytes (offset · hex · ASCII)"
-        bytesActions={<ToolButton
-  disabled={!capture || !current || !currentBytes || currentBytes.rows.length === 0}
-  title="Transfer selected captured frame bytes to Recipes"
-  onClick={() => {
-    if (!capture || !current || !currentBytes) return;
-    const hex = currentBytes.rows.map((row) => row.hex.replace(/[^0-9a-f]/gi, "")).join("");
-    wb.sendToRecipes(hex, `${capture.file_name}: frame ${current.index + 1} (visible bytes)`,
-      [{ opId: "from_hex", enabled: true }]);
-  }}>Send to Recipes</ToolButton>}
-        bytes={            <div className="min-h-0 flex-1 overflow-auto">
-              {capture && currentBytes ? (
-                <pre className="p-1 font-mono text-[11px] leading-relaxed text-fg-dim">
-                  {currentBytes.rows.map((row) => (
-                    <div key={row.offset}>
-                      <span className="text-fg-muted">{row.offset.toString(16).padStart(4, "0")}</span>
-                      {"  "}
-                      {row.hex}
-                      {"  "}
-                      <span className="text-orange">{row.ascii}</span>
-                    </div>
-                  ))}
-                </pre>
-              ) : !capture ? (
-                <pre className="p-1 font-mono text-[11px] leading-relaxed text-fg-dim">
-                  {hexDump(sampleBytes).map((row) => (
-                    <div key={row.offset}>
-                      <span className="text-fg-muted">{row.offset.toString(16).padStart(4, "0")}</span>
-                      {"  "}
-                      {row.hex}
-                      {"  "}
-                      <span className="text-orange">{row.ascii}</span>
-                    </div>
-                  ))}
-                </pre>
-              ) : null}
-            </div>}
-      />
+            ) : tab === "os-hints" ? (
+              <OsHintsView
+                desktop={desktop}
+                hints={osHints}
+                loading={osHintsLoading}
+                hasCapture={Boolean(capture)}
+                onAnalyze={() => {
+                  setOsHintsLoading(true);
+                  captureOsHintsV1()
+                    .then((wire) => setOsHints(wire))
+                    .catch((cause) => setOpenError(
+                      "OS hints analysis failed: "
+                        + (cause instanceof Error ? cause.message : String(cause)),
+                    ))
+                    .finally(() => setOsHintsLoading(false));
+                }}
+              />
+            ) : (
+              <FollowStreamView packets={filtered} artifactId={savedArtifactId} />
+            )}
+          </div>
+  }
+          detailTitle={`Packet details: ${current ? "frame " + (current.index + 1) : "no selection"}`}
+          details={            <div className="min-h-0 flex-1 overflow-auto p-1">
+                {current ? (
+                  capture ? (
+                    current.layers.map((layer, i) => (
+                      <DetailBranch key={i} node={{ label: layer.label, value: layer.value }} depth={0} />
+                    ))
+                  ) : (
+                    detailTree(SAMPLE_PACKETS[current.index]).map((node, i) => <DetailBranch key={i} node={node} depth={0} />)
+                  )
+                ) : null}
+              </div>}
+          bytesTitle="Packet bytes (offset · hex · ASCII)"
+          bytesActions={<ToolButton
+    disabled={!capture || !current || !currentBytes || currentBytes.rows.length === 0}
+    title="Transfer selected captured frame bytes to Recipes"
+    onClick={() => {
+      if (!capture || !current || !currentBytes) return;
+      const hex = currentBytes.rows.map((row) => row.hex.replace(/[^0-9a-f]/gi, "")).join("");
+      wb.sendToRecipes(hex, `${capture.file_name}: frame ${current.index + 1} (visible bytes)`,
+        [{ opId: "from_hex", enabled: true }]);
+    }}>Send to Recipes</ToolButton>}
+          bytes={            <div className="min-h-0 flex-1 overflow-auto">
+                {capture && currentBytes ? (
+                  <pre className="p-1 font-mono text-[11px] leading-relaxed text-fg-dim">
+                    {currentBytes.rows.map((row) => (
+                      <div key={row.offset}>
+                        <span className="text-fg-muted">{row.offset.toString(16).padStart(4, "0")}</span>
+                        {"  "}
+                        {row.hex}
+                        {"  "}
+                        <span className="text-orange">{row.ascii}</span>
+                      </div>
+                    ))}
+                  </pre>
+                ) : !capture ? (
+                  <pre className="p-1 font-mono text-[11px] leading-relaxed text-fg-dim">
+                    {hexDump(sampleBytes).map((row) => (
+                      <div key={row.offset}>
+                        <span className="text-fg-muted">{row.offset.toString(16).padStart(4, "0")}</span>
+                        {"  "}
+                        {row.hex}
+                        {"  "}
+                        <span className="text-orange">{row.ascii}</span>
+                      </div>
+                    ))}
+                  </pre>
+                ) : null}
+              </div>}
+        />
+        </WorkspaceShell>
       <WorkspaceTabs items={["packets", "conversations", "endpoints", "hierarchy", "io", "statistics", "streams", "os-hints"] as const}
         active={tab} onChange={setTab} placement="bottom" ariaLabel="Packet investigation views" />
       </div>
@@ -663,7 +669,7 @@ function HierarchyRows({ node, depth, totalBytes }: { node: HierarchyNode; depth
         <td>{node.bytes}</td>
         <td>
           <div className="h-1.5 w-full max-w-48 border border-line bg-app">
-            <div className="h-full bg-blue" style={{ width: `${share}%` }} />
+            <div className="h-full bg-orange" style={{ width: `${share}%` }} />
           </div>
         </td>
       </tr>

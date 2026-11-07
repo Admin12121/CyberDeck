@@ -2,16 +2,18 @@
 /**
  * Network Lab (Ettercap-inspired mode, passive/defensive arc).
  *
- * UX revision: a slim icon-only pill rail switcher row (34px buttons,
- * tooltip = label, active = orange filled pill) sits above the active mode —
- * exactly one of Scope, ARP, Live, DNS, Report renders at a time. Scope is
- * the exemplar: controls live INSIDE a centered Frame card (FrameTitle +
- * state chip header, FrameDescription with the honesty wording, FramePanel
- * with the controls); ARP, Live and DNS use the same ModeCard when idle and
- * switch to a minimal toolbar row (only the still-needed controls) above
+ * UX revision: every mode renders through the shared WorkspaceShell — the
+ * IconRail pill rail sits in the shell's rail slot (icon-only pills,
+ * tooltip = label, active pill, no tab underline), per-mode controls move to
+ * the toolbar slot once data exists, and status chips render in the
+ * StatusStrip slot. Exactly one of Scope, ARP, Live, DNS, Report renders at a
+ * time. Scope is the exemplar: controls live INSIDE the shared ModeCard
+ * (state chip header, InfoTip with the honesty wording, panel with the
+ * controls); ARP, Live and DNS use the same shared ModeCard when idle and
+ * switch to the shell toolbar row (only the still-needed controls) above
  * full-width result tables once data exists. The active-interaction gate
- * cluster lives only in the Scope mode. Long explanations are card
- * descriptions / tooltips, never body prose walls.
+ * cluster lives only in the Scope mode. Long explanations are card InfoTips,
+ * never body prose walls.
  *
  * Gates (unchanged, Master Plan §5.1): scope entries are IP/CIDR strings held
  * in memory only; the authorization acknowledgment happens through the
@@ -20,12 +22,11 @@
  * over the opened capture or a subscribed Packet Studio session; the lab
  * never transmits.
  */
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Ban, Crosshair, FileText, FolderOpen, Globe, Network, Radar } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import { Chip, Select, TextInput, ToolButton } from "@ds/panes";
-import { Frame, FrameDescription, FrameHeader, FramePanel, FrameTitle } from "@/components/ui/frame";
-import { IconButton, InfoTip, StatusStrip } from "@ds/compact";
+import { IconRail, IconButton, InfoTip, ModeCard, StatusStrip, WorkspaceShell } from "@ds/compact";
 import {
   captureInterfacesV1,
   isDesktop,
@@ -79,68 +80,6 @@ const SCOPE_TEXT_MAX_CHARS = 8192;
 
 /** Rail modes: one visible at a time (icon-only pill rail navigation). */
 type LabMode = "scope" | "arp" | "live" | "dns" | "report";
-
-/** Shared toolbar-row layout: rail pills + h-8 controls, spacing, no lines. */
-const TOOLBAR_ROW = "cd-workspace-toolbar flex-wrap gap-2 px-3";
-
-/**
- * Empty-state card: centered in the full remaining height, one header line
- * (icon + title) above one short panel line. No explanation stacks, no
- * badges.
- */
-function LabEmptyCard({ icon: Icon, title, line }: { icon: LucideIcon; title: string; line: string }) {
-  // Web-proxy card pattern (user-designated reference): centered Frame,
-  // rounded-xl on a muted surface, header + panel, controls live INSIDE.
-  return (
-    <div className="flex min-h-0 flex-1 items-center justify-center p-4 sm:p-6">
-      <Frame className="mx-auto w-full max-w-2xl rounded-xl bg-muted/72 p-1">
-        <FrameHeader className="flex-row items-center gap-2 px-4 py-3">
-          <Icon size={15} strokeWidth={1.5} className="text-fg-muted" />
-          <FrameTitle>{title}</FrameTitle>
-        </FrameHeader>
-        <FramePanel className="rounded-lg bg-background px-4 pb-5 pt-4">
-          <p className="text-xs leading-relaxed text-fg-muted">{line}</p>
-        </FramePanel>
-      </Frame>
-    </div>
-  );
-}
-
-/**
- * Idle control card for a lab mode (Scope-exemplar pattern): centered Frame,
- * header = FrameTitle + single state chip, FrameDescription carries the long
- * honesty wording, FramePanel holds the mode's controls. Once a run exists
- * the results render full-width below the slim rail row instead, with only
- * the still-needed controls in a toolbar row.
- */
-function ModeCard({
-  title,
-  state,
-  stateTone,
-  description,
-  children,
-}: {
-  title: string;
-  state: string;
-  stateTone: "muted" | "orange" | "ok" | "err";
-  description: string;
-  children: ReactNode;
-}) {
-  return (
-    <div className="flex min-h-0 flex-1 items-start justify-center overflow-y-auto p-4 sm:p-6">
-      <Frame className="mx-auto w-full max-w-3xl rounded-xl bg-muted/72 p-1">
-        <FrameHeader className="flex-row items-center justify-between gap-3 px-4 py-3">
-          <span className="inline-flex items-center gap-2">
-            <FrameTitle>{title}</FrameTitle>
-            <InfoTip text={description} />
-          </span>
-          <Chip tone={stateTone}>{state}</Chip>
-        </FrameHeader>
-        <FramePanel className="space-y-4 rounded-lg bg-background px-4 pb-5 pt-4">{children}</FramePanel>
-      </Frame>
-    </div>
-  );
-}
 
 export function NetworkLabView() {
   const desktop = isDesktop();
@@ -350,38 +289,6 @@ export function NetworkLabView() {
       : null,
     ...timelineStatusItems(displayTimeline),
   ];
-
-  // Icon-only pill rail: 34px square buttons, tooltip = label, active =
-  // orange filled pill. Left-aligned inside the mode's toolbar row; no
-  // bordered wrapper, no tab underline, no labels under the icons.
-  const railPills = (
-    <nav aria-label="Network Lab modes" className="flex items-center gap-1">
-      {railItems.map((item) => {
-        const Icon = item.icon;
-        const activeMode = item.id === mode;
-        return (
-          <button
-            key={item.id}
-            type="button"
-            onClick={() => setMode(item.id)}
-            aria-pressed={activeMode}
-            aria-label={item.label}
-            title={item.label}
-            className={`relative inline-flex h-[34px] w-[34px] items-center justify-center rounded-sm transition-colors focus-visible:outline focus-visible:outline-1 focus-visible:outline-ring ${
-              activeMode ? "bg-orange text-white" : "text-fg-muted hover:bg-line/60 hover:text-fg"
-            }`}
-          >
-            <Icon size={16} strokeWidth={activeMode ? 2 : 1.5} />
-            {item.badge !== undefined && item.badge > 0 ? (
-              <span className="absolute -right-1.5 -top-1.5 min-w-3.5 rounded-full bg-err px-1 text-center font-mono text-[9px] leading-3.5 text-white">
-                {item.badge}
-              </span>
-            ) : null}
-          </button>
-        );
-      })}
-    </nav>
-  );
 
   // Active interaction gate: ONE compact cluster, rendered only in the Scope
   // mode (where the gated sweep lives) — no repetition across mode rows. The
@@ -690,21 +597,66 @@ export function NetworkLabView() {
     }
   };
 
+  // Shell toolbar row per mode: once a run exists the still-needed controls
+  // move up here (the idle card holds them inside the shared ModeCard); the
+  // trailing chip carries the run's state word.
+  const toolbar =
+    mode === "arp" && analysis ? (
+      <>
+        {arpControls}
+        <span className="flex-1" />
+        <Chip tone={capture ? "ok" : "muted"}>
+          {capture
+            ? `${capture.file_name} · ${capture.format.toUpperCase()} · ${capture.packet_count} packets`
+            : "no capture"}
+        </Chip>
+      </>
+    ) : mode === "live" && displayTimeline ? (
+      <>
+        {liveControls}
+        <span className="flex-1" />
+        <Chip tone={liveStateTone}>{liveState}</Chip>
+      </>
+    ) : mode === "dns" && dnsResult ? (
+      <>
+        {dnsControls}
+        <span className="flex-1" />
+        <Chip tone={dnsStateTone}>{dnsState}</Chip>
+      </>
+    ) : undefined;
+
+  // Status chips row per mode (muted strip under the toolbar row); both
+  // strips hide themselves while the mode has no run state to report.
+  const status =
+    mode === "live" ? (
+      <StatusStrip items={liveStripItems} />
+    ) : mode === "dns" ? (
+      <StatusStrip items={dnsStatusItems(dnsResult)} />
+    ) : undefined;
+
   return (
-    <div className="flex h-full min-h-0 flex-col bg-app">
+    <WorkspaceShell
+      rail={
+        <IconRail
+          items={railItems}
+          active={mode}
+          onChange={(id) => setMode(id as LabMode)}
+          ariaLabel="Network Lab modes"
+        />
+      }
+      toolbar={toolbar}
+      status={status}
+      contentClassName="flex flex-col"
+    >
       {mode === "scope" && (
         <section aria-label="Lab scope" className="flex min-h-0 flex-1 flex-col">
-          <div className="flex shrink-0 items-center px-3 py-1.5">{railPills}</div>
-          <div className="flex min-h-0 flex-1 items-start justify-center overflow-y-auto p-4 sm:p-6">
-          <Frame className="mx-auto w-full max-w-3xl rounded-xl bg-muted/72 p-1">
-            <FrameHeader className="flex-row items-center justify-between gap-3 px-4 py-3">
-              <span className="inline-flex items-center gap-2">
-                <FrameTitle>Lab scope</FrameTitle>
-                <InfoTip text="Passive lab over already-captured frames — reads captures, never transmits packets; scope entries are held in memory only." />
-              </span>
-              <Chip tone={scope?.authorized ? "orange" : "muted"}>{scopeSummary(scope)}</Chip>
-            </FrameHeader>
-            <FramePanel className="space-y-4 rounded-lg bg-background px-4 pb-5 pt-4">
+          <ModeCard
+            title="Lab scope"
+            icon={Crosshair}
+            state={scopeSummary(scope)}
+            stateTone={scope?.authorized ? "orange" : "muted"}
+            info="Passive lab over already-captured frames — reads captures, never transmits packets; scope entries are held in memory only."
+          >
             <div className="grid gap-3 md:grid-cols-2">
               <label className="block text-xs text-fg-dim">
                 <span className="mb-1 block font-medium text-fg-muted">Target 1</span>
@@ -815,15 +767,12 @@ export function NetworkLabView() {
                 </div>
               )
             ) : null}
-            </FramePanel>
-          </Frame>
-          </div>
+          </ModeCard>
         </section>
       )}
 
       {mode === "arp" && (
         <section aria-label="ARP analysis" className="flex min-h-0 flex-1 flex-col">
-          <div className="flex shrink-0 items-center px-3 py-1.5">{railPills}</div>
           {openError ? (
             <div role="alert" className="mx-3 border border-err/50 bg-err/10 px-3 py-1 font-mono text-[10px] text-err">
               {openError}
@@ -837,28 +786,19 @@ export function NetworkLabView() {
           {!analysis ? (
             <ModeCard
               title="ARP analysis"
+              icon={Network}
               state={
                 capture
                   ? `${capture.file_name} · ${capture.format.toUpperCase()} · ${capture.packet_count} packets`
                   : "no capture"
               }
               stateTone={capture ? "ok" : "muted"}
-              description="Passive ARP anomaly analysis over the opened capture — read-only, transmits nothing."
+              info="Passive ARP anomaly analysis over the opened capture — read-only, transmits nothing."
             >
               <div className="flex flex-wrap items-center gap-3">{arpControls}</div>
             </ModeCard>
           ) : (
-            <>
-              <div className={TOOLBAR_ROW}>
-                {arpControls}
-                <span className="flex-1" />
-                <Chip tone={capture ? "ok" : "muted"}>
-                  {capture
-                    ? `${capture.file_name} · ${capture.format.toUpperCase()} · ${capture.packet_count} packets`
-                    : "no capture"}
-                </Chip>
-              </div>
-              <div className="min-h-0 flex-1 overflow-y-auto pb-4">
+            <div className="min-h-0 flex-1 overflow-y-auto pb-4">
               <p className="px-3 pt-2 font-mono text-[10px] text-fg-muted">
                 {analysis.arp_frame_count} ARP frames · {analysis.observation_count} attributable
                 observations · {analysis.findings.length} finding
@@ -947,15 +887,13 @@ export function NetworkLabView() {
                   ) : null}
                 </tbody>
               </table>
-              </div>
-            </>
+            </div>
           )}
         </section>
       )}
 
       {mode === "live" && (
         <section aria-label="Live monitor" className="flex min-h-0 flex-1 flex-col">
-          <div className="flex shrink-0 items-center px-3 py-1.5">{railPills}</div>
           {liveError ? (
             <div role="alert" className="mx-3 border border-err/50 bg-err/10 px-3 py-1 font-mono text-[10px] text-err">
               {liveError}
@@ -964,31 +902,23 @@ export function NetworkLabView() {
           {!displayTimeline ? (
             <ModeCard
               title="Live monitor"
+              icon={Radar}
               state={liveState}
               stateTone={liveStateTone}
-              description="Subscribe to Packet Studio's running capture — the lab transmits nothing; Packet Studio owns the capture lifecycle."
+              info="Subscribe to Packet Studio's running capture — the lab transmits nothing; Packet Studio owns the capture lifecycle."
             >
               <div className="flex flex-wrap items-center gap-3">{liveControls}</div>
             </ModeCard>
           ) : (
-            <>
-              <div className={TOOLBAR_ROW}>
-                {liveControls}
-                <span className="flex-1" />
-                <Chip tone={liveStateTone}>{liveState}</Chip>
-              </div>
-              <div className="min-h-0 flex-1 overflow-y-auto pb-4">
-                <StatusStrip items={liveStripItems} />
-                <TimelineTable wire={displayTimeline} />
-              </div>
-            </>
+            <div className="min-h-0 flex-1 overflow-y-auto pb-4">
+              <TimelineTable wire={displayTimeline} />
+            </div>
           )}
         </section>
       )}
 
       {mode === "dns" && (
         <section aria-label="DNS monitor (passive)" className="flex min-h-0 flex-1 flex-col">
-          <div className="flex shrink-0 items-center px-3 py-1.5">{railPills}</div>
           {dnsError ? (
             <div role="alert" className="mx-3 border border-err/50 bg-err/10 px-3 py-1 font-mono text-[10px] text-err">
               {dnsError}
@@ -997,24 +927,17 @@ export function NetworkLabView() {
           {!dnsResult ? (
             <ModeCard
               title="DNS monitor"
+              icon={Globe}
               state={dnsState}
               stateTone={dnsStateTone}
-              description="Passive DNS-response monitoring over the opened capture — read-only, the lab transmits nothing."
+              info="Passive DNS-response monitoring over the opened capture — read-only, the lab transmits nothing."
             >
               <div className="flex flex-wrap items-center gap-3">{dnsControls}</div>
             </ModeCard>
           ) : (
-            <>
-              <div className={TOOLBAR_ROW}>
-                {dnsControls}
-                <span className="flex-1" />
-                <Chip tone={dnsStateTone}>{dnsState}</Chip>
-              </div>
-              <div className="min-h-0 flex-1 overflow-y-auto pb-4">
-                <StatusStrip items={dnsStatusItems(dnsResult)} />
-                <DnsFindingsTable wire={dnsResult} />
-              </div>
-            </>
+            <div className="min-h-0 flex-1 overflow-y-auto pb-4">
+              <DnsFindingsTable wire={dnsResult} />
+            </div>
           )}
         </section>
       )}
@@ -1022,24 +945,20 @@ export function NetworkLabView() {
       {mode === "report" && (
         <section aria-label="Session report" className="flex min-h-0 flex-1 flex-col">
           {/* lab-report-ui.test.mjs pins the role="group" label, the muted
-              uppercase span and the border-t wrapper verbatim — keep them,
-              but they live INSIDE the card now (no space-at-top toolbar). */}
-          <div className="flex min-h-0 flex-1 items-start justify-center overflow-y-auto p-4 sm:p-6">
-          <Frame className="mx-auto w-full max-w-2xl rounded-xl bg-muted/72 p-1">
-            <FrameHeader className="flex-row items-center justify-between gap-3 px-4 py-3">
-              <span className="inline-flex items-center gap-2">
-                <FileText size={15} strokeWidth={1.5} className="text-fg-muted" />
-                <FrameTitle>Session report</FrameTitle>
-              </span>
-              <Chip tone={reportReceipt ? "ok" : "muted"}>{reportReceipt ? "exported" : "no report yet"}</Chip>
-            </FrameHeader>
-            <FramePanel className="space-y-4 rounded-lg bg-background px-4 pb-5 pt-4">
+              uppercase span and the border-t wrapper verbatim — keep them
+              INSIDE the shared ModeCard (the mode rail moved up to the
+              WorkspaceShell rail slot, so the group no longer repeats it). */}
+          <ModeCard
+            title="Session report"
+            icon={FileText}
+            state={reportReceipt ? "exported" : "no report yet"}
+            stateTone={reportReceipt ? "ok" : "muted"}
+          >
             <div
               role="group"
               aria-label="Export lab session report"
               className="flex flex-wrap items-center gap-3 border-t border-line pt-3"
             >
-              {railPills}
               <span className="font-medium uppercase tracking-wider text-fg-muted">Session report</span>
               <ToolButton
                 tone="primary"
@@ -1066,20 +985,18 @@ export function NetworkLabView() {
               <ReportReceiptChip receipt={reportReceipt} />
               <InfoTip text="One structured artifact (ARP findings, event timeline, host inventory, DNS findings) rendered to bounded markdown and persisted as ONE case finding in the backend-selected saved case. Read-only over the capture; the frontend only ever receives a receipt." />
             </div>
-          {reportError ? (
-            <div role="alert" className="border border-err/50 bg-err/10 px-3 py-1 font-mono text-[10px] text-err">
-              {reportError}
-            </div>
-          ) : null}
-          <p className="text-xs leading-relaxed text-fg-muted">
-            Export the opened capture as one case finding.
-          </p>
-            </FramePanel>
-          </Frame>
-          </div>
+            {reportError ? (
+              <div role="alert" className="border border-err/50 bg-err/10 px-3 py-1 font-mono text-[10px] text-err">
+                {reportError}
+              </div>
+            ) : null}
+            <p className="text-xs leading-relaxed text-fg-muted">
+              Export the opened capture as one case finding.
+            </p>
+          </ModeCard>
         </section>
       )}
-    </div>
+    </WorkspaceShell>
   );
 }
 

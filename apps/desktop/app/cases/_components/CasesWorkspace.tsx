@@ -10,10 +10,10 @@ import {
 } from "@lib/ipc";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Badge } from "@/components/ui/badge";
 import { Frame, FrameHeader, FramePanel } from "@/components/ui/frame";
-import { Tabs, TabsList, TabsTab, TabsPanel } from "@/components/ui/tabs";
-import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from "@/components/ui/table";
+import { StatusStrip, WorkspaceShell } from "@ds/compact";
+import { Chip, TextInput, ToolButton, WorkspaceTabs } from "@ds/panes";
+import { CaseCreateFields } from "@/app/_components/CaseCreateFields";
 import { FileSearch, FolderPlus, RefreshCcw, ShieldCheck, Search } from "lucide-react";
 import {
   reviewSelectedEvidence, resumeSelectedCase, verifySelectedCase,
@@ -115,27 +115,29 @@ export function CasesWorkspace() {
   const findings = searchPage ? searchPage.findings : report?.findings ?? [];
 
   return (
-    <div className="flex h-full min-h-0 flex-col bg-app text-fg" aria-label="Cases and Evidence">
-      <div className="cd-workspace-toolbar flex shrink-0 items-center justify-between gap-3 px-4">
-        <div className="flex items-center gap-2">
-          <FileSearch className="size-4 text-fg-muted" aria-hidden />
-          <h1 className="text-sm font-semibold">Cases &amp; Evidence</h1>
-          <Badge size="sm" variant={ready ? "success" : "secondary"}>
-            {ready ? "Case selected" : "No saved case selected"}
-          </Badge>
-        </div>
-        <div className="flex gap-2">
-          <Button size="sm" variant="outline" disabled={!native || Boolean(busy)}
-            onClick={() => void (async () => {
-              setBusy("Reviewing unregistered evidence"); setError("");
-              try { setUnregistered(await reviewUnregisteredCaseFolders()); }
-              catch (cause) { setError(describeError(cause)); }
-              finally { setBusy(""); }
-            })()}>Review unregistered case folders</Button>
-          <Button size="sm" variant="outline" disabled={Boolean(busy)}
-            onClick={() => void refreshCases()}><RefreshCcw className="size-3.5" /> Refresh</Button>
-        </div>
-      </div>
+    <WorkspaceShell
+      aria-label="Cases and Evidence"
+      toolbar={<>
+        <FileSearch className="size-4 shrink-0 text-fg-muted" aria-hidden />
+        <span className="text-xs font-semibold text-fg">Cases &amp; Evidence</span>
+        <span className="flex-1" />
+        <ToolButton disabled={!native || Boolean(busy)}
+          onClick={() => void (async () => {
+            setBusy("Reviewing unregistered evidence"); setError("");
+            try { setUnregistered(await reviewUnregisteredCaseFolders()); }
+            catch (cause) { setError(describeError(cause)); }
+            finally { setBusy(""); }
+          })()}>Review unregistered case folders</ToolButton>
+        <ToolButton disabled={Boolean(busy)} onClick={() => void refreshCases()}>
+          <RefreshCcw className="size-3.5" /> Refresh</ToolButton>
+      </>}
+      status={<StatusStrip items={[
+        ready ? { label: "case selected", tone: "ok" as const }
+          : temporary ? { label: "temporary workspace" }
+          : { label: "no saved case" },
+      ]} />}
+    >
+      {error && <div role="alert" className="shrink-0 border-b border-err/50 bg-err/10 px-3 py-1 font-mono text-3xs text-err">{error}</div>}
       <div className="grid min-h-0 flex-1 grid-cols-1 gap-3 overflow-y-auto p-3 lg:grid-cols-[260px_minmax(0,1fr)] lg:overflow-hidden">
         <Frame className="min-h-0 overflow-hidden">
           <FrameHeader className="px-3 py-3">
@@ -154,13 +156,15 @@ export function CasesWorkspace() {
             ))}
             {cases.length === 0 && <p className="text-xs text-fg-muted">No saved investigations.</p>}
             <div className="mt-4 space-y-2 border-t border-line pt-3">
-              <label htmlFor="case-new-title" className="text-xs font-medium">Create case</label>
-              <Input id="case-new-title" size="sm" value={title}
-                onChange={(e) => setTitle(e.target.value)} maxLength={120}
-                placeholder="Investigation name" disabled={!native || Boolean(busy)} />
-              <Input size="sm" value={description} aria-label="Case description"
-                onChange={(e) => setDescription(e.target.value)} maxLength={500}
-                placeholder="Optional description" disabled={!native || Boolean(busy)} />
+              <span id="case-create-label" className="text-xs font-medium">Create case</span>
+              <CaseCreateFields
+                idPrefix="cyberdeck-cases-new"
+                title={title}
+                description={description}
+                onTitleChange={setTitle}
+                onDescriptionChange={setDescription}
+                disabled={!native || Boolean(busy)}
+              />
               <Button size="sm" className="w-full" onClick={() => void createCase()}
                 disabled={!native || !title.trim() || Boolean(busy)}>
                 <FolderPlus className="size-3.5" /> Create saved case
@@ -180,12 +184,11 @@ export function CasesWorkspace() {
             </p>
           </FrameHeader>
           <FramePanel className="min-h-0 flex-1 overflow-y-auto p-3">
-            {error && <p role="alert" className="mb-3 rounded-md border border-destructive/40 p-3 text-xs text-destructive">{error}</p>}
             {busy && <p role="status" className="mb-3 text-xs text-fg-muted">{busy}…</p>}
             {unregistered && <div className="mb-3 rounded-md border border-line p-3 text-xs">
               <strong>Unregistered case evidence folders ({unregistered.folders.length})</strong>
               <p className="mt-1 text-fg-muted">Read-only orphan review. No uncertain evidence is automatically adopted or deleted.</p>
-              {unregistered.truncated && <Badge variant="warning">Directory scan truncated</Badge>}
+              {unregistered.truncated && <Chip tone="orange">Directory scan truncated</Chip>}
               {unregistered.folders.map((folder) => (
                 <div key={folder.case_id} className="mt-1 flex justify-between gap-2 border-t border-line py-2">
                   <span className="font-mono">{folder.case_id}</span>
@@ -281,7 +284,7 @@ export function CasesWorkspace() {
                   </Button>
                   <Button size="sm" variant="outline" disabled={Boolean(busy)}
                     onClick={() => router.push("/forensics")}>Open Forensics</Button>
-                  {report?.truncated && <Badge variant="warning">Report truncated</Badge>}
+                  {report?.truncated && <Chip tone="orange">Report truncated</Chip>}
                 </div>
                 {integrity && (
                   <p className="mb-3 rounded-md border border-line p-3 text-xs">
@@ -293,7 +296,7 @@ export function CasesWorkspace() {
                   <div className="mb-3 rounded-md border border-line p-3 text-xs">
                     <div className="flex items-center justify-between">
                       <strong>Filesystem reconciliation</strong>
-                      {review.truncated && <Badge variant="warning">Incomplete scan</Badge>}
+                      {review.truncated && <Chip tone="orange">Incomplete scan</Chip>}
                     </div>
                     <p className="mt-1 text-fg-muted">Read-only scan. Uncertain files are never silently adopted or deleted.</p>
                     <div className="mt-2 max-h-40 overflow-y-auto">
@@ -301,50 +304,48 @@ export function CasesWorkspace() {
                         <div key={entry.name + (entry.artifact_id ?? String(i))}
                           className="flex justify-between gap-2 border-t border-line py-1.5">
                           <span className="truncate">{entry.name}</span>
-                          <Badge size="sm" variant={entry.state === "indexed_verified" ? "success"
-                            : entry.state === "indexed_tampered" || entry.state === "unsafe_entry" ? "error" : "warning"}>
+                          <Chip tone={entry.state === "indexed_verified" ? "ok"
+                            : entry.state === "indexed_tampered" || entry.state === "unsafe_entry" ? "err" : "orange"}>
                             {entry.state.replaceAll("_", " ")}
-                          </Badge>
+                          </Chip>
                         </div>
                       ))}
                     </div>
                   </div>
                 )}
                 <div className="mb-3 flex gap-2">
-                  <Input size="sm" aria-label="Search case evidence and findings"
+                  <TextInput ariaLabel="Search case evidence and findings"
                     placeholder="Search case evidence or findings" value={query}
-                    onChange={(e) => { setQuery(e.target.value); setSearchPage(null); setOffset(0); }}
+                    onChange={(value) => { setQuery(value); setSearchPage(null); setOffset(0); }}
                     onKeyDown={(e) => { if (e.key === "Enter" && query.trim()) void search(0); }} />
-                  <Button size="sm" disabled={!query.trim() || Boolean(busy)}
-                    onClick={() => void search(0)}><Search className="size-3.5" /> Search</Button>
-                  {searchPage && <Button size="sm" variant="outline" onClick={() => setSearchPage(null)}>Clear</Button>}
+                  <ToolButton disabled={!query.trim() || Boolean(busy)}
+                    onClick={() => void search(0)}><Search className="size-3.5" /> Search</ToolButton>
+                  {searchPage && <ToolButton onClick={() => setSearchPage(null)}>Clear</ToolButton>}
                 </div>
-                <Tabs value={view} onValueChange={(value) => setView(value as View)}>
-                  <TabsList size="sm" variant="underline">
-                    <TabsTab value="evidence">Evidence</TabsTab>
-                    <TabsTab value="findings">Findings</TabsTab>
-                    <TabsTab value="timeline">Timeline</TabsTab>
-                    <TabsTab value="lineage">Lineage</TabsTab>
-                  </TabsList>
-                  <TabsPanel value="evidence">
-                    <Table><TableHeader><TableRow>
-                      <TableHead>Artifact</TableHead><TableHead>Size</TableHead>
-                      <TableHead>SHA-256</TableHead><TableHead>Reference</TableHead>
-                    </TableRow></TableHeader><TableBody>
+                <WorkspaceTabs<View>
+                  items={["evidence", "findings", "timeline", "lineage"]}
+                  active={view} onChange={setView} ariaLabel="Case evidence views"
+                  panels={{
+                    evidence: <>
+                    <div className="overflow-auto"><table className="data-table">
+                      <thead><tr>
+                        <th>Artifact</th><th>Size</th>
+                        <th>SHA-256</th><th>Reference</th>
+                      </tr></thead><tbody>
                       {artifacts.map((item) => (
-                        <TableRow key={item.id}>
-                          <TableCell className="max-w-44 truncate">{item.name}</TableCell>
-                          <TableCell>{item.size.toLocaleString()} B</TableCell>
-                          <TableCell className="font-mono text-xs">{item.sha256.slice(0, 16)}…</TableCell>
-                          <TableCell>
+                        <tr key={item.id}>
+                          <td className="max-w-44 truncate">{item.name}</td>
+                          <td>{item.size.toLocaleString()} B</td>
+                          <td className="font-mono text-xs">{item.sha256.slice(0, 16)}…</td>
+                          <td>
                             <Button size="sm" variant="ghost" disabled={Boolean(busy)}
                               onClick={() => void task("Authorizing reference", async () => {
                                 setReference(await scopedArtifactReference(item.id));
                               })}>Inspect ref</Button>
-                          </TableCell>
-                        </TableRow>
+                          </td>
+                        </tr>
                       ))}
-                    </TableBody></Table>
+                    </tbody></table></div>
                     {artifacts.length === 0 && <p className="p-3 text-xs text-fg-muted">No indexed evidence.</p>}
                     {reference && <div className="mt-2 space-y-2 rounded-md border border-line p-3 text-xs">
                       <p>Backend-checked {reference.kind} ref: {reference.artifact_id} · revision {reference.session_revision}.
@@ -366,18 +367,19 @@ export function CasesWorkspace() {
                         Copied {copyReceipt.artifact_id} into saved case {copyReceipt.target_case_id}; original retained.
                       </p>}
                     </div>}
-                  </TabsPanel>
-                  <TabsPanel value="findings">
-                    <Table><TableHeader><TableRow>
-                      <TableHead>Severity</TableHead><TableHead>Finding</TableHead><TableHead>Source</TableHead>
-                    </TableRow></TableHeader><TableBody>
+                  </>,
+                    findings: <>
+                    <div className="overflow-auto"><table className="data-table">
+                      <thead><tr>
+                        <th>Severity</th><th>Finding</th><th>Source</th>
+                      </tr></thead><tbody>
                       {findings.map((item) => (
-                        <TableRow key={item.id}><TableCell>{item.severity}</TableCell>
-                          <TableCell>{item.title}</TableCell><TableCell>{item.source}</TableCell></TableRow>
+                        <tr key={item.id}><td><Chip tone={item.severity === "critical" || item.severity === "high" ? "err" : item.severity === "medium" ? "orange" : "muted"}>{item.severity}</Chip></td>
+                          <td>{item.title}</td><td>{item.source}</td></tr>
                       ))}
-                    </TableBody></Table>
-                  </TabsPanel>
-                  <TabsPanel value="timeline">
+                    </tbody></table></div>
+                  </>,
+                    timeline: <>
                     <div className="space-y-1 text-xs">
                       {report?.events.map((event) => (
                         <div key={event.id} className="grid grid-cols-[120px_1fr] gap-2 border-b border-line py-2">
@@ -387,8 +389,8 @@ export function CasesWorkspace() {
                       ))}
                       {!report?.events.length && <p className="p-3 text-fg-muted">No provenance recorded.</p>}
                     </div>
-                  </TabsPanel>
-                  <TabsPanel value="lineage">
+                  </>,
+                    lineage: <>
                     <div className="space-y-2 text-xs">
                       {lineage?.hops.map((hop, i) => (
                         <div key={i} className="rounded-md border border-line p-3">
@@ -397,10 +399,11 @@ export function CasesWorkspace() {
                         </div>
                       ))}
                       {!lineage?.hops.length && <p className="p-3 text-fg-muted">No derived lineage links.</p>}
-                      {lineage?.truncated && <Badge variant="warning">Lineage truncated</Badge>}
+                      {lineage?.truncated && <Chip tone="orange">Lineage truncated</Chip>}
                     </div>
-                  </TabsPanel>
-                </Tabs>
+                  </>,
+                  }}
+                />
                 {searchPage && <div className="mt-3 flex items-center gap-2">
                   <Button size="sm" variant="outline" disabled={offset === 0 || Boolean(busy)}
                     onClick={() => void search(Math.max(0, offset - 30))}>Previous</Button>
@@ -414,6 +417,6 @@ export function CasesWorkspace() {
           </FramePanel>
         </Frame>
       </div>
-    </div>
+    </WorkspaceShell>
   );
 }

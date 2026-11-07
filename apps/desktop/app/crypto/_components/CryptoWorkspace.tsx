@@ -1,20 +1,22 @@
 "use client";
 /** Thin dispatcher: all crypto tools stay mounted; hidden views keep state. */
+import { CategoryWorkspace } from "@ds/compact";
 import { HashAnalysisView } from "./HashAnalysisView";
 import { RecipesView } from "./RecipesView";
 import { CryptoOpsView } from "./CryptoOpsView";
 import type { ToolId } from "@state/tool-registry";
 
 export function CryptoWorkspace({ tool }: { tool: ToolId }) {
-  const show = (id: ToolId) => (tool === id ? "h-full" : "hidden h-full");
   return (
     <div className="flex h-full min-h-0 flex-col">
-      <div className="min-h-0 flex-1">
-
-      <div className={show("crypto.recipes")}><RecipesView /></div>
-      <div className={show("crypto.hash")}><HashAnalysisView /></div>
-      <div className={show("crypto.ops")}><CryptoOpsView /></div>
-      </div>
+      <CategoryWorkspace
+        activeId={tool}
+        views={[
+          { id: "crypto.recipes", render: () => <RecipesView /> },
+          { id: "crypto.hash", render: () => <HashAnalysisView /> },
+          { id: "crypto.ops", render: () => <CryptoOpsView /> },
+        ]}
+      />
     </div>
   );
 }

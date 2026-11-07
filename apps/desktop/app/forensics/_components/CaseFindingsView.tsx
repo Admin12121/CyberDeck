@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Download, FileSearch, RefreshCcw } from "lucide-react";
 import { Chip, EmptyState, Pane, TextInput, ToolButton } from "@ds/panes";
+import { StatusStrip, WorkspaceShell } from "@ds/compact";
 import { caseEventsList, caseFindingsList, caseReport, caseIntegrityVerify, isDesktop, type CaseEventWire, type FindingRecordWire, type CaseIntegritySummaryWire } from "@lib/ipc";
 import { useWorkbench } from "@state/workbench";
 import { downloadContent } from "@lib/download";
@@ -106,23 +107,28 @@ export function CaseFindingsView() {
     value === "medium" ? "orange" : "muted";
 
   return (
-    <div className="flex h-full min-h-0 flex-col">
-      <div className="cd-workspace-toolbar shrink-0 items-center gap-2  px-2">
-        <FileSearch size={13} className="text-orange" />
-        <span className="font-mono text-[10px] uppercase text-fg-muted">Case findings</span>
-        <TextInput value={query} onChange={setQuery} placeholder="filter findings…" ariaLabel="Search case findings" className="w-64" />
-        <ToolButton onClick={() => void refresh()} disabled={loading || !isDesktop()} title="Refresh findings">
-          <RefreshCcw size={12} /> {loading ? "Loading…" : "Refresh"}
-        </ToolButton>
-        <ToolButton onClick={() => void verifyCase()} disabled={!isDesktop() || verifying}
-          title="Verify case evidence bytes and local provenance; independent chain anchoring requires a retained trusted head">
-          {verifying ? "Verifying…" : "Verify Case"}
-        </ToolButton>
-        <ToolButton onClick={() => void exportReport()} disabled={!isDesktop() || exporting} title="Export a portable, path-free JSON report (review before sharing)">
-          <Download size={12} /> {exporting ? "Exporting…" : "Export JSON"}
-        </ToolButton>
-        <span className="ml-auto font-mono text-[10px] text-fg-muted">{filtered.length} of {findings.length} · {events.length} events · {wb.caseId}</span>
-      </div>
+    <WorkspaceShell
+      contentClassName="flex flex-col"
+      toolbar={
+        <>
+          <FileSearch size={13} className="text-orange" />
+          <span className="font-mono text-[10px] uppercase text-fg-muted">Case findings</span>
+          <TextInput value={query} onChange={setQuery} placeholder="filter findings…" ariaLabel="Search case findings" className="w-64" />
+          <ToolButton onClick={() => void refresh()} disabled={loading || !isDesktop()} title="Refresh findings">
+            <RefreshCcw size={12} /> {loading ? "Loading…" : "Refresh"}
+          </ToolButton>
+          <ToolButton onClick={() => void verifyCase()} disabled={!isDesktop() || verifying}
+            title="Verify case evidence bytes and local provenance; independent chain anchoring requires a retained trusted head">
+            {verifying ? "Verifying…" : "Verify Case"}
+          </ToolButton>
+          <ToolButton onClick={() => void exportReport()} disabled={!isDesktop() || exporting} title="Export a portable, path-free JSON report (review before sharing)">
+            <Download size={12} /> {exporting ? "Exporting…" : "Export JSON"}
+          </ToolButton>
+          <span className="ml-auto font-mono text-[10px] text-fg-muted">{filtered.length} of {findings.length} · {events.length}</span>
+        </>
+      }
+      status={<StatusStrip items={[{ label: "case: " + (wb.caseId === "scratchpad" ? "temporary" : wb.caseId) }]} />}
+    >
       {error ? <div className="border-b border-err/50 px-2 py-1 text-xs text-err">{error}</div> : null}
       {verification ? <div className="border-b border-line bg-raised px-3 py-2 font-mono text-[11px] text-fg-dim" role="status">
         Verified {verification.verified_artifacts} artifacts, {verification.verified_bytes} bytes, and {verification.provenance.verified_events} local provenance events in case {verification.case_id}.
@@ -168,6 +174,6 @@ export function CaseFindingsView() {
           ) : <div className="p-3 text-xs text-fg-muted">Select a finding.</div>}
         </Pane>
       </div>
-    </div>
+    </WorkspaceShell>
   );
 }

@@ -2,6 +2,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Play, Square } from "lucide-react";
 import { Chip, EmptyState, Pane, TextInput, ToolButton } from "@ds/panes";
+import { WorkspaceShell } from "@ds/compact";
 import { isDesktop } from "@lib/ipc";
 import { useWebWorkflow } from "./WebWorkflow";
 import { useCaseReady, useWorkbench } from "@state/workbench";
@@ -165,31 +166,36 @@ export function ScannerView() {
   };
   const tone = (s: string) => s === "critical" || s === "high" ? "err" :
     s === "medium" ? "orange" : "muted";
-  return <div className="flex h-full min-h-0 flex-col">
-    <div className="cd-workspace-toolbar shrink-0 items-center gap-2 px-2">
-      <TextInput value={target} onChange={setTarget} placeholder="http://127.0.0.1:3000"
-        ariaLabel="Scanner target" className="w-72" />
-      {running && jobId !== null
-        ? <ToolButton tone="danger" onClick={() => void stop()}><Square size={12} /> Stop</ToolButton>
-        : <ToolButton tone="primary" disabled={!desktop || !caseReady || !normalized || !authorized || running}
-            onClick={() => void start("scanner")}><Play size={12} /> Start review</ToolButton>}
-      <ToolButton onClick={() => setAdvancedOpen((open) => !open)}
-        title="Show additional bounded active Web testing tools">
-        {advancedOpen ? "Hide advanced tests" : "Advanced tests"}
-      </ToolButton>
-      {(sessionCookie.trim() || sessionHeaders.trim()) && (
-        <span className="flex items-center gap-1 text-[11px] text-fg-dim">
-          Session context enabled (volatile)
-          <ToolButton onClick={() => { setSessionCookie(""); setSessionHeaders(""); }}
-            title="Discard all volatile authentication headers and cookies before another scan">
-            Clear session
-          </ToolButton>
+  return <WorkspaceShell
+    contentClassName="flex flex-col"
+    toolbar={
+      <>
+        <TextInput value={target} onChange={setTarget} placeholder="http://127.0.0.1:3000"
+          ariaLabel="Scanner target" className="w-72" />
+        {running && jobId !== null
+          ? <ToolButton tone="danger" onClick={() => void stop()}><Square size={12} /> Stop</ToolButton>
+          : <ToolButton tone="primary" disabled={!desktop || !caseReady || !normalized || !authorized || running}
+              onClick={() => void start("scanner")}><Play size={12} /> Start review</ToolButton>}
+        <ToolButton onClick={() => setAdvancedOpen((open) => !open)}
+          title="Show additional bounded active Web testing tools">
+          {advancedOpen ? "Hide advanced tests" : "Advanced tests"}
+        </ToolButton>
+        {(sessionCookie.trim() || sessionHeaders.trim()) && (
+          <span className="flex items-center gap-1 text-[11px] text-fg-dim">
+            Session context enabled (volatile)
+            <ToolButton onClick={() => { setSessionCookie(""); setSessionHeaders(""); }}
+              title="Discard all volatile authentication headers and cookies before another scan">
+              Clear session
+            </ToolButton>
+          </span>
+        )}
+        <span className="ml-auto font-mono text-[10px] text-fg-muted">
+          {job ? `${job.kind} · ${job.state} · ${job.processed} requests · ${job.discovered} findings` : "Native review"}
         </span>
-      )}
-      <span className="ml-auto font-mono text-[10px] text-fg-muted">
-        {job ? `${job.kind} · ${job.state} · ${job.processed} requests · ${job.discovered} findings` : "Native review"}
-      </span>
-    </div>
+      </>
+    }
+  >
+    <CaseGate activity="Web security assessment" />
     {advancedOpen && (
       <div className="flex flex-wrap items-center gap-2 border-b border-line bg-panel p-2">
       <label className="flex items-center gap-1 text-[11px] text-fg-muted">
@@ -235,7 +241,6 @@ export function ScannerView() {
         </span>}
       </div>
     )}
-    <CaseGate activity="Web security assessment" />
     <label className="flex items-center gap-2 border-b border-line px-2 py-1.5 text-[11px] text-fg-dim">
       <input type="checkbox" checked={authorized} onChange={(e) => setAuthorized(e.target.checked)} />
       Authorized target · native approval required
@@ -356,5 +361,5 @@ export function ScannerView() {
         detail={running ? `Checked ${job?.processed ?? 0} HTTP requests` :
           "Enter an authorized private target; choose Start review or Test query parameters."} />}
     </Pane>
-  </div>;
+  </WorkspaceShell>;
 }

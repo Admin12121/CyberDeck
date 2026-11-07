@@ -255,6 +255,32 @@ export function WorkspaceShell({
 
 
 /**
+ * The ONE category dispatcher: every tool view of a category stays mounted
+ * and only the active one is visible, so per-case drafts and native job
+ * state survive tab switches. Provider wrappers (EvidenceProvider,
+ * WebWorkflowProvider) compose around it; views needing an active flag
+ * receive it through `render(active)`.
+ */
+export function CategoryWorkspace({
+  activeId,
+  views,
+}: {
+  activeId: string;
+  views: readonly { id: string; render: (active: boolean) => ReactNode }[];
+}) {
+  return (
+    <div className="min-h-0 flex-1">
+      {views.map((view) => (
+        <div key={view.id} className={view.id === activeId ? "h-full" : "hidden h-full"}>
+          {view.render(view.id === activeId)}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+
+/**
  * ModeCard — the idle/control surface for a tool mode, copying the Web
  * proxy card exactly (the user-designated reference): centered Frame with
  * rounded-xl border, header (icon + title + status chip), panel holding the

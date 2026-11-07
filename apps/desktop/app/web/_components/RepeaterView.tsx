@@ -2,6 +2,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Copy, Play, X } from "lucide-react";
 import { Chip, EmptyState, Pane, ToolButton } from "@ds/panes";
+import { WorkspaceShell } from "@ds/compact";
 import { httpSend, isDesktop, type HttpResponseWire } from "@lib/ipc";
 import { hexDump } from "@lib/hex";
 import { useWebWorkflow } from "./WebWorkflow";
@@ -106,38 +107,42 @@ export function RepeaterView() {
     : [];
 
   return (
-    <div className="flex h-full min-h-0 flex-col">
-      <div className="cd-workspace-toolbar shrink-0 items-center gap-1  px-2">
-        {tabs.map((t, i) => (
-          <div key={t.name} className={`flex h-6 items-center gap-1 border px-1 font-mono text-[11px] uppercase ${i === active ? "border-line bg-selected text-fg" : "border-line text-fg-muted"}`}>
-            <button type="button" aria-selected={i === active} onClick={() => setActive(i)}
-              className="h-full px-1 hover:text-fg" title={`Open ${t.name}`}>{t.name}</button>
-            {tabs.length > 1 ? (
-              <button type="button" aria-label={`Close ${t.name}`} onClick={() => {
-                setTabs((prev) => prev.filter((_, j) => j !== i));
-                setActive((a) => (i < a ? a - 1 : Math.min(a, tabs.length - 2)));
-              }} className="px-0.5 text-fg-muted hover:text-err">×</button>
-            ) : null}
-          </div>
-        ))}
-        <ToolButton
-          onClick={() => {
-            const name = `R${nextTabId.current++}`;
-            setTabs((prev) => [...prev, { name, request: SAMPLE_REQUEST, response: null, error: null }]);
-            setActive(tabs.length);
-          }}
-          title="New repeater tab"
-        >
-          +
-        </ToolButton>
-        <span className="mx-1 h-4 w-px bg-line" />
-        <ToolButton tone="primary" onClick={() => void send()} disabled={busy || !desktop || !caseReady} title={desktop ? "Send the raw request through the native HTTP engine" : "Sending requires the desktop runtime"}>
-          <Play size={11} /> {busy ? "sending…" : "Send"}
-        </ToolButton>
-        <span className="ml-auto font-mono text-[10px] text-fg-muted" title="A native selected case, a private/loopback literal-IP target and per-request OS confirmation are required">
-          {current.response ? `${current.response.status} · ${current.response.size} B · ${current.response.duration_ms} ms` : "Native approval · scoped private/loopback IP only"}
-        </span>
-      </div>
+    <WorkspaceShell
+      contentClassName="flex flex-col"
+      toolbar={
+        <>
+          {tabs.map((t, i) => (
+            <div key={t.name} className={`flex h-6 items-center gap-1 border px-1 font-mono text-[11px] uppercase ${i === active ? "border-line bg-selected text-fg" : "border-line text-fg-muted"}`}>
+              <button type="button" aria-selected={i === active} onClick={() => setActive(i)}
+                className="h-full px-1 hover:text-fg" title={`Open ${t.name}`}>{t.name}</button>
+              {tabs.length > 1 ? (
+                <button type="button" aria-label={`Close ${t.name}`} onClick={() => {
+                  setTabs((prev) => prev.filter((_, j) => j !== i));
+                  setActive((a) => (i < a ? a - 1 : Math.min(a, tabs.length - 2)));
+                }} className="px-0.5 text-fg-muted hover:text-err">×</button>
+              ) : null}
+            </div>
+          ))}
+          <ToolButton
+            onClick={() => {
+              const name = `R${nextTabId.current++}`;
+              setTabs((prev) => [...prev, { name, request: SAMPLE_REQUEST, response: null, error: null }]);
+              setActive(tabs.length);
+            }}
+            title="New repeater tab"
+          >
+            +
+          </ToolButton>
+          <span className="mx-1 h-4 w-px bg-line" />
+          <ToolButton tone="primary" onClick={() => void send()} disabled={busy || !desktop || !caseReady} title={desktop ? "Send the raw request through the native HTTP engine" : "Sending requires the desktop runtime"}>
+            <Play size={11} /> {busy ? "sending…" : "Send"}
+          </ToolButton>
+          <span className="ml-auto font-mono text-[10px] text-fg-muted" title="A native selected case, a private/loopback literal-IP target and per-request OS confirmation are required">
+            {current.response ? `${current.response.status} · ${current.response.size} B · ${current.response.duration_ms} ms` : "Native approval · scoped private/loopback IP only"}
+          </span>
+        </>
+      }
+    >
       <CaseGate activity="Web request replay" />
       <div className="flex min-h-0 flex-1 gap-px bg-line">
         <Pane title={`Request: ${current.name}`} className="min-w-0 flex-1" bodyClassName="p-0">
@@ -215,6 +220,6 @@ export function RepeaterView() {
           )}
         </Pane>
       </div>
-    </div>
+    </WorkspaceShell>
   );
 }

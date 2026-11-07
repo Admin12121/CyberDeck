@@ -154,7 +154,7 @@ test("insights are registered as the fourth network tool and keep-all-mounted", 
   assert.match(registrySource, /label: "Insights"/);
   assert.match(registrySource, /ndiff-style scan comparison and topology projection/);
   assert.match(workspaceSource, /import \{ ScanInsightsView \} from "\.\/ScanInsightsView";/);
-  assert.match(workspaceSource, /\{show\("network\.insights"\)\}><ScanInsightsView \/>/);
+  assert.match(workspaceSource, /\{ id: "network\.insights", render: \(\) => <ScanInsightsView \/> \},/);
 });
 
 test("pending clients validate inputs and refuse the browser runtime", () => {

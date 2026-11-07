@@ -10,11 +10,11 @@ import { EmptyState, Pane } from "@ds/panes";
 export function ReverseWorkspace() {
   return (
     <div className="flex h-full min-h-0 gap-px bg-line">
-      <Pane title="Modules / symbols" className="w-64 shrink-0">
+      <Pane title="Modules / Symbols" className="w-64 shrink-0">
         <EmptyState title="Reserved (Phase 6)" detail="Full decompiler workspace: functions tree, symbols, segments." badge="future" />
       </Pane>
       <div className="flex min-w-0 flex-1 flex-col gap-px">
-        <Pane title="Decompiler / assembly / hex" className="min-h-0 flex-1">
+        <Pane title="Decompiler / Assembly / Hex" className="min-h-0 flex-1">
           <EmptyState
             title="Reverse Engineering Studio ships in a later release"
             detail="PE/ELF/Mach-O analysis, xrefs, CFG/call graphs and decompilation are scoped as a dedicated phase (§5.7, RFC-006). Core workbench, rendering model and analysis storage are proven first."
@@ -22,7 +22,7 @@ export function ReverseWorkspace() {
           />
         </Pane>
       </div>
-      <Pane title="Xrefs / types" className="w-64 shrink-0">
+      <Pane title="Xrefs / Types" className="w-64 shrink-0">
         <EmptyState title="Reserved" badge="phase 6" />
       </Pane>
     </div>

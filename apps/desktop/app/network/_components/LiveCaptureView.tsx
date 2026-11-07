@@ -5,6 +5,7 @@ import { Play, RefreshCw, Square, Settings2, Info, MonitorDot, FolderOpen } from
 import { Router } from "@lucasmarkes/hairline/react";
 import { Button } from "@/components/ui/button";
 import { Chip, EmptyState, Select, TextInput, ToolButton, WorkspaceTabs } from "@ds/panes";
+import { WorkspaceShell } from "@ds/compact";
 import { PacketTable } from "./PacketTable";
 import { PacketPaneSplit } from "./PacketPaneSplit";
 import { CaptureActivity, type CaptureActivityPoint } from "./CaptureActivity";
@@ -435,7 +436,7 @@ export function LiveCaptureView({ presentation = "full", onCaptureStarted, onRet
           </div>
         )}
         {(error || caseSession.error) && (
-          <p role="alert" className="mt-3 text-xs text-err">{error || caseSession.error}</p>
+          <div role="alert" className="border-b border-err/50 bg-err/10 px-3 py-1 font-mono text-3xs text-err">{error || caseSession.error}</div>
         )}
       </section>
     );
@@ -443,188 +444,194 @@ export function LiveCaptureView({ presentation = "full", onCaptureStarted, onRet
   const selectedPacket = pages.packets.entries.find((packet) => packet.packet_index === selectedIndex);
   return (
     <div className="flex h-full min-h-0 flex-col" aria-label="Native packet analyzer">
-      <div className="cd-workspace-toolbar shrink-0 items-center gap-2 px-2">
-        {onReturnToStart && (
-          <Button variant="ghost" size="sm" onClick={onReturnToStart}>Capture selection</Button>
-        )}
-        <span className="text-[10px] uppercase text-fg-muted">Interface</span>
-        <Select value={device} onChange={setDevice} ariaLabel="Native capture interface" className="w-44"
-          options={eligible.length ? eligible.map((entry) => ({ value: entry.name, label: entry.name + " · " + entry.index })) :
-            [{ value: "-", label: "No eligible Ethernet interface" }]} />
-        <ToolButton onClick={() => void discover()} disabled={!desktop} title="Refresh native interface list">
-          <RefreshCw size={12} /> Refresh
-        </ToolButton>
-        {running ? (
-          <ToolButton tone="danger" onClick={() => void stop()} disabled={working || status?.phase === "stopping"}>
-            <Square size={12} /> {status?.phase === "stopping" ? "Stopping…" : "Stop"}
+      <WorkspaceShell
+        toolbar={
+          <>
+            {onReturnToStart && (
+              <Button variant="ghost" size="sm" onClick={onReturnToStart}>Capture selection</Button>
+            )}
+            <span className="text-[10px] uppercase text-fg-muted">Interface</span>
+            <Select value={device} onChange={setDevice} ariaLabel="Native capture interface" className="w-44"
+              options={eligible.length ? eligible.map((entry) => ({ value: entry.name, label: entry.name + " · " + entry.index })) :
+                [{ value: "-", label: "No eligible Ethernet interface" }]} />
+            <ToolButton onClick={() => void discover()} disabled={!desktop} title="Refresh native interface list">
+              <RefreshCw size={12} /> Refresh
+            </ToolButton>
+            {running ? (
+              <ToolButton tone="danger" onClick={() => void stop()} disabled={working || status?.phase === "stopping"}>
+                <Square size={12} /> {status?.phase === "stopping" ? "Stopping…" : "Stop"}
+              </ToolButton>
+            ) : (
+              <ToolButton tone="primary" onClick={() => void start()} disabled={!canStart}
+                title="Requires a saved case, explicit native confirmation and OS capture permissions; macOS requires BPF device privileges (/dev/bpf*); Windows also requires the independently signed CyberDeck capture driver">
+                <Play size={12} /> {working ? "Confirming…" : "Start Capture"}
+              </ToolButton>
+            )}
+            <Chip tone={running ? "orange" : status?.phase === "failed" ? "err" : readable ? "ok" : "muted"}>
+              {status?.phase ?? "idle"}
+            </Chip>
+            <span className="ml-auto flex items-center gap-2 truncate text-[10px] text-fg-muted">
+              <CaptureActivity samples={activity}/>
+              {status ? status.progress.packets + " frames · " + status.progress.stored_pcap_bytes + " PCAP bytes" : "Native Ethernet capture"}
+            </span>
+          </>
+        }
+        contentClassName="flex flex-col"
+      >
+        <div className="flex shrink-0 flex-wrap items-center gap-3 border-b border-line px-3 py-1.5 text-[11px] text-fg-muted">
+          <label>Packets <TextInput value={maxPackets} onChange={setMaxPackets} ariaLabel="Maximum packets" className="ml-1 inline-flex w-20" /></label>
+          <label>Memory MiB <TextInput value={memoryMiB} onChange={setMemoryMiB} ariaLabel="Memory budget MiB" className="ml-1 inline-flex w-16" /></label>
+          <label>Duration s <TextInput value={seconds} onChange={setSeconds} ariaLabel="Capture duration in seconds" className="ml-1 inline-flex w-16" /></label>
+          <span>{revision === null ? "Saved case required for live capture." : "Case " + caseId + " · rev " + revision}</span>
+          <ToolButton disabled={!readable || saving} onClick={() => void save()}
+            title={readable ? "Save the byte-exact original PCAP as immutable case evidence, after native confirmation" : "Complete a capture with original frames first"}>
+            {saving ? "Saving…" : saved ? "Saved to Case" : "Save Capture to Case"}
           </ToolButton>
-        ) : (
-          <ToolButton tone="primary" onClick={() => void start()} disabled={!canStart}
-            title="Requires a saved case, explicit native confirmation and OS capture permissions; macOS requires BPF device privileges (/dev/bpf*); Windows also requires the independently signed CyberDeck capture driver">
-            <Play size={12} /> {working ? "Confirming…" : "Start Capture"}
-          </ToolButton>
-        )}
-        <Chip tone={running ? "orange" : status?.phase === "failed" ? "err" : readable ? "ok" : "muted"}>
-          {status?.phase ?? "idle"}
-        </Chip>
-        <span className="ml-auto flex items-center gap-2 truncate text-[10px] text-fg-muted">
-          <CaptureActivity samples={activity}/>
-          {status ? status.progress.packets + " frames · " + status.progress.stored_pcap_bytes + " PCAP bytes" : "Native Ethernet capture"}
-        </span>
-      </div>
-      <div className="flex shrink-0 flex-wrap items-center gap-3 border-b border-line px-3 py-1.5 text-[11px] text-fg-muted">
-        <label>Packets <TextInput value={maxPackets} onChange={setMaxPackets} ariaLabel="Maximum packets" className="ml-1 inline-flex w-20" /></label>
-        <label>Memory MiB <TextInput value={memoryMiB} onChange={setMemoryMiB} ariaLabel="Memory budget MiB" className="ml-1 inline-flex w-16" /></label>
-        <label>Duration s <TextInput value={seconds} onChange={setSeconds} ariaLabel="Capture duration in seconds" className="ml-1 inline-flex w-16" /></label>
-        <span>{revision === null ? "Saved case required for live capture." : "Case " + caseId + " · rev " + revision}</span>
-        <ToolButton disabled={!readable || saving} onClick={() => void save()}
-          title={readable ? "Save the byte-exact original PCAP as immutable case evidence, after native confirmation" : "Complete a capture with original frames first"}>
-          {saving ? "Saving…" : saved ? "Saved to Case" : "Save Capture to Case"}
-        </ToolButton>
-        {saved && onOpenSavedArtifact && (
-          <ToolButton onClick={() => onOpenSavedArtifact(saved.artifact_id)} title="Reopen SHA-256-verified case PCAP in the full packet analyzer">
-            Open Verified Capture
-          </ToolButton>
-        )}
-        {saved && <span className="font-mono text-[10px] text-fg-muted" title={saved.artifact_id}>
-          SHA-256 {saved.sha256.slice(0, 16)}… · {saved.frame_count} frames verified
-        </span>}
-      </div>
-      {(error || caseSession.error) && (
-        <p role="alert" className="border-b border-err/50 bg-err/10 px-3 py-1 text-xs text-err">{error || caseSession.error}</p>
-      )}
-      {status && (
-        <div className="flex shrink-0 flex-wrap items-center gap-3 border-b border-line px-3 py-1 text-[10px] text-fg-muted">
-          <span>Session #{status.session_id} · {status.interface}</span>
-          <span>Packets {status.progress.packets}</span>
-          <span>Oversized discarded {status.progress.oversized_frames_discarded}</span>
-          {status.stop_reason && <span>Stop: {status.stop_reason}</span>}
-          {!readable && running && <span>Frame inspection available once capture completes</span>}
-        </div>
-      )}
-      <PacketPaneSplit
-        list={<div className="flex h-full min-h-0 flex-col">
-        <div className="min-h-0 flex-1 overflow-auto bg-panel">
-          {tab === "packets" ? (
-            <PacketTable
-              rows={pages.packets.entries.map(nativeCapturePacketRow)}
-              selectedIndex={selectedIndex}
-              onSelect={(index) => void inspect(index)}
-              empty={running
-                ? "Capturing frames… live progress is shown above; packet pages are published when the Rust capture finishes."
-                : readable ? "No captured frames in this page" : "Select an interface and start capture, or open a PCAP from Capture selection."}
-            />
-          ) : tab === "hosts" ? (
-            <table className="data-table w-full" aria-label="Captured hosts">
-              <thead><tr><th>Host</th><th>First frame</th><th>Last frame</th><th>Sent</th><th>Received</th><th>Bytes</th></tr></thead>
-              <tbody>{pages.hosts.entries.map((entry) => (
-                <tr key={entry.address} className="cursor-pointer" onClick={() => { setTab("packets"); void inspect(entry.first_packet_index); }}>
-                  <td>{entry.address}</td><td>{entry.first_packet_index + 1}</td><td>{entry.last_packet_index + 1}</td>
-                  <td>{entry.packets_sent}</td><td>{entry.packets_received}</td>
-                  <td>{entry.captured_bytes_sent + entry.captured_bytes_received}</td>
-                </tr>
-              ))}</tbody>
-            </table>
-          ) : tab === "flows" ? (
-            <table className="data-table w-full" aria-label="Captured flows">
-              <thead><tr><th>Flow</th><th>First frame</th><th>Last frame</th><th>Packets</th><th>Bytes</th></tr></thead>
-              <tbody>{pages.flows.entries.map((entry) => (
-                <tr key={entry.stream_id} className="cursor-pointer" onClick={() => { setTab("packets"); void inspect(entry.first_packet_index); }}>
-                  <td className="max-w-80 truncate" title={entry.stream_id}>{entry.stream_id}</td>
-                  <td>{entry.first_packet_index + 1}</td><td>{entry.last_packet_index + 1}</td>
-                  <td>{entry.packet_count}</td><td>{entry.captured_bytes}</td>
-                </tr>
-              ))}</tbody>
-            </table>
-          ) : (
-            <div className="grid gap-3 p-4 text-xs sm:grid-cols-2 lg:grid-cols-4" aria-label="Capture statistics">
-              {[
-                ["Captured packets", status?.progress.packets ?? 0],
-                ["Stored PCAP bytes", status?.progress.stored_pcap_bytes ?? 0],
-                ["Oversized discarded", status?.progress.oversized_frames_discarded ?? 0],
-                ["Captured hosts / flows", readable ? pages.hosts.total + " / " + pages.flows.total : "Available on completion"],
-              ].map(([label, value]) => (
-                <div key={label} className="rounded border border-line bg-panel p-3">
-                  <div className="text-fg-muted">{label}</div>
-                  <div className="mt-1 font-mono text-base text-fg">{value}</div>
-                </div>
-              ))}
-            </div>
+          {saved && onOpenSavedArtifact && (
+            <ToolButton onClick={() => onOpenSavedArtifact(saved.artifact_id)} title="Reopen SHA-256-verified case PCAP in the full packet analyzer">
+              Open Verified Capture
+            </ToolButton>
           )}
+          {saved && <span className="font-mono text-[10px] text-fg-muted" title={saved.artifact_id}>
+            SHA-256 {saved.sha256.slice(0, 16)}… · {saved.frame_count} frames verified
+          </span>}
         </div>
-        <div className="flex shrink-0 items-center justify-between border-b border-line px-2 py-1 text-[11px] text-fg-muted">
-          <span>{readable && tab !== "statistics" && page.total
-            ? page.offset + 1 + "–" + (page.offset + page.entries.length) + " of " + page.total
-            : running ? "Capture in progress" : readable ? "No rows" : "No completed native capture"}
-          </span>
-          <div className="flex gap-1">
-            <ToolButton disabled={!readable || tab === "statistics" || loadingPages || page.offset === 0} onClick={() => movePage(-1)}>Previous</ToolButton>
-            <ToolButton disabled={!readable || tab === "statistics" || loadingPages || page.offset + SIZE >= page.total} onClick={() => movePage(1)}>Next</ToolButton>
+        {(error || caseSession.error) && (
+          <div role="alert" className="border-b border-err/50 bg-err/10 px-3 py-1 font-mono text-3xs text-err">{error || caseSession.error}</div>
+        )}
+        {status && (
+          <div className="flex shrink-0 flex-wrap items-center gap-3 border-b border-line px-3 py-1 text-[10px] text-fg-muted">
+            <span>Session #{status.session_id} · {status.interface}</span>
+            <span>Packets {status.progress.packets}</span>
+            <span>Oversized discarded {status.progress.oversized_frames_discarded}</span>
+            {status.stop_reason && <span>Stop: {status.stop_reason}</span>}
+            {!readable && running && <span>Frame inspection available once capture completes</span>}
           </div>
-        </div>
-</div>}
-        detailTitle={`Packet details: ${selectedIndex === null ? "no selection" : "frame " + (selectedIndex + 1)}`}
-        details={            <div className="min-h-0 flex-1 overflow-auto p-2 text-xs">
-              {selectedPacket ? (
-                <dl className="space-y-1 font-mono">
-                  <div><dt className="inline text-fg-muted">Frame: </dt><dd className="inline">{selectedPacket.packet_index + 1}</dd></div>
-                  <div><dt className="inline text-fg-muted">Source: </dt><dd className="inline">{selectedPacket.source ?? "Unknown"}</dd></div>
-                  <div><dt className="inline text-fg-muted">Destination: </dt><dd className="inline">{selectedPacket.destination ?? "Unknown"}</dd></div>
-                  <div><dt className="inline text-fg-muted">Captured / wire length: </dt><dd className="inline">{selectedPacket.captured_length} / {selectedPacket.wire_length} bytes</dd></div>
-                  <div><dt className="inline text-fg-muted">PCAP frame offset: </dt><dd className="inline">{selectedPacket.pcap_frame_offset}</dd></div>
-                  {selectedPacket.stream_id && <div><dt className="inline text-fg-muted">Stream: </dt><dd className="inline break-all">{selectedPacket.stream_id}</dd></div>}
-                  {decoded && (
-                    <div className="mt-2 space-y-1 border-t border-line pt-2">
-                      <div className="text-fg">{decoded.protocol} · {decoded.info}</div>
-                      <div>Relative time: {(decoded.time_ms / 1000).toFixed(6)} s</div>
-                      {decoded.layers.map((layer, index) => (
-                        <div key={index} className="break-words"><span className="text-fg-muted">{layer.label}: </span>{layer.value}</div>
-                      ))}
-                      {decoded.stream_id && (
-                        <ToolButton onClick={() => void followSelectedStream()} disabled={streamBusy}>
-                          {streamBusy ? "Following…" : "Follow native stream"}
-                        </ToolButton>
-                      )}
-                    </div>
-                  )}
-                  {stream && (
-                    <div className="mt-2 border-t border-line pt-2">
-                      <div className="mb-1 flex items-center justify-between">
-                        <span>{stream.protocol} stream · {stream.chunks.length} chunks · {stream.gaps} gaps</span>
-                        <ToolButton onClick={() => setStream(null)}>Hide stream</ToolButton>
+        )}
+        <PacketPaneSplit
+          list={<div className="flex h-full min-h-0 flex-col">
+          <div className="min-h-0 flex-1 overflow-auto bg-panel">
+            {tab === "packets" ? (
+              <PacketTable
+                rows={pages.packets.entries.map(nativeCapturePacketRow)}
+                selectedIndex={selectedIndex}
+                onSelect={(index) => void inspect(index)}
+                empty={running
+                  ? "Capturing frames… live progress is shown above; packet pages are published when the Rust capture finishes."
+                  : readable ? "No captured frames in this page" : "Select an interface and start capture, or open a PCAP from Capture selection."}
+              />
+            ) : tab === "hosts" ? (
+              <table className="data-table w-full" aria-label="Captured hosts">
+                <thead><tr><th>Host</th><th>First frame</th><th>Last frame</th><th>Sent</th><th>Received</th><th>Bytes</th></tr></thead>
+                <tbody>{pages.hosts.entries.map((entry) => (
+                  <tr key={entry.address} className="cursor-pointer" onClick={() => { setTab("packets"); void inspect(entry.first_packet_index); }}>
+                    <td>{entry.address}</td><td>{entry.first_packet_index + 1}</td><td>{entry.last_packet_index + 1}</td>
+                    <td>{entry.packets_sent}</td><td>{entry.packets_received}</td>
+                    <td>{entry.captured_bytes_sent + entry.captured_bytes_received}</td>
+                  </tr>
+                ))}</tbody>
+              </table>
+            ) : tab === "flows" ? (
+              <table className="data-table w-full" aria-label="Captured flows">
+                <thead><tr><th>Flow</th><th>First frame</th><th>Last frame</th><th>Packets</th><th>Bytes</th></tr></thead>
+                <tbody>{pages.flows.entries.map((entry) => (
+                  <tr key={entry.stream_id} className="cursor-pointer" onClick={() => { setTab("packets"); void inspect(entry.first_packet_index); }}>
+                    <td className="max-w-80 truncate" title={entry.stream_id}>{entry.stream_id}</td>
+                    <td>{entry.first_packet_index + 1}</td><td>{entry.last_packet_index + 1}</td>
+                    <td>{entry.packet_count}</td><td>{entry.captured_bytes}</td>
+                  </tr>
+                ))}</tbody>
+              </table>
+            ) : (
+              <div className="grid gap-3 p-4 text-xs sm:grid-cols-2 lg:grid-cols-4" aria-label="Capture statistics">
+                {[
+                  ["Captured packets", status?.progress.packets ?? 0],
+                  ["Stored PCAP bytes", status?.progress.stored_pcap_bytes ?? 0],
+                  ["Oversized discarded", status?.progress.oversized_frames_discarded ?? 0],
+                  ["Captured hosts / flows", readable ? pages.hosts.total + " / " + pages.flows.total : "Available on completion"],
+                ].map(([label, value]) => (
+                  <div key={label} className="rounded border border-line bg-panel p-3">
+                    <div className="text-fg-muted">{label}</div>
+                    <div className="mt-1 font-mono text-base text-fg">{value}</div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+          <div className="flex shrink-0 items-center justify-between border-b border-line px-2 py-1 text-[11px] text-fg-muted">
+            <span>{readable && tab !== "statistics" && page.total
+              ? page.offset + 1 + "–" + (page.offset + page.entries.length) + " of " + page.total
+              : running ? "Capture in progress" : readable ? "No rows" : "No completed native capture"}
+            </span>
+            <div className="flex gap-1">
+              <ToolButton disabled={!readable || tab === "statistics" || loadingPages || page.offset === 0} onClick={() => movePage(-1)}>Previous</ToolButton>
+              <ToolButton disabled={!readable || tab === "statistics" || loadingPages || page.offset + SIZE >= page.total} onClick={() => movePage(1)}>Next</ToolButton>
+            </div>
+          </div>
+  </div>}
+          detailTitle={`Packet details: ${selectedIndex === null ? "no selection" : "frame " + (selectedIndex + 1)}`}
+          details={            <div className="min-h-0 flex-1 overflow-auto p-2 text-xs">
+                {selectedPacket ? (
+                  <dl className="space-y-1 font-mono">
+                    <div><dt className="inline text-fg-muted">Frame: </dt><dd className="inline">{selectedPacket.packet_index + 1}</dd></div>
+                    <div><dt className="inline text-fg-muted">Source: </dt><dd className="inline">{selectedPacket.source ?? "Unknown"}</dd></div>
+                    <div><dt className="inline text-fg-muted">Destination: </dt><dd className="inline">{selectedPacket.destination ?? "Unknown"}</dd></div>
+                    <div><dt className="inline text-fg-muted">Captured / wire length: </dt><dd className="inline">{selectedPacket.captured_length} / {selectedPacket.wire_length} bytes</dd></div>
+                    <div><dt className="inline text-fg-muted">PCAP frame offset: </dt><dd className="inline">{selectedPacket.pcap_frame_offset}</dd></div>
+                    {selectedPacket.stream_id && <div><dt className="inline text-fg-muted">Stream: </dt><dd className="inline break-all">{selectedPacket.stream_id}</dd></div>}
+                    {decoded && (
+                      <div className="mt-2 space-y-1 border-t border-line pt-2">
+                        <div className="text-fg">{decoded.protocol} · {decoded.info}</div>
+                        <div>Relative time: {(decoded.time_ms / 1000).toFixed(6)} s</div>
+                        {decoded.layers.map((layer, index) => (
+                          <div key={index} className="break-words"><span className="text-fg-muted">{layer.label}: </span>{layer.value}</div>
+                        ))}
+                        {decoded.stream_id && (
+                          <ToolButton onClick={() => void followSelectedStream()} disabled={streamBusy}>
+                            {streamBusy ? "Following…" : "Follow native stream"}
+                          </ToolButton>
+                        )}
                       </div>
-                      <pre className="max-h-56 overflow-auto whitespace-pre-wrap break-all text-[10px]">{stream.chunks.map((chunk) => "[" + chunk.dir + " / " + chunk.kind + "] " + chunk.text).join("\n")}</pre>
-                      {stream.truncated && <p className="text-warn">Stream reconstruction was truncated at native safety limits.</p>}
-                    </div>
-                  )}
-                  {!decoded && <p className="pt-2 text-[11px] text-fg-muted">Decoded protocol layers are retrieved from the original capture using the shared native Rust parser.</p>}
-                </dl>
-              ) : (
-                <EmptyState title="Select a captured packet" detail={running
-                  ? "The Rust capture worker is running; packet inspection becomes available after completion."
-                  : "Inspect the packet's native provenance after a completed capture."} />
-              )}
-            </div>
-}
-        bytesTitle="Packet bytes (offset · hex · ASCII)"
-        bytesActions={<ToolButton disabled={!frame || frame.offset + frame.bytes.length >= frame.frame_length}
-                onClick={() => { if (frame) void inspect(frame.index, frame.offset + frame.bytes.length); }}>
-                Next 4 KiB
-              </ToolButton>}
-        bytes={            <div className="min-h-0 flex-1 overflow-auto p-2">
-              {frame ? (
-                <>
-                  <p className="mb-2 text-[10px] text-fg-muted">
-                    Original captured frame {frame.index + 1} · bytes {frame.offset}–{frame.offset + frame.bytes.length} of {frame.frame_length}
-                  </p>
-                  <pre className="whitespace-pre font-mono text-[11px] leading-relaxed text-fg-dim">{bytesAsHex(frame.bytes, frame.offset)}</pre>
-                </>
-              ) : (
-                <EmptyState title="No frame bytes selected" detail="Select a completed native capture frame to inspect byte-exact original content." />
-              )}
-            </div>
-}
-      />
+                    )}
+                    {stream && (
+                      <div className="mt-2 border-t border-line pt-2">
+                        <div className="mb-1 flex items-center justify-between">
+                          <span>{stream.protocol} stream · {stream.chunks.length} chunks · {stream.gaps} gaps</span>
+                          <ToolButton onClick={() => setStream(null)}>Hide stream</ToolButton>
+                        </div>
+                        <pre className="max-h-56 overflow-auto whitespace-pre-wrap break-all text-[10px]">{stream.chunks.map((chunk) => "[" + chunk.dir + " / " + chunk.kind + "] " + chunk.text).join("\n")}</pre>
+                        {stream.truncated && <p className="text-warn">Stream reconstruction was truncated at native safety limits.</p>}
+                      </div>
+                    )}
+                    {!decoded && <p className="pt-2 text-[11px] text-fg-muted">Decoded protocol layers are retrieved from the original capture using the shared native Rust parser.</p>}
+                  </dl>
+                ) : (
+                  <EmptyState title="Select a captured packet" detail={running
+                    ? "The Rust capture worker is running; packet inspection becomes available after completion."
+                    : "Inspect the packet's native provenance after a completed capture."} />
+                )}
+              </div>
+  }
+          bytesTitle="Packet bytes (offset · hex · ASCII)"
+          bytesActions={<ToolButton disabled={!frame || frame.offset + frame.bytes.length >= frame.frame_length}
+                  onClick={() => { if (frame) void inspect(frame.index, frame.offset + frame.bytes.length); }}>
+                  Next 4 KiB
+                </ToolButton>}
+          bytes={            <div className="min-h-0 flex-1 overflow-auto p-2">
+                {frame ? (
+                  <>
+                    <p className="mb-2 text-[10px] text-fg-muted">
+                      Original captured frame {frame.index + 1} · bytes {frame.offset}–{frame.offset + frame.bytes.length} of {frame.frame_length}
+                    </p>
+                    <pre className="whitespace-pre font-mono text-[11px] leading-relaxed text-fg-dim">{bytesAsHex(frame.bytes, frame.offset)}</pre>
+                  </>
+                ) : (
+                  <EmptyState title="No frame bytes selected" detail="Select a completed native capture frame to inspect byte-exact original content." />
+                )}
+              </div>
+  }
+        />
+      </WorkspaceShell>
       <WorkspaceTabs items={["packets", "hosts", "flows", "statistics"] as const}
         active={tab} onChange={setTab} placement="bottom" ariaLabel="Native packet investigation views" />
     </div>

@@ -8,6 +8,8 @@ const read = (filename) => fs.readFileSync(path.join(base, filename), "utf8");
 const proxy = read("ProxyView.tsx");
 const workspace = read("WebWorkspace.tsx");
 const certificate = read("ProxyCertificateAction.tsx");
+const compact = read("../../../design-system/compact.tsx");
+const modeCard = compact.slice(compact.indexOf("export function ModeCard"));
 
 test("the sole Proxy CA download action belongs in the top-right workspace tab header, not the card", () => {
   assert.match(workspace, /<WorkspaceTabs\b/);
@@ -22,15 +24,20 @@ test("the sole Proxy CA download action belongs in the top-right workspace tab h
   assert.match(certificate, /disabled=\{!desktop \|\| exporting\}/);
 });
 
-test("Proxy Frame is centered and uses coss Frame > FrameHeader > FramePanel hierarchy", () => {
-  assert.match(proxy, /import \{ Frame, FrameHeader, FramePanel, FrameTitle \}/);
-  assert.match(proxy, /flex min-h-full w-full items-center justify-center/);
-  assert.match(proxy, /<Frame className="mx-auto w-full max-w-2xl/);
-  assert.match(proxy, /<FrameHeader\b/);
-  assert.match(proxy, /<FrameTitle>Local interception proxy<\/FrameTitle>/);
-  assert.match(proxy, /<FramePanel\b/);
-  assert.ok(proxy.indexOf("<FrameHeader") < proxy.indexOf("<FramePanel"));
-  assert.ok(proxy.indexOf("</FramePanel>") < proxy.indexOf("</Frame>"));
+test("Proxy renders through the shared ModeCard: centered coss Frame > FrameHeader > FramePanel hierarchy", () => {
+  assert.match(proxy, /import \{ ModeCard \} from "@ds\/compact";/);
+  assert.match(proxy, /<ModeCard\b/);
+  assert.match(proxy, /title="Local interception proxy"/);
+  assert.match(proxy, /state=\{status\.running \? "Running" : "Stopped"\}/);
+  assert.match(proxy, /info=\{howTo\}/);
+  // The shared ModeCard itself keeps the centered coss Frame hierarchy the
+  // proxy card used to inline.
+  assert.match(modeCard, /flex min-h-full w-full .*items-center justify-center/);
+  assert.match(modeCard, /<Frame className="mx-auto w-full max-w-2xl/);
+  assert.match(modeCard, /<FrameHeader\b/);
+  assert.match(modeCard, /<FramePanel\b/);
+  assert.ok(modeCard.indexOf("<FrameHeader") < modeCard.indexOf("<FramePanel"));
+  assert.ok(modeCard.indexOf("</FramePanel>") < modeCard.indexOf("</Frame>"));
 });
 
 test("Proxy default display is focused; optional advanced preserves security and rules", () => {

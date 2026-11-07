@@ -1,12 +1,13 @@
 // Source-contract tests for the Network Lab icon-pill rail shell and the
 // live monitor mode (passive event timeline + Packet Studio subscription).
 // NetworkLabView.tsx is a React client component, so under plain `node --test`
-// the UI is asserted as SOURCE TEXT: the rail is icon-only (34px buttons,
-// tooltip = label, active = orange filled pill, no tab underline), exactly
-// one mode renders at a time, attention badges count real state, and the
-// live monitor stays passive and capture-gated with its honesty wording in
-// tooltips. The Rust command and lab-events engine files are cross-checked
-// for the contracts the UI relies on.
+// the UI is asserted as SOURCE TEXT: the rail is the shared IconRail
+// primitive wired through the WorkspaceShell rail slot (icon-only pills,
+// tooltip = label, active pill, no tab underline), exactly one mode renders
+// at a time, attention badges count real state, and the live monitor stays
+// passive and capture-gated with its honesty wording in tooltips. The Rust
+// command and lab-events engine files are cross-checked for the contracts
+// the UI relies on.
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
@@ -23,14 +24,15 @@ const engine = read("../../../../../crates/packet/src/lab_events.rs");
 // --------------------------------------------------------------- rail shell ---
 
 test("lab modes render as a compact icon-only pill rail, not tabs", () => {
-  assert.match(view, /<nav aria-label="Network Lab modes"/);
-  // 34px square icon buttons; tooltip/aria-label carry the mode name.
-  assert.match(view, /aria-pressed=\{activeMode\}/);
-  assert.match(view, /h-\[34px\] w-\[34px\]/);
-  assert.match(view, /bg-orange text-white/);
-  // The IconRail primitive renders a full-width tab-like bar; the lab must
-  // not use it.
-  assert.doesNotMatch(view, /<IconRail\b/);
+  // The shared IconRail primitive owns the pill markup now (icon-only
+  // buttons, tooltip = label, aria-pressed, active pill, no underline); the
+  // lab wires it through the WorkspaceShell rail slot with its mode items.
+  assert.match(view, /<IconRail\b/);
+  assert.match(view, /ariaLabel="Network Lab modes"/);
+  assert.match(view, /active=\{mode\}/);
+  assert.match(view, /items=\{railItems\}/);
+  // Not tabs: no tab-bar primitive may appear in the lab view.
+  assert.doesNotMatch(view, /<WorkspaceTabs\b/);
   for (const label of ["Scope", "ARP", "Live", "DNS", "Report"]) {
     assert.match(view, new RegExp(`label: "${label}"`));
   }
@@ -40,9 +42,9 @@ test("exactly one mode section renders at a time", () => {
   for (const id of ["scope", "arp", "live", "dns", "report"]) {
     assert.match(view, new RegExp(`\\{mode === "${id}" && \\(`));
   }
-  // The rail drives the mode state.
+  // The rail drives the mode state (IconRail onChange -> setMode).
   assert.match(view, /useState<LabMode>\("scope"\)/);
-  assert.match(view, /onClick=\{\(\) => setMode\(item\.id\)\}/);
+  assert.match(view, /onChange=\{\(id\) => setMode\(id as LabMode\)\}/);
 });
 
 test("rail badges count real state: ARP conflicts, live gateway changes, DNS findings", () => {

@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from "react";
 
 import { Globe, Play, PlayCircle, Square } from "lucide-react";
 import { Chip, EmptyState, Pane, Select, TextInput, ToolButton } from "@ds/panes";
+import { WorkspaceShell } from "@ds/compact";
 import {
   engineScan,
   httpSend,
@@ -144,30 +145,34 @@ export function SpiderView() {
   };
 
   return (
-    <div className="flex h-full min-h-0 flex-col">
-      <div className="cd-workspace-toolbar shrink-0 items-center gap-2  px-2">
-        <span className="font-mono text-[10px] uppercase text-fg-muted">target</span>
-        <TextInput value={target} onChange={setTarget} placeholder="http://127.0.0.1:3000" ariaLabel="Spider target" className="w-72" />
-        <span className="font-mono text-[10px] uppercase text-fg-muted">depth</span>
-        <Select
-          value={depth}
-          onChange={setDepth}
-          options={[
-            { value: "1", label: "1" },
-            { value: "2", label: "2" },
-            { value: "3", label: "3" },
-            { value: "4", label: "4" },
-          ]}
-          ariaLabel="Spider depth"
-        />
-        {job?.state === "running" && jobId !== null
-          ? <ToolButton tone="danger" onClick={() => void stop()}><Square size={11} /> Stop</ToolButton>
-          : <ToolButton tone="primary" disabled={busy || !desktop || !caseReady || !normalized || !authorized}
-              onClick={() => void crawl()}><Play size={11} /> {busy ? "Authorizing…" : "Start"}</ToolButton>}
-        <span className="ml-auto font-mono text-[10px] text-fg-muted">
-          {job ? `${job.state} · ${job.processed} pages · ${job.discovered} URLs` : `${links.length} URLs`}
-        </span>
-      </div>
+    <WorkspaceShell
+      contentClassName="flex flex-col"
+      toolbar={
+        <>
+          <span className="font-mono text-[10px] uppercase text-fg-muted">target</span>
+          <TextInput value={target} onChange={setTarget} placeholder="http://127.0.0.1:3000" ariaLabel="Spider target" className="w-72" />
+          <span className="font-mono text-[10px] uppercase text-fg-muted">depth</span>
+          <Select
+            value={depth}
+            onChange={setDepth}
+            options={[
+              { value: "1", label: "1" },
+              { value: "2", label: "2" },
+              { value: "3", label: "3" },
+              { value: "4", label: "4" },
+            ]}
+            ariaLabel="Spider depth"
+          />
+          {job?.state === "running" && jobId !== null
+            ? <ToolButton tone="danger" onClick={() => void stop()}><Square size={11} /> Stop</ToolButton>
+            : <ToolButton tone="primary" disabled={busy || !desktop || !caseReady || !normalized || !authorized}
+                onClick={() => void crawl()}><Play size={11} /> {busy ? "Authorizing…" : "Start"}</ToolButton>}
+          <span className="ml-auto font-mono text-[10px] text-fg-muted">
+            {job ? `${job.state} · ${job.processed} pages · ${job.discovered} URLs` : `${links.length} URLs`}
+          </span>
+        </>
+      }
+    >
       <CaseGate activity="Web site discovery" />
       {error ? <div className="border-b border-err/50 bg-err/10 px-2 py-1 font-mono text-[10px] text-err">{error}</div> : null}
       <label className="flex items-center gap-2 border-b border-line bg-panel px-3 py-2 text-xs text-fg-dim">
@@ -198,6 +203,6 @@ export function SpiderView() {
           </table>
         )}
       </Pane>
-    </div>
+    </WorkspaceShell>
   );
 }

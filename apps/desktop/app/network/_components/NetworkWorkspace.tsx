@@ -1,5 +1,6 @@
 "use client";
 /** Thin dispatcher: all network tools stay mounted; hidden views keep state. */
+import { CategoryWorkspace } from "@ds/compact";
 import { PacketStudioView } from "./PacketStudioView";
 import { NetworkLabView } from "./NetworkLabView";
 import { ScanView } from "./ScanView";
@@ -7,16 +8,17 @@ import { ScanInsightsView } from "./ScanInsightsView";
 import type { ToolId } from "@state/tool-registry";
 
 export function NetworkWorkspace({ tool }: { tool: ToolId }) {
-  const show = (id: ToolId) => (tool === id ? "h-full" : "hidden h-full");
   return (
     <div className="flex h-full min-h-0 flex-col">
-      <div className="min-h-0 flex-1">
-
-      <div className={show("network.packet")}><PacketStudioView /></div>
-      <div className={show("network.lab")}><NetworkLabView /></div>
-      <div className={show("network.scan")}><ScanView /></div>
-      <div className={show("network.insights")}><ScanInsightsView /></div>
-      </div>
+      <CategoryWorkspace
+        activeId={tool}
+        views={[
+          { id: "network.packet", render: () => <PacketStudioView /> },
+          { id: "network.lab", render: () => <NetworkLabView /> },
+          { id: "network.scan", render: () => <ScanView /> },
+          { id: "network.insights", render: () => <ScanInsightsView /> },
+        ]}
+      />
     </div>
   );
 }

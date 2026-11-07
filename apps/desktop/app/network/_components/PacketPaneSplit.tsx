@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { PanelBottomClose, PanelBottomOpen, PanelLeftClose, PanelLeftOpen, PanelRightClose, PanelRightOpen } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { Resizer } from "@ds/panes";
+import { Pane, Resizer } from "@ds/panes";
 
 /** Shared three-pane Packet Analysis geometry. Resizes to the *actual* available
  * workspace, not a fixed 720px cap; hiding a pane never discards its data. */
@@ -75,22 +75,22 @@ export function PacketPaneSplit({
             }} />
           <div className="flex min-h-0 min-w-0 flex-1">
             {detailsOpen && (
-              <div ref={detailRef} className={bytesOpen ? "flex min-h-0 shrink-0 flex-col overflow-hidden bg-panel" : "flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden bg-panel"}
+              <div ref={detailRef} className={bytesOpen ? "flex min-h-0 shrink-0 flex-col overflow-hidden" : "flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden"}
                 style={bytesOpen ? { width: shownDetail } : undefined}>
-                <div className="cd-workspace-toolbar justify-between gap-2 px-2">
-                  <span className="min-w-0 truncate font-mono text-[10px] font-medium uppercase text-fg-muted">{detailTitle}</span>
-                  <div className="flex shrink-0 items-center gap-1">
+                <Pane className="min-h-0 flex-1" title={detailTitle} actions={
+                  <>
                     {!bytesOpen && (
                       <Button variant="ghost" size="icon-xs" title="Show packet bytes" aria-label="Show packet bytes"
                         onClick={() => setBytesOpen(true)}><PanelRightOpen size={14}/></Button>
                     )}
                     <Button variant="ghost" size="icon-xs" title="Hide packet details" aria-label="Hide packet details"
                       onClick={closeDetails}><PanelLeftClose size={14}/></Button>
-                    <Button variant="ghost" size="icon-xs" title="Hide inspectors" aria-label="Hide packet inspectors"
+                    <Button variant="ghost" size="icon-xs" title="Hide packet inspectors" aria-label="Hide packet inspectors"
                       onClick={() => setInspectorOpen(false)}><PanelBottomClose size={14}/></Button>
-                  </div>
-                </div>
-                <div className="min-h-0 flex-1 overflow-auto">{details}</div>
+                  </>
+                }>
+                  {details}
+                </Pane>
               </div>
             )}
             {detailsOpen && bytesOpen && (
@@ -103,10 +103,11 @@ export function PacketPaneSplit({
                 }} />
             )}
             {bytesOpen && (
-              <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden bg-panel">
-                <div className="cd-workspace-toolbar justify-between gap-2 px-2">
-                  <span className="min-w-0 truncate font-mono text-[10px] font-medium uppercase text-fg-muted">{bytesTitle}</span>
-                  <div className="flex shrink-0 items-center gap-1">
+              <Pane
+                className="flex-1 overflow-hidden"
+                title={bytesTitle}
+                actions={
+                  <>
                     {bytesActions}
                     {!detailsOpen && (
                       <Button variant="ghost" size="icon-xs" title="Show packet details" aria-label="Show packet details"
@@ -114,12 +115,13 @@ export function PacketPaneSplit({
                     )}
                     <Button variant="ghost" size="icon-xs" title="Hide packet bytes" aria-label="Hide packet bytes"
                       onClick={closeBytes}><PanelRightClose size={14}/></Button>
-                    <Button variant="ghost" size="icon-xs" title="Hide inspectors" aria-label="Hide packet inspectors"
+                    <Button variant="ghost" size="icon-xs" title="Hide packet inspectors" aria-label="Hide packet inspectors"
                       onClick={() => setInspectorOpen(false)}><PanelBottomClose size={14}/></Button>
-                  </div>
-                </div>
-                <div className="min-h-0 flex-1 overflow-auto">{bytes}</div>
-              </div>
+                  </>
+                }
+              >
+                {bytes}
+              </Pane>
             )}
           </div>
         </>

@@ -92,7 +92,10 @@ test("start screen is aligned, succinct and capture settings are progressive", (
   const start = read("PacketStartView.tsx");
   const capture = read("LiveCaptureView.tsx");
   const studio = read("PacketStudioView.tsx");
-  assert.match(start, /w-full shrink-0 px-5 pt-5/);
+  // UX revision: the welcome is the shared centered EmptyCard (icon + title +
+  // one-line detail + footer actions), not a bespoke top-aligned header block.
+  assert.match(start, /<EmptyCard/);
+  assert.match(start, /title="Packet Analysis"/);
   assert.doesNotMatch(start, /mx-auto w-full max-w-6xl/);
   assert.doesNotMatch(start, /Previously opened files are not retained/);
   assert.match(capture, /const \[showLimits, setShowLimits\]/);
