@@ -5,7 +5,7 @@ import {
   FileJson, FileSpreadsheet, Info, Laptop, Play, Radar, Save, Square, Trash2, Upload,
 } from "lucide-react";
 import { Select, TextInput, ToolButton } from "@ds/panes";
-import { EmptyCard, IconButton, InfoTip, StatusStrip, WorkspaceShell } from "@ds/compact";
+import { EmptyCard, ErrorStrip, IconButton, InfoTip, ProgressBar, ResultStack, StatusStrip, WorkspaceShell } from "@ds/compact";
 import {
   isDesktop,
   netscanExport,
@@ -773,7 +773,7 @@ export function ScanView() {
             </span>
           ) : null}
           {checks ? (
-            <span className="block font-mono text-[10px] text-fg-muted">
+            <span className="block font-mono text-3xs text-fg-muted">
               {checks.findings.length === 0
                 ? "checks: none fired"
                 : checks.findings.map((f) => (
@@ -1010,7 +1010,7 @@ export function ScanView() {
                   Trace 4
                 </ToolButton>
               )}
-              {arpInterfaces.length === 0 && <span role="status" className="font-mono text-[10px] text-fg-muted">
+              {arpInterfaces.length === 0 && <span role="status" className="font-mono text-3xs text-fg-muted">
                 No active IPv4 source adapter; TCP/UDP scans remain available.
               </span>}
             </>
@@ -1116,7 +1116,7 @@ export function ScanView() {
                 SYN 6
               </ToolButton>
               {synProgress ? (
-                <span className="font-mono text-[10px] text-fg-muted">
+                <span className="font-mono text-3xs text-fg-muted">
                   SYN {synProgress.tried}/{synProgress.total} · {synProgress.percent}%
                 </span>
               ) : null}
@@ -1146,7 +1146,7 @@ export function ScanView() {
                 </ToolButton>
               )}
               {stealthProgress ? (
-                <span className="font-mono text-[10px] text-fg-muted">
+                <span className="font-mono text-3xs text-fg-muted">
                   {stealthType} {stealthProgress.tried}/{stealthProgress.total} · {stealthProgress.percent}%
                 </span>
               ) : null}
@@ -1181,16 +1181,14 @@ export function ScanView() {
       contentClassName="flex flex-col"
     >
       <CaseGate activity="Network scanning" />
-      {error ? <div role="alert" className="shrink-0 bg-err/10 px-3 py-1 font-mono text-[10px] text-err">{error}</div> : null}
+      {error ? <ErrorStrip>{error}</ErrorStrip> : null}
       {progress ? (
         <div className="shrink-0 px-3 py-1">
-          <div className="mb-0.5 flex items-center justify-between font-mono text-[10px] text-fg-muted">
+          <div className="mb-0.5 flex items-center justify-between font-mono text-3xs text-fg-muted">
             <span>{progress.tried} / {progress.total} probes</span>
             <span>{progress.percent}%</span>
           </div>
-          <div className="h-1.5 w-full border border-line bg-app">
-            <div className="h-full bg-orange" style={{ width: `${progress.percent}%` }} />
-          </div>
+          <ProgressBar percent={progress.percent} className="w-full" />
         </div>
       ) : null}
       <div className="flex min-h-0 flex-1 flex-col bg-app">
@@ -1255,10 +1253,9 @@ export function ScanView() {
         {hasFindings ? (
           <div className="max-h-56 shrink-0 overflow-y-auto">
           {synFindings !== null ? (
-            <div className="border-t border-line p-2 text-[10px] text-fg-muted">
-              <div className="mb-1 font-semibold text-fg">
-                Correlated {synFamily} TCP SYN: {synFindings.length} observations · {synFindings.filter((r) => r.state === "open").length} open
-              </div>
+            <ResultStack
+              title={`Correlated ${synFamily} TCP SYN: ${synFindings.length} observations · ${synFindings.filter((r) => r.state === "open").length} open`}
+            >
               <div className="max-h-36 overflow-y-auto font-mono">
                 {synFindings.map((r) => (
                   <div key={r.host + ":" + r.port}>
@@ -1266,14 +1263,13 @@ export function ScanView() {
                   </div>
                 ))}
               </div>
-            </div>
+            </ResultStack>
           ) : null}
           {stealthFindings !== null ? (
-            <div className="border-t border-line p-2 text-[10px] text-fg-muted">
-              <div className="mb-1 font-semibold text-fg"
-                title="States classify one probe each; FIN/NULL/Xmas silence is open|filtered and ACK/Window silence is filtered by definition.">
-                Raw {stealthType} scan: {stealthFindings.length} observations · {stealthFindings.filter((r) => r.state === "open").length} open · {stealthFindings.filter((r) => r.state === "open_filtered").length} open|filtered
-              </div>
+            <ResultStack
+              title={`Raw ${stealthType} scan: ${stealthFindings.length} observations · ${stealthFindings.filter((r) => r.state === "open").length} open · ${stealthFindings.filter((r) => r.state === "open_filtered").length} open|filtered`}
+              info="States classify one probe each; FIN/NULL/Xmas silence is open|filtered and ACK/Window silence is filtered by definition."
+            >
               <div className="max-h-36 overflow-y-auto font-mono">
                 {stealthFindings.map((r) => (
                   <div key={r.host + ":" + r.port + ":" + r.scan}>
@@ -1281,27 +1277,23 @@ export function ScanView() {
                   </div>
                 ))}
               </div>
-            </div>
+            </ResultStack>
           ) : null}
           {trace6Rows !== null ? (
-            <div className="border-t border-line p-2 text-[10px] text-fg-muted">
-              <p className="mb-1 font-semibold text-fg">
-                Native IPv6 ICMPv6 route trace: {trace6Rows.length} observed hop-limit steps
-              </p>
+            <ResultStack title={`Native IPv6 ICMPv6 route trace: ${trace6Rows.length} observed hop-limit steps`}>
               {trace6Rows.map((hop) => (
-                <p key={hop.hop} className="font-mono text-[11px]">
+                <p key={hop.hop} className="font-mono text-2xs">
                   hop {hop.hop}: {hop.responder ?? "no response"}
                   {hop.reached ? " — destination reached" : ""} ({hop.elapsed_ms} ms, {hop.reason})
                 </p>
               ))}
-            </div>
+            </ResultStack>
           ) : null}
           {traceRows !== null ? (
-            <div className="border-t border-line p-2 text-[10px] text-fg-muted">
-              <div className="mb-1 font-semibold text-fg"
-                title="Router identities are not authenticated; missing responses do not prove missing hops.">
-                Native IPv4 ICMP route trace: {traceRows.length} observed TTL steps
-              </div>
+            <ResultStack
+              title={`Native IPv4 ICMP route trace: ${traceRows.length} observed TTL steps`}
+              info="Router identities are not authenticated; missing responses do not prove missing hops."
+            >
               <div className="max-h-36 overflow-y-auto font-mono">
                 {traceRows.map((hop) => (
                   <div key={hop.ttl}>
@@ -1310,13 +1302,12 @@ export function ScanView() {
                   </div>
                 ))}
               </div>
-            </div>
+            </ResultStack>
           ) : null}
           {icmpRows !== null ? (
-            <div className="border-t border-line p-2 text-[10px] text-fg-muted">
-              <div className="mb-1 font-semibold text-fg">
-                {icmpFamily} ICMP echo: {icmpRows.filter((r) => r.state === "responded").length} responding / {icmpRows.length} checked
-              </div>
+            <ResultStack
+              title={`${icmpFamily} ICMP echo: ${icmpRows.filter((r) => r.state === "responded").length} responding / ${icmpRows.length} checked`}
+            >
               <div className="max-h-28 overflow-y-auto font-mono">
                 {icmpRows.map((row) => (
                   <div key={row.host}>
@@ -1324,13 +1315,10 @@ export function ScanView() {
                   </div>
                 ))}
               </div>
-            </div>
+            </ResultStack>
           ) : null}
           {ndpNeighbors !== null ? (
-            <div className="border-t border-line p-2 text-[10px] text-fg-muted">
-              <div className="mb-1 font-semibold text-fg">
-                Correlated IPv6 Neighbor Advertisements: {ndpNeighbors.length}
-              </div>
+            <ResultStack title={`Correlated IPv6 Neighbor Advertisements: ${ndpNeighbors.length}`}>
               <div className="max-h-28 overflow-y-auto font-mono">
                 {ndpNeighbors.length === 0
                   ? "No matching IPv6 Neighbor Advertisements observed; silence is not proof a host is down."
@@ -1338,13 +1326,10 @@ export function ScanView() {
                     <div key={row.host}>{row.host} · {row.mac} · {row.elapsed_ms} ms</div>
                   ))}
               </div>
-            </div>
+            </ResultStack>
           ) : null}
           {arpNeighbors !== null ? (
-            <div className="border-t border-line p-2 text-[10px] text-fg-muted">
-              <div className="mb-1 font-semibold text-fg">
-                Correlated ARP neighbors: {arpNeighbors.length}
-              </div>
+            <ResultStack title={`Correlated ARP neighbors: ${arpNeighbors.length}`}>
               <div className="max-h-28 overflow-y-auto font-mono">
                 {arpNeighbors.length === 0
                   ? "No matched ARP replies were observed. Silence does not prove hosts are down."
@@ -1352,18 +1337,17 @@ export function ScanView() {
                     <div key={row.host}>{row.host} · {row.mac} · {row.elapsed_ms} ms</div>
                   ))}
               </div>
-            </div>
+            </ResultStack>
           ) : null}
           {discovered !== null ? (
-            <div className="border-t border-line p-2 text-[10px] text-fg-muted">
-              <div className="mb-1 font-semibold text-fg">Responsive hosts: {discovered.length}</div>
+            <ResultStack title={`Responsive hosts: ${discovered.length}`}>
               <div className="max-h-24 overflow-y-auto font-mono">
                 {discovered.length === 0
                   ? "No TCP response on the checked discovery ports; this does not prove hosts are down."
                   : discovered.slice(0, 50).join(", ")}
                 {discovered.length > 50 ? " · " + (discovered.length - 50) + " more" : ""}
               </div>
-            </div>
+            </ResultStack>
           ) : null}
 
           </div>

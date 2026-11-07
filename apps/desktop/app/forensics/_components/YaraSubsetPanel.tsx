@@ -2,6 +2,8 @@
 import { useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
+import { ToolButton } from "@ds/panes";
+import { ErrorStrip } from "@ds/compact";
 import { fileYaraSubsetScan, MAX_YARA_SOURCE_BYTES, type YaraSubsetResponse } from "./yara-subset";
 import { yaraScanWindow } from "./yara-window";
 
@@ -62,27 +64,27 @@ export function YaraSubsetPanel({
       </Button>
       {expanded ? (
         <div id="forensics-yara-subset" className="mt-2 space-y-2">
-          <p className="text-[11px] leading-relaxed text-fg-muted">
+          <p className="text-2xs leading-relaxed text-fg-muted">
             Read-only native rule subset: ASCII / nocase or hex bytes (?? wildcard), 1–16 patterns,
             any/all/N-of-them condition (N up to 16); no regex, modules, full YARA compatibility or executable evaluation.
             Rules stay in this view only and are not saved to evidence.
           </p>
-          <label className="block text-[11px] text-fg-dim" htmlFor="forensics-yara-source">Rule source (ASCII, up to 4096 bytes)</label>
+          <label className="block text-2xs text-fg-dim" htmlFor="forensics-yara-source">Rule source (ASCII, up to 4096 bytes)</label>
           <Textarea id="forensics-yara-source" size="sm" rows={6} spellCheck={false}
             className="font-mono text-xs"
             value={rule} onChange={(event) => { generation.current++; setBusy(false); setResult(null); setError(null); setRule(event.target.value); }} />
-          <div className="font-mono text-[10px] text-fg-muted">
+          <div className="font-mono text-3xs text-fg-muted">
             {rule.length} / {MAX_YARA_SOURCE_BYTES} source characters · source window {window
               ? `0x${window.offset.toString(16)}–0x${(window.offset + window.len - 1).toString(16)} (max 1 MiB)`
               : "unavailable"}
           </div>
-          <Button size="sm" variant="secondary" onClick={() => void run()}
+          <ToolButton tone="primary" onClick={() => void run()}
             disabled={!desktop || !active || !artifactId || !window || busy || !rule.trim() || rule.length > MAX_YARA_SOURCE_BYTES || !/^[\x00-\x7F]*$/.test(rule)}>
             {busy ? "Scanning verified evidence…" : "Scan selected source window"}
-          </Button>
-          {error ? <div role="alert" className="break-words text-[11px] text-err">{error}</div> : null}
+          </ToolButton>
+          {error ? <ErrorStrip>{error}</ErrorStrip> : null}
           {result ? (
-            <div className="space-y-1 border border-line p-2 font-mono text-[11px]">
+            <div className="space-y-1 border border-line p-2 font-mono text-2xs">
               <div className={result.matched ? "text-fg" : "text-fg-muted"}>
                 Rule {result.rule}: {result.matched ? "matched" : "no match in examined window"}
               </div>
@@ -93,10 +95,10 @@ export function YaraSubsetPanel({
               </div>
               {result.hits.map((hit, index) => (
                 <div key={`${hit.identifier}:${hit.offset}:${index}`} className="flex gap-2 border-t border-line/50 py-1">
-                  <Button variant="ghost" size="xs" onClick={() => onOpenOffset(hit.offset)}
+                  <ToolButton onClick={() => onOpenOffset(hit.offset)}
                     title="Open verified source byte offset">
                     0x{hit.offset.toString(16)}
-                  </Button>
+                  </ToolButton>
                   <span className="break-all">{hit.identifier}</span>
                 </div>
               ))}

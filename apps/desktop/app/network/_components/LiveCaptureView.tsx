@@ -5,7 +5,7 @@ import { Play, RefreshCw, Square, Settings2, Info, MonitorDot, FolderOpen } from
 import { Router } from "@lucasmarkes/hairline/react";
 import { Button } from "@/components/ui/button";
 import { Chip, EmptyState, Select, TextInput, ToolButton, WorkspaceTabs } from "@ds/panes";
-import { WorkspaceShell } from "@ds/compact";
+import { ErrorStrip, WorkspaceShell } from "@ds/compact";
 import { PacketTable } from "./PacketTable";
 import { PacketPaneSplit } from "./PacketPaneSplit";
 import { CaptureActivity, type CaptureActivityPoint } from "./CaptureActivity";
@@ -375,7 +375,7 @@ export function LiveCaptureView({ presentation = "full", onCaptureStarted, onRet
               <div role="status" className="mt-3 space-y-2 rounded-md border border-line p-3 text-xs text-fg-dim">
                 <p className="font-medium text-fg">Windows live packet capture is not operational</p>
                 <p>Windows adapters are listed by their OS display names. Live Ethernet frame capture requires a compatible native capture driver; adapter discovery alone cannot record packets.</p>
-                {nativeCaptureStatus && <p className="font-mono text-[11px]">{nativeCaptureStatus}</p>}
+                {nativeCaptureStatus && <p className="font-mono text-2xs">{nativeCaptureStatus}</p>}
                 <p>You can still analyze PCAP/PCAPNG files with the native Rust packet analyzer.</p>
                 {onOpenCaptureFile && <Button size="sm" variant="outline" onClick={onOpenCaptureFile}><FolderOpen size={14} /> Open capture file</Button>}
               </div>
@@ -436,7 +436,7 @@ export function LiveCaptureView({ presentation = "full", onCaptureStarted, onRet
           </div>
         )}
         {(error || caseSession.error) && (
-          <div role="alert" className="border-b border-err/50 bg-err/10 px-3 py-1 font-mono text-3xs text-err">{error || caseSession.error}</div>
+          <ErrorStrip>{error || caseSession.error}</ErrorStrip>
         )}
       </section>
     );
@@ -450,7 +450,7 @@ export function LiveCaptureView({ presentation = "full", onCaptureStarted, onRet
             {onReturnToStart && (
               <Button variant="ghost" size="sm" onClick={onReturnToStart}>Capture selection</Button>
             )}
-            <span className="text-[10px] uppercase text-fg-muted">Interface</span>
+            <span className="text-3xs uppercase text-fg-muted">Interface</span>
             <Select value={device} onChange={setDevice} ariaLabel="Native capture interface" className="w-44"
               options={eligible.length ? eligible.map((entry) => ({ value: entry.name, label: entry.name + " · " + entry.index })) :
                 [{ value: "-", label: "No eligible Ethernet interface" }]} />
@@ -470,7 +470,7 @@ export function LiveCaptureView({ presentation = "full", onCaptureStarted, onRet
             <Chip tone={running ? "orange" : status?.phase === "failed" ? "err" : readable ? "ok" : "muted"}>
               {status?.phase ?? "idle"}
             </Chip>
-            <span className="ml-auto flex items-center gap-2 truncate text-[10px] text-fg-muted">
+            <span className="ml-auto flex items-center gap-2 truncate text-3xs text-fg-muted">
               <CaptureActivity samples={activity}/>
               {status ? status.progress.packets + " frames · " + status.progress.stored_pcap_bytes + " PCAP bytes" : "Native Ethernet capture"}
             </span>
@@ -478,7 +478,7 @@ export function LiveCaptureView({ presentation = "full", onCaptureStarted, onRet
         }
         contentClassName="flex flex-col"
       >
-        <div className="flex shrink-0 flex-wrap items-center gap-3 border-b border-line px-3 py-1.5 text-[11px] text-fg-muted">
+        <div className="flex shrink-0 flex-wrap items-center gap-3 border-b border-line px-3 py-1.5 text-2xs text-fg-muted">
           <label>Packets <TextInput value={maxPackets} onChange={setMaxPackets} ariaLabel="Maximum packets" className="ml-1 inline-flex w-20" /></label>
           <label>Memory MiB <TextInput value={memoryMiB} onChange={setMemoryMiB} ariaLabel="Memory budget MiB" className="ml-1 inline-flex w-16" /></label>
           <label>Duration s <TextInput value={seconds} onChange={setSeconds} ariaLabel="Capture duration in seconds" className="ml-1 inline-flex w-16" /></label>
@@ -492,15 +492,15 @@ export function LiveCaptureView({ presentation = "full", onCaptureStarted, onRet
               Open Verified Capture
             </ToolButton>
           )}
-          {saved && <span className="font-mono text-[10px] text-fg-muted" title={saved.artifact_id}>
+          {saved && <span className="font-mono text-3xs text-fg-muted" title={saved.artifact_id}>
             SHA-256 {saved.sha256.slice(0, 16)}… · {saved.frame_count} frames verified
           </span>}
         </div>
         {(error || caseSession.error) && (
-          <div role="alert" className="border-b border-err/50 bg-err/10 px-3 py-1 font-mono text-3xs text-err">{error || caseSession.error}</div>
+          <ErrorStrip>{error || caseSession.error}</ErrorStrip>
         )}
         {status && (
-          <div className="flex shrink-0 flex-wrap items-center gap-3 border-b border-line px-3 py-1 text-[10px] text-fg-muted">
+          <div className="flex shrink-0 flex-wrap items-center gap-3 border-b border-line px-3 py-1 text-3xs text-fg-muted">
             <span>Session #{status.session_id} · {status.interface}</span>
             <span>Packets {status.progress.packets}</span>
             <span>Oversized discarded {status.progress.oversized_frames_discarded}</span>
@@ -558,7 +558,7 @@ export function LiveCaptureView({ presentation = "full", onCaptureStarted, onRet
               </div>
             )}
           </div>
-          <div className="flex shrink-0 items-center justify-between border-b border-line px-2 py-1 text-[11px] text-fg-muted">
+          <div className="flex shrink-0 items-center justify-between border-b border-line px-2 py-1 text-2xs text-fg-muted">
             <span>{readable && tab !== "statistics" && page.total
               ? page.offset + 1 + "–" + (page.offset + page.entries.length) + " of " + page.total
               : running ? "Capture in progress" : readable ? "No rows" : "No completed native capture"}
@@ -599,11 +599,11 @@ export function LiveCaptureView({ presentation = "full", onCaptureStarted, onRet
                           <span>{stream.protocol} stream · {stream.chunks.length} chunks · {stream.gaps} gaps</span>
                           <ToolButton onClick={() => setStream(null)}>Hide stream</ToolButton>
                         </div>
-                        <pre className="max-h-56 overflow-auto whitespace-pre-wrap break-all text-[10px]">{stream.chunks.map((chunk) => "[" + chunk.dir + " / " + chunk.kind + "] " + chunk.text).join("\n")}</pre>
+                        <pre className="max-h-56 overflow-auto whitespace-pre-wrap break-all text-3xs">{stream.chunks.map((chunk) => "[" + chunk.dir + " / " + chunk.kind + "] " + chunk.text).join("\n")}</pre>
                         {stream.truncated && <p className="text-warn">Stream reconstruction was truncated at native safety limits.</p>}
                       </div>
                     )}
-                    {!decoded && <p className="pt-2 text-[11px] text-fg-muted">Decoded protocol layers are retrieved from the original capture using the shared native Rust parser.</p>}
+                    {!decoded && <p className="pt-2 text-2xs text-fg-muted">Decoded protocol layers are retrieved from the original capture using the shared native Rust parser.</p>}
                   </dl>
                 ) : (
                   <EmptyState title="Select a captured packet" detail={running
@@ -620,10 +620,10 @@ export function LiveCaptureView({ presentation = "full", onCaptureStarted, onRet
           bytes={            <div className="min-h-0 flex-1 overflow-auto p-2">
                 {frame ? (
                   <>
-                    <p className="mb-2 text-[10px] text-fg-muted">
+                    <p className="mb-2 text-3xs text-fg-muted">
                       Original captured frame {frame.index + 1} · bytes {frame.offset}–{frame.offset + frame.bytes.length} of {frame.frame_length}
                     </p>
-                    <pre className="whitespace-pre font-mono text-[11px] leading-relaxed text-fg-dim">{bytesAsHex(frame.bytes, frame.offset)}</pre>
+                    <pre className="whitespace-pre font-mono text-2xs leading-relaxed text-fg-dim">{bytesAsHex(frame.bytes, frame.offset)}</pre>
                   </>
                 ) : (
                   <EmptyState title="No frame bytes selected" detail="Select a completed native capture frame to inspect byte-exact original content." />

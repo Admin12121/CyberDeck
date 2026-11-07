@@ -67,8 +67,10 @@ test("active interaction gate is one compact cluster in the mode toolbar row: a 
 test("lab scope controls exist and the set-scope action is authorization-gated", () => {
   assert.match(viewSource, /Target 1/);
   assert.match(viewSource, /Target 2/);
-  assert.match(viewSource, /aria-label="Target 1 scope: IP or CIDR entries separated by commas or newlines"/);
-  assert.match(viewSource, /aria-label="Target 2 scope: IP or CIDR entries separated by commas or newlines"/);
+  // The scope textareas render through the shared TextArea primitive; the
+  // accessible name travels in its ariaLabel prop verbatim.
+  assert.match(viewSource, /ariaLabel="Target 1 scope: IP or CIDR entries separated by commas or newlines"/);
+  assert.match(viewSource, /ariaLabel="Target 2 scope: IP or CIDR entries separated by commas or newlines"/);
   // User directive: no on-screen auth checkbox — the native dialog on the
   // gated sweep is the acknowledgment; scope calls pass authorized: true.
   assert.doesNotMatch(viewSource, /I am authorized to assess this scope/);

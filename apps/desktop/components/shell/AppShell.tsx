@@ -25,7 +25,7 @@ function DesktopFrame({ children }: { children: ReactNode }) {
           {!home && ui.navigatorOpen ? (
             <>
               <button type="button" aria-label="Close tool sidebar" onClick={ui.toggleNavigator}
-                className="fixed inset-y-0 left-12 right-0 z-20 bg-black/45 min-[1080px]:hidden" />
+                className="fixed inset-y-0 left-12 right-0 z-20 bg-overlay min-[1080px]:hidden" />
               <div className="fixed inset-y-0 left-12 z-30 flex max-w-[calc(100vw-3rem)] min-[1080px]:contents">
                 <ContextNavigator />
                 <div className="hidden min-[1080px]:contents">

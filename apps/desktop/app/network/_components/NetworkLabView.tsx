@@ -25,8 +25,8 @@
 import { useEffect, useRef, useState } from "react";
 import { Ban, Crosshair, FileText, FolderOpen, Globe, Network, Radar } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
-import { Chip, Select, TextInput, ToolButton } from "@ds/panes";
-import { IconRail, IconButton, InfoTip, ModeCard, StatusStrip, WorkspaceShell } from "@ds/compact";
+import { CheckBox, Chip, Select, TextArea, TextInput, ToolButton } from "@ds/panes";
+import { ErrorStrip, IconRail, IconButton, InfoTip, ModeCard, StatusStrip, WorkspaceShell } from "@ds/compact";
 import {
   captureInterfacesV1,
   isDesktop,
@@ -340,17 +340,18 @@ export function NetworkLabView() {
     <>
       <label className="flex items-center gap-1.5 text-xs text-fg-dim">
         <span className="text-fg-muted">Source</span>
-        <select
+        <Select
           value={liveSource}
-          onChange={(event) =>
-            switchLiveSource(event.target.value === "session" ? "session" : "opened")
+          onChange={(value) =>
+            switchLiveSource(value === "session" ? "session" : "opened")
           }
-          aria-label="Live timeline source: opened capture or running capture session"
-          className="h-8 rounded border border-line bg-panel px-2 text-xs text-fg outline-none focus:outline-none sm:h-7"
-        >
-          <option value="opened">Opened capture</option>
-          <option value="session">Running capture session</option>
-        </select>
+          ariaLabel="Live timeline source: opened capture or running capture session"
+          options={[
+            { value: "opened", label: "Opened capture" },
+            { value: "session", label: "Running capture session" },
+          ]}
+          className="w-44 sm:h-7"
+        />
       </label>
       {liveSource === "session" ? (
         <>
@@ -660,26 +661,26 @@ export function NetworkLabView() {
             <div className="grid gap-3 md:grid-cols-2">
               <label className="block text-xs text-fg-dim">
                 <span className="mb-1 block font-medium text-fg-muted">Target 1</span>
-                <textarea
+                <TextArea
                   value={targetsT1}
-                  onChange={(event) => setTargetsT1(event.target.value.slice(0, SCOPE_TEXT_MAX_CHARS))}
-                  spellCheck={false}
+                  onChange={(value) => setTargetsT1(value.slice(0, SCOPE_TEXT_MAX_CHARS))}
                   maxLength={SCOPE_TEXT_MAX_CHARS}
-                  aria-label="Target 1 scope: IP or CIDR entries separated by commas or newlines"
+                  ariaLabel="Target 1 scope: IP or CIDR entries separated by commas or newlines"
                   placeholder={"192.168.1.0/24\n10.0.0.5"}
-                  className="h-24 w-full resize-none rounded-sm border border-line bg-app p-2 font-mono text-xs leading-relaxed text-fg outline-none ring-0 focus:border-line focus:outline-none focus:ring-0 focus-visible:border-line focus-visible:outline-none focus-visible:ring-0"
+                  rows={4}
+                  className="h-24"
                 />
               </label>
               <label className="block text-xs text-fg-dim">
                 <span className="mb-1 block font-medium text-fg-muted">Target 2</span>
-                <textarea
+                <TextArea
                   value={targetsT2}
-                  onChange={(event) => setTargetsT2(event.target.value.slice(0, SCOPE_TEXT_MAX_CHARS))}
-                  spellCheck={false}
+                  onChange={(value) => setTargetsT2(value.slice(0, SCOPE_TEXT_MAX_CHARS))}
                   maxLength={SCOPE_TEXT_MAX_CHARS}
-                  aria-label="Target 2 scope: IP or CIDR entries separated by commas or newlines"
+                  ariaLabel="Target 2 scope: IP or CIDR entries separated by commas or newlines"
                   placeholder={"192.168.1.1"}
-                  className="h-24 w-full resize-none rounded-sm border border-line bg-app p-2 font-mono text-xs leading-relaxed text-fg outline-none ring-0 focus:border-line focus:outline-none focus:ring-0 focus-visible:border-line focus-visible:outline-none focus-visible:ring-0"
+                  rows={4}
+                  className="h-24"
                 />
               </label>
             </div>
@@ -733,11 +734,7 @@ export function NetworkLabView() {
               ) : null}
               {gateCluster}
             </div>
-            {sweepError ? (
-              <div role="alert" className="border border-err/50 bg-err/10 px-3 py-1 font-mono text-[10px] text-err">
-                {sweepError}
-              </div>
-            ) : null}
+            {sweepError ? <ErrorStrip>{sweepError}</ErrorStrip> : null}
             {sweepResults ? (
               sweepResults.length === 0 ? (
                 <p className="text-xs text-fg-muted">
@@ -773,16 +770,8 @@ export function NetworkLabView() {
 
       {mode === "arp" && (
         <section aria-label="ARP analysis" className="flex min-h-0 flex-1 flex-col">
-          {openError ? (
-            <div role="alert" className="mx-3 border border-err/50 bg-err/10 px-3 py-1 font-mono text-[10px] text-err">
-              {openError}
-            </div>
-          ) : null}
-          {analysisError ? (
-            <div role="alert" className="mx-3 border border-err/50 bg-err/10 px-3 py-1 font-mono text-[10px] text-err">
-              {analysisError}
-            </div>
-          ) : null}
+          {openError ? <ErrorStrip>{openError}</ErrorStrip> : null}
+          {analysisError ? <ErrorStrip>{analysisError}</ErrorStrip> : null}
           {!analysis ? (
             <ModeCard
               title="ARP analysis"
@@ -799,7 +788,7 @@ export function NetworkLabView() {
             </ModeCard>
           ) : (
             <div className="min-h-0 flex-1 overflow-y-auto pb-4">
-              <p className="px-3 pt-2 font-mono text-[10px] text-fg-muted">
+              <p className="px-3 pt-2 font-mono text-3xs text-fg-muted">
                 {analysis.arp_frame_count} ARP frames · {analysis.observation_count} attributable
                 observations · {analysis.findings.length} finding
                 {analysis.findings.length === 1 ? "" : "s"} · {analysis.hosts.length} host
@@ -824,7 +813,7 @@ export function NetworkLabView() {
                     <tr key={`${finding.ip}-${finding.kind}-${index}`}>
                       <td className="text-fg">{findingKindLabel(finding.kind)}</td>
                       <td className="font-mono text-fg">{finding.ip}</td>
-                      <td className="font-mono text-[11px] text-fg-dim" title={finding.detail}>
+                      <td className="font-mono text-2xs text-fg-dim" title={finding.detail}>
                         {summarizeMacClaims(finding.macs)}
                       </td>
                       <td>{formatSeenMs(finding.first_seen_ms)}</td>
@@ -847,7 +836,7 @@ export function NetworkLabView() {
                   ) : null}
                 </tbody>
               </table>
-              <p className="px-3 pb-1 pt-3 text-[11px] font-semibold text-fg-muted">
+              <p className="px-3 pb-1 pt-3 text-2xs font-semibold text-fg-muted">
                 Unified host inventory
               </p>
               <table className="data-table">
@@ -864,7 +853,7 @@ export function NetworkLabView() {
                   {analysis.hosts.map((host) => (
                     <tr key={host.ip}>
                       <td className="font-mono text-fg">{host.ip}</td>
-                      <td className="font-mono text-[11px] text-fg-dim">
+                      <td className="font-mono text-2xs text-fg-dim">
                         {summarizeMacClaims(host.mac_claims)}
                       </td>
                       <td>{formatSeenMs(host.first_seen_ms)}</td>
@@ -894,11 +883,7 @@ export function NetworkLabView() {
 
       {mode === "live" && (
         <section aria-label="Live monitor" className="flex min-h-0 flex-1 flex-col">
-          {liveError ? (
-            <div role="alert" className="mx-3 border border-err/50 bg-err/10 px-3 py-1 font-mono text-[10px] text-err">
-              {liveError}
-            </div>
-          ) : null}
+          {liveError ? <ErrorStrip>{liveError}</ErrorStrip> : null}
           {!displayTimeline ? (
             <ModeCard
               title="Live monitor"
@@ -919,11 +904,7 @@ export function NetworkLabView() {
 
       {mode === "dns" && (
         <section aria-label="DNS monitor (passive)" className="flex min-h-0 flex-1 flex-col">
-          {dnsError ? (
-            <div role="alert" className="mx-3 border border-err/50 bg-err/10 px-3 py-1 font-mono text-[10px] text-err">
-              {dnsError}
-            </div>
-          ) : null}
+          {dnsError ? <ErrorStrip>{dnsError}</ErrorStrip> : null}
           {!dnsResult ? (
             <ModeCard
               title="DNS monitor"
@@ -972,24 +953,13 @@ export function NetworkLabView() {
               >
                 {reportBusy ? "exporting…" : "Export"}
               </ToolButton>
-              <label className="flex items-center gap-1 text-xs text-fg-dim">
-                <input
-                  type="checkbox"
-                  checked={reportIncludeDns}
-                  onChange={(event) => setReportIncludeDns(event.target.checked)}
-                  className="accent-[var(--color-orange)]"
-                  aria-label="Include DNS findings in the session report"
-                />
+              <CheckBox checked={reportIncludeDns} onChange={setReportIncludeDns}>
                 <span>include DNS findings</span>
-              </label>
+              </CheckBox>
               <ReportReceiptChip receipt={reportReceipt} />
               <InfoTip text="One structured artifact (ARP findings, event timeline, host inventory, DNS findings) rendered to bounded markdown and persisted as ONE case finding in the backend-selected saved case. Read-only over the capture; the frontend only ever receives a receipt." />
             </div>
-            {reportError ? (
-              <div role="alert" className="border border-err/50 bg-err/10 px-3 py-1 font-mono text-[10px] text-err">
-                {reportError}
-              </div>
-            ) : null}
+            {reportError ? <ErrorStrip>{reportError}</ErrorStrip> : null}
             <p className="text-xs leading-relaxed text-fg-muted">
               Export the opened capture as one case finding.
             </p>
@@ -1068,13 +1038,13 @@ export function TimelineTable({ wire }: { wire: LabEventsWire | null }) {
 function TimelineRow({ event }: { event: LabEventWire }) {
   return (
     <tr>
-      <td className="font-mono text-[11px]">{formatSeenMs(event.timestamp_ms)}</td>
+      <td className="font-mono text-2xs">{formatSeenMs(event.timestamp_ms)}</td>
       <td>
         <Chip tone={event.kind === "arp_conflict" || event.kind === "gateway_changed" ? "err" : "muted"}>
           {labEventKindLabel(event.kind)}
         </Chip>
       </td>
-      <td className="font-mono text-[11px]">{event.subject}</td>
+      <td className="font-mono text-2xs">{event.subject}</td>
       <td className="text-fg-muted">{event.detail}</td>
     </tr>
   );
@@ -1157,13 +1127,13 @@ export function DnsFindingsTable({ wire }: { wire: DnsMonitorWire | null }) {
                   {dnsFindingKindLabel(finding.kind)}
                 </Chip>
               </td>
-              <td className="font-mono text-[11px]">
+              <td className="font-mono text-2xs">
                 {finding.question_name} · {questionTypeLabel(finding.question_type)}
               </td>
-              <td className="font-mono text-[11px] text-fg-dim" title={formatAnswerSet(finding.baseline)}>
+              <td className="font-mono text-2xs text-fg-dim" title={formatAnswerSet(finding.baseline)}>
                 {formatAnswerSet(finding.baseline)}
               </td>
-              <td className="font-mono text-[11px] text-fg-dim" title={formatAnswerSet(finding.later)}>
+              <td className="font-mono text-2xs text-fg-dim" title={formatAnswerSet(finding.later)}>
                 {formatAnswerSet(finding.later)}
               </td>
               <td>{formatSeenMs(finding.first_seen_ms)}</td>

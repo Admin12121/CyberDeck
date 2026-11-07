@@ -15,7 +15,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { GitCompare, Network, Play } from "lucide-react";
 import { Chip, EmptyState, Select } from "@ds/panes";
-import { IconRail, IconButton, InfoTip, StatusStrip, WorkspaceShell } from "@ds/compact";
+import { ErrorStrip, IconRail, IconButton, InfoTip, StatusStrip, WorkspaceShell } from "@ds/compact";
 import {
   isDesktop, netscanHistory, netscanDiffV1, netscanTopologyV1,
   type ScanHistoryItemWire, type ScanDiffWire, type ScanTopologyWire,
@@ -232,7 +232,7 @@ export function ScanInsightsView() {
             ariaLabel="Baseline scan session"
             className="w-56"
           />
-          <span className="font-mono text-[10px] text-fg-muted">→</span>
+          <span className="font-mono text-3xs text-fg-muted">→</span>
           <Select
             value={compareId}
             onChange={setCompareId}
@@ -266,7 +266,7 @@ export function ScanInsightsView() {
       )}
       status={statusItems.some((item) => item !== null) ? <StatusStrip items={statusItems} /> : undefined}
     >
-      {error ? <div className="border-b border-err/50 bg-err/10 px-2 py-1 font-mono text-[10px] text-err">{error}</div> : null}
+      {error ? <ErrorStrip>{error}</ErrorStrip> : null}
       <CaseGate activity="Scan insights" />
       <div className="flex min-h-0 flex-1 flex-col bg-panel">
         {!desktop ? (
@@ -361,7 +361,7 @@ export function ScanInsightsView() {
         ) : (
           <div className="flex h-full min-h-0 flex-col">
             {topology.truncated ? (
-              <div className="shrink-0 border-b border-warn/40 bg-warn/10 px-2 py-1 font-mono text-[10px] text-warn" role="status">
+              <div className="shrink-0 border-b border-warn/40 bg-warn/10 px-2 py-1 font-mono text-3xs text-warn" role="status">
                 more hosts observed than the {TOPOLOGY_NODE_LIMIT}-node bound; showing the lowest addresses deterministically
               </div>
             ) : null}

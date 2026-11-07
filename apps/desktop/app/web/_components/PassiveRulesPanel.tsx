@@ -1,6 +1,7 @@
 "use client";
 import { useEffect, useRef, useState } from "react";
-import { ToolButton } from "@ds/panes";
+import { CheckBox, ToolButton } from "@ds/panes";
+import { ErrorStrip } from "@ds/compact";
 import {
   cancelWebAssessment, listWebPassiveRules, saveWebAssessmentFindings,
   startWebPassiveScan, webAssessmentStatus,
@@ -95,7 +96,7 @@ export function PassiveRulesPanel({ enabled, caseId, revision, generation }: Pro
   const categories = Array.from(new Set(rules.map((rule) => rule.category)));
   const busy = job?.state === "running";
   return <div className="shrink-0 border-b border-line bg-panel">
-    <div className="flex items-center gap-2 px-2 py-1 text-[11px]">
+    <div className="flex items-center gap-2 px-2 py-1 text-2xs">
       <ToolButton onClick={() => setOpen((value) => !value)}>{open ? "Hide" : "Passive rules"}</ToolButton>
       <span className="text-fg-muted">Check consented volatile History without sending requests</span>
       <span className="ml-auto text-fg-muted">
@@ -103,7 +104,7 @@ export function PassiveRulesPanel({ enabled, caseId, revision, generation }: Pro
           : rules.length ? rules.length + " rules · offline only" : "Offline only"}
       </span>
     </div>
-    {open && <div className="max-h-72 space-y-2 overflow-auto border-t border-line px-3 py-2 text-[11px]">
+    {open && <div className="max-h-72 space-y-2 overflow-auto border-t border-line px-3 py-2 text-2xs">
       {!enabled && <div className="text-fg-muted">Start the proxy and enable case-bound History consent first.</div>}
       <div className="flex items-center gap-2">
         <ToolButton disabled={!enabled || busy} onClick={() => setChosen(rules.map((rule) => rule.id))}>All</ToolButton>
@@ -111,18 +112,19 @@ export function PassiveRulesPanel({ enabled, caseId, revision, generation }: Pro
         <span className="text-fg-muted">{chosen.length} of {rules.length} selected</span>
       </div>
       {categories.map((category) => <div key={category} className="space-y-1">
-        <div className="text-[10px] uppercase tracking-wide text-fg-muted">
+        <div className="text-3xs uppercase tracking-wide text-fg-muted">
           {CATEGORY_LABELS[category]}
         </div>
         <div className="flex flex-wrap gap-x-4 gap-y-1">
-          {rules.filter((rule) => rule.category === category).map((rule) => <label
-            key={rule.id} className="flex items-center gap-1 text-fg-dim"
+          {rules.filter((rule) => rule.category === category).map((rule) => <span
+            key={rule.id}
             title={rule.id + " · " + rule.severity + " severity · " + rule.confidence + " confidence"}>
-            <input type="checkbox" disabled={!enabled || busy}
-              checked={chosen.includes(rule.id)} onChange={(e) => setChosen((selected) =>
-                e.target.checked ? [...selected, rule.id] : selected.filter((id) => id !== rule.id))} />
-            {rule.title}
-          </label>)}
+            <CheckBox disabled={!enabled || busy}
+              checked={chosen.includes(rule.id)} onChange={(checked) => setChosen((selected) =>
+                checked ? [...selected, rule.id] : selected.filter((id) => id !== rule.id))}>
+              {rule.title}
+            </CheckBox>
+          </span>)}
         </div>
       </div>)}
       <div className="flex items-center gap-2">
@@ -136,7 +138,7 @@ export function PassiveRulesPanel({ enabled, caseId, revision, generation }: Pro
           </ToolButton>}
         <span className="text-fg-muted">No request bodies, tokens, cookie names or values in findings.</span>
       </div>
-      {error && <div role="alert" className="text-err">{error}</div>}
+      {error && <ErrorStrip>{error}</ErrorStrip>}
       {job?.state === "completed" && <div className="max-h-44 overflow-auto">
         <table className="data-table">
           <thead><tr><th>Rule</th><th>Severity</th><th>Confidence</th><th>History</th><th>Reason</th></tr></thead>

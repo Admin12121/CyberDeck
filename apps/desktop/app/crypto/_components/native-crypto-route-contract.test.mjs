@@ -71,7 +71,10 @@ test("Recovery V1 real route uses existing typed native calls and authorized rev
   }
   assert.ok(read("apps/desktop/src-tauri/src/main.rs").includes("recovery_select_wordlist_v1"));
   assert.ok(view.includes("maxLength={MAX_HASH_INPUT_CHARS}"));
-  assert.ok(view.includes("resize-none"));
+  // The hash input renders through the shared TextArea primitive and stays a
+  // bounded fixed-height box (the primitive's resize-y is clamped by min/max).
+  assert.ok(view.includes("<TextArea"));
+  assert.ok(view.includes("max-h-28"));
   assert.ok(view.includes("showNextCandidates(event.currentTarget)"));
   assert.ok(ui.includes("Scroll to view more masked matches"));
   assert.ok(ui.includes('<AccordionItem value="advanced"'));

@@ -3,11 +3,11 @@ import { createContext, useCallback, useContext, useEffect, useRef, useState, ty
 import { Play, Square, Trash2, Eye, EyeOff, FileUp, SlidersHorizontal, FileText, Library, Download, Hash } from "lucide-react";
 import { Phosphor } from "@lucasmarkes/hairline/react";
 import { Accordion, AccordionItem, AccordionTrigger, AccordionPanel } from "@/components/ui/accordion";
-import { Chip } from "@ds/panes";
+import { ErrorStrip, ProgressBar } from "@ds/compact";
+import { Chip, NumberInput, Select, TextArea, TextInput } from "@ds/panes";
 import { hasCurrentRecoveryScope, recoveryDisplay } from "./recovery-presentation";
 import { chooseRecoveryBackend, DEFAULT_CANDIDATES, DEFAULT_MATCHES, DEFAULT_OPENCL_BATCH } from "./recovery-auto";
 import { Button } from "@/components/ui/button";
-import { Select } from "@ds/panes";
 import { useCaseReady, useWorkbenchCase } from "@state/workbench";
 import {
   isDesktop, recoveryCancelV1, recoveryDevicesV1, recoveryDiscardV1,
@@ -599,7 +599,7 @@ export function NativeRecoveryControls() {
     return (
       <section aria-label="Recovery controls" className="border-b border-line px-3 pb-3 pt-3">
         <h3 className="text-xs font-semibold text-fg">Recovery</h3>
-        <p className="pt-1 text-[11px] text-fg-muted">Runs in the CyberDeck desktop app.</p>
+        <p className="pt-1 text-2xs text-fg-muted">Runs in the CyberDeck desktop app.</p>
       </section>
     );
   }
@@ -607,7 +607,7 @@ export function NativeRecoveryControls() {
     return (
       <section aria-label="Recovery controls" className="border-b border-line px-3 pb-3 pt-3">
         <h3 className="text-xs font-semibold text-fg">Recovery</h3>
-        <p className="pt-1 text-[11px] text-fg-muted">
+        <p className="pt-1 text-2xs text-fg-muted">
           {r.hash.length > 0 ? "Unsupported hash format." : "Paste a hash to start recovery."}
         </p>
       </section>
@@ -625,7 +625,7 @@ export function NativeRecoveryControls() {
       <div className="mt-4 space-y-1.5">
         <div className="flex items-center gap-2">
           <label className="min-w-0 flex-1 space-y-1">
-            <span className="text-[11px] text-fg-dim">Attack mode</span>
+            <span className="text-2xs text-fg-dim">Attack mode</span>
             <Select ariaLabel="Recovery attack mode" value={r.attackMode}
               onChange={(value) => {
                 if (r.jobId === null && !r.busy && (value === "wordlist" || value === "mask")) {
@@ -638,9 +638,9 @@ export function NativeRecoveryControls() {
               ]} className="w-full" />
           </label>
           <label className="min-w-0 flex-1 space-y-1">
-            <span className="text-[11px] text-fg-dim">Hash file · optional</span>
+            <span className="text-2xs text-fg-dim">Hash file · optional</span>
             <Button size="sm" variant="outline"
-              className="h-8 w-full justify-start gap-1.5 rounded-md px-2 text-[11px]"
+              className="h-8 w-full justify-start gap-1.5 rounded-md px-2 text-2xs"
               title={r.hashInput ? r.hashInput.count + " hashes bound (" + r.hashInput.source + ")" : "Crack a whole hash file in one pass"}
               disabled={!r.desktop || !r.scope || r.hashInputBusy || r.jobId !== null || r.busy}
               onClick={() => void r.importHashFile()}>
@@ -654,28 +654,32 @@ export function NativeRecoveryControls() {
         {r.attackMode === "mask" ? (
           <div className="space-y-1.5">
             <label className="block space-y-1">
-              <span className="text-[11px] text-fg-dim">Custom charsets · optional</span>
-              <input type="text" aria-label="Custom mask charsets"
-                value={r.customCharsets} maxLength={1200}
-                disabled={r.jobId !== null || r.busy}
-                onChange={(event) => { r.setCustomCharsets(event.target.value.slice(0, 1200)); r.clearReveal(); }}
+              <span className="text-2xs text-fg-dim">Custom charsets · optional</span>
+              <TextInput ariaLabel="Custom mask charsets"
+                value={r.customCharsets}
+                onChange={(value) => {
+                  if (r.jobId !== null || r.busy) return;
+                  r.setCustomCharsets(value.slice(0, 1200)); r.clearReveal();
+                }}
                 placeholder="1=0123456789abcdef;2=ABC"
-                className="h-8 w-full rounded-md border border-line bg-app px-2 font-mono text-xs text-fg outline-none focus-visible:ring-1 focus-visible:ring-orange disabled:opacity-50" />
+                className={r.jobId !== null || r.busy ? "w-full opacity-40" : "w-full"} />
             </label>
             <label className="block space-y-1">
-              <span className="text-[11px] text-fg-dim">Mask pattern</span>
-              <input type="text" aria-label="Recovery mask pattern"
-                value={r.maskText} maxLength={256}
-                disabled={r.jobId !== null || r.busy}
-                onChange={(event) => { r.setMaskText(event.target.value.slice(0, 256)); r.clearReveal(); }}
+              <span className="text-2xs text-fg-dim">Mask pattern</span>
+              <TextInput ariaLabel="Recovery mask pattern"
+                value={r.maskText}
+                onChange={(value) => {
+                  if (r.jobId !== null || r.busy) return;
+                  r.setMaskText(value.slice(0, 256)); r.clearReveal();
+                }}
                 placeholder="?u?l?l?o?d?d?d?d"
-                className="h-8 w-full rounded-md border border-line bg-app px-2 font-mono text-xs text-fg outline-none focus-visible:ring-1 focus-visible:ring-orange disabled:opacity-50" />
+                className={r.jobId !== null || r.busy ? "w-full opacity-40" : "w-full"} />
             </label>
           </div>
         ) : null}
         <div className="flex items-center justify-between gap-2">
-          <span className="text-[11px] font-medium text-fg-dim">{r.attackMode === "mask" ? "Mask target" : "Wordlist"}</span>
-          <span className="text-[10px] text-fg-muted">{r.selectedWordlist
+          <span className="text-2xs font-medium text-fg-dim">{r.attackMode === "mask" ? "Mask target" : "Wordlist"}</span>
+          <span className="text-3xs text-fg-muted">{r.selectedWordlist
             ? r.selectedWordlist.size_bytes.toLocaleString() + " bytes"
             : "Required"}</span>
         </div>
@@ -690,7 +694,7 @@ export function NativeRecoveryControls() {
             onClick={() => void r.chooseWordlist()}>
             {r.selectedWordlist ? <FileText size={15} className="shrink-0" aria-hidden="true" />
               : <FileUp size={15} className="shrink-0" aria-hidden="true" />}
-            <span className="min-w-0 flex-1 truncate font-mono text-[11px] text-fg-dim"
+            <span className="min-w-0 flex-1 truncate font-mono text-2xs text-fg-dim"
               title={fileLabel}>{r.choosingWordlist ? "Selecting…" : fileLabel}</span>
           </Button>
           <Button size="icon" variant="outline" className="h-10 w-10 shrink-0 rounded-md"
@@ -737,19 +741,19 @@ export function NativeRecoveryControls() {
         {r.libraryOpen && r.attackMode === "wordlist" ? (
           <div role="region" aria-label="Wordlist library" className="space-y-1.5 rounded-md border border-line bg-app p-2">
             <div className="flex items-center justify-between gap-2">
-              <span className="text-[10px] font-semibold uppercase tracking-wider text-fg-muted">Library</span>
-              <Button size="sm" variant="ghost" className="h-6 px-2 text-[10px] text-fg-muted"
+              <span className="text-3xs font-semibold uppercase tracking-wider text-fg-muted">Library</span>
+              <Button size="sm" variant="ghost" className="h-6 px-2 text-3xs text-fg-muted"
                 onClick={() => void r.refreshLibrary()} disabled={!!r.libraryBusy}>
                 Refresh
               </Button>
             </div>
             {r.libraryEntries === null ? (
-              <p className="text-[11px] text-fg-muted">Loading library…</p>
+              <p className="text-2xs text-fg-muted">Loading library…</p>
             ) : r.libraryEntries.map((entry) => (
               <div key={entry.id} className="flex items-center justify-between gap-2 border-t border-line/60 pt-1.5 first:border-0 first:pt-0">
                 <div className="min-w-0">
-                  <p className="truncate text-[11px] text-fg" title={entry.name}>{entry.name}</p>
-                  <p className="text-[10px] text-fg-muted">
+                  <p className="truncate text-2xs text-fg" title={entry.name}>{entry.name}</p>
+                  <p className="text-3xs text-fg-muted">
                     {entry.present
                       ? entry.size_bytes.toLocaleString() + " bytes · " + entry.license_note
                       : "Not downloaded · " + entry.license_note}
@@ -757,7 +761,7 @@ export function NativeRecoveryControls() {
                 </div>
                 {entry.present ? (
                   <div className="flex shrink-0 items-center gap-1">
-                    <Button size="sm" variant="outline" className="h-7 px-2 text-[10px]"
+                    <Button size="sm" variant="outline" className="h-7 px-2 text-3xs"
                       disabled={!!r.libraryBusy || r.jobId !== null}
                       onClick={() => void r.useLibraryWordlist(entry.id)}>
                       Use
@@ -772,7 +776,7 @@ export function NativeRecoveryControls() {
                     ) : null}
                   </div>
                 ) : (
-                  <Button size="sm" variant="outline" className="h-7 shrink-0 gap-1 px-2 text-[10px]"
+                  <Button size="sm" variant="outline" className="h-7 shrink-0 gap-1 px-2 text-3xs"
                     disabled={!!r.libraryBusy}
                     onClick={() => void r.downloadLibraryWordlist(entry.id)}>
                     <Download size={12} aria-hidden="true" />
@@ -785,15 +789,15 @@ export function NativeRecoveryControls() {
             ))}
           </div>
         ) : null}
-        {r.wordlistError ? <p role="alert" className="text-[11px] text-err">{r.wordlistError}</p> : null}
+        {r.wordlistError ? <ErrorStrip>{r.wordlistError}</ErrorStrip> : null}
         {statusText
-          ? <p role="status" className="pt-1 text-[11px] text-fg-muted">{statusText}</p>
+          ? <p role="status" className="pt-1 text-2xs text-fg-muted">{statusText}</p>
           : null}
       </div>
 
       <Accordion defaultValue={[]} className="mt-3 border-t border-line/70">
         <AccordionItem value="advanced" className="border-0">
-          <AccordionTrigger className="group w-full rounded-none px-0 py-2.5 text-[11px] font-medium text-fg-dim hover:text-fg focus-visible:ring-2 focus-visible:ring-orange">
+          <AccordionTrigger className="group w-full rounded-none px-0 py-2.5 text-2xs font-medium text-fg-dim hover:text-fg focus-visible:ring-2 focus-visible:ring-orange">
             <span className="flex min-w-0 items-center gap-2">
               <SlidersHorizontal size={14} aria-hidden="true" className="text-fg-muted" />
               Advanced settings
@@ -801,7 +805,7 @@ export function NativeRecoveryControls() {
           </AccordionTrigger>
           <AccordionPanel className="space-y-3 border-t border-line/50 pt-3 pb-1">
             <div className="space-y-1.5">
-              <span className="text-[10px] font-semibold uppercase tracking-wider text-fg-muted">Engine</span>
+              <span className="text-3xs font-semibold uppercase tracking-wider text-fg-muted">Engine</span>
               <Select ariaLabel="Recovery execution engine" value={r.engineChoice}
                 onChange={(value) => {
                   if (r.jobId === null && !r.busy && (value === "rust" || value === "hashcat")) {
@@ -826,14 +830,14 @@ export function NativeRecoveryControls() {
                 ]} className="w-full" />
               {r.isKdfHash ? (
                 <div className="space-y-1">
-                  <span className="text-[11px] text-fg-dim">Hash family</span>
-                  <p className="rounded-md border border-line bg-app px-2 py-1.5 text-[11px] text-fg">
+                  <span className="text-2xs text-fg-dim">Hash family</span>
+                  <p className="rounded-md border border-line bg-app px-2 py-1.5 text-2xs text-fg">
                     Modular KDF · CPU
                   </p>
                 </div>
               ) : (
                 <label className="block space-y-1">
-                  <span className="text-[11px] text-fg-dim">Hash algorithm</span>
+                  <span className="text-2xs text-fg-dim">Hash algorithm</span>
                   <Select ariaLabel="Recovery wordlist hash algorithm"
                     value={r.hashcatAlgorithm}
                     onChange={(value) => {
@@ -850,9 +854,9 @@ export function NativeRecoveryControls() {
                       r.hashcatCapability.modes.some((mode) => mode.algorithm === entry.value)
                     ).map(({value, label}) => ({value, label}))}
                     className="w-full" />
-                  <span className="text-[10px] text-fg-muted">MD5, NTLM and MD4 share 32 hex digits.</span>
+                  <span className="text-3xs text-fg-muted">MD5, NTLM and MD4 share 32 hex digits.</span>
                   {r.engineChoice === "hashcat" && r.hashcatMode.pwMax ? (
-                    <span className="block text-[10px] text-fg-muted"
+                    <span className="block text-3xs text-fg-muted"
                       title={"This mode's upstream optimized kernel skips candidates longer than " +
                         r.hashcatMode.pwMax + " characters; longer wordlist entries are not tested."}>
                       Optimized kernel tests candidates up to {r.hashcatMode.pwMax} characters (upstream kernel limit).
@@ -862,7 +866,7 @@ export function NativeRecoveryControls() {
               )}
               {r.engineChoice === "hashcat" && (
                 <label className="block space-y-1">
-                  <span className="text-[11px] text-fg-dim">Wordlist transformation</span>
+                  <span className="text-2xs text-fg-dim">Wordlist transformation</span>
                   <Select ariaLabel="Embedded Hashcat candidate preset"
                     value={r.hashcatPreset}
                     onChange={(value) => {
@@ -877,21 +881,21 @@ export function NativeRecoveryControls() {
                       { value: "uppercase", label: "Uppercase candidates" },
                       { value: "append_one", label: "Append 1 to candidates" },
                     ]} className="w-full" />
-                  <span className="text-[10px] text-fg-muted">
+                  <span className="text-3xs text-fg-muted">
                     Prepared privately and bounded before native Hashcat; not arbitrary Hashcat rule scripts.
                   </span>
                 </label>
               )}
               {r.hashcatCapability && !r.hashcatCapability.available ? (
-                <p className="text-[10px] text-fg-muted">
+                <p className="text-3xs text-fg-muted">
                   GPU engine not built (dev). See docs/crypto-review.md.
                 </p>
               ) : null}
             </div>
             <div className="space-y-1.5">
-              <span className="text-[10px] font-semibold uppercase tracking-wider text-fg-muted">Compute</span>
+              <span className="text-3xs font-semibold uppercase tracking-wider text-fg-muted">Compute</span>
               {r.engineChoice === "hashcat" ? (
-                <p className="text-[10px] text-fg-muted">Device selection is handled by Hashcat.</p>
+                <p className="text-3xs text-fg-muted">Device selection is handled by Hashcat.</p>
               ) : <Select ariaLabel="Recovery V1 backend" value={r.backend}
                 onChange={(value) => {
                   if (r.jobId === null && !r.busy) { r.setBackend(value); r.clearReveal(); }
@@ -908,23 +912,19 @@ export function NativeRecoveryControls() {
             </div>
             {r.engineChoice === "rust" && !r.isKdfHash && (
               <div className="space-y-1.5">
-                <label className="block text-[10px] font-semibold uppercase tracking-wider text-fg-muted"
-                  htmlFor="recovery-native-rules">CPU wordlist rules · optional</label>
-                <textarea id="recovery-native-rules"
-                  aria-label="Native CPU wordlist transformation rules"
-                  value={r.ruleText} maxLength={4096}
+                <span className="block text-3xs font-semibold uppercase tracking-wider text-fg-muted">CPU wordlist rules · optional</span>
+                <TextArea ariaLabel="Native CPU wordlist transformation rules"
+                  value={r.ruleText} maxLength={4096} rows={3}
                   disabled={r.jobId !== null || r.busy}
-                  onChange={(event) => {
-                    const text = event.target.value.slice(0, 4096);
+                  onChange={(value) => {
+                    const text = value.slice(0, 4096);
                     r.setRuleText(text);
                     if (text.trim()) r.setBackend("cpu");
                     r.clearReveal();
                   }}
-                  rows={3} spellCheck={false}
-                  placeholder={":\n$1\nu"}
-                  className="w-full resize-y rounded-md border border-line bg-app p-2 font-mono text-xs text-fg outline-none focus-visible:ring-1 focus-visible:ring-orange disabled:opacity-50" />
+                  placeholder={":\n$1\nu"} />
                 <label className="block space-y-1">
-                  <span className="text-[11px] text-fg-dim">Bundled rule sets</span>
+                  <span className="text-2xs text-fg-dim">Bundled rule sets</span>
                   <Select ariaLabel="Bundled rule set library"
                     value={r.ruleSetId ?? "none"}
                     onChange={(value) => {
@@ -940,43 +940,40 @@ export function NativeRecoveryControls() {
                       })),
                     ]} className="w-full" />
                   {r.ruleSetNote ? (
-                    <span className="block text-[10px] text-fg-muted">{r.ruleSetNote}</span>
+                    <span className="block text-3xs text-fg-muted">{r.ruleSetNote}</span>
                   ) : null}
                 </label>
               </div>
             )}
             <div className="space-y-1.5">
-              <span className="text-[10px] font-semibold uppercase tracking-wider text-fg-muted">Processing limits</span>
+              <span className="text-3xs font-semibold uppercase tracking-wider text-fg-muted">Processing limits</span>
               <div className="grid grid-cols-2 gap-2">
                 <label className="min-w-0 space-y-1">
-                  <span className="text-[11px] text-fg-muted">Passwords to try</span>
-                  <input type="number" aria-label="Recovery candidate budget" min={1} max={1000000}
-                    disabled={r.jobId !== null || r.busy}
-                    value={r.maxCandidates} onChange={(event) => {
-                      const value = Number(event.target.value);
-                      if (Number.isSafeInteger(value)) r.setMaxCandidates(Math.max(1, Math.min(1000000, value)));
-                    }} className="h-8 w-full min-w-0 rounded-md border border-line bg-app px-2 font-mono text-xs text-fg outline-none focus-visible:ring-1 focus-visible:ring-orange disabled:opacity-50" />
+                  <span className="text-2xs text-fg-muted">Passwords to try</span>
+                  <NumberInput ariaLabel="Recovery candidate budget" min={1} max={1000000}
+                    value={r.maxCandidates} onChange={(value) => {
+                      if (r.jobId !== null || r.busy || !Number.isSafeInteger(value)) return;
+                      r.setMaxCandidates(Math.max(1, Math.min(1000000, value)));
+                    }} className={r.jobId !== null || r.busy ? "w-full opacity-40" : "w-full"} />
                 </label>
                 <label className="min-w-0 space-y-1">
-                  <span className="text-[11px] text-fg-muted">Masked results</span>
-                  <input type="number" aria-label="Maximum matches" min={1} max={4}
-                    disabled={r.jobId !== null || r.busy}
-                    value={r.maxMatches} onChange={(event) => {
-                      const value = Number(event.target.value);
-                      if (Number.isSafeInteger(value)) r.setMaxMatches(Math.max(1, Math.min(4, value)));
-                    }} className="h-8 w-full min-w-0 rounded-md border border-line bg-app px-2 font-mono text-xs text-fg outline-none focus-visible:ring-1 focus-visible:ring-orange disabled:opacity-50" />
+                  <span className="text-2xs text-fg-muted">Masked results</span>
+                  <NumberInput ariaLabel="Maximum matches" min={1} max={4}
+                    value={r.maxMatches} onChange={(value) => {
+                      if (r.jobId !== null || r.busy || !Number.isSafeInteger(value)) return;
+                      r.setMaxMatches(Math.max(1, Math.min(4, value)));
+                    }} className={r.jobId !== null || r.busy ? "w-full opacity-40" : "w-full"} />
                 </label>
               </div>
             </div>
             {r.selectedDevice !== null ? (
               <label className="block space-y-1">
-                <span className="text-[11px] text-fg-muted">OpenCL batch size</span>
-                <input type="number" aria-label="OpenCL batch size" min={1} max={65536}
-                  disabled={r.jobId !== null || r.busy}
-                  value={r.batchSize} onChange={(event) => {
-                    const value = Number(event.target.value);
-                    if (Number.isSafeInteger(value)) r.setBatchSize(Math.max(1, Math.min(65536, value)));
-                  }} className="h-8 w-full rounded-md border border-line bg-app px-2 font-mono text-xs text-fg outline-none focus-visible:ring-1 focus-visible:ring-orange disabled:opacity-50" />
+                <span className="text-2xs text-fg-muted">OpenCL batch size</span>
+                <NumberInput ariaLabel="OpenCL batch size" min={1} max={65536}
+                  value={r.batchSize} onChange={(value) => {
+                    if (r.jobId !== null || r.busy || !Number.isSafeInteger(value)) return;
+                    r.setBatchSize(Math.max(1, Math.min(65536, value)));
+                  }} className={r.jobId !== null || r.busy ? "w-full opacity-40" : "w-full"} />
               </label>
             ) : null}
           </AccordionPanel>
@@ -989,7 +986,7 @@ export function NativeRecoveryControls() {
 export function NativeRecoveryDevices() {
   const { inventory, deviceError, desktop } = useRecovery();
   return (
-    <section aria-label="Recovery devices" className="space-y-2 px-3 py-3 text-[11px]">
+    <section aria-label="Recovery devices" className="space-y-2 px-3 py-3 text-2xs">
       <div className="text-xs font-semibold text-fg">Devices</div>
       <div className="flex items-center justify-between gap-2">
         <div><span>CPU · Native Rust</span>
@@ -1009,7 +1006,7 @@ export function NativeRecoveryDevices() {
       {desktop && inventory?.devices.length === 0 ? (
         <p className="text-fg-muted">No OpenCL devices detected. CPU remains available.</p>
       ) : null}
-      {deviceError ? <p role="alert" className="text-err">{deviceError}</p> : null}
+      {deviceError ? <ErrorStrip>{deviceError}</ErrorStrip> : null}
       {inventory && !inventory.opencl_detected ? (
         <details className="text-fg-muted">
           <summary className="cursor-pointer">OpenCL details</summary>
@@ -1067,32 +1064,32 @@ export function NativeRecoveryResults() {
           {view.kind === "completed" ? <Chip tone="ok">Masked</Chip> : null}
           {view.kind === "failed" ? <Chip tone="err">Failed</Chip> : null}
         </div>
-        {r.jobId !== null ? <span className="font-mono text-[11px] text-fg-muted">Job #{r.jobId}</span> : null}
+        {r.jobId !== null ? <span className="font-mono text-2xs text-fg-muted">Job #{r.jobId}</span> : null}
       </div>
       {isActive ? (
         <div className="flex items-center gap-3 rounded-md border border-line/70 bg-app/50 px-2.5 py-2">
           <Phosphor intensity={1} play theme="dark" label="Recovery activity"
             className="h-20 w-20 shrink-0" />
           <div className="min-w-0 space-y-1">
-            <div className="text-[11px] font-semibold text-fg">Processing wordlist</div>
-            <p className="text-[11px] leading-relaxed text-fg-muted">{view.detail}</p>
+            <div className="text-2xs font-semibold text-fg">Processing wordlist</div>
+            <p className="text-2xs leading-relaxed text-fg-muted">{view.detail}</p>
           </div>
         </div>
-      ) : <p className="text-[11px] leading-relaxed text-fg-muted">{view.detail}</p>}
+      ) : <p className="text-2xs leading-relaxed text-fg-muted">{view.detail}</p>}
       {r.status?.progress && (
         <div className="space-y-1.5">
           {r.status.progress.stage ? (
-            <p className="text-[11px] text-fg-muted">Stage · {r.status.progress.stage}</p>
+            <p className="text-2xs text-fg-muted">Stage · {r.status.progress.stage}</p>
           ) : null}
-          <div className="flex justify-between gap-2 font-mono text-[11px] text-fg-dim">
+          <div className="flex justify-between gap-2 font-mono text-3xs text-fg-dim">
             <span>{r.status.progress.tried.toLocaleString()} / {r.status.progress.budget.toLocaleString()} candidates</span>
             <span>{r.percent}%</span>
           </div>
-          <progress className="h-2 w-full" aria-label="Native recovery progress" value={r.percent} max={100} />
+          <ProgressBar percent={r.percent} className="w-full" />
         </div>
       )}
       {r.status?.summary && (
-        <div className="flex flex-wrap gap-3 text-[11px] text-fg-muted">
+        <div className="flex flex-wrap gap-3 text-2xs text-fg-muted">
           {r.status.summary.engine.startsWith("embedded_hashcat")
               ? <span>Hashcat processed · count unavailable in ABI v1</span>
               : <span>{r.status.summary.tried.toLocaleString()} checked</span>}
@@ -1106,7 +1103,7 @@ export function NativeRecoveryResults() {
       {(r.status?.summary?.stages?.length ?? 0) > 0 ? (
         <div role="list" aria-label="Autopilot stage results" className="space-y-1">
           {r.status!.summary!.stages!.map((stage, index) => (
-            <div key={index} role="listitem" className="flex items-center justify-between gap-2 rounded-sm border border-line/70 bg-app/40 px-2.5 py-1.5 text-[11px]">
+            <div key={index} role="listitem" className="flex items-center justify-between gap-2 rounded-sm border border-line/70 bg-app/40 px-2.5 py-1.5 text-2xs">
               <span className="min-w-0 truncate text-fg-dim" title={stage.label}>{stage.label}</span>
               <span className="flex shrink-0 items-center gap-2 text-fg-muted">
                 <span className="font-mono">{stage.tried.toLocaleString()} tried</span>
@@ -1122,7 +1119,7 @@ export function NativeRecoveryResults() {
             <div key={ordinal} className="flex items-center justify-between gap-2 rounded-sm border border-line bg-app px-3 py-2">
               <div className="min-w-0">
                 <p className="font-mono text-xs text-fg">••••••••</p>
-                <p className="mt-1 text-[11px] text-fg-muted">Candidate #{match.candidate_index}</p>
+                <p className="mt-1 text-2xs text-fg-muted">Candidate #{match.candidate_index}</p>
               </div>
               <Button size="sm" variant="outline" className="h-8 gap-1.5"
                 title="Native OS confirmation required before revealing sensitive candidate bytes"
@@ -1134,11 +1131,11 @@ export function NativeRecoveryResults() {
           ))}
         </div>
       )}
-      {visibleMatches < matches.length ? <p className="text-[11px] text-fg-muted">Scroll to view more masked matches</p> : null}
+      {visibleMatches < matches.length ? <p className="text-2xs text-fg-muted">Scroll to view more masked matches</p> : null}
       {r.secretHex !== null && (
         <div role="region" aria-label="Transient recovered candidate" className="rounded-sm border border-line bg-app p-3">
           <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
-            <span className="text-[11px] text-warn">{revealedText === null ? "Sensitive binary candidate · hex" : "Recovered candidate · UTF-8"} · auto-hide in 30 seconds</span>
+            <span className="text-2xs text-warn">{revealedText === null ? "Sensitive binary candidate · hex" : "Recovered candidate · UTF-8"} · auto-hide in 30 seconds</span>
             <Button size="sm" variant="outline" className="h-8 gap-1"
               onClick={r.clearReveal}><EyeOff size={13} aria-hidden="true" /> Hide</Button>
           </div>
@@ -1146,14 +1143,14 @@ export function NativeRecoveryResults() {
             {revealedText ?? r.secretHex}
           </code>
           {revealedText !== null ? (
-            <details className="mt-2 text-[10px] text-fg-muted">
+            <details className="mt-2 text-3xs text-fg-muted">
               <summary className="cursor-pointer">Show exact candidate bytes (hex)</summary>
-              <code className="mt-1 block break-all font-mono text-[11px]">{r.secretHex}</code>
+              <code className="mt-1 block break-all font-mono text-2xs">{r.secretHex}</code>
             </details>
           ) : null}
         </div>
       )}
-      {r.error && <p role="alert" className="text-[11px] text-err">{r.error}</p>}
+      {r.error && <ErrorStrip>{r.error}</ErrorStrip>}
     </div>
   );
 }

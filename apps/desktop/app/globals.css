@@ -139,6 +139,7 @@
   --color-ok: var(--foreground);
   --color-warn: var(--muted-foreground);
   --color-err: var(--destructive);
+  --color-overlay: rgb(0 0 0 / 0.45);
 
   --font-sans: Inter, "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
   --font-mono: "Geist Mono", "JetBrains Mono", "Cascadia Mono", Consolas, monospace;

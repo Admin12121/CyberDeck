@@ -280,6 +280,61 @@ export function CategoryWorkspace({
 }
 
 
+/** The one error treatment: a full-width strip with the shared err tokens.
+ * Replaces the banner/boxed/paragraph/inline error variants. */
+export function ErrorStrip({ children }: { children: ReactNode }) {
+  return (
+    <div role="alert" className="shrink-0 border-b border-err/50 bg-err/10 px-3 py-1 font-mono text-3xs text-err">
+      {children}
+    </div>
+  );
+}
+
+/** The one progress treatment: bounded 0..100 bar on the shared track.
+ * Callers provide their own label row; the bar itself stays plain. */
+export function ProgressBar({ percent, className = "" }: { percent: number; className?: string }) {
+  const clamped = Math.max(0, Math.min(100, percent));
+  return (
+    <div className={`h-1.5 border border-line bg-app ${className}`}>
+      <div className="h-full bg-orange" style={{ width: `${clamped}%` }} />
+    </div>
+  );
+}
+
+/** One monospace block in a findings/results stack: bold header (with the
+ * honesty note one hover away) over bounded mono rows. Blocks separate by
+ * border, never by nested cards. */
+export function ResultStack({ title, info, children }: { title: ReactNode; info?: string; children?: ReactNode }) {
+  return (
+    <div className="border-t border-line p-2 text-3xs text-fg-muted">
+      <div className="mb-1 flex items-center gap-1 font-semibold text-fg">
+        <span>{title}</span>
+        {info ? <InfoTip text={info} /> : null}
+      </div>
+      {children}
+    </div>
+  );
+}
+
+/** The one hex-dump row renderer (offset / hex / ascii columns). Consumers
+ * pass hexDump() rows; truncation and paging stay the caller's concern. */
+export function HexRows({ rows }: { rows: readonly { offset: number; hex: string; ascii: string }[] }) {
+  return (
+    <>
+      {rows.map((row) => (
+        <div key={row.offset}>
+          <span className="text-fg-muted">{row.offset.toString(16).padStart(8, "0")}</span>
+          {"  "}
+          {row.hex}
+          {"  "}
+          <span className="text-orange">{row.ascii}</span>
+        </div>
+      ))}
+    </>
+  );
+}
+
+
 /**
  * ModeCard — the idle/control surface for a tool mode, copying the Web
  * proxy card exactly (the user-designated reference): centered Frame with

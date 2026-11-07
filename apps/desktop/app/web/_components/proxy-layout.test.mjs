@@ -25,7 +25,7 @@ test("the sole Proxy CA download action belongs in the top-right workspace tab h
 });
 
 test("Proxy renders through the shared ModeCard: centered coss Frame > FrameHeader > FramePanel hierarchy", () => {
-  assert.match(proxy, /import \{ ModeCard \} from "@ds\/compact";/);
+  assert.match(proxy, /import \{[^}]*ModeCard[^}]*\} from "@ds\/compact";/);
   assert.match(proxy, /<ModeCard\b/);
   assert.match(proxy, /title="Local interception proxy"/);
   assert.match(proxy, /state=\{status\.running \? "Running" : "Stopped"\}/);

@@ -1,6 +1,7 @@
 "use client";
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { Chip, Field, Pane, Resizer, TextInput, ToolButton } from "@ds/panes";
+import { Chip, EmptyState, Field, Pane, Resizer, TextInput, ToolButton } from "@ds/panes";
+import { ErrorStrip, HexRows } from "@ds/compact";
 import { hexDump } from "@lib/hex";
 import {
   fileHex,
@@ -157,7 +158,7 @@ export function EvidenceTree({ ctx }: { ctx: EvidenceContext }) {
       </div>}
     >
       {ctx.importError ? (
-        <div className="m-1 border border-err/50 p-2 font-mono text-[10px] text-err">{ctx.importError}</div>
+        <ErrorStrip>{ctx.importError}</ErrorStrip>
       ) : null}
       {ctx.desktop ? (
         <>
@@ -165,30 +166,34 @@ export function EvidenceTree({ ctx }: { ctx: EvidenceContext }) {
             <TextInput value={ctx.query} onChange={ctx.setQuery} ariaLabel="Filter case evidence by filename"
               placeholder="Filter imported evidence…" className="w-full" />
           </div>
-          <div className="px-2 py-1 text-[10px] uppercase tracking-wider text-fg-muted">▾ imported ({realFiles.length} of {ctx.artifacts.length})</div>
+          <div className="px-2 py-1 text-3xs uppercase tracking-wider text-fg-muted">▾ imported ({realFiles.length} of {ctx.artifacts.length})</div>
           {realFiles.map((artifact) => (
             <button
               key={artifact.id}
               type="button"
               onClick={() => ctx.setSelected({ id: artifact.id, real: true })}
               title={artifact.original_path ?? artifact.name}
-              className={`block w-full truncate px-2 py-1 text-left font-mono text-[11px] ${
-                ctx.selected?.id === artifact.id ? "bg-orange-dim text-orange" : "text-fg-dim hover:bg-raised hover:text-fg"
+              className={`block w-full truncate px-2 py-1 text-left font-mono text-2xs ${
+                ctx.selected?.id === artifact.id ? "bg-selected" : "text-fg-dim hover:bg-raised hover:text-fg"
               }`}
             >
               {artifact.name}
             </button>
           ))}
           {realFiles.length === 0 ? (
-            <div className="p-2 font-mono text-[10px] leading-relaxed text-fg-muted">
-              {ctx.artifacts.length ? "No imported filenames match the filter." : "No evidence in this case yet. Import a file; originals are copied into the case store and hashed."}
-            </div>
+            <EmptyState
+              title={ctx.artifacts.length ? "No filename matches" : "No evidence yet"}
+              detail={ctx.artifacts.length
+                ? "No imported filenames match the filter."
+                : "No evidence in this case yet. Import a file; originals are copied into the case store and hashed."}
+            />
           ) : null}
         </>
       ) : (
-        <div className="p-3 font-mono text-[11px] leading-relaxed text-fg-muted">
-          Case evidence requires the native CyberDeck desktop runtime. No synthetic evidence is displayed.
-        </div>
+        <EmptyState
+          title="Desktop required"
+          detail="Case evidence requires the native CyberDeck desktop runtime. No synthetic evidence is displayed."
+        />
       )}
     </Pane>
     <Resizer direction="horizontal" ariaLabel="Resize evidence tree" value={ctx.treeWidth} onChange={ctx.setTreeWidth} min={192} max={420} />
@@ -245,12 +250,12 @@ export function HexBody({ ctx, enabled = true }: { ctx: EvidenceContext; enabled
     ctx.setHexOffset(Math.min(parsed, Math.max(0, size - 1)));
   };
   if (error) {
-    return <div className="m-2 border border-err/50 p-2 font-mono text-[11px] text-err">{error}</div>;
+    return <ErrorStrip>{error}</ErrorStrip>;
   }
   if (hexData) {
     return (
       <>
-        <div className="flex items-center gap-2 border-b border-line bg-panel px-2 py-1 font-mono text-[11px]">
+        <div className="flex items-center gap-2 border-b border-line bg-panel px-2 py-1 font-mono text-2xs">
           <ToolButton onClick={() => ctx.setHexOffset(Math.max(0, ctx.hexOffset - 512))}
             disabled={ctx.hexOffset <= 0} title="Previous verified 512-byte window">Previous</ToolButton>
           <ToolButton onClick={() => ctx.setHexOffset(Math.min(Math.max(0, hexData.total_size - 1), ctx.hexOffset + 512))}
@@ -259,18 +264,10 @@ export function HexBody({ ctx, enabled = true }: { ctx: EvidenceContext; enabled
           <ToolButton onClick={jump} title="Open file offset">Go</ToolButton>
           <span className="ml-auto text-fg-muted">Verified byte window</span>
         </div>
-        <pre className="p-1 font-mono text-[11px] leading-relaxed text-fg-dim">
-          {hexData.rows.map((row) => (
-            <div key={row.offset}>
-              <span className="text-fg-muted">{row.offset.toString(16).padStart(8, "0")}</span>
-              {"  "}
-              {row.hex}
-              {"  "}
-              <span className="text-orange">{row.ascii}</span>
-            </div>
-          ))}
+        <pre className="p-1 font-mono text-2xs leading-relaxed text-fg-dim">
+          <HexRows rows={hexData.rows} />
         </pre>
-        <div className="sticky bottom-0 border-t border-line bg-panel px-2 py-0.5 font-mono text-[10px] text-fg-muted">
+        <div className="sticky bottom-0 border-t border-line bg-panel px-2 py-0.5 font-mono text-3xs text-fg-muted">
           {hexData.rows.length} rows from 0x{hexData.offset.toString(16)} · {hexData.total_size} total bytes · {hexData.complete ? "end of artifact" : "more bytes available"}
         </div>
       </>
@@ -279,19 +276,11 @@ export function HexBody({ ctx, enabled = true }: { ctx: EvidenceContext; enabled
   if (bytes) {
     const rows = hexDump(bytes);
     return (
-      <pre className="p-1 font-mono text-[11px] leading-relaxed text-fg-dim">
-        {rows.map((row) => (
-          <div key={row.offset}>
-            <span className="text-fg-muted">{row.offset.toString(16).padStart(8, "0")}</span>
-            {"  "}
-            {row.hex}
-            {"  "}
-            <span className="text-orange">{row.ascii}</span>
-          </div>
-        ))}
+      <pre className="p-1 font-mono text-2xs leading-relaxed text-fg-dim">
+        <HexRows rows={rows} />
       </pre>
     );
   }
-  return <div className="p-3 font-mono text-[11px] text-fg-muted">select evidence to inspect</div>;
+  return <EmptyState title="No selection" detail="select evidence to inspect" />;
 }
 

@@ -1,6 +1,7 @@
 "use client";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ArrowDown, ArrowUp, Copy, Play, Wand2, X } from "lucide-react";
+import { ErrorStrip, InfoTip } from "@ds/compact";
 import { Chip, EmptyState, Field, Pane, Resizer, Select, TextInput, ToolButton } from "@ds/panes";
 import {
   OPERATIONS,
@@ -132,7 +133,7 @@ export function CryptoOpsView() {
     <div className="flex h-full min-h-0 gap-px bg-line">
       <Pane title="Parameters" className="w-72 shrink-0">
         <div className="p-2">
-          <div className="mb-1 text-[10px] uppercase tracking-wider text-fg-muted">Algorithm</div>
+          <div className="mb-1 text-3xs uppercase tracking-wider text-fg-muted">Algorithm</div>
           <Select
             value={algo}
             onChange={(v) => {
@@ -144,7 +145,7 @@ export function CryptoOpsView() {
             ariaLabel="Digest algorithm"
             className="w-full"
           />
-          <div className="mb-1 mt-3 text-[10px] uppercase tracking-wider text-fg-muted">Input</div>
+          <div className="mb-1 mt-3 text-3xs uppercase tracking-wider text-fg-muted">Input</div>
           <textarea
             value={input}
             onChange={(e) => setInput(e.target.value)}
@@ -154,7 +155,7 @@ export function CryptoOpsView() {
           />
           {current.needsKey ? (
             <>
-              <div className="mb-1 mt-2 text-[10px] uppercase tracking-wider text-fg-muted">Key</div>
+              <div className="mb-1 mt-2 text-3xs uppercase tracking-wider text-fg-muted">Key</div>
               <TextInput value={key} onChange={setKey} placeholder="HMAC key" ariaLabel="HMAC key" className="w-full" />
             </>
           ) : null}
@@ -166,9 +167,9 @@ export function CryptoOpsView() {
               {fileBusy ? "hashing…" : "Hash a file…"}
             </ToolButton>
           </div>
-          {fileError ? <div className="mt-1 font-mono text-[10px] text-err">{fileError}</div> : null}
+          {fileError ? <div className="mt-1 font-mono text-3xs text-err">{fileError}</div> : null}
           {!desktop ? (
-            <p className="mt-2 font-mono text-[10px] leading-relaxed text-fg-muted">
+            <p className="mt-2 font-mono text-3xs leading-relaxed text-fg-muted">
               SHA algorithms run via WebCrypto here; MD5, CRC32, HMAC and file hashing use the native engine in the desktop app.
             </p>
           ) : null}
@@ -178,8 +179,8 @@ export function CryptoOpsView() {
         <div className="min-h-0 flex-1 overflow-auto">
           {fileDigest ? (
             <div className="p-3">
-              <div className="text-[10px] uppercase tracking-wider text-fg-muted">File digests: {fileDigest.name} ({fileDigest.size} bytes)</div>
-              <div className="mt-2 space-y-1 font-mono text-[11px]">
+              <div className="text-3xs uppercase tracking-wider text-fg-muted">File digests: {fileDigest.name} ({fileDigest.size} bytes)</div>
+              <div className="mt-2 space-y-1 font-mono text-2xs">
                 <div><span className="text-fg-muted">sha256 </span><span className="break-all text-ok">{fileDigest.sha256}</span></div>
                 <div><span className="text-fg-muted">sha1   </span><span className="break-all text-fg">{fileDigest.sha1}</span></div>
                 <div><span className="text-fg-muted">md5    </span><span className="break-all text-fg">{fileDigest.md5}</span></div>
@@ -187,10 +188,10 @@ export function CryptoOpsView() {
               </div>
             </div>
           ) : error ? (
-            <div className="m-2 border border-err/50 p-2 font-mono text-[11px] text-err">{error}</div>
+            <ErrorStrip>{error}</ErrorStrip>
           ) : result ? (
             <div className="p-3">
-              <div className="text-[10px] uppercase tracking-wider text-fg-muted">{current.label} (hex)</div>
+              <div className="text-3xs uppercase tracking-wider text-fg-muted">{current.label} (hex)</div>
               <div className="mt-1 break-all border border-line bg-app p-2 font-mono text-xs text-ok">{result.output_hex}</div>
               <div className="mt-2">
                 <ToolButton onClick={() => void navigator.clipboard?.writeText(result.output_hex)}>
@@ -203,7 +204,7 @@ export function CryptoOpsView() {
           )}
         </div>
         <div className="shrink-0 border-t border-line p-2">
-          <div className="mb-1 text-[10px] uppercase tracking-wider text-fg-muted">Compare digests</div>
+          <div className="mb-1 text-3xs uppercase tracking-wider text-fg-muted">Compare digests</div>
           <div className="space-y-1">
             <TextInput value={compareA} onChange={setCompareA} placeholder="digest A" ariaLabel="Digest A" className="w-full" />
             <TextInput value={compareB} onChange={setCompareB} placeholder="digest B" ariaLabel="Digest B" className="w-full" />
@@ -215,10 +216,13 @@ export function CryptoOpsView() {
         </div>
       </Pane>
       <Pane title="Provenance" className="w-72 shrink-0">
+        <div className="flex items-center gap-1.5 border-b border-line/50 px-3 py-1.5">
+          <span className="text-3xs uppercase tracking-wider text-fg-muted">Roadmap</span>
+          <InfoTip text="Next arc: streaming digests, KDF formats, benchmark planner" />
+        </div>
         <Field label="Engine" value={result?.engine ?? (desktop ? "cyberdeck-crypto (rust)" : "webcrypto fallback for SHA")} />
         <Field label="Engine version" value={result?.engine_version ?? (desktop ? "native" : "n/a")} />
         <Field label="Hashing vs encryption" value="digests are one-way; passwords verify against KDF formats" />
-        <Field label="Next arc" value="streaming digests, KDF formats, benchmark planner" />
       </Pane>
     </div>
   );

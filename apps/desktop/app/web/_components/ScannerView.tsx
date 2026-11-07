@@ -1,8 +1,8 @@
 "use client";
 import { useEffect, useRef, useState } from "react";
 import { Play, Square } from "lucide-react";
-import { Chip, EmptyState, Pane, TextInput, ToolButton } from "@ds/panes";
-import { WorkspaceShell } from "@ds/compact";
+import { CheckBox, Chip, EmptyState, Pane, Select, TextArea, TextInput, ToolButton } from "@ds/panes";
+import { ErrorStrip, InfoTip, WorkspaceShell } from "@ds/compact";
 import { isDesktop } from "@lib/ipc";
 import { useWebWorkflow } from "./WebWorkflow";
 import { useCaseReady, useWorkbench } from "@state/workbench";
@@ -181,7 +181,7 @@ export function ScannerView() {
           {advancedOpen ? "Hide advanced tests" : "Advanced tests"}
         </ToolButton>
         {(sessionCookie.trim() || sessionHeaders.trim()) && (
-          <span className="flex items-center gap-1 text-[11px] text-fg-dim">
+          <span className="flex items-center gap-1 text-2xs text-fg-dim">
             Session context enabled (volatile)
             <ToolButton onClick={() => { setSessionCookie(""); setSessionHeaders(""); }}
               title="Discard all volatile authentication headers and cookies before another scan">
@@ -189,7 +189,7 @@ export function ScannerView() {
             </ToolButton>
           </span>
         )}
-        <span className="ml-auto font-mono text-[10px] text-fg-muted">
+        <span className="ml-auto font-mono text-3xs text-fg-muted">
           {job ? `${job.kind} · ${job.state} · ${job.processed} requests · ${job.discovered} findings` : "Native review"}
         </span>
       </>
@@ -198,17 +198,19 @@ export function ScannerView() {
     <CaseGate activity="Web security assessment" />
     {advancedOpen && (
       <div className="flex flex-wrap items-center gap-2 border-b border-line bg-panel p-2">
-      <label className="flex items-center gap-1 text-[11px] text-fg-muted">
+      <span className="flex items-center gap-1 text-2xs text-fg-muted">
         Intensity
-        <select value={scanIntensity} disabled={running}
-          aria-label="Active scan intensity"
-          onChange={(event) => setScanIntensity(event.target.value as "quick" | "standard" | "thorough")}
-          className="rounded border border-line bg-panel px-1 py-0.5 text-fg">
-          <option value="quick">Quick · 1 mutation</option>
-          <option value="standard">Standard · 4 GET / 2 POST</option>
-          <option value="thorough">Thorough · 8 GET / 4 POST</option>
-        </select>
-      </label>
+        <fieldset disabled={running} className="m-0 min-w-0 border-0 p-0">
+          <Select value={scanIntensity}
+            onChange={(value) => setScanIntensity(value as "quick" | "standard" | "thorough")}
+            ariaLabel="Active scan intensity"
+            options={[
+              { value: "quick", label: "Quick · 1 mutation" },
+              { value: "standard", label: "Standard · 4 GET / 2 POST" },
+              { value: "thorough", label: "Thorough · 8 GET / 4 POST" },
+            ]} />
+        </fieldset>
+      </span>
       <ToolButton disabled={!desktop || !caseReady || !normalized || !authorized || running || !hasQuery}
         title="Send a baseline and bounded inert GET parameter probes, only to the approved private origin"
         onClick={() => void start("active-query")}>
@@ -236,21 +238,21 @@ export function ScannerView() {
         <Play size={12} /> Test SSRF (OAST)
       </ToolButton>
 
-        {!hasQuery && <span className="text-[11px] text-fg-muted">
+        {!hasQuery && <span className="text-2xs text-fg-muted">
           To run parameter tests, enter a URL with a query string, e.g. /search?q=sample.
         </span>}
       </div>
     )}
-    <label className="flex items-center gap-2 border-b border-line px-2 py-1.5 text-[11px] text-fg-dim">
-      <input type="checkbox" checked={authorized} onChange={(e) => setAuthorized(e.target.checked)} />
-      Authorized target · native approval required
-    </label>
-    <div className="border-b border-line px-2 py-1 text-[10px] text-fg-muted">
-      Start review checks an approved private or loopback target with the native engine. Expand Advanced tests for optional bounded query mutations; these are heuristics, not confirmed exploitation. A saved case, target ownership and native approval remain required.
+    <div className="flex flex-wrap items-center gap-2 border-b border-line px-2 py-1.5">
+      <CheckBox checked={authorized} onChange={setAuthorized}>
+        Authorized target · native approval required
+      </CheckBox>
+      <InfoTip text="Start review checks an approved private or loopback target with the native engine. Expand Advanced tests for optional bounded query mutations; these are heuristics, not confirmed exploitation. A saved case, target ownership and native approval remain required." />
+      <span className="text-3xs text-fg-muted">Bounded native review; advanced tests are heuristics, not confirmed exploitation.</span>
     </div>
     {advancedOpen && (
       <>
-    <div className="border-b border-line bg-panel px-2 py-1 text-[11px]">
+    <div className="border-b border-line bg-panel px-2 py-1 text-2xs">
       <div className="flex flex-wrap items-center gap-2">
         <ToolButton onClick={() => setOastOpen((value) => !value)}>
           {oastOpen ? "Hide out-of-band callback" : "Out-of-band callback"}
@@ -258,26 +260,18 @@ export function ScannerView() {
         <span className="text-fg-muted">
           {oastBind.trim() && oastBase.trim() ? "Collector configured" : "Optional SSRF confirmation"}
         </span>
+        <InfoTip text="The collector binds only to a loopback or private address. The base URL must be reachable from the target. A finding is reported only if the target actually calls back; the collector keeps only the single-use path token." />
       </div>
-      {oastOpen && <div className="mt-2 space-y-1">
-        <input value={oastBind} disabled={running}
-          onChange={(e) => setOastBind(e.target.value.slice(0, 64))}
-          aria-label="Callback bind address"
-          placeholder="Collector bind, for example 127.0.0.1:9099"
-          className="w-full rounded border border-line bg-panel px-2 py-1 font-mono text-[11px] text-fg" />
-        <input value={oastBase} disabled={running}
-          onChange={(e) => setOastBase(e.target.value.slice(0, 2048))}
-          aria-label="Callback base URL"
-          placeholder="Base URL the target can reach, for example http://10.0.0.5:9099"
-          className="w-full rounded border border-line bg-panel px-2 py-1 font-mono text-[11px] text-fg" />
-        <div className="text-[10px] text-fg-muted">
-          The collector binds only to a loopback or private address. The base URL must be
-          reachable from the target. A finding is reported only if the target actually calls
-          back; the collector keeps only the single-use path token.
-        </div>
-      </div>}
+      {oastOpen && <fieldset disabled={running} className="m-0 mt-2 min-w-0 space-y-1 border-0 p-0">
+        <TextInput value={oastBind} onChange={(value) => setOastBind(value.slice(0, 64))}
+          ariaLabel="Callback bind address"
+          placeholder="Collector bind, for example 127.0.0.1:9099" className="w-full" />
+        <TextInput value={oastBase} onChange={(value) => setOastBase(value.slice(0, 2048))}
+          ariaLabel="Callback base URL"
+          placeholder="Base URL the target can reach, for example http://10.0.0.5:9099" className="w-full" />
+      </fieldset>}
     </div>
-    <div className="border-b border-line bg-panel px-2 py-1 text-[11px]">
+    <div className="border-b border-line bg-panel px-2 py-1 text-2xs">
       <div className="flex flex-wrap items-center gap-2">
         <ToolButton onClick={() => setSessionOpen((value) => !value)}>
           {sessionOpen ? "Hide session context" : "Session context"}
@@ -287,40 +281,28 @@ export function ScannerView() {
             ? "Authenticated requests enabled for this target"
             : "Optional authenticated requests"}
         </span>
+        <InfoTip text="Sent only to the approved pinned target, including every scanner, crawler and parameter probe. Maximum 8 headers. Host, Content-Length, Transfer-Encoding, Connection and Cookie headers are rejected; use the cookie field instead. Values are never saved to the case, history or logs, and are cleared when the target changes. If the baseline is rejected or a probe is redirected to a login page, the review stops and reports it instead of continuing unauthenticated." />
       </div>
       {sessionOpen && <div className="mt-2 space-y-2">
-        <textarea value={sessionCookie} disabled={running}
-          onChange={(e) => setSessionCookie(e.target.value.slice(0, 4096))}
-          aria-label="Session cookies"
+        <TextArea value={sessionCookie} onChange={(value) => setSessionCookie(value.slice(0, 4096))}
+          disabled={running} ariaLabel="Session cookies"
           placeholder="Cookie value, for example: session=abc123; theme=dark"
-          rows={2} spellCheck={false}
-          className="w-full resize-y rounded border border-line bg-panel px-2 py-1 font-mono text-[11px] text-fg" />
-        <textarea value={sessionHeaders} disabled={running}
-          onChange={(e) => setSessionHeaders(e.target.value.slice(0, 8192))}
-          aria-label="Session headers"
+          rows={2} maxLength={4096} />
+        <TextArea value={sessionHeaders} onChange={(value) => setSessionHeaders(value.slice(0, 8192))}
+          disabled={running} ariaLabel="Session headers"
           placeholder={"One header per line, for example:\nX-Lab-Role: operator"}
-          rows={2} spellCheck={false}
-          className="w-full resize-y rounded border border-line bg-panel px-2 py-1 font-mono text-[11px] text-fg" />
-        <div className="text-[10px] text-fg-muted">
-          Sent only to the approved pinned target, including every scanner, crawler and
-          parameter probe. Maximum 8 headers. Host, Content-Length, Transfer-Encoding,
-          Connection and Cookie headers are rejected; use the cookie field instead.
-          Values are never saved to the case, history or logs, and are cleared when the
-          target changes. If the baseline is rejected or a probe is redirected to a login
-          page, the review stops and reports it instead of continuing unauthenticated.
-        </div>
+          rows={2} maxLength={8192} />
       </div>}
     </div>
-    <div className="border-b border-line bg-panel px-2 py-2 text-[11px]">
+    <div className="border-b border-line bg-panel px-2 py-2 text-2xs">
       <div className="flex flex-wrap items-center gap-2">
         <span className="font-semibold">Manual POST reflection probe</span>
-        <select className="rounded border border-line bg-panel px-2 py-1"
-          value={postFormat} disabled={running} aria-label="POST template type"
-          onChange={(e) => { setPostFormat(e.target.value as "form" | "json");
-            setPostRiskApproved(false); }}>
-          <option value="form">Form URL-encoded</option>
-          <option value="json">JSON object</option>
-        </select>
+        <fieldset disabled={running} className="m-0 min-w-0 border-0 p-0">
+          <Select value={postFormat}
+            onChange={(value) => { setPostFormat(value as "form" | "json"); setPostRiskApproved(false); }}
+            ariaLabel="POST template type"
+            options={[{ value: "form", label: "Form URL-encoded" }, { value: "json", label: "JSON object" }]} />
+        </fieldset>
         <ToolButton disabled={!desktop || !caseReady || !normalized || !authorized || running ||
           !postRiskApproved || !postTemplate.trim()}
           onClick={() => void start(postFormat === "form" ? "active-form" : "active-json")}>
@@ -328,22 +310,21 @@ export function ScannerView() {
         </ToolButton>
         <span className="text-fg-muted">Baseline + intensity-limited mutations; pinned private target</span>
       </div>
-      <textarea value={postTemplate} disabled={running}
-        onChange={(e) => { setPostTemplate(e.target.value.slice(0, 2048)); setPostRiskApproved(false); }}
-        aria-label="Manual POST body"
+      <TextArea value={postTemplate}
+        onChange={(value) => { setPostTemplate(value.slice(0, 2048)); setPostRiskApproved(false); }}
+        disabled={running} ariaLabel="Manual POST body"
         placeholder={postFormat === "form" ? "q=example&label=sample" : '{"q":"example","label":"sample"}'}
-        rows={2} spellCheck={false}
-        className="mt-2 w-full resize-y rounded border border-line bg-panel px-2 py-1 font-mono text-[11px] text-fg" />
-      <label className="mt-1 flex items-start gap-2 text-fg-dim">
-        <input type="checkbox" checked={postRiskApproved} disabled={running}
-          onChange={(e) => setPostRiskApproved(e.target.checked)} />
-        I authorize POST submissions to this private target and understand that they may change server state.
-        Do not enter passwords, session tokens or CSRF values. Native confirmation is also required.
-      </label>
+        rows={2} maxLength={2048} className="mt-2" />
+      <div className="mt-1">
+        <CheckBox checked={postRiskApproved} onChange={setPostRiskApproved} disabled={running}>
+          I authorize POST submissions to this private target and understand that they may change server state.
+          Do not enter passwords, session tokens or CSRF values. Native confirmation is also required.
+        </CheckBox>
+      </div>
     </div>
       </>
     )}
-    {error ? <div role="alert" className="border-b border-line px-2 py-1 text-xs text-err">{error}</div> : null}
+    {error ? <ErrorStrip>{error}</ErrorStrip> : null}
     <Pane title="Findings" className="min-h-0 flex-1"
       actions={job?.state === "completed" && findings.length > 0 && caseReady
         ? <ToolButton disabled={saving || savedCount > 0} onClick={() => void save()}>

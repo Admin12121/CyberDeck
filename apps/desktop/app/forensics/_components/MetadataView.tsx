@@ -1,6 +1,7 @@
 "use client";
 import { useEffect, useMemo, useState } from "react";
-import { Pane, ToolButton } from "@ds/panes";
+import { EmptyState, Pane, ToolButton } from "@ds/panes";
+import { ErrorStrip } from "@ds/compact";
 import { fileMetadataScan, type ForensicMetadataResponseWire } from "@lib/ipc";
 import { useWorkbench } from "@state/workbench";
 import { formatEntropy } from "./controller";
@@ -61,9 +62,9 @@ export function MetadataView({ active }: { active: boolean }) {
           {loading ? "Inspecting…" : "Refresh metadata"}
         </ToolButton>}>
         {!ctx.desktop ? (
-          <div className="p-4 text-xs text-fg-muted">Native desktop required. No sample or fabricated EXIF values are displayed.</div>
+          <EmptyState title="Native desktop required" detail="No sample or fabricated EXIF values are displayed." />
         ) : !artifact ? (
-          <div className="p-4 text-xs text-fg-muted">Select imported case evidence to inspect format metadata and provenance.</div>
+          <EmptyState title="No evidence selected" detail="Select imported case evidence to inspect format metadata and provenance." />
         ) : (
           <div className="space-y-4 p-3">
             <section aria-label="Stored evidence properties">
@@ -78,11 +79,11 @@ export function MetadataView({ active }: { active: boolean }) {
             <section aria-label="Parsed native metadata" className="space-y-3">
               <h3 className="font-mono text-xs font-semibold text-fg">Native metadata inspector</h3>
               <p className="text-xs text-fg-muted">Read-only, bounded TIFF/EXIF and PNG/JPEG metadata subset. Values are parsed from the selected case artifact. Original/digitized times are local camera clock values; separate optional UTC offsets and fractional-second digits appear exactly as recorded. A missing offset is unknown, not UTC; no timestamp conversion is performed.</p>
-              {error ? <div role="alert" className="border border-err/50 p-2 text-xs text-err">{error}</div> : null}
+              {error ? <ErrorStrip>{error}</ErrorStrip> : null}
               {loading ? <div role="status" className="text-xs text-fg-muted">Verifying complete source SHA-256 and parsing available metadata…</div> : null}
               {data ? (
                 <>
-                  <div className="border border-line p-2 font-mono text-[11px] text-fg-dim">
+                  <div className="border border-line p-2 font-mono text-2xs text-fg-dim">
                     <div>{data.report.format.toUpperCase()} · {data.report.fields.length} fields · {data.analyzed_bytes.toLocaleString()} / {data.file_bytes.toLocaleString()} evidence bytes in inspected window</div>
                     <div>{data.integrity_checked ? "Full source SHA-256 verified" : "Source integrity not verified"}
                       {data.coverage_truncated ? " · prefix coverage only" : ""}

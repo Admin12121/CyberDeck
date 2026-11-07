@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Download, FileSearch, RefreshCcw } from "lucide-react";
 import { Chip, EmptyState, Pane, TextInput, ToolButton } from "@ds/panes";
-import { StatusStrip, WorkspaceShell } from "@ds/compact";
+import { ErrorStrip, StatusStrip, WorkspaceShell } from "@ds/compact";
 import { caseEventsList, caseFindingsList, caseReport, caseIntegrityVerify, isDesktop, type CaseEventWire, type FindingRecordWire, type CaseIntegritySummaryWire } from "@lib/ipc";
 import { useWorkbench } from "@state/workbench";
 import { downloadContent } from "@lib/download";
@@ -112,7 +112,7 @@ export function CaseFindingsView() {
       toolbar={
         <>
           <FileSearch size={13} className="text-orange" />
-          <span className="font-mono text-[10px] uppercase text-fg-muted">Case findings</span>
+          <span className="font-mono text-3xs uppercase text-fg-muted">Case findings</span>
           <TextInput value={query} onChange={setQuery} placeholder="filter findings…" ariaLabel="Search case findings" className="w-64" />
           <ToolButton onClick={() => void refresh()} disabled={loading || !isDesktop()} title="Refresh findings">
             <RefreshCcw size={12} /> {loading ? "Loading…" : "Refresh"}
@@ -124,13 +124,13 @@ export function CaseFindingsView() {
           <ToolButton onClick={() => void exportReport()} disabled={!isDesktop() || exporting} title="Export a portable, path-free JSON report (review before sharing)">
             <Download size={12} /> {exporting ? "Exporting…" : "Export JSON"}
           </ToolButton>
-          <span className="ml-auto font-mono text-[10px] text-fg-muted">{filtered.length} of {findings.length} · {events.length}</span>
+          <span className="ml-auto font-mono text-3xs text-fg-muted">{filtered.length} of {findings.length} · {events.length}</span>
         </>
       }
       status={<StatusStrip items={[{ label: "case: " + (wb.caseId === "scratchpad" ? "temporary" : wb.caseId) }]} />}
     >
-      {error ? <div className="border-b border-err/50 px-2 py-1 text-xs text-err">{error}</div> : null}
-      {verification ? <div className="border-b border-line bg-raised px-3 py-2 font-mono text-[11px] text-fg-dim" role="status">
+      {error ? <ErrorStrip>{error}</ErrorStrip> : null}
+      {verification ? <div className="border-b border-line bg-raised px-3 py-2 font-mono text-2xs text-fg-dim" role="status">
         Verified {verification.verified_artifacts} artifacts, {verification.verified_bytes} bytes, and {verification.provenance.verified_events} local provenance events in case {verification.case_id}.
         <span className="ml-2 text-fg-muted">Keep the chain head outside the case for independent tamper detection.</span>
       </div> : null}
@@ -166,7 +166,7 @@ export function CaseFindingsView() {
               {current.artifact_id ? <div className="break-all font-mono text-xs text-orange">artifact: {current.artifact_id}</div> : null}
               <pre className="whitespace-pre-wrap break-words border-t border-line pt-3 font-mono text-xs text-fg-dim">{current.details}</pre>
               {events.filter((e) => e.artifact_id && e.artifact_id === current.artifact_id).slice(0, 15).map((entry) => (
-                <div key={entry.id} className="border-t border-line pt-2 font-mono text-[10px] text-fg-dim">
+                <div key={entry.id} className="border-t border-line pt-2 font-mono text-3xs text-fg-dim">
                   {entry.source} · {entry.action} · {entry.source_description}
                 </div>
               ))}

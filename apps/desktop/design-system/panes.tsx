@@ -165,6 +165,7 @@ export function TextInput({
   mono = true,
   onKeyDown,
   ariaLabel,
+  disabled,
 }: {
   value: string;
   onChange: (value: string) => void;
@@ -173,10 +174,11 @@ export function TextInput({
   mono?: boolean;
   onKeyDown?: (e: React.KeyboardEvent<HTMLInputElement>) => void;
   ariaLabel?: string;
+  disabled?: boolean;
 }) {
   return (
     <Input size="sm" value={value} onChange={(e) => onChange(e.target.value)}
-      onKeyDown={onKeyDown} placeholder={placeholder} aria-label={ariaLabel}
+      onKeyDown={onKeyDown} placeholder={placeholder} aria-label={ariaLabel} disabled={disabled}
       className={`min-w-0 rounded-sm ${mono ? "font-mono" : ""} ${className}`} />
   );
 }
@@ -187,17 +189,19 @@ export function Select({
   options,
   ariaLabel,
   className = "",
+  disabled,
 }: {
   value: string;
   onChange: (value: string) => void;
   options: { value: string; label: string }[];
   ariaLabel?: string;
   className?: string;
+  disabled?: boolean;
 }) {
   return (
-    <CossSelect items={options} value={value}
+    <CossSelect items={options} value={value} disabled={disabled}
       onValueChange={(next) => { if (typeof next === "string") onChange(next); }}>
-      <SelectTrigger size="sm" aria-label={ariaLabel}
+      <SelectTrigger size="sm" aria-label={ariaLabel} disabled={disabled}
         className={`h-8 min-w-0 rounded-sm font-mono text-xs ${className}`}>
         <SelectValue />
       </SelectTrigger>
@@ -209,5 +213,101 @@ export function Select({
         ))}
       </SelectPopup>
     </CossSelect>
+  );
+}
+
+/** The one multi-line input: mono by default, bounded, shared chrome.
+ * Replaces the bespoke per-view textarea class strings. */
+export function TextArea({
+  value,
+  onChange,
+  placeholder,
+  ariaLabel,
+  rows = 2,
+  maxLength,
+  disabled,
+  mono = true,
+  className = "",
+}: {
+  value: string;
+  onChange: (value: string) => void;
+  placeholder?: string;
+  ariaLabel?: string;
+  rows?: number;
+  maxLength?: number;
+  disabled?: boolean;
+  mono?: boolean;
+  className?: string;
+}) {
+  return (
+    <textarea
+      value={value}
+      disabled={disabled}
+      rows={rows}
+      maxLength={maxLength}
+      placeholder={placeholder}
+      aria-label={ariaLabel}
+      spellCheck={false}
+      onChange={(e) => onChange(e.target.value)}
+      className={`w-full resize-y rounded-sm border border-line bg-panel px-2 py-1 text-xs leading-relaxed text-fg focus-visible:outline focus-visible:outline-1 focus-visible:outline-ring disabled:opacity-40 ${mono ? "font-mono" : ""} ${className}`}
+    />
+  );
+}
+
+/** The one numeric input: shared chrome, number semantics, bounded. */
+export function NumberInput({
+  value,
+  onChange,
+  ariaLabel,
+  min,
+  max,
+  step = 1,
+  className = "",
+  disabled,
+}: {
+  value: number;
+  onChange: (value: number) => void;
+  ariaLabel?: string;
+  min?: number;
+  max?: number;
+  step?: number;
+  className?: string;
+  disabled?: boolean;
+}) {
+  return (
+    <Input type="number" size="sm" value={Number.isFinite(value) ? String(value) : ""} min={min}
+      max={max} step={step} aria-label={ariaLabel} disabled={disabled}
+      onChange={(e) => {
+        const next = Number(e.target.value);
+        if (Number.isFinite(next)) onChange(next);
+      }}
+      className={`min-w-0 rounded-sm font-mono ${className}`} />
+  );
+}
+
+/** The one labeled checkbox: native input with the accent token, one
+ * label treatment. Replaces the accent-/bare-checkbox drift. */
+export function CheckBox({
+  checked,
+  onChange,
+  disabled,
+  children,
+}: {
+  checked: boolean;
+  onChange: (checked: boolean) => void;
+  disabled?: boolean;
+  children: ReactNode;
+}) {
+  return (
+    <label className={`flex items-center gap-2 text-xs text-fg-dim ${disabled ? "opacity-40" : ""}`}>
+      <input
+        type="checkbox"
+        checked={checked}
+        disabled={disabled}
+        onChange={(e) => onChange(e.target.checked)}
+        className="accent-[var(--color-orange)]"
+      />
+      {children}
+    </label>
   );
 }

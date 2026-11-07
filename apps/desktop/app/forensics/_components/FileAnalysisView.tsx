@@ -1,6 +1,7 @@
 "use client";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Chip, Field, Pane, Resizer, TextInput, ToolButton } from "@ds/panes";
+import { Chip, EmptyState, Field, Pane, Resizer, ToolButton } from "@ds/panes";
+import { ErrorStrip, ResultStack } from "@ds/compact";
 import { hexDump } from "@lib/hex";
 import {
   fileHex,
@@ -210,7 +211,7 @@ export function FileAnalysisView({ active }: { active: boolean }) {
         ) : ctx.selectedSample ? (
           sampleMetadata(ctx.selectedSample).map((row) => <Field key={row.key} label={row.key} value={row.value} />)
         ) : (
-          <div className="p-3 font-mono text-[11px] text-fg-muted">select evidence to inspect</div>
+          <EmptyState title="No selection" detail="select evidence to inspect" />
         )}
         {highEntropy ? (
           <div className="px-3 py-1.5">
@@ -232,104 +233,110 @@ export function FileAnalysisView({ active }: { active: boolean }) {
             {carveBusy ? "Validating boundaries…" : "Preview Structural Carving"}
           </ToolButton>
           {binary ? (
-            <div className="space-y-1 border-t border-line py-2 font-mono text-[10px] text-fg-dim">
-              <div className="text-fg">{binary.format.toUpperCase()} · {binary.architecture} · {binary.bits}-bit</div>
-              <div>{binary.little_endian ? "Little-endian" : "Big-endian"} · {binary.sections.length} sections</div>
-              <div>Entry ({binary.entry_kind}): {binary.entry_point === null ? "n/a" : `0x${binary.entry_point.toString(16)}`}</div>
-              <div className="max-h-60 overflow-y-auto border-t border-line">
-                {binary.sections.slice(0, 64).map((section, index) => (
-                  <div key={index} className="border-b border-line/50 py-1">
-                    <div className="text-fg break-all">{section.name || `section ${index}`}</div>
-                    <div>file 0x{section.offset.toString(16)} · {section.size} bytes</div>
-                    <div>address 0x{section.address.toString(16)}</div>
+            <ResultStack title={`${binary.format.toUpperCase()} · ${binary.architecture} · ${binary.bits}-bit`}>
+              <div className="space-y-1 font-mono text-fg-dim">
+                <div>{binary.little_endian ? "Little-endian" : "Big-endian"} · {binary.sections.length} sections</div>
+                <div>Entry ({binary.entry_kind}): {binary.entry_point === null ? "n/a" : `0x${binary.entry_point.toString(16)}`}</div>
+                <div className="max-h-60 overflow-y-auto border-t border-line">
+                  {binary.sections.slice(0, 64).map((section, index) => (
+                    <div key={index} className="border-b border-line/50 py-1">
+                      <div className="text-fg break-all">{section.name || `section ${index}`}</div>
+                      <div>file 0x{section.offset.toString(16)} · {section.size} bytes</div>
+                      <div>address 0x{section.address.toString(16)}</div>
+                    </div>
+                  ))}
+                  {binary.sections.length > 64 ? <div>Showing first 64 of {binary.sections.length} sections</div> : null}
+                </div>
+              </div>
+            </ResultStack>
+          ) : null}
+          {scanError ? <ErrorStrip>{scanError}</ErrorStrip> : null}
+          {carveError ? <ErrorStrip>{carveError}</ErrorStrip> : null}
+          {carve ? (
+            <ResultStack
+              title={`Read-only PNG / RIFF-WAVE / JPEG / GIF / U-Boot uImage candidates: ${carve.candidates.length} (max 32)`}
+              info="Structural validation: PNG chunks/CRC, RIFF-WAVE framing, JPEG markers/restarts, GIF palettes/subblocks/trailer, legacy U-Boot uImage header and payload CRC32. No image/audio decoding, firmware unpacking, signature-authenticity verification, fragment recovery, automatic extraction or evidence changes.">
+              <div className="space-y-1 font-mono text-fg-dim">
+                <div>
+                  Verified source: {carve.integrity_checked ? "yes" : "no"} ·
+                  {" "}{carve.analyzed_bytes} bytes starting at 0x{carve.analyzed_offset.toString(16)}
+                  {" "}of {carve.file_bytes} total
+                  {carve.coverage_truncated ? " · partial window" : ""}
+                  {carve.candidate_limit_reached ? " · candidate limit reached" : ""}
+                  {carve.rejected_or_incomplete ? ` · ${carve.rejected_or_incomplete} rejected/incomplete` : ""}
+                </div>
+                {carve.candidates.map((candidate, index) => (
+                  <div key={index} className="flex gap-2 border-t border-line py-1">
+                    <ToolButton title="Navigate to verified source offset" onClick={() => ctx.setHexOffset(candidate.offset)}>
+                      0x{candidate.offset.toString(16)}
+                    </ToolButton>
+                    <span>{candidate.format.toUpperCase()} · {candidate.length} bytes</span>
                   </div>
                 ))}
-                {binary.sections.length > 64 ? <div>Showing first 64 of {binary.sections.length} sections</div> : null}
+                {carve.candidates.length === 0 ? <div>No validated PNG / RIFF-WAVE / JPEG / GIF / U-Boot uImage members in this window.</div> : null}
               </div>
-            </div>
-          ) : null}
-          {scanError ? <div className="text-xs text-err">{scanError}</div> : null}
-          {carveError ? <div className="text-xs text-err">{carveError}</div> : null}
-          {carve ? (
-            <div className="space-y-1 border-t border-line py-2 font-mono text-[10px] text-fg-dim">
-              <div className="text-fg">Read-only PNG / RIFF-WAVE / JPEG / GIF / U-Boot uImage candidates: {carve.candidates.length} (max 32)</div>
-              <div>
-                Verified source: {carve.integrity_checked ? "yes" : "no"} ·
-                {" "}{carve.analyzed_bytes} bytes starting at 0x{carve.analyzed_offset.toString(16)}
-                {" "}of {carve.file_bytes} total
-                {carve.coverage_truncated ? " · partial window" : ""}
-                {carve.candidate_limit_reached ? " · candidate limit reached" : ""}
-                {carve.rejected_or_incomplete ? ` · ${carve.rejected_or_incomplete} rejected/incomplete` : ""}
-              </div>
-              <div>Structural validation: PNG chunks/CRC, RIFF-WAVE framing, JPEG markers/restarts, GIF palettes/subblocks/trailer, legacy U-Boot uImage header and payload CRC32. No image/audio decoding, firmware unpacking, signature-authenticity verification, fragment recovery, automatic extraction or evidence changes.</div>
-              {carve.candidates.map((candidate, index) => (
-                <div key={index} className="flex gap-2 border-t border-line py-1">
-                  <ToolButton title="Navigate to verified source offset" onClick={() => ctx.setHexOffset(candidate.offset)}>
-                    0x{candidate.offset.toString(16)}
-                  </ToolButton>
-                  <span>{candidate.format.toUpperCase()} · {candidate.length} bytes</span>
-                </div>
-              ))}
-              {carve.candidates.length === 0 ? <div>No validated PNG / RIFF-WAVE / JPEG / GIF / U-Boot uImage members in this window.</div> : null}
-            </div>
+            </ResultStack>
           ) : null}
           {extractNote ? <div role="status" className="text-xs text-fg">{extractNote}</div> : null}
           {extractedRecords.length > 0 ? (
-            <section aria-label="Derived case artifacts" className="space-y-1 border-t border-line py-2">
-              <h4 className="font-mono text-xs font-semibold text-fg">Derived evidence · {extractedRecords.length} case record(s)</h4>
-              <p className="text-[10px] text-fg-muted">Read-only list of backend-created case artifacts. Choose any record to inspect its verified source bytes; provenance remains in the case store.</p>
-              {extractedRecords.slice(0, 128).map((record) => (
-                <div key={record.id} className="flex flex-wrap items-center gap-2 border-b border-line/50 py-1 font-mono text-[10px]">
-                  <ToolButton onClick={() => { if (ctx.artifacts.some((a) => a.id === record.id && a.case_id === wb.caseId)) { ctx.setSelected({ id: record.id, real: true }); ctx.setHexOffset(0); } }}
-                    disabled={!ctx.artifacts.some((a) => a.id === record.id && a.case_id === wb.caseId)}
-                    title="Inspect this derived artifact in the current case">{record.name}</ToolButton>
-                  <span className="break-all text-fg-muted">{record.size.toLocaleString()} bytes · SHA-256 {record.sha256.slice(0, 16)}…</span>
+            <section aria-label="Derived case artifacts">
+              <ResultStack title={`Derived evidence · ${extractedRecords.length} case record(s)`}
+                info="Read-only list of backend-created case artifacts. Choose any record to inspect its verified source bytes; provenance remains in the case store.">
+                <div className="space-y-1 font-mono">
+                  {extractedRecords.slice(0, 128).map((record) => (
+                    <div key={record.id} className="flex flex-wrap items-center gap-2 border-b border-line/50 py-1">
+                      <ToolButton onClick={() => { if (ctx.artifacts.some((a) => a.id === record.id && a.case_id === wb.caseId)) { ctx.setSelected({ id: record.id, real: true }); ctx.setHexOffset(0); } }}
+                        disabled={!ctx.artifacts.some((a) => a.id === record.id && a.case_id === wb.caseId)}
+                        title="Inspect this derived artifact in the current case">{record.name}</ToolButton>
+                      <span className="break-all text-fg-muted">{record.size.toLocaleString()} bytes · SHA-256 {record.sha256.slice(0, 16)}…</span>
+                    </div>
+                  ))}
+                  {extractedRecords.length > 128 ? <p className="text-fg-muted">Showing 128 of {extractedRecords.length} case records.</p> : null}
                 </div>
-              ))}
-              {extractedRecords.length > 128 ? <p className="text-[10px] text-fg-muted">Showing 128 of {extractedRecords.length} case records.</p> : null}
+              </ResultStack>
             </section>
           ) : null}
           {scan ? (
-            <div className="space-y-1 font-mono text-[10px] text-fg-dim">
-              <div>{scan.hits.length} candidate signatures · {scan.scanned_bytes} of {scan.file_bytes} bytes scanned
-                {scan.truncated ? " · partial coverage" : ""}
-                {scan.integrity_checked ? " · full-source SHA-256 verified" : ""}
-                {scan.hit_cap_reached ? " · hit limit reached" : ""}
+            <ResultStack title={<>{scan.hits.length} candidate signatures · {scan.scanned_bytes} of {scan.file_bytes} bytes scanned
+              {scan.truncated ? " · partial coverage" : ""}
+              {scan.integrity_checked ? " · full-source SHA-256 verified" : ""}
+              {scan.hit_cap_reached ? " · hit limit reached" : ""}</>}>
+              <div className="font-mono text-fg-dim">
+                {scan.hits.map((hit, index) => (
+                  <div key={index} className="flex gap-2 border-t border-line py-1">
+                    <ToolButton title="Open signature candidate in verified source hex"
+                      onClick={() => ctx.setHexOffset(hit.offset)}>0x{hit.offset.toString(16)}</ToolButton>
+                    <span className="flex-1">{hit.format}: {hit.description}</span>
+                    {(hit.format === "zip" || hit.format === "tar") && (
+                      <ToolButton
+                        onClick={() => void extractArchive(hit.format as "zip" | "tar", hit.offset)}
+                        disabled={extracting !== null || !ctx.desktop}
+                        title="Native Rust extraction: validates paths, CRC/checksums, 128-entry and 16 MiB limits"
+                      >
+                        {extracting === hit.offset ? "Extracting…" : `Extract ${hit.format.toUpperCase()}`}
+                      </ToolButton>
+                    )}
+                    {(hit.format === "zip" || hit.format === "tar" || hit.format === "gzip") && (
+                      <ToolButton onClick={() => void extractNested(hit.format as "zip" | "tar" | "gzip", hit.offset)}
+                        disabled={extracting !== null || !ctx.desktop}
+                        title="Explicitly extract up to two nested archive levels into immutable case evidence">
+                        {extracting === hit.offset ? "Extracting…" : "Extract Nested"}
+                      </ToolButton>
+                    )}
+                    {hit.format === "gzip" && (
+                      <ToolButton
+                        onClick={() => void extract(hit.offset)}
+                        disabled={extracting !== null || !ctx.desktop}
+                        title="Safely decompress one Gzip member (16 MiB input/output limits) into this case"
+                      >
+                        {extracting === hit.offset ? "Extracting…" : "Extract Gzip"}
+                      </ToolButton>
+                    )}
+                  </div>
+                ))}
+                {scan.hits.length === 0 ? <div>No known signatures detected.</div> : null}
               </div>
-              {scan.hits.map((hit, index) => (
-                <div key={index} className="flex gap-2 border-t border-line py-1">
-                  <ToolButton title="Open signature candidate in verified source hex"
-                    onClick={() => ctx.setHexOffset(hit.offset)}>0x{hit.offset.toString(16)}</ToolButton>
-                  <span className="flex-1">{hit.format}: {hit.description}</span>
-                  {(hit.format === "zip" || hit.format === "tar") && (
-                    <ToolButton
-                      onClick={() => void extractArchive(hit.format as "zip" | "tar", hit.offset)}
-                      disabled={extracting !== null || !ctx.desktop}
-                      title="Native Rust extraction: validates paths, CRC/checksums, 128-entry and 16 MiB limits"
-                    >
-                      {extracting === hit.offset ? "Extracting…" : `Extract ${hit.format.toUpperCase()}`}
-                    </ToolButton>
-                  )}
-                  {(hit.format === "zip" || hit.format === "tar" || hit.format === "gzip") && (
-                    <ToolButton onClick={() => void extractNested(hit.format as "zip" | "tar" | "gzip", hit.offset)}
-                      disabled={extracting !== null || !ctx.desktop}
-                      title="Explicitly extract up to two nested archive levels into immutable case evidence">
-                      {extracting === hit.offset ? "Extracting…" : "Extract Nested"}
-                    </ToolButton>
-                  )}
-                  {hit.format === "gzip" && (
-                    <ToolButton
-                      onClick={() => void extract(hit.offset)}
-                      disabled={extracting !== null || !ctx.desktop}
-                      title="Safely decompress one Gzip member (16 MiB input/output limits) into this case"
-                    >
-                      {extracting === hit.offset ? "Extracting…" : "Extract Gzip"}
-                    </ToolButton>
-                  )}
-                </div>
-              ))}
-              {scan.hits.length === 0 ? <div>No known signatures detected.</div> : null}
-            </div>
+            </ResultStack>
           ) : null}
 
           <YaraSubsetPanel caseId={wb.caseId} artifactId={ctx.selectedArtifact?.id ?? null}

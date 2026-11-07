@@ -47,11 +47,11 @@ test("sweep button is scope-constrained: labeled Target 1 ∪ Target 2 in its to
 
 test("sweep UI reports why it is blocked and reuses the alert surface for refusals", () => {
   assert.match(viewSource, /labSweepBlockReason\(scope\)/);
-  // The reused role="alert" error surface renders sweep refusals too.
-  const alertBlocks = viewSource.match(/<div role="alert"[^>]*>[\s\S]*?<\/div>/g) ?? [];
+  // The reused role="alert" error surface renders sweep refusals too (the
+  // shared ErrorStrip primitive carries role="alert" internally).
   assert.ok(
-    alertBlocks.some((block) => block.includes("{sweepError}")),
-    "sweep errors must render through the reused alert surface",
+    viewSource.includes("<ErrorStrip>{sweepError}</ErrorStrip>"),
+    "sweep errors must render through the reused ErrorStrip alert surface",
   );
 });
 

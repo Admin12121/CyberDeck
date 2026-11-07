@@ -1,7 +1,8 @@
 "use client";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { ArrowDown, ArrowUp, Copy, FileDown, Play, Save, Wand2, X } from "lucide-react";
-import { Chip, EmptyState, Pane, Resizer, Select, TextInput, ToolButton } from "@ds/panes";
+import { ErrorStrip } from "@ds/compact";
+import { CheckBox, Chip, EmptyState, Pane, Resizer, Select, TextInput, ToolButton } from "@ds/panes";
 import {
   OPERATIONS,
   detectImageMime,
@@ -273,7 +274,7 @@ export function RecipesView() {
           if (ops.length === 0) return null;
           return (
             <div key={category} className="mb-1">
-              <div className="px-2 py-1 text-[10px] uppercase tracking-wider text-fg-muted">{category}</div>
+              <div className="px-2 py-1 text-3xs uppercase tracking-wider text-fg-muted">{category}</div>
               {ops.map((op) => (
                 <button
                   key={op.id}
@@ -285,7 +286,7 @@ export function RecipesView() {
                   }}
                   title={`${op.description} (drag into the recipe, or click to append)`}
                   onClick={() => setState((s) => addStep(s, op.id))}
-                  className="block w-full cursor-grab truncate px-2 py-1 text-left font-mono text-[11px] text-fg-dim hover:bg-raised hover:text-fg active:cursor-grabbing"
+                  className="block w-full cursor-grab truncate px-2 py-1 text-left font-mono text-2xs text-fg-dim hover:bg-raised hover:text-fg active:cursor-grabbing"
                 >
                   {op.label}
                 </button>
@@ -310,15 +311,9 @@ export function RecipesView() {
         style={{ width: recipeWidth }}
         bodyClassName="flex flex-col"
         actions={
-          <label className="flex cursor-pointer items-center gap-1 font-mono text-[10px] text-fg-dim">
-            <input
-              type="checkbox"
-              checked={state.autoBake}
-              onChange={(e) => setState((s) => setAutoBake(s, e.target.checked))}
-              className="accent-[var(--color-orange)]"
-            />
+          <CheckBox checked={state.autoBake} onChange={(checked) => setState((s) => setAutoBake(s, checked))}>
             auto-bake
-          </label>
+          </CheckBox>
         }
       >
         <div
@@ -432,7 +427,7 @@ export function RecipesView() {
                   type="button"
                   disabled={mode === "text" ? !output.canText : mode === "hex" ? !output.canHex : !output.canImage}
                   onClick={() => setOutMode(mode)}
-                  className={`flex h-6 items-center border px-1.5 font-mono text-[10px] uppercase disabled:opacity-30 ${outMode === mode ? "border-line bg-selected text-fg" : "border-line text-fg-muted"}`}
+                  className={`flex h-6 items-center border px-1.5 font-mono text-3xs uppercase disabled:opacity-30 ${outMode === mode ? "border-line bg-selected text-fg" : "border-line text-fg-muted"}`}
                 >
                   {mode}
                 </button>
@@ -451,11 +446,11 @@ export function RecipesView() {
           }
         >
           {result?.error ? (
-            <div className="min-h-0 flex-1 overflow-auto p-2">
-              <div className="border border-err/50 bg-err/10 p-2 font-mono text-[11px] leading-relaxed text-err">
+            <div className="min-h-0 flex-1 overflow-auto">
+              <ErrorStrip>
                 <div className="uppercase tracking-wide">step {result.error.stepIndex + 1} failed: {result.error.opId}</div>
                 <div className="mt-1 text-fg-dim">{result.error.message}</div>
-              </div>
+              </ErrorStrip>
             </div>
           ) : result ? (
             outMode === "hex" ? (
@@ -469,12 +464,12 @@ export function RecipesView() {
                     {/* eslint-disable-next-line @next/next/no-img-element */}
                     <img src={imageSrc ?? ""} alt="recipe output preview" className="max-h-full max-w-full object-contain" />
                   </div>
-                  <div className="shrink-0 border-t border-line px-2 py-0.5 font-mono text-[10px] text-fg-muted">
+                  <div className="shrink-0 border-t border-line px-2 py-0.5 font-mono text-3xs text-fg-muted">
                     {decodedImage.mime} · {result.byteLength} bytes
                   </div>
                 </div>
               ) : (
-                <div className="min-h-0 flex-1 overflow-auto p-2 font-mono text-[11px] text-fg-muted">
+                <div className="min-h-0 flex-1 overflow-auto p-2 font-mono text-2xs text-fg-muted">
                   output is not a recognizable image (PNG, JPEG, GIF, WebP, BMP)
                 </div>
               )
@@ -488,9 +483,9 @@ export function RecipesView() {
               <EmptyState title={state.autoBake && eligibleForNative ? "Processing in Rust…" : "No result yet"} detail={state.autoBake && eligibleForNative ? "Evaluating the recipe in the native engine." : "Enable auto-bake or press Bake to evaluate the recipe."} badge="recipes" />
             </div>
           )}
-          {caseSaveError ? <div role="alert" className="border-t border-line px-2 py-1 text-xs text-err">{caseSaveError}</div> : null}
-          {outputActionError ? <div role="alert" className="border-t border-line px-2 py-1 text-xs text-err">{outputActionError}</div> : null}
-          <div className="shrink-0 border-t border-line px-2 py-0.5 font-mono text-[10px] text-fg-muted">
+          {caseSaveError ? <ErrorStrip>{caseSaveError}</ErrorStrip> : null}
+          {outputActionError ? <ErrorStrip>{outputActionError}</ErrorStrip> : null}
+          <div className="shrink-0 border-t border-line px-2 py-0.5 font-mono text-3xs text-fg-muted">
             {result ? `${result.byteLength} bytes out${mounted ? ` · ${result.elapsedMs.toFixed(1)} ms` : ""} · ${nativeResult ? "Rust engine" : "TypeScript engine"}` : "n/a"}
           </div>
         </Pane>
@@ -524,17 +519,12 @@ export function StepRow({ step, index, onToggle, onMoveUp, onMoveDown, onRemove,
       onDrop={onDropRow}
       className={`group mb-px flex items-center gap-2 border border-line bg-app px-2 py-1.5 ${step.enabled ? "" : "opacity-50"}`}
     >
-      <span aria-hidden title="Drag to reorder" className="cursor-grab select-none font-mono text-[13px] leading-none text-fg-muted group-hover:text-fg-dim">⠿</span>
-      <input
-        type="checkbox"
-        checked={step.enabled}
-        onChange={onToggle}
-        aria-label={`Toggle step ${index + 1}`}
-        className="accent-[var(--color-orange)]"
-      />
-      <span className="flex-1 truncate font-mono text-[11px]" title={op?.description}>
-        {op?.label ?? step.opId}
-      </span>
+      <span aria-hidden title="Drag to reorder" className="cursor-grab select-none font-mono text-xs leading-none text-fg-muted group-hover:text-fg-dim">⠿</span>
+      <CheckBox checked={step.enabled} onChange={onToggle}>
+        <span className="flex-1 truncate font-mono text-2xs" title={op?.description}>
+          {op?.label ?? step.opId}
+        </span>
+      </CheckBox>
       {op?.takesParam ? (
         <input
           value={step.param ?? ""}
@@ -542,7 +532,7 @@ export function StepRow({ step, index, onToggle, onMoveUp, onMoveDown, onRemove,
           title={`${op.paramLabel ?? "parameter"} for ${op.label}`}
           aria-label={`${op.label} parameter`}
           draggable={false}
-          className="h-5 w-16 shrink-0 border border-line bg-app px-1 font-mono text-[10px] text-fg"
+          className="h-5 w-16 shrink-0 border border-line bg-app px-1 font-mono text-3xs text-fg"
         />
       ) : null}
       <button type="button" title="Move up" onClick={onMoveUp} className="text-fg-muted opacity-0 transition-opacity group-hover:opacity-100 hover:text-fg">

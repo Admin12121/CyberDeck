@@ -58,11 +58,10 @@ test("export button is labeled, capture-gated and carries the accessible group l
 });
 
 test("include-DNS checkbox drives the export payload", () => {
-  assert.match(viewSource, /checked=\{reportIncludeDns\}/);
-  assert.match(
-    viewSource,
-    /aria-label="Include DNS findings in the session report"/,
-  );
+  // The checkbox renders through the shared CheckBox primitive; its
+  // accessible name comes from the wrapped label text.
+  assert.match(viewSource, /<CheckBox checked=\{reportIncludeDns\} onChange=\{setReportIncludeDns\}>/);
+  assert.match(viewSource, /include DNS findings/);
   assert.match(viewSource, /networkLabReportExportV1\(routerIp\.trim\(\) \|\| null, reportIncludeDns\)/);
 });
 

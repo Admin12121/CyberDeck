@@ -2,7 +2,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Copy, Play, X } from "lucide-react";
 import { Chip, EmptyState, Pane, ToolButton } from "@ds/panes";
-import { WorkspaceShell } from "@ds/compact";
+import { ErrorStrip, HexRows, WorkspaceShell } from "@ds/compact";
 import { httpSend, isDesktop, type HttpResponseWire } from "@lib/ipc";
 import { hexDump } from "@lib/hex";
 import { useWebWorkflow } from "./WebWorkflow";
@@ -112,7 +112,7 @@ export function RepeaterView() {
       toolbar={
         <>
           {tabs.map((t, i) => (
-            <div key={t.name} className={`flex h-6 items-center gap-1 border px-1 font-mono text-[11px] uppercase ${i === active ? "border-line bg-selected text-fg" : "border-line text-fg-muted"}`}>
+            <div key={t.name} className={`flex h-6 items-center gap-1 border px-1 font-mono text-2xs uppercase ${i === active ? "border-line bg-selected text-fg" : "border-line text-fg-muted"}`}>
               <button type="button" aria-selected={i === active} onClick={() => setActive(i)}
                 className="h-full px-1 hover:text-fg" title={`Open ${t.name}`}>{t.name}</button>
               {tabs.length > 1 ? (
@@ -137,7 +137,7 @@ export function RepeaterView() {
           <ToolButton tone="primary" onClick={() => void send()} disabled={busy || !desktop || !caseReady} title={desktop ? "Send the raw request through the native HTTP engine" : "Sending requires the desktop runtime"}>
             <Play size={11} /> {busy ? "sending…" : "Send"}
           </ToolButton>
-          <span className="ml-auto font-mono text-[10px] text-fg-muted" title="A native selected case, a private/loopback literal-IP target and per-request OS confirmation are required">
+          <span className="ml-auto font-mono text-3xs text-fg-muted" title="A native selected case, a private/loopback literal-IP target and per-request OS confirmation are required">
             {current.response ? `${current.response.status} · ${current.response.size} B · ${current.response.duration_ms} ms` : "Native approval · scoped private/loopback IP only"}
           </span>
         </>
@@ -166,7 +166,7 @@ export function RepeaterView() {
                     key={mode}
                     type="button"
                     onClick={() => setBodyMode(mode)}
-                    className={`flex h-6 items-center border px-1.5 font-mono text-[10px] uppercase ${bodyMode === mode ? "border-line bg-selected text-fg" : "border-line text-fg-muted"}`}
+                    className={`flex h-6 items-center border px-1.5 font-mono text-3xs uppercase ${bodyMode === mode ? "border-line bg-selected text-fg" : "border-line text-fg-muted"}`}
                   >
                     {mode === "hex" ? "Binary hex" : mode}
                   </button>
@@ -179,10 +179,10 @@ export function RepeaterView() {
           }
         >
           {current.error ? (
-            <div className="m-2 border border-err/50 p-2 font-mono text-[11px] text-err">{current.error}</div>
+            <ErrorStrip>{current.error}</ErrorStrip>
           ) : current.response ? (
             bodyMode === "inspector" ? (
-              <div className="h-full overflow-auto p-2 font-mono text-[11px] leading-relaxed">
+              <div className="h-full overflow-auto p-2 font-mono text-2xs leading-relaxed">
                 <div className="text-ok">HTTP {current.response.status} · {current.response.url}</div>
                 <div className="mt-1 border-t border-line" />
                 {current.response.headers.map(([name, value]) => (
@@ -193,7 +193,7 @@ export function RepeaterView() {
                 {current.response.body_truncated ? <div className="mt-2 text-fg-muted">body truncated for display</div> : null}
               </div>
             ) : bodyMode === "raw" ? (
-              <div className="h-full overflow-auto p-2 font-mono text-[11px] leading-relaxed">
+              <div className="h-full overflow-auto p-2 font-mono text-2xs leading-relaxed">
                 <div className="text-ok">HTTP {current.response.status}</div>
                 {current.response.headers.map(([name, value]) => (
                   <div key={name} className="text-fg-dim">{name}: {value}</div>
@@ -202,17 +202,9 @@ export function RepeaterView() {
                 <pre className="whitespace-pre-wrap break-all text-fg">{current.response.body}</pre>
               </div>
             ) : (
-              <pre className="h-full overflow-auto p-2 font-mono text-[11px] leading-relaxed text-fg-dim">
+              <pre className="h-full overflow-auto p-2 font-mono text-2xs leading-relaxed text-fg-dim">
                 <div className="mb-2 text-warn">Exact decoded response bytes from the bounded Base64 payload (first 2048 bytes).</div>
-                {hexRows.map((row) => (
-                  <div key={row.offset}>
-                    <span className="text-fg-muted">{row.offset.toString(16).padStart(8, "0")}</span>
-                    {"  "}
-                    {row.hex}
-                    {"  "}
-                    <span className="text-orange">{row.ascii}</span>
-                  </div>
-                ))}
+                <HexRows rows={hexRows} />
               </pre>
             )
           ) : (

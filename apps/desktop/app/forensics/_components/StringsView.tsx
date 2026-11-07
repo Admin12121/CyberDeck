@@ -1,6 +1,7 @@
 "use client";
 import { useEffect, useRef, useState } from "react";
-import { Pane, Resizer, TextInput, ToolButton } from "@ds/panes";
+import { EmptyState, Pane, Resizer, TextInput, ToolButton } from "@ds/panes";
+import { ErrorStrip } from "@ds/compact";
 import {
   fileEntropyRegions,
   fileStringsScan,
@@ -63,7 +64,7 @@ export function StringsView() {
       <EvidenceTree ctx={ctx} />
       <Pane title={`Strings: ${artifact?.name ?? "no selection"}`} className="min-w-0 flex-1"
         actions={<div className="flex items-center gap-2">
-          <span className="font-mono text-[11px] text-fg-muted">Minimum length</span>
+          <span className="font-mono text-2xs text-fg-muted">Minimum length</span>
           <TextInput value={minLength} onChange={setMinLength} ariaLabel="Minimum string length"
             className="w-12" />
           <ToolButton onClick={() => void analyze()} disabled={!ctx.desktop || !artifact || artifact.size === 0 || busy}
@@ -72,16 +73,16 @@ export function StringsView() {
           </ToolButton>
         </div>}>
         {!ctx.desktop ? (
-          <div className="p-4 text-xs text-fg-muted">The native desktop runtime is required. No simulated strings are displayed.</div>
+          <EmptyState title="Native desktop required" detail="No simulated strings are displayed." />
         ) : !artifact ? (
-          <div className="p-4 text-xs text-fg-muted">Select an imported case artifact, then analyze strings and regional entropy.</div>
+          <EmptyState title="No evidence selected" detail="Select an imported case artifact, then analyze strings and regional entropy." />
         ) : artifact.size === 0 ? (
-          <div className="p-4 text-xs text-fg-muted">This evidence file is empty.</div>
+          <EmptyState title="Empty evidence" detail="This evidence file is empty." />
         ) : (
           <>
-            {error ? <div className="m-2 border border-err/50 p-2 text-xs text-err" role="alert">{error}</div> : null}
+            {error ? <ErrorStrip>{error}</ErrorStrip> : null}
             {strings ? (
-              <div className="border-b border-line px-3 py-2 font-mono text-[11px] text-fg-dim">
+              <div className="border-b border-line px-3 py-2 font-mono text-2xs text-fg-dim">
                 {strings.hits.length} matches (ASCII / UTF-16LE / UTF-16BE) · analyzed {strings.analyzed_bytes.toLocaleString()} of {strings.file_bytes.toLocaleString()} bytes
                 {strings.coverage_truncated ? " · partial file coverage" : ""}
                 {strings.hit_limit_reached ? " · hit limit reached" : ""}
@@ -94,17 +95,18 @@ export function StringsView() {
                 <tbody>{strings.hits.map((hit, index) => (
                   <tr key={`${hit.offset}:${hit.encoding}:${index}`}>
                     <td className="font-mono">
-                      <button type="button" className="text-orange hover:underline" title="Open this byte offset in Hex"
+                      <ToolButton title="Open this byte offset in Hex"
                         onClick={() => { ctx.setHexOffset(hit.offset); wb.selectTool("forensics.files"); }}>
                         0x{hit.offset.toString(16)}
-                      </button>
+                      </ToolButton>
                     </td>
                     <td className="text-fg-muted">{hit.encoding.toUpperCase()}</td>
                     <td className="break-all text-fg">{hit.text}</td>
                   </tr>
                 ))}</tbody>
               </table>
-            ) : <div className="p-4 text-xs text-fg-muted">{busy ? "Verifying and analyzing selected evidence…" : "Select Analyze to scan the first 8 MiB. No background scan runs without your action."}</div>}
+            ) : <EmptyState title={busy ? "Analyzing" : "No results yet"}
+              detail={busy ? "Verifying and analyzing selected evidence…" : "Select Analyze to scan the first 8 MiB. No background scan runs without your action."} />}
           </>
         )}
       </Pane>
@@ -112,17 +114,19 @@ export function StringsView() {
       <Pane title="Regional entropy" className="shrink-0" style={{ width: entropyWidth }}>
         {entropy ? (
           <div className="p-3">
-            <div className="mb-3 text-[11px] text-fg-dim">
+            <div className="mb-3 text-2xs text-fg-dim">
               {entropy.regions.length} actual blocks · {entropy.block_size} bytes each · {entropy.analyzed_bytes.toLocaleString()} bytes analyzed
               {entropy.coverage_truncated ? " (partial)" : ""}
             </div>
             <div className="space-y-1">
               {entropy.regions.slice(0, 128).map((region) => (
-                <div key={region.offset} className="flex items-center gap-2 font-mono text-[10px]">
-                  <button type="button" className="w-20 shrink-0 text-left text-orange hover:underline" title="Inspect entropy region in Hex"
-                    onClick={() => { ctx.setHexOffset(region.offset); wb.selectTool("forensics.files"); }}>
-                    0x{region.offset.toString(16)}
-                  </button>
+                <div key={region.offset} className="flex items-center gap-2 font-mono text-3xs">
+                  <span className="w-20 shrink-0">
+                    <ToolButton title="Inspect entropy region in Hex"
+                      onClick={() => { ctx.setHexOffset(region.offset); wb.selectTool("forensics.files"); }}>
+                      0x{region.offset.toString(16)}
+                    </ToolButton>
+                  </span>
                   <div className="h-2 flex-1 overflow-hidden bg-raised">
                     <div className="h-full bg-orange" style={{ width: `${Math.max(0, Math.min(100, region.entropy / 8 * 100))}%` }} />
                   </div>
@@ -131,10 +135,11 @@ export function StringsView() {
               ))}
             </div>
             {entropy.regions.length > 128 ? (
-              <div className="mt-3 font-mono text-[10px] text-fg-muted">Displaying first 128 of {entropy.regions.length} measured blocks.</div>
+              <div className="mt-3 font-mono text-3xs text-fg-muted">Displaying first 128 of {entropy.regions.length} measured blocks.</div>
             ) : null}
           </div>
-        ) : <div className="p-3 text-xs text-fg-muted">{busy ? "Calculating native regional entropy…" : "Regional entropy is calculated on demand from the selected evidence."}</div>}
+        ) : <EmptyState title={busy ? "Measuring entropy" : "No results yet"}
+          detail={busy ? "Calculating native regional entropy…" : "Regional entropy is calculated on demand from the selected evidence."} />}
       </Pane>
     </div>
   );

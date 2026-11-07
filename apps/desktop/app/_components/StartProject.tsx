@@ -147,7 +147,7 @@ export function StartProject() {
               <div className="text-lg font-semibold tracking-tight">
                 CyberDeck
               </div>
-              <div className="text-[11px] text-fg-muted">
+              <div className="text-2xs text-fg-muted">
                 Security Workbench
               </div>
             </div>
@@ -268,7 +268,7 @@ export function StartProject() {
 
             <div className="px-5 border-t border-line py-4">
               <div className="flex items-center justify-between gap-2">
-                <h2 className="text-[11px] font-semibold uppercase tracking-wide text-fg-muted">
+                <h2 className="text-2xs font-semibold uppercase tracking-wide text-fg-muted">
                   Quick tools
                 </h2>
                 {lastTool && (

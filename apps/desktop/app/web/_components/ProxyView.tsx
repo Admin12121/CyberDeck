@@ -4,7 +4,7 @@ import { Copy, Globe, PlayCircle, Settings2, Square, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { useCaseReady } from "@state/workbench";
 import { CaseGate } from "@ds/case-gate";
-import { ModeCard } from "@ds/compact";
+import { ErrorStrip, ModeCard } from "@ds/compact";
 import { Chip, TextInput, ToolButton } from "@ds/panes";
 import {
   isDesktop,
@@ -240,12 +240,12 @@ export function ProxyView() {
           title="Hold supported requests for Forward or Drop">
           Intercept {interceptOn ? "on" : "off"}
         </ToolButton>
-        <span className="ml-auto font-mono text-[11px] text-fg-muted">
+        <span className="ml-auto font-mono text-2xs text-fg-muted">
           127.0.0.1:{status.running ? status.port : port} · {status.captured} requests
         </span>
       </div>
 
-      {error && <p role="alert" className="text-xs text-err">{error}</p>}
+      {error && <ErrorStrip>{error}</ErrorStrip>}
       {!desktop && <p className="text-xs text-fg-muted">Proxy control requires the desktop application.</p>}
 
       <div className="flex items-center">
@@ -276,18 +276,18 @@ export function ProxyView() {
             </ToolButton>
           </div>
           <CaseGate activity="Private HTTP history capture" />
-          {consentError && <p role="alert" className="text-xs text-err">{consentError}</p>}
+          {consentError && <ErrorStrip>{consentError}</ErrorStrip>}
           <div className="flex flex-wrap items-center gap-3">
             <span className="text-xs font-semibold">CA trust</span>
             <ToolButton onClick={() => void copyCa()} disabled={!desktop} title="Copy CA certificate PEM">
               <Copy size={13} /> Copy PEM
             </ToolButton>
-            <span className="text-[11px] text-fg-muted">Trust only in an isolated authorized test profile.</span>
+            <span className="text-2xs text-fg-muted">Trust only in an isolated authorized test profile.</span>
           </div>
           <div className="space-y-2">
             <div className="flex flex-wrap items-center gap-3">
               <span className="text-xs font-semibold">Request rules</span>
-              <span className="text-[11px] text-fg-muted">
+              <span className="text-2xs text-fg-muted">
                 {rules.length} {rules.length === 1 ? "rule" : "rules"}
                 {rulesSaving ? " · applying…" : rulesApplied ? " · applied" : ""}
               </span>
@@ -328,8 +328,8 @@ export function ProxyView() {
             <div className="space-y-1">
               {pending.map((request) => (
                 <div key={request.id} className="flex items-center gap-2 rounded-sm bg-raised px-2 py-1.5">
-                  <span className="w-12 shrink-0 font-mono text-[11px] text-fg-dim">{request.method}</span>
-                  <span className="min-w-0 flex-1 truncate font-mono text-[11px]" title={request.url}>
+                  <span className="w-12 shrink-0 font-mono text-2xs text-fg-dim">{request.method}</span>
+                  <span className="min-w-0 flex-1 truncate font-mono text-2xs" title={request.url}>
                     {request.host}{request.path}
                   </span>
                   <ToolButton tone="primary" disabled={pendingBusy !== null}

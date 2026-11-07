@@ -2,7 +2,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { ChevronRight, CornerUpLeft, Download, FileDown, FolderOpen } from "lucide-react";
 import { Chip, EmptyState, TextInput, ToolButton, WorkspaceTabs } from "@ds/panes";
-import { IconButton, WorkspaceShell } from "@ds/compact";
+import { ErrorStrip, IconButton, ProgressBar, WorkspaceShell } from "@ds/compact";
 import { hexDump } from "@lib/hex";
 import {
   isDesktop,
@@ -319,37 +319,39 @@ function ImportedCaptureView() {
           contentClassName="flex flex-col"
         >
         {openError ? (
-          <div className="border-b border-err/50 bg-err/10 px-2 py-1 font-mono text-[10px] text-err">{openError}</div>
+          <ErrorStrip>{openError}</ErrorStrip>
         ) : null}
         {filterProblem ? (
-          <div className="border-b border-warn/40 bg-warn/10 px-2 py-1 font-mono text-[10px] text-warn" role="status" aria-label="Display filter syntax error">
+          <ErrorStrip>
             {"filter syntax: "}
             {filterProblem.message}
             {" · at character "}
             {filterProblem.position + 1}
-          </div>
+          </ErrorStrip>
         ) : null}
         {capture?.malformed_tail ? (
-          <div className="border-b border-warn/40 bg-warn/10 px-2 py-0.5 text-[10px] text-warn">
+          <ErrorStrip>
             malformed trailing record — earlier packets loaded
-          </div>
+          </ErrorStrip>
         ) : null}
         {reassembly && showReassembly ? (
-          <div
-            className="flex items-center justify-between gap-2 border-b border-warn/40 bg-warn/10 px-2 py-1 font-mono text-[10px] text-warn"
-            role="status"
-            aria-label="Fragment reassembly summary"
-          >
-            <span className="truncate">{reassemblyBannerText(reassembly)}</span>
-            <button
-              type="button"
-              className="shrink-0 px-1 font-mono text-[10px] text-warn hover:text-fg"
-              aria-label="Dismiss reassembly summary"
-              onClick={() => setShowReassembly(false)}
+          <ErrorStrip>
+            <div
+              className="flex items-center justify-between gap-2"
+              role="status"
+              aria-label="Fragment reassembly summary"
             >
-              ×
-            </button>
-          </div>
+              <span className="truncate">{reassemblyBannerText(reassembly)}</span>
+              <button
+                type="button"
+                className="shrink-0 px-1 font-mono text-3xs text-err hover:text-fg"
+                aria-label="Dismiss reassembly summary"
+                onClick={() => setShowReassembly(false)}
+              >
+                ×
+              </button>
+            </div>
+          </ErrorStrip>
         ) : null}
 
         <PacketPaneSplit
@@ -411,7 +413,7 @@ function ImportedCaptureView() {
                     <tr key={`${e.family}:${e.address}`}>
                       <td>
                         <button type="button"
-                          className="w-full rounded-sm px-1 py-0.5 text-left font-mono text-[11px] hover:bg-selected focus-visible:outline focus-visible:outline-1 focus-visible:outline-ring"
+                          className="w-full rounded-sm px-1 py-0.5 text-left font-mono text-2xs hover:bg-selected focus-visible:outline focus-visible:outline-1 focus-visible:outline-ring"
                           title={`Filter for address ${e.address}`}
                           aria-label={`Filter packets for address ${e.address}`}
                           onClick={() => {
@@ -473,7 +475,7 @@ function ImportedCaptureView() {
                       <tr key={stat.protocol}>
                         <td>
                           <button type="button"
-                            className={`w-full rounded-sm px-1 py-0.5 text-left font-mono text-[11px] hover:bg-selected focus-visible:outline focus-visible:outline-1 focus-visible:outline-ring ${PROTOCOL_COLORS[stat.protocol.toLowerCase()] ?? "text-fg-dim"}`}
+                            className={`w-full rounded-sm px-1 py-0.5 text-left font-mono text-2xs hover:bg-selected focus-visible:outline focus-visible:outline-1 focus-visible:outline-ring ${PROTOCOL_COLORS[stat.protocol.toLowerCase()] ?? "text-fg-dim"}`}
                             title={`Filter packets by ${stat.protocol}`}
                             aria-label={`Show ${stat.protocol} packets`}
                             onClick={() => inspectProtocol(stat.protocol)}>
@@ -483,9 +485,7 @@ function ImportedCaptureView() {
                         <td>{stat.packets}</td>
                         <td>{stat.bytes}</td>
                         <td>
-                          <div className="h-1.5 w-full max-w-48 border border-line bg-app">
-                            <div className="h-full bg-orange" style={{ width: `${Math.round((stat.bytes / totalBytes) * 100)}%` }} />
-                          </div>
+                          <ProgressBar percent={Math.round((stat.bytes / totalBytes) * 100)} className="max-w-48" />
                         </td>
                       </tr>
                     );
@@ -538,7 +538,7 @@ function ImportedCaptureView() {
     }}>Send to Recipes</ToolButton>}
           bytes={            <div className="min-h-0 flex-1 overflow-auto">
                 {capture && currentBytes ? (
-                  <pre className="p-1 font-mono text-[11px] leading-relaxed text-fg-dim">
+                  <pre className="p-1 font-mono text-2xs leading-relaxed text-fg-dim">
                     {currentBytes.rows.map((row) => (
                       <div key={row.offset}>
                         <span className="text-fg-muted">{row.offset.toString(16).padStart(4, "0")}</span>
@@ -550,7 +550,7 @@ function ImportedCaptureView() {
                     ))}
                   </pre>
                 ) : !capture ? (
-                  <pre className="p-1 font-mono text-[11px] leading-relaxed text-fg-dim">
+                  <pre className="p-1 font-mono text-2xs leading-relaxed text-fg-dim">
                     {hexDump(sampleBytes).map((row) => (
                       <div key={row.offset}>
                         <span className="text-fg-muted">{row.offset.toString(16).padStart(4, "0")}</span>
@@ -605,7 +605,7 @@ function OsHintsView({ desktop, hints, loading, hasCapture, onAnalyze }: {
           <Chip>no analysis yet</Chip>
         )}
       </div>
-      <p className="mb-2 font-mono text-[10px] text-fg-muted">
+      <p className="mb-2 font-mono text-3xs text-fg-muted">
         low-confidence hints from documented stack breakpoints (initial TTL, window scale, MSS,
         option order) — never verdicts, never versions; "unknown" is the expected result for
         hardened or uncommon stacks
@@ -625,8 +625,8 @@ function OsHintsView({ desktop, hints, loading, hasCapture, onAnalyze }: {
           <tbody>
             {hints.hints.map((observation, index) => (
               <tr key={`${observation.source}-${observation.destination}-${index}`}>
-                <td className="font-mono text-[11px]">{observation.source}</td>
-                <td className="font-mono text-[11px]">{observation.destination}</td>
+                <td className="font-mono text-2xs">{observation.source}</td>
+                <td className="font-mono text-2xs">{observation.destination}</td>
                 <td>{observation.syn_ack ? <Chip>SYN/ACK</Chip> : <Chip>SYN</Chip>}</td>
                 <td>
                   <Chip tone={observation.hint.family === "unknown" ? "muted" : "orange"}>
@@ -661,16 +661,14 @@ function HierarchyRows({ node, depth, totalBytes }: { node: HierarchyNode; depth
     <>
       <tr>
         <td>
-          <span style={{ paddingLeft: depth * 14 }} className="font-mono text-[11px] text-fg">
+          <span style={{ paddingLeft: depth * 14 }} className="font-mono text-2xs text-fg">
             {depth > 0 ? "└ " : ""}{node.protocol}
           </span>
         </td>
         <td>{node.packets}</td>
         <td>{node.bytes}</td>
         <td>
-          <div className="h-1.5 w-full max-w-48 border border-line bg-app">
-            <div className="h-full bg-orange" style={{ width: `${share}%` }} />
-          </div>
+          <ProgressBar percent={share} className="max-w-48" />
         </td>
       </tr>
       {node.children.map((child) => (
@@ -695,7 +693,7 @@ function IoGraphView({ buckets }: { buckets: IoBucket[] }) {
   const span = Math.max(buckets[buckets.length - 1].fromMs - buckets[0].fromMs, 1);
   return (
     <div className="flex h-full min-h-0 flex-col p-2">
-      <p className="mb-1 font-mono text-[10px] text-fg-muted">
+      <p className="mb-1 font-mono text-3xs text-fg-muted">
         packets per bucket over {(span / 1000).toFixed(3)} s · peak {maxPackets} · total {buckets.reduce((s, b) => s + b.packets, 0)}
       </p>
       <div className="flex min-h-0 flex-1 items-end gap-px" role="img" aria-label="Packets per time bucket">
@@ -706,7 +704,7 @@ function IoGraphView({ buckets }: { buckets: IoBucket[] }) {
             title={`t=+${(b.fromMs / 1000).toFixed(3)} s · ${b.packets} packets · ${b.bytes} bytes`} />
         ))}
       </div>
-      <div className="mt-1 flex justify-between font-mono text-[10px] text-fg-muted">
+      <div className="mt-1 flex justify-between font-mono text-3xs text-fg-muted">
         <span>+{(buckets[0].fromMs / 1000).toFixed(3)} s</span>
         <span>+{((buckets[buckets.length - 1].fromMs + span / buckets.length) / 1000).toFixed(3)} s</span>
       </div>
@@ -721,7 +719,7 @@ function DetailBranch({ node, depth }: { node: DetailNode; depth: number }) {  c
       <button
         type="button"
         onClick={() => hasChildren && setOpen((v) => !v)}
-        className="flex w-full items-center gap-1 py-px text-left font-mono text-[11px] hover:bg-raised"
+        className="flex w-full items-center gap-1 py-px text-left font-mono text-2xs hover:bg-raised"
       >
         {hasChildren ? (
           <ChevronRight size={11} className={`shrink-0 text-fg-muted transition-transform ${open ? "rotate-90" : ""}`} />
@@ -807,7 +805,7 @@ function FollowStreamView({ packets, artifactId }: { packets: DisplayPacket[]; a
             key={stream.id}
             type="button"
             onClick={() => setSelected(stream.id)}
-            className={"block w-full truncate px-2 py-1 text-left font-mono text-[10px] " + (
+            className={"block w-full truncate px-2 py-1 text-left font-mono text-3xs " + (
               selected === stream.id ? "bg-orange-dim text-orange" : "text-fg-dim hover:bg-raised hover:text-fg"
             )}
           >
@@ -815,7 +813,7 @@ function FollowStreamView({ packets, artifactId }: { packets: DisplayPacket[]; a
           </button>
         ))}
       </div>
-      <div className="min-h-0 flex-1 overflow-auto p-2 font-mono text-[11px] leading-relaxed">
+      <div className="min-h-0 flex-1 overflow-auto p-2 font-mono text-2xs leading-relaxed">
         {streamError ? (
           <div className="text-err">{streamError}</div>
         ) : transcript === null ? (

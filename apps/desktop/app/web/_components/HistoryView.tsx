@@ -2,6 +2,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Globe } from "lucide-react";
 import { EmptyState, Pane, Resizer, TextInput, ToolButton } from "@ds/panes";
+import { ErrorStrip, HexRows } from "@ds/compact";
 import { hexDump } from "@lib/hex";
 import {
   isDesktop, proxyHistory, webCaptureConsentStatusV1,
@@ -28,9 +29,7 @@ function BinaryPreview({ data, truncated }: { data: string | null; truncated: bo
       <div className="text-fg-muted">{bytes.length} bytes {truncated ? "· truncated" : ""}</div>
       {text !== null
         ? <pre className="max-h-48 overflow-auto whitespace-pre-wrap break-all text-fg">{text.slice(0, 16384)}</pre>
-        : <pre className="max-h-48 overflow-auto text-fg-dim">{hexDump(bytes.slice(0, 1024)).map((line) =>
-          <div key={line.offset}>{line.offset.toString(16).padStart(8, "0")}  {line.hex}  {line.ascii}</div>
-        )}</pre>}
+        : <pre className="max-h-48 overflow-auto text-fg-dim"><HexRows rows={hexDump(bytes.slice(0, 1024))} /></pre>}
     </div>
   );
 }
@@ -152,7 +151,7 @@ export function HistoryView() {
       <div className="flex min-h-0 flex-1 gap-px">
       <Pane title={`HTTP history · ${rows.length}`} className="min-w-0 flex-1" bodyClassName="p-0"
         actions={<TextInput value={query} onChange={setQuery} placeholder="Filter requests" ariaLabel="History filter" className="w-40" />}>
-        {error ? <div role="alert" className="border-b border-line px-2 py-1 text-xs text-err">{error}</div> : null}
+        {error ? <ErrorStrip>{error}</ErrorStrip> : null}
         {!captureGeneration
           ? <EmptyState title="No active history" detail={caseReady
               ? "In Proxy, start the listener, open Advanced and authorize private History for this case. Configure an isolated browser to use the local proxy."
@@ -198,7 +197,7 @@ export function HistoryView() {
                 {busy ? "Authorizing…" : `Replay ${mode === "forwarded" ? "forwarded" : "original"}`}
               </ToolButton>
             </div>
-            <div className="min-h-0 flex-1 overflow-auto p-2 font-mono text-[11px]">
+            <div className="min-h-0 flex-1 overflow-auto p-2 font-mono text-2xs">
               {mode === "original" ? <>
                 <div className="break-all text-fg">{detail.url}</div>
                 <pre className="my-2 whitespace-pre-wrap break-all text-fg-dim">{detail.request_head}</pre>
@@ -216,9 +215,9 @@ export function HistoryView() {
           </div>
         ) : <div className="h-full overflow-auto">
           <EmptyState title="Select a request" detail="Inspecting or replaying captured bytes requires native authorization." />
-          <div className="border-t border-line px-2 py-2 text-[10px] text-fg-muted">Sites</div>
+          <div className="border-t border-line px-2 py-2 text-3xs text-fg-muted">Sites</div>
           {[...new Set(rows.map((r) => r.host))].map((host) =>
-            <div key={host} className="flex items-center gap-2 truncate px-2 py-1 font-mono text-[11px]">
+            <div key={host} className="flex items-center gap-2 truncate px-2 py-1 font-mono text-2xs">
               <Globe size={12} className="shrink-0" />{host}
             </div>)}
         </div>}

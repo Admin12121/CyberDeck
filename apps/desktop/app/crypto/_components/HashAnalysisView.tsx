@@ -5,7 +5,8 @@ import { Accordion, AccordionItem, AccordionTrigger, AccordionPanel } from "@/co
 import { VerifyAlgorithmCombobox, VERIFY_ALGORITHMS, type VerifyAlgorithmId } from "./VerifyAlgorithmCombobox";
 import { verifyDigestOutput } from "./verify-output";
 import { FileUp, Info, Link2, Play } from "lucide-react";
-import { Chip, Pane, Resizer, TextInput, ToolButton } from "@ds/panes";
+import { ErrorStrip } from "@ds/compact";
+import { Chip, Pane, Resizer, TextArea, TextInput, ToolButton } from "@ds/panes";
 import { useWorkbench, useWorkbenchCase } from "@state/workbench";
 import { cryptoOp, kdfVerify } from "@lib/ipc";
 import { detectHashFormats } from "./model/hash";
@@ -120,21 +121,21 @@ export function HashAnalysisView() {
       <div className="flex h-full min-h-0 min-w-0 gap-px bg-line">
         <div className="flex min-w-0 flex-1 flex-col gap-px">
           <Pane title="Hash Input" className="shrink-0" bodyClassName="p-3">
-            <textarea
+            <TextArea
               value={input}
-              onChange={(event) => {
-                const value = event.target.value.slice(0, MAX_HASH_INPUT_CHARS);
-                setInput(value);
-                keepHash(caseId, value);
+              onChange={(value) => {
+                const next = value.slice(0, MAX_HASH_INPUT_CHARS);
+                setInput(next);
+                keepHash(caseId, next);
                 setHashImportError(null);
                 setVerdict(null);
                 setVerifyError(null);
               }}
-              spellCheck={false}
               maxLength={MAX_HASH_INPUT_CHARS}
-              aria-label="Hash input"
+              ariaLabel="Hash input"
               placeholder="Paste a digest or password hash…"
-              className="h-28 max-h-28 min-h-28 w-full resize-none overflow-y-auto rounded-sm border border-line bg-app p-3 font-mono text-xs leading-relaxed text-fg outline-none ring-0 focus:border-line focus:outline-none focus:ring-0 focus-visible:border-line focus-visible:outline-none focus-visible:ring-0"
+              rows={4}
+              className="h-28 min-h-28 max-h-28 overflow-y-auto"
             />
             <div className="mt-2 flex flex-wrap items-center gap-2">
               <input ref={hashFileRef} type="file" accept=".txt,.hash,.md5,.sha1,.sha256,.sha512,text/plain"
@@ -152,13 +153,13 @@ export function HashAnalysisView() {
                 onClick={() => sendToRecipes(hash, "Hash Analysis target")}>
                 <Link2 size={13} aria-hidden="true" /> To Recipes
               </ToolButton>
-              <span className="ml-auto font-mono text-[11px] text-fg-muted">{hash.length}/{MAX_HASH_INPUT_CHARS} characters</span>
+              <span className="ml-auto font-mono text-2xs text-fg-muted">{hash.length}/{MAX_HASH_INPUT_CHARS} characters</span>
             </div>
-            {hashImportError ? <p role="alert" className="mt-2 text-[11px] text-err">{hashImportError}</p> : null}
+            {hashImportError ? <ErrorStrip>{hashImportError}</ErrorStrip> : null}
           </Pane>
           <Pane title="Detected Candidates" className={hash ? "h-[40%] min-h-44 max-h-[50%] shrink-0" : "h-44 shrink-0"} bodyClassName="overflow-hidden"
             actions={
-              <details className="relative text-[11px] text-fg-muted">
+              <details className="relative text-2xs text-fg-muted">
                 <summary className="inline-flex cursor-pointer items-center gap-1 rounded px-1 focus-visible:outline focus-visible:outline-2"
                   aria-label="About heuristic hash identification">
                   <Info size={13} aria-hidden="true" /> About
@@ -174,32 +175,32 @@ export function HashAnalysisView() {
             {hash.length === 0 ? (
               <div className="px-3 py-6 text-center">
                 <p className="text-xs font-medium text-fg">No hash to identify</p>
-                <p className="mt-1 text-[11px] text-fg-muted">Paste a hash to view possible formats.</p>
+                <p className="mt-1 text-2xs text-fg-muted">Paste a hash to view possible formats.</p>
               </div>
             ) : (
               <div className="h-full min-h-0 overflow-auto" onScroll={(event) => showNextCandidates(event.currentTarget)}
                 aria-label="Scroll detected candidates">
-                <table className="w-full text-left text-xs" aria-label="Heuristic hash format candidates">
-                  <thead className="sticky top-0 z-10 border-b border-line bg-app text-[11px] text-fg-muted">
+                <table className="data-table" aria-label="Heuristic hash format candidates">
+                  <thead>
                     <tr>
-                      <th scope="col" className="min-w-40 px-3 py-2 font-medium">Possible format</th>
-                      <th scope="col" className="px-3 py-2 font-medium">Confidence</th>
-                      <th scope="col" className="min-w-32 px-3 py-2 font-medium">Recovery V1</th>
+                      <th scope="col">Possible format</th>
+                      <th scope="col">Confidence</th>
+                      <th scope="col">Recovery V1</th>
                     </tr>
                   </thead>
-                  <tbody className="divide-y divide-line/60">
+                  <tbody>
                     {candidates.slice(0, visibleCandidates).map((item, index) => (
                       <tr key={item.format + index} className="align-top">
-                        <td className="px-3 py-2">
+                        <td>
                           <p className="font-medium text-fg">{item.format}</p>
-                          <p className="mt-1 text-[11px] leading-relaxed text-fg-muted">{item.note}</p>
+                          <p className="mt-1 text-2xs leading-relaxed text-fg-muted">{item.note}</p>
                         </td>
-                        <td className="px-3 py-2">
+                        <td>
                           <Chip tone={item.confidence === "high" ? "ok" : "muted"}>
                             {item.confidence}
                           </Chip>
                         </td>
-                        <td className="px-3 py-2 text-[11px]">
+                        <td className="text-2xs">
                           {cpuRecoveryEligible ? (
                             <span className="text-warn">CPU eligible · confirm algorithm</span>
                           ) : (
@@ -210,7 +211,7 @@ export function HashAnalysisView() {
                     ))}
                   </tbody>
                 </table>
-                {visibleCandidates < candidates.length ? <p className="px-3 py-2 text-[11px] text-fg-muted">Scroll to load more candidates</p> : null}
+                {visibleCandidates < candidates.length ? <p className="px-3 py-2 text-2xs text-fg-muted">Scroll to load more candidates</p> : null}
               </div>
             )}
           </Pane>
@@ -231,12 +232,12 @@ export function HashAnalysisView() {
               </AccordionTrigger>
               <AccordionPanel className="space-y-3 px-3 pb-3">
                 <label className="block space-y-1">
-                  <span className="text-[11px] text-fg-muted">Hash algorithm (length is only a suggestion)</span>
+                  <span className="text-2xs text-fg-muted">Hash algorithm (length is only a suggestion)</span>
                   <VerifyAlgorithmCombobox value={algorithm}
                     onChange={(value) => { setAlgorithm(value); setVerdict(null); }} />
                 </label>
                 <label className="block space-y-1">
-                  <span className="text-[11px] text-fg-muted">Candidate</span>
+                  <span className="text-2xs text-fg-muted">Candidate</span>
                   <TextInput value={candidate} ariaLabel="Candidate password" placeholder="Enter candidate"
                     onChange={(value) => { setCandidate(value); setVerdict(null); }} className="w-full" />
                 </label>
@@ -247,7 +248,7 @@ export function HashAnalysisView() {
                 </ToolButton>
                 {verdict === "match" ? <Chip tone="ok">Match</Chip> : null}
                 {verdict === "mismatch" ? <Chip tone="err">No match</Chip> : null}
-                {verifyError ? <p role="alert" className="text-[11px] text-err">{verifyError}</p> : null}
+                {verifyError ? <ErrorStrip>{verifyError}</ErrorStrip> : null}
               </AccordionPanel>
             </AccordionItem>
           </Accordion>
