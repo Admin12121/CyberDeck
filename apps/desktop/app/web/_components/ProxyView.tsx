@@ -3,7 +3,6 @@ import { useEffect, useRef, useState } from "react";
 import { Copy, Globe, PlayCircle, Settings2, Square, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { useCaseReady } from "@state/workbench";
-import { CaseGate } from "@ds/case-gate";
 import { ErrorStrip, ModeCard } from "@ds/compact";
 import { Chip, TextInput, ToolButton } from "@ds/panes";
 import {
@@ -275,7 +274,6 @@ export function ProxyView() {
               Revoke & clear
             </ToolButton>
           </div>
-          <CaseGate activity="Private HTTP history capture" />
           {consentError && <ErrorStrip>{consentError}</ErrorStrip>}
           <div className="flex flex-wrap items-center gap-3">
             <span className="text-xs font-semibold">CA trust</span>

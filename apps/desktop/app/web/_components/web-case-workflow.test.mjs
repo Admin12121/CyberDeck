@@ -14,7 +14,7 @@ const jobs = read("../../../src-tauri/src/features/web/application/assessment_jo
 
 test("Web scanner requires backend-selected saved case and routes to the central case surfaces", () => {
   assert.match(scanner, /useCaseReady\(\)/);
-  assert.match(scanner, /<CaseGate activity="Web security assessment" \/>/);
+  assert.doesNotMatch(scanner, /CaseGate|New case|Choose case/);
   assert.match(scanner, /disabled=\{!desktop \|\| !caseReady \|\| !normalized \|\| !authorized \|\| running\}/);
   assert.match(scanner, /\{advancedOpen && \(/);
   assert.match(scanner, /setJobId\(null\)/);
@@ -24,7 +24,7 @@ test("Web scanner requires backend-selected saved case and routes to the central
 });
 
 test("Web Spider requires saved case and persists only explicit backend-owned discoveries", () => {
-  assert.match(spider, /<CaseGate activity="Web site discovery" \/>/);
+  assert.doesNotMatch(spider, /CaseGate|New case|Choose case/);
   assert.match(spider, /disabled=\{busy \|\| !desktop \|\| !caseReady/);
   assert.match(spider, /saveWebAssessmentFindings\(job\.job_id\)/);
   assert.match(spider, /Save discovered routes to case/);
@@ -37,14 +37,15 @@ test("Web Repeater drops raw drafts and response data when switching case revisi
   assert.match(repeater, /lastCaseIdentity\.current\.caseId !== caseId/);
   assert.match(repeater, /lastHandoff\.current = repeaterHandoff\?\.id \?\? 0/);
   assert.match(repeater, /setTabs\(\[\{ name: "R1", request: SAMPLE_REQUEST, response: null, error: null \}\]\)/);
-  assert.match(repeater, /<CaseGate activity="Web request replay" \/>/);
+  assert.doesNotMatch(repeater, /CaseGate|New case|Choose case/);
   assert.match(repeater, /disabled=\{busy \|\| !desktop \|\| !caseReady\}/);
 });
 
 test("Proxy/History expose saved-case consent workflow and never claim automatic CA trust", () => {
-  assert.match(proxy, /<CaseGate activity="Private HTTP history capture" \/>/);
+  assert.doesNotMatch(proxy, /CaseGate|New case|Choose case/);
   assert.match(proxy, /!caseReady \|\| !status\.running \|\| consentBusy/);
   assert.match(proxy, /does not install trust automatically/);
-  assert.match(history, /<CaseGate activity="Private Web history" \/>/);
+  assert.doesNotMatch(history, /CaseGate|New case|Choose case/);
+  assert.match(history, /Select a saved case on the home page/);
   assert.match(history, /Enable case-bound capture consent|authorize private History capture in Proxy/i);
 });

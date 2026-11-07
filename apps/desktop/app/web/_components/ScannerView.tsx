@@ -7,7 +7,6 @@ import { isDesktop } from "@lib/ipc";
 import { useWebWorkflow } from "./WebWorkflow";
 import { useCaseReady, useWorkbench } from "@state/workbench";
 import { useWorkspaceDraft } from "@state/workspace-sessions";
-import { CaseGate } from "@ds/case-gate";
 import {
   cancelWebAssessment, startWebAssessment, webAssessmentStatus, waitForWebAssessment, saveWebAssessmentFindings,
   type WebAssessmentJob,
@@ -195,7 +194,6 @@ export function ScannerView() {
       </>
     }
   >
-    <CaseGate activity="Web security assessment" />
     {advancedOpen && (
       <div className="flex flex-wrap items-center gap-2 border-b border-line bg-panel p-2">
       <span className="flex items-center gap-1 text-2xs text-fg-muted">

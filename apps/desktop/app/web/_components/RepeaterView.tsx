@@ -7,7 +7,6 @@ import { httpSend, isDesktop, type HttpResponseWire } from "@lib/ipc";
 import { hexDump } from "@lib/hex";
 import { useWebWorkflow } from "./WebWorkflow";
 import { useCaseReady } from "@state/workbench";
-import { CaseGate } from "@ds/case-gate";
 
 interface RepeaterTab {
   name: string;
@@ -143,7 +142,6 @@ export function RepeaterView() {
         </>
       }
     >
-      <CaseGate activity="Web request replay" />
       <div className="flex min-h-0 flex-1 gap-px bg-line">
         <Pane title={`Request: ${current.name}`} className="min-w-0 flex-1" bodyClassName="p-0">
           <textarea

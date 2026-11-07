@@ -69,7 +69,7 @@ export function StartProject() {
 
   const recent = useMemo(() => cases.slice(0, 8), [cases]);
 
-  // Deep link from the shared CaseGate: preselect the create form and focus it.
+  // Deep link from in-tool pointer lines: preselect the create form and focus it.
   useEffect(() => {
     if (!new URLSearchParams(window.location.search).has("new")) return;
     setNative(isDesktop());

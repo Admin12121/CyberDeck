@@ -27,7 +27,6 @@ import { buildSitesTree, filterCaptured, useTarget } from "./controller";
 import { makeGetDraft, useWebWorkflow } from "./WebWorkflow";
 import { useCaseReady, useWorkbench } from "@state/workbench";
 import { useWorkspaceDraft } from "@state/workspace-sessions";
-import { CaseGate } from "@ds/case-gate";
 import { cancelWebAssessment, startWebAssessment, webAssessmentStatus, waitForWebAssessment, saveWebAssessmentFindings, type WebAssessmentJob } from "./controller/assessment-jobs";
 
 // ----------------------------------------------------------------- spider ---
@@ -174,7 +173,6 @@ export function SpiderView() {
         </>
       }
     >
-      <CaseGate activity="Web site discovery" />
       {error ? <ErrorStrip>{error}</ErrorStrip> : null}
       <div className="border-b border-line bg-panel px-3 py-2">
         <CheckBox checked={authorized} onChange={setAuthorized}>

@@ -49,7 +49,6 @@ import {
   type ScanProfileWire,
 } from "@lib/ipc";
 import { useCaseReady, useWorkbench } from "@state/workbench";
-import { CaseGate } from "@ds/case-gate";
 import { useWorkspaceDraft } from "@state/workspace-sessions";import { invoke, Channel } from "@tauri-apps/api/core";
 
 
@@ -857,7 +856,7 @@ export function ScanView() {
     ? "Scanning…"
     : revision === null ? "No case selected" : "Ready to scan";
   const emptyLine = revision === null
-    ? "Choose a saved case in the gate above to enable scanning."
+    ? "Choose a saved case on the home page to enable scanning."
     : running
       ? "Results appear here as probes complete."
       : "Enter a target and press Run scan.";
@@ -1180,7 +1179,6 @@ export function ScanView() {
       status={<StatusStrip items={statusItems} />}
       contentClassName="flex flex-col"
     >
-      <CaseGate activity="Network scanning" />
       {error ? <ErrorStrip>{error}</ErrorStrip> : null}
       {progress ? (
         <div className="shrink-0 px-3 py-1">

@@ -20,7 +20,6 @@ import {
   type CaptureFramePageV1, type PcapPacketWire, type StreamTranscriptWire,
 } from "@lib/ipc";
 import { useCaseReady, useWorkbenchCase } from "@state/workbench";
-import { CaseGate } from "@ds/case-gate";
 import { useWorkspaceDraft } from "@state/workspace-sessions";
 import { activeCaptureId, boundedPageOffset, captureLimits, captureInterfaceEligible, matchesCaptureIdentity } from "./capture-view-policy";
 import { currentNativeSession, dropNativeSession, rememberNativeSession, subscribeNativeSessions } from "./capture-session-registry";
@@ -387,7 +386,6 @@ export function LiveCaptureView({ presentation = "full", onCaptureStarted, onRet
             )}
           </div>
         )}
-        {revision === null && eligible.length > 0 && <CaseGate activity="Live packet capture" />}
         <div className="mt-3 flex flex-wrap items-center gap-2">
           {running && sessionId !== null && (
             <Button variant="destructive-outline" size="sm" disabled={working || status?.phase === "stopping"}

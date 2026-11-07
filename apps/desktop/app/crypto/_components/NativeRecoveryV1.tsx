@@ -614,7 +614,7 @@ export function NativeRecoveryControls() {
     );
   }
   const statusText = !r.scope
-    ? "Choose a saved case to authorize recovery — status-bar switcher or start page."
+    ? "Choose a saved case on the home page to authorize recovery."
     : r.wordlistError
       ? r.wordlistError
       : null;

@@ -8,7 +8,7 @@
  *
  * UX revision (Zenmap reference): an icon rail picks ONE focused mode at a
  * time — Diff or Topology — and each mode gets a single dense toolbar row.
- * Every long explanation (honesty contract, topology legend, case-gate
+ * Every long explanation (honesty contract, topology legend
  * rationale) lives in an InfoTip tooltip instead of on-screen prose, so the
  * screen shows controls and results, not text walls.
  */
@@ -21,7 +21,6 @@ import {
   type ScanHistoryItemWire, type ScanDiffWire, type ScanTopologyWire,
 } from "@lib/ipc";
 import { useCaseReady } from "@state/workbench";
-import { CaseGate } from "@ds/case-gate";
 import {
   hostChangeCount,
   formatSessionLabel,
@@ -268,7 +267,6 @@ export function ScanInsightsView() {
       contentClassName="flex flex-col"
     >
       {error ? <ErrorStrip>{error}</ErrorStrip> : null}
-      <CaseGate activity="Scan insights" />
       <div className="flex min-h-0 flex-1 flex-col bg-panel">
         {!desktop ? (
           <EmptyCard icon={GitCompare} title="Scan insights require the desktop runtime">

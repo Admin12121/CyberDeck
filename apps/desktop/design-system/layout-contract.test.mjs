@@ -100,7 +100,6 @@ test("every workspace top row renders through WorkspaceShell — no bespoke chro
 test("tool surfaces never re-derive case readiness and never create cases", () => {
   assert.match(source("state/workbench.tsx"), /export function useCaseReady/);
   assert.match(source("state/workbench.tsx"), /export function useCreateCase/);
-  assert.match(source("design-system/case-gate.tsx"), /export function CaseGate/);
   for (const file of views) {
     const text = fs.readFileSync(file, "utf8");
     assert.doesNotMatch(text, /caseSession\.phase === "ready"/, file);
@@ -118,21 +117,22 @@ test("tool surfaces never re-derive case readiness and never create cases", () =
   assert.match(casesView, /router\.push\("\/\?new=1"\)/);
 });
 
-test("the shared gate routes to the central case surfaces, not in-tool creation", () => {
-  const gate = source("design-system/case-gate.tsx");
-  assert.match(gate, /router\.push\("\/\?new=1"\)/);
-  assert.match(gate, /router\.push\("\/cases"\)/);
-  assert.doesNotMatch(gate, /caseCreate\(/);
-  // All five web tabs render it; forensics intentionally uses a status chip.
-  for (const file of [
-    "app/web/_components/ProxyView.tsx",
-    "app/web/_components/HistoryView.tsx",
-    "app/web/_components/RepeaterView.tsx",
-    "app/web/_components/ScannerView.tsx",
-    "app/web/_components/SpiderView.tsx",
-  ]) {
-    assert.match(source(file), /<CaseGate\b/, file);
+test("case management never renders inside tool views — pointer lines only (user directive)", () => {
+  // "Centralized" means ZERO case UI in tools: no gate strip, no case buttons,
+  // no create forms. Creation lives on the home page, switching on home and the
+  // Cases page, and the status bar reads state out. Disabled controls and the
+  // idle cards carry one muted pointer line at most.
+  assert.equal(fs.existsSync(path.join(desktop, "design-system", "case-gate.tsx")), false);
+  for (const file of views) {
+    const text = fs.readFileSync(file, "utf8");
+    assert.doesNotMatch(text, /<CaseGate\b/, file);
+    assert.doesNotMatch(text, /case-gate/, file);
+    assert.doesNotMatch(text, /[>"`]\s*(?:New|Choose|Create) case/, file);
   }
+  // The central surfaces keep their jobs.
+  assert.match(source("app/_components/StartProject.tsx"), /useCreateCase\(\)/);
+  assert.match(source("app/cases/_components/CasesWorkspace.tsx"), /router\.push\("\/\?new=1"\)/);
+  assert.match(source("components/shell/StatusBar.tsx"), /role="status"/);
 });
 
 test("views render shared primitives, not raw controls or arbitrary type sizes", () => {

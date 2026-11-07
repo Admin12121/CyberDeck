@@ -11,7 +11,6 @@ import {
 import { useCaseReady } from "@state/workbench";
 import { useWebWorkflow } from "./WebWorkflow";
 import { PassiveRulesPanel } from "./PassiveRulesPanel";
-import { CaseGate } from "@ds/case-gate";
 import {
   decodedBody, editableHistoryDraft, protectedHistoryAccess,
   type ProtectedHistoryDetail,
@@ -145,7 +144,6 @@ export function HistoryView() {
 
   return (
     <div className="flex h-full min-h-0 flex-col bg-line">
-      <CaseGate activity="Private Web history" />
       <PassiveRulesPanel enabled={Boolean(desktop && captureGeneration)} caseId={caseId}
         revision={nativeRevision} generation={captureGeneration} />
       <div className="flex min-h-0 flex-1 gap-px">
@@ -155,7 +153,7 @@ export function HistoryView() {
         {!captureGeneration
           ? <EmptyState title="No active history" detail={caseReady
               ? "In Proxy, start the listener, open Advanced and authorize private History for this case. Configure an isolated browser to use the local proxy."
-              : "First select or create a saved case, then authorize private History capture in Proxy."} />
+              : "Select a saved case on the home page, then authorize private History capture in Proxy."} />
           : <div className="h-full overflow-auto">
             <table className="data-table">
               <thead><tr><th>#</th><th>Method</th><th>Host</th><th>Path</th><th>Status</th><th>Size</th><th /></tr></thead>
