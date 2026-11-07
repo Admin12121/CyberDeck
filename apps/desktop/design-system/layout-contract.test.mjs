@@ -107,14 +107,15 @@ test("tool surfaces never re-derive case readiness and never create cases", () =
     assert.doesNotMatch(text, /\bcaseCreate\(/, file);
     assert.doesNotMatch(text, /AuthorizedCaseAction/, file);
   }
-  // Creation lives only in the central surfaces, through the shared helper.
-  for (const creator of [
-    "app/_components/StartProject.tsx",
-    "components/shell/StatusBar.tsx",
-    "app/cases/_components/CasesWorkspace.tsx",
-  ]) {
-    assert.match(source(creator), /useCreateCase\(\)/, creator);
-  }
+  // Creation lives ONLY on the home page, through the shared helper.
+  assert.match(source("app/_components/StartProject.tsx"), /useCreateCase\(\)/);
+  // The status bar only reads case state out — no switcher, no create form.
+  const status = source("components/shell/StatusBar.tsx");
+  assert.doesNotMatch(status, /useCreateCase|caseCreate|<Select\b|\+ Case/);
+  // The Cases page is manage-only: no create form; "New case" routes home.
+  const casesView = source("app/cases/_components/CasesWorkspace.tsx");
+  assert.doesNotMatch(casesView, /useCreateCase|Create saved case/);
+  assert.match(casesView, /router\.push\("\/\?new=1"\)/);
 });
 
 test("the shared gate routes to the central case surfaces, not in-tool creation", () => {

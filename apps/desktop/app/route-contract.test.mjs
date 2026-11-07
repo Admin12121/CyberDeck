@@ -75,8 +75,10 @@ test("shared workspace controls and case selection use installed coss primitives
   for (const name of ["button", "input", "select", "tabs"]) {
     assert.match(panes, new RegExp('from "@/components/ui/' + name + '"'));
   }
-  assert.match(status, /<Select\b/);
-  assert.doesNotMatch(status, /<select\b|<option\b/);
+  // The status bar is a case-state readout; switching and creation live on
+  // the home page and the Cases page (no switcher, no create form here).
+  assert.match(status, /useCaseReady\(\)/);
+  assert.doesNotMatch(status, /<Select\b|<select\b|<option\b|useCreateCase/);
   assert.match(rail, /<Button\b/);
   assert.doesNotMatch(rail, /hover:bg-raised(?=")/);
   assert.match(rail, /<Link\s+href="\/"\s+aria-label="CyberDeck Home"/);

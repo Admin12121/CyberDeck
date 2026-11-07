@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
-import { useCaseReady, useCreateCase, useWorkbench } from "@state/workbench";
+import { useCaseReady, useWorkbench } from "@state/workbench";
 import {
   caseList, caseLineageScopedV1, caseSearchScopedV1, isDesktop,
   type CaseRecordWire, type CaseReportWire, type CaseLineageReportWire,
@@ -32,7 +32,6 @@ export function CasesWorkspace() {
   const router = useRouter();
   const native = isDesktop();
   const { caseReady } = useCaseReady();
-  const createNewCase = useCreateCase();
   const [cases, setCases] = useState<CaseRecordWire[]>([]);
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
@@ -93,17 +92,6 @@ export function CasesWorkspace() {
     finally { setBusy(""); }
   }
 
-  async function createCase() {
-    if (!native || !title.trim() || busy) return;
-    setBusy("Creating investigation"); setError("");
-    try {
-      await createNewCase(title.trim(), description.trim());
-      setTitle(""); setDescription("");
-      await refreshCases();
-    } catch (cause) { setError(describeError(cause)); }
-    finally { setBusy(""); }
-  }
-
   async function search(next: number) {
     await task("Searching case", async () => {
       setSearchPage(await caseSearchScopedV1(query, 30, next));
@@ -121,6 +109,8 @@ export function CasesWorkspace() {
         <FileSearch className="size-4 shrink-0 text-fg-muted" aria-hidden />
         <span className="text-xs font-semibold text-fg">Cases &amp; Evidence</span>
         <span className="flex-1" />
+        <ToolButton onClick={() => router.push("/?new=1")}>
+          <FolderPlus className="size-3.5" /> New case</ToolButton>
         <ToolButton disabled={!native || Boolean(busy)}
           onClick={() => void (async () => {
             setBusy("Reviewing unregistered evidence"); setError("");
@@ -155,21 +145,6 @@ export function CasesWorkspace() {
               </Button>
             ))}
             {cases.length === 0 && <p className="text-xs text-fg-muted">No saved investigations.</p>}
-            <div className="mt-4 space-y-2 border-t border-line pt-3">
-              <span id="case-create-label" className="text-xs font-medium">Create case</span>
-              <CaseCreateFields
-                idPrefix="cyberdeck-cases-new"
-                title={title}
-                description={description}
-                onTitleChange={setTitle}
-                onDescriptionChange={setDescription}
-                disabled={!native || Boolean(busy)}
-              />
-              <Button size="sm" className="w-full" onClick={() => void createCase()}
-                disabled={!native || !title.trim() || Boolean(busy)}>
-                <FolderPlus className="size-3.5" /> Create saved case
-              </Button>
-            </div>
           </FramePanel>
         </Frame>
         <Frame className="min-h-0 overflow-hidden">
@@ -243,6 +218,14 @@ export function CasesWorkspace() {
                   {Boolean(temp?.outputs.length) && <div className="space-y-2">
                     <h3 className="text-xs font-semibold">Save Current Work as Case</h3>
                     <p className="text-xs text-fg-muted">A separate native confirmation is required for every promotion. Original input is never saved.</p>
+                    <CaseCreateFields
+                      idPrefix="cyberdeck-promote"
+                      title={title}
+                      description={description}
+                      onTitleChange={setTitle}
+                      onDescriptionChange={setDescription}
+                      disabled={Boolean(busy)}
+                    />
                     <Button size="sm" disabled={Boolean(busy) || !title.trim()}
                       onClick={() => void (async () => {
                         setBusy("Saving new investigation"); setError("");
@@ -252,7 +235,7 @@ export function CasesWorkspace() {
                           await refreshCases(); wb.setCaseId(saved.case.id);
                         } catch (cause) { setError(describeError(cause)); }
                         finally { setBusy(""); }
-                      })()}>Save as New Case{title.trim() ? ": " + title : " (enter a case name on the left)"}</Button>
+                      })()}>Save as New Case{title.trim() ? ": " + title : " (enter a case name above)"}</Button>
                     <div className="flex flex-wrap gap-2">
                       {cases.map((item) => (
                         <Button key={item.id} size="sm" variant="outline" disabled={Boolean(busy)}
