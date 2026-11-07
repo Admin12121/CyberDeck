@@ -2,7 +2,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ArrowDown, ArrowUp, Copy, Play, Wand2, X } from "lucide-react";
 import { ErrorStrip, InfoTip } from "@ds/compact";
-import { Chip, EmptyState, Field, Pane, Resizer, Select, TextInput, ToolButton } from "@ds/panes";
+import { Chip, EmptyState, Field, Pane, Resizer, Select, TextArea, TextInput, ToolButton } from "@ds/panes";
 import {
   OPERATIONS,
   detectImageMime,
@@ -146,12 +146,11 @@ export function CryptoOpsView() {
             className="w-full"
           />
           <div className="mb-1 mt-3 text-3xs uppercase tracking-wider text-fg-muted">Input</div>
-          <textarea
+          <TextArea
             value={input}
-            onChange={(e) => setInput(e.target.value)}
-            spellCheck={false}
-            aria-label="Digest input"
-            className="h-24 w-full resize-none border border-line bg-app p-2 font-mono text-xs text-fg"
+            onChange={setInput}
+            ariaLabel="Digest input"
+            className="h-24 resize-none"
           />
           {current.needsKey ? (
             <>

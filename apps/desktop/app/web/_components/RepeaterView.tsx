@@ -151,7 +151,7 @@ export function RepeaterView() {
             onChange={(e) => update({ request: e.target.value })}
             spellCheck={false}
             aria-label="Request editor"
-            className="h-full w-full resize-none bg-app p-2 font-mono text-[11px] leading-relaxed text-fg focus:outline-none"
+            className="h-full w-full resize-none bg-app p-2 font-mono text-2xs leading-relaxed text-fg focus:outline-none"
           />
         </Pane>
         <Pane

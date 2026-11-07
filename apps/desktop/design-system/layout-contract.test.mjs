@@ -84,3 +84,89 @@ test("heavy Jobs and Console views subscribe to separate update domains", () => 
   assert.match(consoleView, /useWorkbenchCase\(\)/);
   assert.doesNotMatch(consoleView, /useWorkbench\(\)/);
 });
+
+// --- unification contracts (2026-11-07 overhaul) ------------------------------
+
+test("every workspace top row renders through WorkspaceShell — no bespoke chrome", () => {
+  assert.match(source("design-system/compact.tsx"), /export function WorkspaceShell/);
+  for (const file of views) {
+    const text = fs.readFileSync(file, "utf8");
+    // Pane headers legitimately carry the class inside the Pane primitive;
+    // view files must not hand-roll the row themselves.
+    assert.doesNotMatch(text, /className="[^"]*cd-workspace-toolbar/, file);
+  }
+});
+
+test("tool surfaces never re-derive case readiness and never create cases", () => {
+  assert.match(source("state/workbench.tsx"), /export function useCaseReady/);
+  assert.match(source("state/workbench.tsx"), /export function useCreateCase/);
+  assert.match(source("design-system/case-gate.tsx"), /export function CaseGate/);
+  for (const file of views) {
+    const text = fs.readFileSync(file, "utf8");
+    assert.doesNotMatch(text, /caseSession\.phase === "ready"/, file);
+    assert.doesNotMatch(text, /\bcaseCreate\(/, file);
+    assert.doesNotMatch(text, /AuthorizedCaseAction/, file);
+  }
+  // Creation lives only in the central surfaces, through the shared helper.
+  for (const creator of [
+    "app/_components/StartProject.tsx",
+    "components/shell/StatusBar.tsx",
+    "app/cases/_components/CasesWorkspace.tsx",
+  ]) {
+    assert.match(source(creator), /useCreateCase\(\)/, creator);
+  }
+});
+
+test("the shared gate routes to the central case surfaces, not in-tool creation", () => {
+  const gate = source("design-system/case-gate.tsx");
+  assert.match(gate, /router\.push\("\/\?new=1"\)/);
+  assert.match(gate, /router\.push\("\/cases"\)/);
+  assert.doesNotMatch(gate, /caseCreate\(/);
+  // All five web tabs render it; forensics intentionally uses a status chip.
+  for (const file of [
+    "app/web/_components/ProxyView.tsx",
+    "app/web/_components/HistoryView.tsx",
+    "app/web/_components/RepeaterView.tsx",
+    "app/web/_components/ScannerView.tsx",
+    "app/web/_components/SpiderView.tsx",
+  ]) {
+    assert.match(source(file), /<CaseGate\b/, file);
+  }
+});
+
+test("views render shared primitives, not raw controls or arbitrary type sizes", () => {
+  for (const file of views) {
+    const text = fs.readFileSync(file, "utf8");
+    assert.doesNotMatch(text, /<select[\s>]/, file);
+    if (file.endsWith("RepeaterView.tsx") || file.endsWith("RecipesView.tsx")) {
+      // Full-height code editors (request editor, recipe input) are the
+      // sanctioned raw textareas; every bounded form field uses TextArea.
+      assert.equal((text.match(/<textarea[\s>]/g) ?? []).length, 1, file);
+    } else {
+      assert.doesNotMatch(text, /<textarea[\s>]/, file);
+    }
+    assert.doesNotMatch(text, /accent-\[var\(--color-orange\)\]/, file);
+    assert.doesNotMatch(text, /text-\[1[0-9]px\]/, file);
+  }
+});
+
+test("the one error, progress, hex and findings treatments are the shared ones", () => {
+  for (const name of ["ErrorStrip", "ProgressBar", "ResultStack", "HexRows", "ModeCard", "EmptyCard"]) {
+    assert.match(source("design-system/compact.tsx"), new RegExp("export function " + name + "\\b"));
+  }
+  for (const name of ["TextArea", "NumberInput", "CheckBox"]) {
+    assert.match(source("design-system/panes.tsx"), new RegExp("export function " + name + "\\b"));
+  }
+  // Category dispatchers share one keep-mounted component.
+  assert.match(source("design-system/compact.tsx"), /export function CategoryWorkspace/);
+  for (const dispatcher of [
+    "app/crypto/_components/CryptoWorkspace.tsx",
+    "app/network/_components/NetworkWorkspace.tsx",
+    "app/forensics/_components/ForensicsWorkspace.tsx",
+    "app/web/_components/WebWorkspace.tsx",
+  ]) {
+    const text = source(dispatcher);
+    assert.match(text, /<CategoryWorkspace/, dispatcher);
+    assert.doesNotMatch(text, /className=\{?\s*show\(/, dispatcher);
+  }
+});
