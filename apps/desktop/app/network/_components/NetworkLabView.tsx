@@ -23,6 +23,7 @@ import { useEffect, useRef, useState } from "react";
 import { Ban, Crosshair, FileText, FolderOpen, Globe, Network, Radar } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import { Chip, Select, TextInput, ToolButton } from "@ds/panes";
+import { Frame, FrameDescription, FrameHeader, FramePanel, FrameTitle } from "@/components/ui/frame";
 import { IconButton, InfoTip, StatusStrip } from "@ds/compact";
 import {
   captureInterfacesV1,
@@ -87,15 +88,19 @@ const TOOLBAR_ROW = "cd-workspace-toolbar flex-wrap gap-2 px-3";
  * badges.
  */
 function LabEmptyCard({ icon: Icon, title, line }: { icon: LucideIcon; title: string; line: string }) {
+  // Web-proxy card pattern (user-designated reference): centered Frame,
+  // rounded-xl on a muted surface, header + panel, controls live INSIDE.
   return (
-    <div className="flex min-h-0 flex-1 items-center justify-center p-6">
-      <div className="w-full max-w-sm overflow-hidden rounded-md border border-line bg-panel">
-        <div className="flex items-center gap-2 px-3 py-2">
-          <Icon size={14} strokeWidth={1.5} className="shrink-0 text-fg-muted" />
-          <span className="text-xs font-semibold text-fg">{title}</span>
-        </div>
-        <div className="bg-app px-3 py-2 text-xs text-fg-muted">{line}</div>
-      </div>
+    <div className="flex min-h-0 flex-1 items-center justify-center p-4 sm:p-6">
+      <Frame className="mx-auto w-full max-w-2xl rounded-xl bg-muted/72 p-1">
+        <FrameHeader className="flex-row items-center gap-2 px-4 py-3">
+          <Icon size={15} strokeWidth={1.5} className="text-fg-muted" />
+          <FrameTitle>{title}</FrameTitle>
+        </FrameHeader>
+        <FramePanel className="rounded-lg bg-background px-4 pb-5 pt-4">
+          <p className="text-xs leading-relaxed text-fg-muted">{line}</p>
+        </FramePanel>
+      </Frame>
     </div>
   );
 }
@@ -527,63 +532,20 @@ export function NetworkLabView() {
     <div className="flex h-full min-h-0 flex-col bg-app">
       {mode === "scope" && (
         <section aria-label="Lab scope" className="flex min-h-0 flex-1 flex-col">
-          <div className={TOOLBAR_ROW}>
-            {railPills}
-            <InfoTip text="I confirm this lab scope is mine or I have explicit authorization to assess it. The scope is validated, capped at 64 entries per target group and held in memory only." />
-            <ToolButton
-              tone="primary"
-              onClick={() => void applyScope()}
-              disabled={!desktop ||  scopeBusy}
-              title="Validate and store the lab scope in memory; requires the authorization checkbox"
-            >
-              Set scope
-            </ToolButton>
-            <Select
-              value={sweepInterface}
-              onChange={setSweepInterface}
-              options={[
-                { value: "", label: "Choose Ethernet NIC" },
-                ...sweepInterfaces.map((iface) => ({
-                  value: iface.name,
-                  label: iface.name,
-                })),
-              ]}
-              ariaLabel="ARP sweep Ethernet interface"
-              className="w-44"
-            />
-            {sweepBusy ? (
-              <ToolButton
-                tone="danger"
-                onClick={() => void stopSweep()}
-                title="Stop the case-authorized lab ARP sweep; the native worker checks the stop flag before every probe"
-              >
-                Stop sweep
-              </ToolButton>
-            ) : (
-              <ToolButton
-                tone="primary"
-                onClick={() => void runSweep()}
-                disabled={!desktop ||  !sweepInterface || sweepBlock !== null}
-                title="Linux only: ARP sweep (Target 1 ∪ Target 2) probes ONLY the IPv4 targets resolved from the saved lab scope, at most 32 probes at 10/s, native confirmation and CAP_NET_RAW required; refuses anything outside the declared scope"
-              >
-                Sweep
-              </ToolButton>
-            )}
-            {sweepBlock ? <Chip tone="muted">{sweepBlock}</Chip> : null}
-            {sweepProgress ? (
-              <Chip tone={sweepProgress.phase === "done" ? "ok" : "muted"}>
-                {sweepProgress.phase === "done"
-                  ? `${sweepProgress.answered ?? 0}/${sweepProgress.total_targets} answered · ${sweepProgress.elapsed_ms} ms`
-                  : `sweeping ${sweepProgress.total_targets} scope targets · ${(sweepProgress.elapsed_ms / 1000).toFixed(1)} s`}
-              </Chip>
-            ) : null}
-            <InfoTip text="Ettercap-inspired lab mode inside Packet Studio: unified host inventory, passive ARP anomaly analysis and passive DNS-response monitoring over already-captured frames. The lab reads captures and never transmits packets; scope entries are IP/CIDR strings held in memory only and are never persisted (Master Plan §5.1)." />
-            <span className="flex-1" />
-            {gateCluster}
-            <Chip tone={scope?.authorized ? "orange" : "muted"}>{scopeSummary(scope)}</Chip>
-          </div>
-          <div className="flex min-h-0 flex-1 flex-col overflow-y-auto">
-            <div className="grid gap-3 px-3 py-2 md:grid-cols-2">
+          <div className="flex shrink-0 items-center px-3 py-1.5">{railPills}</div>
+          <div className="flex min-h-0 flex-1 items-start justify-center overflow-y-auto p-4 sm:p-6">
+          <Frame className="mx-auto w-full max-w-3xl rounded-xl bg-muted/72 p-1">
+            <FrameHeader className="flex-row items-center justify-between gap-3 px-4 py-3">
+              <FrameTitle>Lab scope</FrameTitle>
+              <Chip tone={scope?.authorized ? "orange" : "muted"}>{scopeSummary(scope)}</Chip>
+            </FrameHeader>
+            <FrameDescription>
+              Ettercap-inspired lab mode: unified host inventory, passive ARP anomaly analysis and
+              passive DNS-response monitoring. The lab reads captures and never transmits packets;
+              scope entries are held in memory only.
+            </FrameDescription>
+            <FramePanel className="space-y-4 rounded-lg bg-background px-4 pb-5 pt-4">
+            <div className="grid gap-3 md:grid-cols-2">
               <label className="block text-xs text-fg-dim">
                 <span className="mb-1 block font-medium text-fg-muted">Target 1</span>
                 <textarea
@@ -609,19 +571,69 @@ export function NetworkLabView() {
                 />
               </label>
             </div>
+            <div className="flex flex-wrap items-center gap-3">
+              <ToolButton
+                tone="primary"
+                onClick={() => void applyScope()}
+                disabled={!desktop || scopeBusy}
+                title="Validate and store the lab scope in memory (capped at 64 entries per target group, held in memory only)"
+              >
+                Set scope
+              </ToolButton>
+              <Select
+                value={sweepInterface}
+                onChange={setSweepInterface}
+                options={[
+                  { value: "", label: "Choose Ethernet NIC" },
+                  ...sweepInterfaces.map((iface) => ({
+                    value: iface.name,
+                    label: iface.name,
+                  })),
+                ]}
+                ariaLabel="ARP sweep Ethernet interface"
+                className="w-44"
+              />
+              {sweepBusy ? (
+                <ToolButton
+                  tone="danger"
+                  onClick={() => void stopSweep()}
+                  title="Stop the case-authorized lab ARP sweep; the native worker checks the stop flag before every probe"
+                >
+                  Stop sweep
+                </ToolButton>
+              ) : (
+                <ToolButton
+                  tone="primary"
+                  onClick={() => void runSweep()}
+                  disabled={!desktop || !sweepInterface || sweepBlock !== null}
+                  title="Linux only: ARP sweep (Target 1 ∪ Target 2) probes ONLY the IPv4 targets resolved from the saved lab scope, at most 32 probes at 10/s, native confirmation and CAP_NET_RAW required; refuses anything outside the declared scope"
+                >
+                  Sweep
+                </ToolButton>
+              )}
+              {sweepBlock ? <Chip tone="muted">{sweepBlock}</Chip> : null}
+              {sweepProgress ? (
+                <Chip tone={sweepProgress.phase === "done" ? "ok" : "muted"}>
+                  {sweepProgress.phase === "done"
+                    ? `${sweepProgress.answered ?? 0}/${sweepProgress.total_targets} answered · ${sweepProgress.elapsed_ms} ms`
+                    : `sweeping ${sweepProgress.total_targets} scope targets · ${(sweepProgress.elapsed_ms / 1000).toFixed(1)} s`}
+                </Chip>
+              ) : null}
+              {gateCluster}
+            </div>
             {sweepError ? (
-              <div role="alert" className="mx-3 border border-err/50 bg-err/10 px-3 py-1 font-mono text-[10px] text-err">
+              <div role="alert" className="border border-err/50 bg-err/10 px-3 py-1 font-mono text-[10px] text-err">
                 {sweepError}
               </div>
             ) : null}
             {sweepResults ? (
               sweepResults.length === 0 ? (
-                <p className="px-3 py-2 text-xs text-fg-muted">
+                <p className="text-xs text-fg-muted">
                   no hosts answered the authorized lab ARP sweep — silence is not evidence of
                   absence; the sweep probed only the saved lab scope
                 </p>
               ) : (
-                <div className="max-h-64 overflow-auto">
+                <div className="max-h-64 overflow-auto rounded-lg border border-line">
                   <table className="data-table">
                     <thead>
                       <tr>
@@ -643,6 +655,8 @@ export function NetworkLabView() {
                 </div>
               )
             ) : null}
+            </FramePanel>
+          </Frame>
           </div>
         </section>
       )}

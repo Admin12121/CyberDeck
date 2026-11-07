@@ -9,7 +9,7 @@
 import type { LucideIcon } from "lucide-react";
 import { Info } from "lucide-react";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "@/components/ui/tooltip";
-import { Frame, FrameHeader, FramePanel, FrameTitle, FrameFooter } from "@/components/ui/frame";
+import { Frame, FrameHeader, FramePanel, FrameTitle, FrameDescription, FrameFooter } from "@/components/ui/frame";
 import type { ReactNode } from "react";
 
 import { Chip } from "./panes";
@@ -249,6 +249,54 @@ export function WorkspaceShell({
       </div>
       {status}
       <div className={`min-h-0 flex-1 ${contentClassName}`}>{children}</div>
+    </div>
+  );
+}
+
+
+/**
+ * ModeCard — the idle/control surface for a tool mode, copying the Web
+ * proxy card exactly (the user-designated reference): centered Frame with
+ * rounded-xl border, header (icon + title + status chip), panel holding the
+ * CONTROLS (inputs and buttons live inside the card, not in a toolbar row).
+ * Results tables render below the card in full width once data exists.
+ */
+export function ModeCard({
+  icon: Icon,
+  title,
+  state,
+  stateTone = "muted",
+  info,
+  children,
+  below,
+}: {
+  icon: LucideIcon;
+  title: string;
+  state?: string;
+  stateTone?: "muted" | "orange" | "ok" | "err";
+  info?: string;
+  children: ReactNode;
+  /** Full-width content under the card (results tables, findings). */
+  below?: ReactNode;
+}) {
+  return (
+    <div className="min-h-0 flex-1 overflow-y-auto bg-app p-4 sm:p-6">
+      <div className="flex min-h-full w-full flex-col items-center justify-center gap-4">
+        <Frame className="mx-auto w-full max-w-2xl rounded-xl bg-muted/72 p-1">
+          <FrameHeader className="flex-row items-center justify-between gap-3 px-4 py-3">
+            <span className="inline-flex items-center gap-2">
+              <Icon size={15} strokeWidth={1.5} className="text-fg-muted" />
+              <FrameTitle>{title}</FrameTitle>
+            </span>
+            {state ? <Chip tone={stateTone}>{state}</Chip> : null}
+            {info ? <InfoTip text={info} /> : null}
+          </FrameHeader>
+          <FramePanel className="space-y-4 rounded-lg bg-background px-4 pb-5 pt-4">
+            {children}
+          </FramePanel>
+        </Frame>
+        {below}
+      </div>
     </div>
   );
 }
