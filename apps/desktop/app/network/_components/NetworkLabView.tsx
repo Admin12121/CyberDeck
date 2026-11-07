@@ -79,7 +79,7 @@ const SCOPE_TEXT_MAX_CHARS = 8192;
 type LabMode = "scope" | "arp" | "live" | "dns" | "report";
 
 /** Shared toolbar-row layout: rail pills + h-8 controls, spacing, no lines. */
-const TOOLBAR_ROW = "flex flex-wrap items-center gap-2 px-3 py-2";
+const TOOLBAR_ROW = "cd-workspace-toolbar flex-wrap gap-2 px-3";
 
 /**
  * Empty-state card: centered in the full remaining height, one header line

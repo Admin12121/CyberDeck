@@ -864,7 +864,7 @@ export function ScanView() {
 
   return (
     <div className="flex h-full min-h-0 flex-col">
-      <div className="flex shrink-0 flex-wrap items-center gap-2 px-2 py-1.5">
+      <div className="cd-workspace-toolbar flex-wrap gap-2 px-2">
         <TextInput value={target} onChange={setTarget} placeholder="IP, CIDR, !exclusion" ariaLabel="Scan target" className="w-52" />
         <Select
           value={transport}

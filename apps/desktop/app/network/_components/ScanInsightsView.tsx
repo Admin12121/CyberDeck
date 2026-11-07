@@ -15,7 +15,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { GitCompare, Network, Play } from "lucide-react";
 import { Chip, EmptyState, Select } from "@ds/panes";
-import { IconRail, IconButton, InfoTip, StatusStrip } from "@ds/compact";
+import { IconRail, IconButton, InfoTip, StatusStrip, WorkspaceShell } from "@ds/compact";
 import {
   isDesktop, netscanHistory, netscanDiffV1, netscanTopologyV1,
   type ScanHistoryItemWire, type ScanDiffWire, type ScanTopologyWire,
@@ -242,19 +242,18 @@ export function ScanInsightsView() {
     : [
       topology ? { label: `${topology.nodes.length} nodes · ${topology.edges.length} edges` } : null,
     ];
-
   return (
-    <div className="flex h-full min-h-0 flex-col">
-      <div className="flex shrink-0 items-center bg-panel">
-      <IconRail
-        items={MODE_RAIL_ITEMS}
-        active={mode}
-        onChange={(id) => setMode(id as InsightsMode)}
-        ariaLabel="Insights mode"
-      />
-      <span className="mx-1 h-5 w-px bg-line" aria-hidden="true" />
-      {mode === "diff" ? (
-        <div className="flex min-w-0 flex-1 flex-wrap items-center gap-2 py-1.5 pr-2">
+    <WorkspaceShell
+      rail={
+        <IconRail
+          items={MODE_RAIL_ITEMS}
+          active={mode}
+          onChange={(id) => setMode(id as InsightsMode)}
+          ariaLabel="Insights mode"
+        />
+      }
+      toolbar={mode === "diff" ? (
+        <>
           <Select
             value={baselineId}
             onChange={setBaselineId}
@@ -272,18 +271,16 @@ export function ScanInsightsView() {
           />
           <IconButton
             icon={Play}
-            tone="primary"
             onClick={() => void runDiff()}
-            disabled={!desktop || revision === null || diffBusy || !baselineId
-              || !compareId || baselineId === compareId}
+            disabled={!desktop || revision === null || diffBusy || !baselineId || !compareId || baselineId === compareId}
             title="Run diff — ndiff-style comparison: hosts pair on IP, ports on port/proto; both sessions must still be retained"
           />
           {diffBusy ? <Chip tone="orange">diffing</Chip> : null}
           <Chip tone="muted">{`${history.length} sessions`}</Chip>
           <span className="ml-auto"><InfoTip text={HONESTY_NOTE} /></span>
-        </div>
+        </>
       ) : (
-        <div className="flex min-w-0 flex-1 flex-wrap items-center gap-2 py-1.5 pr-2">
+        <>
           <Select
             value={topologyId}
             onChange={setTopologyId}
@@ -294,13 +291,11 @@ export function ScanInsightsView() {
           {topoBusy ? <Chip tone="orange">rendering</Chip> : null}
           <Chip tone="muted">{`${history.length} sessions`}</Chip>
           <span className="ml-auto"><InfoTip text={TOPOLOGY_NOTE} /></span>
-        </div>
+        </>
       )}
-      </div>
+      status={statusItems.some((item) => item !== null) ? <StatusStrip items={statusItems} /> : undefined}
+    >
       {error ? <div className="border-b border-err/50 bg-err/10 px-2 py-1 font-mono text-[10px] text-err">{error}</div> : null}
-      {statusItems.some((item) => item !== null) ? (
-        <StatusStrip items={statusItems} />
-      ) : null}
       {revision === null ? <CaseGate activity="Scan insights" /> : null}
       <div className="flex min-h-0 flex-1 flex-col bg-panel">
         {!desktop ? (
@@ -454,6 +449,6 @@ export function ScanInsightsView() {
           </div>
         )}
       </div>
-    </div>
+    </WorkspaceShell>
   );
 }

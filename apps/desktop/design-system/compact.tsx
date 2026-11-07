@@ -217,3 +217,38 @@ export function EmptyCard({
  * tooltips. Not a component — the documented layout for workspace toolbars:
  * one flex-wrap row, h-7/h-8 controls, gap-2, px-2, no section bars inside.
  */
+
+
+/**
+ * WorkspaceShell: the ONE shared top row for every network tool — mode rail
+ * (optional), toolbar content, and the content area below. Fixes the page-
+ * to-page inconsistency: identical bg-panel surface, identical height, one
+ * border-b under the row, content fills the rest. Every workspace renders
+ * through this; bespoke top rows are a defect.
+ */
+export function WorkspaceShell({
+  rail,
+  toolbar,
+  status,
+  children,
+  contentClassName = "",
+}: {
+  rail?: ReactNode;
+  toolbar?: ReactNode;
+  /** Muted status chips under the toolbar row; hidden when empty. */
+  status?: ReactNode;
+  children: ReactNode;
+  contentClassName?: string;
+}) {
+  return (
+    <div className="flex h-full min-h-0 flex-col bg-app">
+      <div className="cd-workspace-toolbar flex items-center gap-1">
+        {rail}
+        {rail && toolbar ? <span className="h-5 w-px shrink-0 bg-line" aria-hidden="true" /> : null}
+        <div className="flex min-w-0 flex-1 flex-wrap items-center gap-2 px-2 py-1.5">{toolbar}</div>
+      </div>
+      {status}
+      <div className={`min-h-0 flex-1 ${contentClassName}`}>{children}</div>
+    </div>
+  );
+}
