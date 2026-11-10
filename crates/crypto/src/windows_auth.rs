@@ -22,6 +22,10 @@ fn md4(data: &[u8]) -> [u8; 16] {
     <Md4 as md4::Digest>::digest(data).into()
 }
 
+fn md5(data: &[u8]) -> [u8; 16] {
+    <Md5 as sha2::Digest>::digest(data).into()
+}
+
 /// Domain Cached Credentials (DCC1): md4(md4(utf16le(pass)) . utf16le(salt)).
 /// The salt is the lowercased username, exactly as hashcat mode 1100 treats it.
 pub fn mscash_digest(password: &str, salt_user: &str) -> Result<[u8; 16], String> {
@@ -121,10 +125,173 @@ fn des_encrypt_block(key: &[u8; 8], block: &[u8]) -> [u8; 8] {
     block.into()
 }
 
+/// The 2^16 third-key space hashcat m05500 brute-forces at parse time
+/// ("precompute netntlmv1 exploit", module_05500.c:286-327).
+const NETNTLMV1_M05500_THIRD_KEY_SPACE: u32 = 0x10000;
+
+/// hashcat m05500 `transform_netntlmv1_key` (module_05500.c:63-82): the seven
+/// input bytes as an MSB-first 56-bit stream, split into eight 7-bit groups,
+/// each left-aligned in a byte with odd parity set. The parity bits never
+/// enter the DES key schedule, so the effective key bits match the crate's
+/// LM expansion; the function stays literal to the module for provenance.
+fn netntlmv1_m05500_key_expand(seven: &[u8; 7]) -> [u8; 8] {
+    let mut key = [0u8; 8];
+    key[0] = seven[0];
+    key[1] = (seven[0] << 7) | (seven[1] >> 1);
+    key[2] = (seven[1] << 6) | (seven[2] >> 2);
+    key[3] = (seven[2] << 5) | (seven[3] >> 3);
+    key[4] = (seven[3] << 4) | (seven[4] >> 4);
+    key[5] = (seven[4] << 3) | (seven[5] >> 5);
+    key[6] = (seven[5] << 2) | (seven[6] >> 6);
+    key[7] = seven[6] << 1;
+    for byte in key.iter_mut() {
+        *byte |= 0x01;
+    }
+    key
+}
+
+/// Everything hashcat m05500 derives from a "NetNTLMv1 / NetNTLMv1+ESS" hash
+/// line before any candidate is tested — module_05500.c:110-343
+/// (`module_hash_decode`) — plus the per-candidate kernel checks of the
+/// m05500 OpenCL kernels.
+struct NetNTLMv1M05500 {
+    /// The 8 bytes the kernels DES-encrypt: the client challenge decoded to
+    /// binary (OPTS_TYPE_ST_HEX, module_05500.c:31, feeds generic_salt_decode
+    /// at parser.c:592-609), or — for ESS — MD5(client[0..8] ||
+    /// server[0..8])[0..8] (module_05500.c:259-284).
+    challenge: [u8; 8],
+    /// The 24-byte NT response split the way the module splits it:
+    /// digest[0..3] = ct1||ct2 (hex_to_u32 over hash_pos+0..32, lines
+    /// 245-248) and digest_tmp = ct3 (hash_pos+32..48, lines 252-255).
+    /// ct3 is consumed by the parse-time brute force (it defines
+    /// third_key_index) and re-checked by the KATs; the kernel path pins it
+    /// through the NT-hash filter instead of re-encrypting.
+    ct1: [u8; 8],
+    ct2: [u8; 8],
+    #[allow(dead_code)]
+    ct3: [u8; 8],
+    /// salt_buf[2]: the first i < 0x10000 whose two seed bytes expand to a
+    /// DES key encrypting the challenge to ct3 (lines 286-322). No match is
+    /// the module's PARSER_SALT_VALUE (line 322) — the line is uncrackable.
+    third_key_index: u16,
+}
+
+impl NetNTLMv1M05500 {
+    /// Parse the three challenge/response fields of the m05500 wire
+    /// "user::domain:srvchall:ntresp:clichall" and run the parse-time
+    /// precompute. Field shapes mirror the module's token attributes
+    /// (module_05500.c:139-156, 205, 223): srvchall 0..=48 hex and even,
+    /// ntresp exactly 48 hex, clichall exactly 16 hex.
+    fn parse(
+        (srvchall_hex, ntresp_hex, clichall_hex): (&str, &str, &str),
+    ) -> Result<Self, String> {
+        if srvchall_hex.len() > 48
+            || srvchall_hex.len() % 2 != 0
+            || !srvchall_hex.bytes().all(|b| b.is_ascii_hexdigit())
+        {
+            return Err("invalid server challenge".into());
+        }
+        if ntresp_hex.len() != 48 || !ntresp_hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Err("NetNTLMv1 NT response must be 48 hex characters".into());
+        }
+        if clichall_hex.len() != 16 || !clichall_hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Err("invalid client challenge".into());
+        }
+
+        let srvchal = hex::decode(srvchall_hex).map_err(|_| "invalid server challenge")?;
+        let clichall = hex::decode(clichall_hex).map_err(|_| "invalid client challenge")?;
+        let ntresp = hex::decode(ntresp_hex).map_err(|_| "invalid NT response")?;
+
+        let mut challenge = [0u8; 8];
+        challenge.copy_from_slice(&clichall);
+
+        // ESS ("special case 2", module_05500.c:259-284): a 24-byte server
+        // challenge whose tail 16 bytes are zero marks an NTLMv1+ESS null
+        // session capture; the challenge becomes the first 8 bytes of
+        // MD5(client_challenge[0..8] || server_challenge[0..8]).
+        if srvchall_hex.len() == 48 && srvchal[8..24].iter().all(|&b| b == 0) {
+            let mut md5_input = [0u8; 16];
+            md5_input[..8].copy_from_slice(&clichall);
+            md5_input[8..].copy_from_slice(&srvchal[..8]);
+            let digest = md5(&md5_input);
+            challenge.copy_from_slice(&digest[..8]);
+        }
+
+        let mut ct1 = [0u8; 8];
+        let mut ct2 = [0u8; 8];
+        let mut ct3 = [0u8; 8];
+        ct1.copy_from_slice(&ntresp[..8]);
+        ct2.copy_from_slice(&ntresp[8..16]);
+        ct3.copy_from_slice(&ntresp[16..24]);
+
+        // The third DES key derives from NT-hash bytes 14..15, unknown at
+        // parse time, so the module walks the whole 16-bit space for the key
+        // whose encryption of the challenge matches the captured tail
+        // (module_05500.c:286-322) and stores the index in salt_buf[2].
+        let mut third_key_index = None;
+        for i in 0..NETNTLMV1_M05500_THIRD_KEY_SPACE {
+            let seed = [i as u8, (i >> 8) as u8, 0, 0, 0, 0, 0];
+            if des_encrypt_block(&netntlmv1_m05500_key_expand(&seed), &challenge) == ct3 {
+                third_key_index = Some(i as u16);
+                break;
+            }
+        }
+        let third_key_index =
+            third_key_index.ok_or("NT response tail does not match any 16-bit third key")?;
+
+        Ok(Self { challenge, ct1, ct2, ct3, third_key_index })
+    }
+
+    /// The m05500 kernel test for one candidate, in attack order:
+    ///
+    /// 1. The NT-hash filter `if ((d >> 16) != s2) continue;`
+    ///    (m05500_a0-pure.cl:155 and :300, MATCHES_NONE_VS form in
+    ///    m05500_a0-optimized.cl:229/:458): d = ctx.h[3] holds NT-hash bytes
+    ///    12..15 little-endian, so d >> 16 is bytes 14..15 — the two bytes
+    ///    the third key is derived from. A candidate whose third key differs
+    ///    from the parse-time s2 can never reproduce ct3.
+    /// 2. DES1 == digest[0..1] (pure.cl:308-343, the s kernel's whole
+    ///    remaining test — its r2/r3 compare against the search words
+    ///    themselves).
+    /// 3. DES2 == digest[2..3], which the m kernel additionally compares
+    ///    (pure.cl:179-196). Included so a candidate that only collides on
+    ///    the first block is still rejected; a genuine preimage always
+    ///    matches all three blocks.
+    ///
+    /// ct3 needs no separate check: the filter pins the candidate's third
+    /// key to s2, whose encryption produced ct3 by construction.
+    fn matches(&self, candidate: &str) -> bool {
+        let nt = md4(&utf16le(candidate));
+        let d = u32::from_le_bytes([nt[12], nt[13], nt[14], nt[15]]);
+        if (d >> 16) != u32::from(self.third_key_index) {
+            return false;
+        }
+        let key1 = netntlmv1_m05500_key_expand(&nt[..7].try_into().unwrap());
+        if des_encrypt_block(&key1, &self.challenge) != self.ct1 {
+            return false;
+        }
+        let key2 = netntlmv1_m05500_key_expand(&nt[7..14].try_into().unwrap());
+        if des_encrypt_block(&key2, &self.challenge) != self.ct2 {
+            return false;
+        }
+        true
+    }
+}
+
 /// NetNTLMv1 challenge response: three DES blocks keyed from the NT hash,
 /// compared against the NT response only (the LM response is never validated).
-/// Accepted forms: "$NETNTLM$challenge$ntresp" or the capture form
-/// "user::domain:challenge:lmresp:ntresp".
+/// Accepted forms:
+/// - "$NETNTLM$challenge$ntresp" (tagged)
+/// - the classic capture "user::domain:challenge:lmresp:ntresp" — the DES
+///   input is the 8-byte server challenge, all three blocks
+/// - the hashcat 5500 wire "user::domain:srvchall:ntresp(48):clichall(16)"
+///   ("NetNTLMv1 / NetNTLMv1+ESS", KERN_TYPE 5500) — verified with the
+///   module's own semantics via [`NetNTLMv1M05500`]: the DES input is the
+///   binary client challenge (or the ESS MD5 challenge), the response tail
+///   is a brute-forced third block that pins a 16-bit NT-hash filter, and
+///   the first 16 response bytes are checked against DES1/DES2. The two
+///   capture forms are told apart by the last field's length (48 hex =
+///   classic, 16 hex = hashcat wire).
 pub fn verify_netntlmv1(encoded: &str, candidate: &str) -> Result<bool, String> {
     let (challenge_hex, resp_hex) = if let Some(rest) = encoded.strip_prefix("$NETNTLM$") {
         let (challenge, resp) = rest
@@ -135,6 +302,11 @@ pub fn verify_netntlmv1(encoded: &str, candidate: &str) -> Result<bool, String> 
         let fields: Vec<&str> = encoded.split(':').collect();
         if fields.len() != 6 {
             return Err("not a NetNTLMv1 target".into());
+        }
+        if fields[4].len() == 48 && fields[5].len() == 16 {
+            // hashcat 5500 wire — the module's parse + kernel semantics.
+            let parsed = NetNTLMv1M05500::parse((fields[3], fields[4], fields[5]))?;
+            return Ok(parsed.matches(candidate));
         }
         (fields[3], fields[5])
     };
@@ -258,6 +430,7 @@ pub fn hmac_digest(kind: &str, password: &[u8], salt: &[u8]) -> Result<Vec<u8>, 
 
 #[cfg(test)]
 mod tests {
+    use md5::Digest as _;
     use super::*;
 
     #[test]
@@ -316,6 +489,115 @@ mod tests {
     }
 
     #[test]
+    fn netntlmv1_m05500_module_self_test_pair() {
+        // hashcat module_05500.c:33-34 ST_PASS / ST_HASH — a NetNTLMv1+ESS
+        // capture (server challenge ada06359242920a5 followed by 16 zero
+        // bytes, client challenge 9c23f6c094853920). The module self-test
+        // requires this exact pair to survive hash_decode (ESS MD5 challenge
+        // + 2^16 third-key precompute) and the m05500 kernel filter/DES
+        // checks, here on CPU.
+        const ST_HASH: &str = "::5V4T:ada06359242920a500000000000000000000000000000000:0556d5297b5daa70eaffde82ef99293a3f3bb59b7c9704ea:9c23f6c094853920";
+        assert!(verify_netntlmv1(ST_HASH, "hashcat").unwrap());
+
+        // Wrong candidates: any password whose NT-hash bytes 14..15 do not
+        // equal the brute-forced third-key index, or whose DES1/DES2 blocks
+        // differ, must be rejected.
+        assert!(!verify_netntlmv1(ST_HASH, "Hashcat").unwrap());
+        assert!(!verify_netntlmv1(ST_HASH, "hashca").unwrap());
+        assert!(!verify_netntlmv1(ST_HASH, "hashcats").unwrap());
+        assert!(!verify_netntlmv1(ST_HASH, "password").unwrap());
+
+        // Flipping one bit of digest[0..3] (the first 16 response bytes)
+        // fails the DES1 comparison (m05500_a0-pure.cl:338-343).
+        let tampered_head = ST_HASH.replacen("0556d529", "0556d528", 1);
+        assert!(!verify_netntlmv1(&tampered_head, "hashcat").unwrap());
+        // Flipping one bit of digest_tmp (the last 8 bytes, the brute-forced
+        // tail) leaves no third key at all: the module's PARSER_SALT_VALUE
+        // parse failure (module_05500.c:322), surfaced here as Err.
+        let tampered_tail = ST_HASH.replacen("7c9704ea", "7c9704eb", 1);
+        assert!(verify_netntlmv1(&tampered_tail, "hashcat").is_err());
+    }
+
+    #[test]
+    fn netntlmv1_m05500_st_derived_values() {
+        // The ST pair's intermediate values, re-derived line by line from
+        // module_05500.c and the m05500 kernels (not from the wire alone).
+        let parsed = NetNTLMv1M05500::parse((
+            "ada06359242920a500000000000000000000000000000000",
+            "0556d5297b5daa70eaffde82ef99293a3f3bb59b7c9704ea",
+            "9c23f6c094853920",
+        ))
+        .unwrap();
+
+        // ESS challenge (module_05500.c:263-283): MD5 over the BINARY client
+        // challenge followed by the first 8 server challenge bytes — not the
+        // ASCII hex (that construction was falsified by prior experiments:
+        // MD5("9c23f6c0" || srvchal) = e3802fc380481e8c..., which does not
+        // match the wire).
+        let ess_input = [
+            0x9c, 0x23, 0xf6, 0xc0, 0x94, 0x85, 0x39, 0x20, 0xad, 0xa0, 0x63, 0x59, 0x24, 0x29,
+            0x20, 0xa5,
+        ];
+        assert_eq!(parsed.challenge, md5(&ess_input)[..8]);
+
+        // NT hash of the ST password (MD4 over UTF-16LE "hashcat").
+        let nt = md4(&utf16le("hashcat"));
+        assert_eq!(
+            nt,
+            [0xb4, 0xb9, 0xb0, 0x2e, 0x6f, 0x09, 0xa9, 0xbd, 0x76, 0x0f, 0x38, 0x8b, 0x67, 0x35,
+             0x1e, 0x2b],
+        );
+
+        // The kernel filter (m05500_a0-pure.cl:155) compares NT-hash word
+        // h[3] >> 16 against salt_buf[2]; the parse-time brute force
+        // (module_05500.c:290-318) must therefore land on exactly the third
+        // key built from the ST password's bytes 14..15.
+        let d = u32::from_le_bytes([nt[12], nt[13], nt[14], nt[15]]);
+        assert_eq!(u32::from(parsed.third_key_index), d >> 16);
+
+        // ...and that key's encryption reproduces the captured tail ct3,
+        // while the first two key expansions reproduce ct1/ct2 (the DES1 and
+        // DES2 kernel compares).
+        let k1 = netntlmv1_m05500_key_expand(&nt[..7].try_into().unwrap());
+        assert_eq!(des_encrypt_block(&k1, &parsed.challenge), parsed.ct1);
+        let k2 = netntlmv1_m05500_key_expand(&nt[7..14].try_into().unwrap());
+        assert_eq!(des_encrypt_block(&k2, &parsed.challenge), parsed.ct2);
+        let k3 = netntlmv1_m05500_key_expand(&[nt[14], nt[15], 0, 0, 0, 0, 0]);
+        assert_eq!(des_encrypt_block(&k3, &parsed.challenge), parsed.ct3);
+    }
+
+    #[test]
+    fn netntlmv1_m05500_classic_shape_roundtrip() {
+        // Non-ESS line (16-hex server challenge): the ESS branch is skipped
+        // (module_05500.c:259) and the challenge is the binary client
+        // challenge. Built exactly the way the capture variant the module
+        // models produces it — third block keyed from NT-hash bytes 14..15 —
+        // so the parse-time brute force recovers the same 16-bit index.
+        let nt = md4(&utf16le("deck-test-1"));
+        let clichall = hex::decode("9c23f6c094853920").unwrap();
+        let k = |index: usize| netntlmv1_m05500_key_expand(&nt[index..index + 7].try_into().unwrap());
+        let ct1 = des_encrypt_block(&k(0), &clichall);
+        let ct2 = des_encrypt_block(&k(7), &clichall);
+        let ct3 = des_encrypt_block(
+            &netntlmv1_m05500_key_expand(&[nt[14], nt[15], 0, 0, 0, 0, 0]),
+            &clichall,
+        );
+        let line = format!(
+            "user::dom:1122334455667788:{}{}{}:9c23f6c094853920",
+            hex::encode(ct1),
+            hex::encode(ct2),
+            hex::encode(ct3),
+        );
+        assert!(verify_netntlmv1(&line, "deck-test-1").unwrap());
+        assert!(!verify_netntlmv1(&line, "deck-test-2").unwrap());
+
+        // An odd-length server challenge is the module's PARSER_TOKEN_LENGTH
+        // (module_05500.c:205).
+        let odd = line.replacen("1122334455667788", "112233445566778", 1);
+        assert!(verify_netntlmv1(&odd, "deck-test-1").is_err());
+    }
+
+    #[test]
     fn netntlmv2_matches_john_vectors() {
         assert!(verify_netntlmv2(
             "$NETNTLMv2$NTLMV2TESTWORKGROUP$1122334455667788$07659A550D5E9D02996DFD95C87EC1D5$0101000000000000006CF6385B74CA01B3610B02D99732DD000000000200120057004F0052004B00470052004F00550050000100200044004100540041002E00420049004E0043002D0053004500430055005200490000000000",
@@ -337,3 +619,4 @@ mod tests {
         .unwrap());
     }
 }
+

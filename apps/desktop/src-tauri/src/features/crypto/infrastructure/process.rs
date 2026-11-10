@@ -7,7 +7,8 @@ use std::time::{Duration, Instant};
 
 const MAX_CAPTURE_BYTES: usize = 1024 * 1024;
 
-fn collect_bounded<R: Read + Send + 'static>(mut reader: R) -> thread::JoinHandle<Vec<u8>> {
+/// Bounded concurrent output capture shared with the recovery sidecar runner.
+pub(crate) fn collect_bounded<R: Read + Send + 'static>(mut reader: R) -> thread::JoinHandle<Vec<u8>> {
     thread::spawn(move || {
         let mut result = Vec::new();
         let mut buffer = [0u8; 8192];

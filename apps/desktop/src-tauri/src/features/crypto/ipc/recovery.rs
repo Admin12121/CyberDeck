@@ -27,9 +27,12 @@ mod library_support {
 use crate::features::forensics::ipc::evidence::EvidenceCtx;
 use crate::features::shared::session::CaseSessionCtx;
 use cyberdeck_storage::{NewRecoveryCheckpoint, RecoveryCheckpointRecord};
+// Support modules shared with the Engines panel: one compilation instance of
+// the sidecar process adapters and their private scratch (no twin includes).
+use super::engines as engines_support;
 use recovery_backend::access::{RecoveryResultAccess, VerifiedScope};
 use recovery_backend::{
-    execute_path, execute_path_with_rules, probe_recovery_devices, RecoveryCancel,
+    execute_path, execute_path_with_rules, probe_recovery_devices, MatchMetadata, RecoveryCancel,
     RecoveryDeviceInventory, RecoveryProgressWire, RecoveryRequest, RecoveryRun,
     RecoverySummaryWire,
 };
@@ -1374,6 +1377,7 @@ fn bundled_hashcat_modes() -> Vec<EmbeddedHashcatMode> {
         // and the LUKS v1 RIPEMD-160 + AES text form.
         ("pdf-1.7", 10600, 0),
         ("wpa-pmkid", 16800, 0),
+        ("mongodb-scram", 24100, 0),
         ("wpa", 22000, 0),
         ("luks", 29541, 0),
     ]
@@ -1708,6 +1712,14 @@ enum StageRoute {
         /// Private scratch (rules expansion or resume tail) freed after the run.
         _scratch: Option<tempfile::TempDir>,
     },
+    /// john GPLv2 sidecar fallback for registered sidecar-routed algorithms.
+    Sidecar {
+        /// john format name (e.g. "crypt" for gost-yescrypt).
+        format: &'static str,
+        path: PathBuf,
+        /// john-syntax rules file, when one is registered for the algorithm.
+        rules: Option<PathBuf>,
+    },
     /// Cancellation during expansion: the stage ends without running.
     Cancelled,
 }
@@ -1732,6 +1744,23 @@ fn build_stage_route(
     skip: u64,
     token: &RecoveryCancel,
 ) -> Result<StageRoute, String> {
+    if stage.engine == autopilot::StageEngine::Sidecar {
+        let format = autopilot::sidecar_john_format(&stage.algorithm)
+            .ok_or("stage algorithm has no registered sidecar format")?;
+        if stage.rules_set.is_some() {
+            // Library rule sets are hashcat syntax; john rule syntax differs
+            // and no sidecar rule escalation is registered. A sidecar rule
+            // stage would be a planning bug: fail honestly, never silently
+            // weaken the announced attack.
+            return Err("sidecar-routed algorithms do not take library rule sets".into());
+        }
+        let path = library_wordlists::resolve(app, &stage.wordlist_id)?;
+        return Ok(StageRoute::Sidecar {
+            format,
+            path,
+            rules: None,
+        });
+    }
     if stage.engine != autopilot::StageEngine::Gpu {
         let path = library_wordlists::resolve(app, &stage.wordlist_id)?;
         return match &stage.rules_set {
@@ -1859,6 +1888,200 @@ fn resume_gpu_path(
     }
 }
 
+/// Resolve the john sidecar binary: bundled engine resource first, then PATH
+/// (same lookup order as the Engines panel, without spawning a shell).
+fn resolve_john_sidecar(app: &AppHandle) -> Option<PathBuf> {
+    let exe = if cfg!(windows) { "john.exe" } else { "john" };
+    if let Ok(resource_dir) = app.path().resource_dir() {
+        let bundled = resource_dir.join("engines").join(exe);
+        if bundled.is_file() {
+            return Some(bundled);
+        }
+    }
+    if super::engines::which_exists("john") {
+        return Some(PathBuf::from(exe)); // resolved from PATH by Command
+    }
+    None
+}
+
+/// Re-enter a sidecar-reported candidate through the same verified-match
+/// path the native engine uses: when the crate has a verifier for the target
+/// the candidate is independently re-checked; when it has none — the honest
+/// boundary of the sidecar route, e.g. gost-yescrypt whose verifier is
+/// deliberately unimplemented (verify_kdf_format errors) — john's own
+/// crypt(3) verdict stands. An independent REJECT drops the candidate.
+fn verify_sidecar_candidate(hash_text: &str, password: &str) -> bool {
+    match cyberdeck_crypto::verify_kdf(hash_text, password) {
+        Ok(verified) => verified,
+        Err(_) => true, // no native verifier: john's own verdict is the verdict
+    }
+}
+
+/// Map sidecar pot pairs (hash, plaintext) onto the ladder's targets and the
+/// verified-match path. Unknown pot hashes are dropped; candidate_index is
+/// the match ordinal (the candidate stream is the sidecar's, not the wire's).
+fn sidecar_verified_matches(
+    targets: &[String],
+    single_target: &str,
+    pairs: Vec<(String, String)>,
+) -> (Vec<MatchMetadata>, Vec<Vec<u8>>) {
+    let mut matches = Vec::new();
+    let mut hits = Vec::new();
+    for (ordinal, (hash, password)) in pairs.into_iter().enumerate() {
+        let target_index = if targets.is_empty() {
+            if hash.trim() != single_target {
+                continue; // a pot entry for a hash this run never loaded
+            }
+            None
+        } else {
+            match targets.iter().position(|target| target.trim() == hash.trim()) {
+                Some(index) => Some(index),
+                None => continue,
+            }
+        };
+        if !verify_sidecar_candidate(&hash, &password) {
+            continue; // independent native verifier disagrees: not a match
+        }
+        matches.push(MatchMetadata {
+            candidate_index: ordinal as u64,
+            masked: true,
+            target_index,
+        });
+        hits.push(password.into_bytes());
+    }
+    (matches, hits)
+}
+
+/// Execute one sidecar-routed ladder stage through the john GPLv2 sidecar
+/// with the library wordlist: progress streams into the same stage-event wire
+/// the native engines use, RecoveryCancel kills the child, and the run is
+/// bounded by an honest wall-clock timeout. Candidates are bounded at the
+/// stage budget with a private scratch copy, like every native stage.
+#[allow(clippy::too_many_arguments)]
+fn run_sidecar_stage_with_binary(
+    binary: &Path,
+    scratch: &engines_support::scratch::ScratchDir,
+    label: &str,
+    format: &str,
+    request: &RecoveryRequest,
+    targets: &[String],
+    wordlist: &Path,
+    rules: Option<&Path>,
+    token: &RecoveryCancel,
+    forward: &mut (dyn FnMut(RecoveryProgressWire) + Send),
+) -> Result<RecoveryRun, String> {
+    let started = Instant::now();
+    let hash_text = if targets.is_empty() {
+        request.target_hash.clone()
+    } else {
+        targets.join("\n")
+    };
+    let hash_file = scratch.write_hash_file(&hash_text)?;
+    let pot = scratch.join("sidecar.pot");
+    let session = scratch.join("sidecar-session");
+    // Bound the candidates honestly at the stage budget. A rule-expanded run
+    // cannot pre-count its candidates; the wall-clock timeout remains the
+    // bound there (no registered sidecar algorithm uses rules today).
+    let (candidates, budget_effective) = match rules {
+        Some(_) => (wordlist.to_path_buf(), request.max_candidates),
+        None => {
+            let (path, lines) =
+                scratch.write_bounded_candidates(wordlist, request.max_candidates)?;
+            (path, lines)
+        }
+    };
+    let mut last_tried = 0u64;
+    let run = engines_support::sidecar::john_recovery(
+        binary,
+        format,
+        &hash_file,
+        &candidates,
+        rules,
+        &pot,
+        &session,
+        engines_support::sidecar::JOHN_RECOVERY_TIMEOUT,
+        &|| token.is_cancelled(),
+        |status| {
+            // tried is john's own keyspace percent scaled onto the bounded
+            // candidate set; guesses arrive exactly from the status line.
+            let tried = match status.percent {
+                Some(percent) => ((percent / 100.0) * budget_effective as f64) as u64,
+                None => 0,
+            }
+            .min(budget_effective);
+            last_tried = tried;
+            forward(RecoveryProgressWire {
+                tried,
+                budget: budget_effective,
+                matches: status.guesses.min(usize::MAX as u64) as usize,
+                stage: Some(label.to_string()),
+            });
+        },
+    )?;
+    let summary = if run.cancelled {
+        RecoverySummaryWire {
+            algorithm: request.algorithm.clone(),
+            backend: recovery_backend::BackendSelection::Cpu,
+            engine: format!("john-sidecar-{format}"),
+            tried: last_tried,
+            cancelled: true,
+            limit_reached: false,
+            duration_ms: started.elapsed().as_millis() as u64,
+            matches: Vec::new(),
+            stages: Vec::new(),
+            resume_index: 0,
+        }
+    } else {
+        let (matches, hits) =
+            sidecar_verified_matches(targets, request.target_hash.trim(), run.matches);
+        // The bounded copy holds the stage's whole candidate set: a completed
+        // pass submitted all of it, even when john printed no status line.
+        let tried = if last_tried == 0 { budget_effective } else { last_tried };
+        return Ok(RecoveryRun::from_parts(
+            RecoverySummaryWire {
+                algorithm: request.algorithm.clone(),
+                backend: recovery_backend::BackendSelection::Cpu,
+                engine: format!("john-sidecar-{format}"),
+                tried,
+                cancelled: false,
+                limit_reached: false,
+                duration_ms: started.elapsed().as_millis() as u64,
+                matches,
+                stages: Vec::new(),
+                resume_index: 0,
+            },
+            hits,
+        ));
+    };
+    Ok(RecoveryRun::from_parts(summary, Vec::new()))
+}
+
+/// Resolve the sidecar binary and private scratch, then run the stage.
+#[allow(clippy::too_many_arguments)]
+fn run_sidecar_stage(
+    app: &AppHandle,
+    label: &str,
+    format: &str,
+    request: &RecoveryRequest,
+    targets: &[String],
+    wordlist: &Path,
+    rules: Option<&Path>,
+    token: &RecoveryCancel,
+    forward: &mut (dyn FnMut(RecoveryProgressWire) + Send),
+) -> Result<RecoveryRun, String> {
+    let binary = resolve_john_sidecar(app).ok_or(
+        "john sidecar binary was not found on this machine; the sidecar fallback stage cannot run",
+    )?;
+    let cache = app
+        .path()
+        .app_cache_dir()
+        .map_err(|e| format!("cannot resolve cache dir: {e}"))?;
+    let scratch = engines_support::scratch::ScratchDir::create(&cache)?;
+    run_sidecar_stage_with_binary(
+        &binary, &scratch, label, format, request, targets, wordlist, rules, token, forward,
+    )
+}
+
 /// Everything one ladder execution needs; shared by fresh and resumed runs.
 struct LadderRun {
     stages: Vec<autopilot::AutopilotStagePlan>,
@@ -1962,6 +2185,19 @@ fn run_ladder(
                     &runtime,
                     token,
                     embedded_hashcat::WordlistPreset::Plain,
+                    &mut progress_with_stage,
+                ),
+                // john GPLv2 sidecar fallback: same stage-event wire, same
+                // verified-match re-entry, same cancel/reveal lifecycle.
+                StageRoute::Sidecar { format, path, rules } => run_sidecar_stage(
+                    app,
+                    &label,
+                    format,
+                    &request,
+                    &run.targets,
+                    &path,
+                    rules.as_deref(),
+                    token,
                     &mut progress_with_stage,
                 ),
                 StageRoute::Cancelled => unreachable!("handled above"),
@@ -2668,6 +2904,189 @@ fn emit_channel(on_event: Channel<RecoveryEvent>) -> impl Fn(RecoveryEvent) + Se
 mod tests {
     use super::recovery_backend::execute_reader;
     use super::*;
+
+    const GOST_KAT_HASH: &str =
+        "$gy$j9T$Rt9jcSbmNRUKSenPHUxJp/$4zprMvVKuU/xwoYe3gB5k6WFKfpxRv6IbTkdBfVQQu3";
+    const GOST_KAT_PASSWORD: &str = "openwall";
+
+    #[test]
+    fn sidecar_matches_reenter_through_the_native_verifier_or_john_verdict() {
+        // gost-yescrypt has no native verifier (verify_kdf_format errors
+        // honestly): john's own crypt(3) verdict is the verdict.
+        let (matches, hits) = sidecar_verified_matches(
+            &[],
+            GOST_KAT_HASH,
+            vec![(GOST_KAT_HASH.to_string(), GOST_KAT_PASSWORD.to_string())],
+        );
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].candidate_index, 0);
+        assert_eq!(matches[0].target_index, None);
+        assert!(matches[0].masked);
+        assert_eq!(hits[0], GOST_KAT_PASSWORD.as_bytes().to_vec());
+
+        // bcrypt HAS a native verifier: an independently rejected candidate
+        // is dropped even though the sidecar reported it.
+        let bcrypt = "$2a$05$CCCCCCCCCCCCCCCCCCCCC.E5YPO9kmyuRGyh0XouQYb4YMJKvyOeW";
+        let (matches, hits) = sidecar_verified_matches(
+            &[],
+            bcrypt,
+            vec![(bcrypt.to_string(), "not-the-password".to_string())],
+        );
+        assert!(matches.is_empty());
+        assert!(hits.is_empty());
+        // The real upstream vector ("U*U") passes the native verify path.
+        let (matches, hits) = sidecar_verified_matches(
+            &[],
+            bcrypt,
+            vec![(bcrypt.to_string(), "U*U".to_string())],
+        );
+        assert_eq!(matches.len(), 1);
+        assert_eq!(hits[0], b"U*U".to_vec());
+    }
+
+    #[test]
+    fn sidecar_pot_entries_map_to_multi_target_ordinals_or_are_dropped() {
+        let other = "$gy$j9T$dZZACKQy5jE344hHtI3sQ/$d.kB7A2uNANeWuy2td/7oD3GMgbQtcx/XzibtJqHg5.";
+        let targets = vec![other.to_string(), GOST_KAT_HASH.to_string()];
+        let pairs = vec![
+            (GOST_KAT_HASH.to_string(), GOST_KAT_PASSWORD.to_string()),
+            ("$gy$unknown$line".to_string(), "junk".to_string()),
+        ];
+        let (matches, hits) = sidecar_verified_matches(&targets, "", pairs);
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].target_index, Some(1));
+        assert_eq!(hits.len(), 1);
+    }
+
+    #[test]
+    fn sidecar_ladder_stage_runs_stub_john_and_reenters_verified_matches() {
+        let temp = tempfile::tempdir().unwrap();
+        let cache = temp.path().join("cache-root");
+        let scratch = engines_support::scratch::ScratchDir::create(&cache).unwrap();
+        let stub = engines_support::sidecar::stub_john_binary(temp.path(), 0);
+        let wordlist = temp.path().join("library-wordlist.txt");
+        std::fs::write(&wordlist, b"wrong\nopenwall\nother\n").unwrap();
+        let request = RecoveryRequest {
+            algorithm: "gost-yescrypt".into(),
+            target_hash: GOST_KAT_HASH.into(),
+            backend: recovery_backend::BackendSelection::Cpu,
+            max_candidates: 1_000,
+            max_matches: 10,
+            target_hashes: Vec::new(),
+        };
+        let mut progress = Vec::new();
+        let token = RecoveryCancel::new();
+        let label = "rockyou wordlist as gost-yescrypt (john sidecar)";
+        let run = run_sidecar_stage_with_binary(
+            &stub,
+            &scratch,
+            label,
+            "crypt",
+            &request,
+            &[],
+            &wordlist,
+            None,
+            &token,
+            &mut |wire| progress.push(wire),
+        )
+        .unwrap();
+        let (summary, hits) = run.into_parts();
+        assert_eq!(summary.engine, "john-sidecar-crypt");
+        assert_eq!(summary.algorithm, "gost-yescrypt");
+        assert!(!summary.cancelled);
+        assert_eq!(summary.tried, 3); // bounded copy holds the whole wordlist
+        assert_eq!(summary.matches.len(), 1);
+        assert!(summary.duration_ms <= 60_000);
+        assert_eq!(hits[0], GOST_KAT_PASSWORD.as_bytes().to_vec());
+        // Progress streamed into the same stage wire with the stage label.
+        assert!(progress
+            .iter()
+            .all(|p| p.stage.as_deref() == Some(label)));
+        assert_eq!(progress.last().unwrap().budget, 3);
+        assert_eq!(progress.last().unwrap().tried, 3);
+        assert_eq!(progress.last().unwrap().matches, 1);
+    }
+
+    #[test]
+    fn sidecar_ladder_stage_bounds_candidates_at_the_stage_budget() {
+        let temp = tempfile::tempdir().unwrap();
+        let cache = temp.path().join("cache-root");
+        let scratch = engines_support::scratch::ScratchDir::create(&cache).unwrap();
+        let stub = engines_support::sidecar::stub_john_binary(temp.path(), 0);
+        let wordlist = temp.path().join("library-wordlist.txt");
+        std::fs::write(&wordlist, b"a\nb\nc\nd\ne\nf\ng\nh\n").unwrap();
+        let request = RecoveryRequest {
+            algorithm: "gost-yescrypt".into(),
+            target_hash: GOST_KAT_HASH.into(),
+            backend: recovery_backend::BackendSelection::Cpu,
+            max_candidates: 5,
+            max_matches: 10,
+            target_hashes: Vec::new(),
+        };
+        let mut progress = Vec::new();
+        let run = run_sidecar_stage_with_binary(
+            &stub,
+            &scratch,
+            "stage",
+            "crypt",
+            &request,
+            &[],
+            &wordlist,
+            None,
+            &RecoveryCancel::new(),
+            &mut |wire| progress.push(wire),
+        )
+        .unwrap();
+        let (summary, _) = run.into_parts();
+        // Only the first five wordlist lines became candidates: the sidecar
+        // honors the same budget as every native stage.
+        assert_eq!(summary.tried, 5);
+        assert_eq!(progress.last().unwrap().budget, 5);
+    }
+
+    #[test]
+    fn sidecar_ladder_stage_maps_multi_target_pot_lines() {
+        let temp = tempfile::tempdir().unwrap();
+        let cache = temp.path().join("cache-root");
+        let scratch = engines_support::scratch::ScratchDir::create(&cache).unwrap();
+        let stub = engines_support::sidecar::stub_john_binary(temp.path(), 0);
+        let other = "$gy$j9T$dZZACKQy5jE344hHtI3sQ/$d.kB7A2uNANeWuy2td/7oD3GMgbQtcx/XzibtJqHg5.";
+        let targets = vec![other.to_string(), GOST_KAT_HASH.to_string()];
+        let wordlist = temp.path().join("library-wordlist.txt");
+        std::fs::write(&wordlist, b"openwall\n").unwrap();
+        let request = RecoveryRequest {
+            algorithm: "gost-yescrypt".into(),
+            target_hash: other.into(),
+            backend: recovery_backend::BackendSelection::Cpu,
+            max_candidates: 100,
+            max_matches: 10,
+            target_hashes: targets.clone(),
+        };
+        let run = run_sidecar_stage_with_binary(
+            &stub,
+            &scratch,
+            "stage",
+            "crypt",
+            &request,
+            &targets,
+            &wordlist,
+            None,
+            &RecoveryCancel::new(),
+            &mut |_| {},
+        )
+        .unwrap();
+        let (summary, hits) = run.into_parts();
+        assert_eq!(summary.matches.len(), 2);
+        assert_eq!(summary.matches[0].target_index, Some(0));
+        assert_eq!(summary.matches[1].target_index, Some(1));
+        assert_eq!(
+            hits,
+            vec![
+                GOST_KAT_PASSWORD.as_bytes().to_vec(),
+                GOST_KAT_PASSWORD.as_bytes().to_vec()
+            ]
+        );
+    }
 
     fn collecting_controller(
         run_kind: &str,

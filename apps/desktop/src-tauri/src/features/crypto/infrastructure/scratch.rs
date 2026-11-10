@@ -58,7 +58,7 @@ impl ScratchDir {
         opts.write(true).create_new(true);
         #[cfg(unix)]
         {
-            use std::os::unix::fs::OpenOptionsExt;
+            use std::os::unix::OpenOptionsExt;
             opts.mode(0o600);
         }
         let mut handle = opts
@@ -68,6 +68,59 @@ impl ScratchDir {
             .write_all(format!("{hash}\n").as_bytes())
             .map_err(|e| format!("cannot write hash file: {e}"))?;
         Ok(file)
+    }
+
+    /// Private bounded candidates copy for one recovery sidecar stage:
+    /// at most `max_lines` wordlist lines are streamed into the scratch dir,
+    /// capping the sidecar at the same candidate budget every native stage
+    /// honors. The copy is bounded like the embedded rules expansion (256 MiB
+    /// private file cap) and also isolates the run from library file changes.
+    /// Returns the copy path and the exact candidate count it holds.
+    pub fn write_bounded_candidates(
+        &self,
+        source: &Path,
+        max_lines: u64,
+    ) -> Result<(PathBuf, u64), String> {
+        use std::io::{BufRead, BufReader, BufWriter, Write as _};
+        const MAX_CANDIDATE_FILE_BYTES: u64 = 256 << 20;
+        let input = std::fs::File::open(source).map_err(|e| format!("cannot read wordlist: {e}"))?;
+        let mut reader = BufReader::with_capacity(1 << 20, input);
+        let path = self.join("sidecar-candidates.words");
+        let file =
+            std::fs::File::create(&path).map_err(|e| format!("cannot create candidates file: {e}"))?;
+        let mut writer = BufWriter::with_capacity(1 << 20, file);
+        let mut lines = 0u64;
+        let mut bytes = 0u64;
+        let mut buffer = Vec::new();
+        loop {
+            buffer.clear();
+            match reader.read_until(b'\n', &mut buffer) {
+                Ok(0) => break,
+                Ok(read) => {
+                    bytes += read as u64;
+                    if bytes > MAX_CANDIDATE_FILE_BYTES {
+                        return Err(
+                            "sidecar candidates copy exceeds the 256 MiB private file cap".into(),
+                        );
+                    }
+                    writer
+                        .write_all(&buffer)
+                        .map_err(|e| format!("cannot write candidates file: {e}"))?;
+                    lines += 1;
+                    if lines >= max_lines {
+                        break;
+                    }
+                }
+                Err(error) => return Err(format!("cannot copy wordlist: {error}")),
+            }
+        }
+        writer
+            .flush()
+            .map_err(|e| format!("cannot write candidates file: {e}"))?;
+        if lines == 0 {
+            return Err("wordlist has no candidates for the sidecar stage".into());
+        }
+        Ok((path, lines))
     }
 }
 

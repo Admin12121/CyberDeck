@@ -26,6 +26,7 @@ pub mod wallets;
 pub mod bitlocker;
 pub mod kerberos;
 pub mod databases;
+pub mod mongodb;
 pub mod kdbx4;
 pub mod kerberos_etype1718;
 pub mod macos_salted_sha1;
@@ -286,6 +287,8 @@ pub fn kdf_format(hash: &str) -> Option<&'static str> {
         Some("rar3-hp")
     } else if hash.starts_with("$rar5$") {
         Some("rar5")
+    } else if hash.starts_with("$mongodb-scram$") {
+        Some("mongodb-scram")
     } else if hash.starts_with("$luks$") {
         Some("luks")
     } else if hash.starts_with("$keepass$*4*") {
@@ -370,12 +373,23 @@ fn netntlm_capture_shape(hash: &str) -> bool {
     let fields: Vec<&str> = hash.split(':').collect();
     fields.len() == 6
         && fields[1].is_empty()
-        && fields[3].len() == 16
-        && fields[3].bytes().all(|b| b.is_ascii_hexdigit())
-        && (fields[4].len() == 48 || fields[4].len() == 32)
-        && fields[5].len() >= 16
         && fields[4].bytes().all(|b| b.is_ascii_hexdigit())
         && fields[5].bytes().all(|b| b.is_ascii_hexdigit())
+        && (fields[4].len() == 48 || fields[4].len() == 32)
+        && if fields[5].len() == 16 && fields[4].len() == 48 {
+            // hashcat 5500 wire: user::domain:srvchall(≤48):NTresp(48):clichall(16)
+            // — the server challenge sits in field 3 and the client challenge
+            // (the kernel's DES input) in field 5.
+            fields[3].len() >= 16
+                && fields[3].len() <= 48
+                && fields[3].len() % 2 == 0
+                && fields[3].bytes().all(|b| b.is_ascii_hexdigit())
+        } else {
+            // Classic capture: user::domain:challenge(16):LM:NT(≥16)
+            fields[3].len() == 16
+                && fields[3].bytes().all(|b| b.is_ascii_hexdigit())
+                && fields[5].len() >= 16
+        }
 }
 
 /// Shape check for the four-field PMKID capture (hashcat mode 16800): a
@@ -591,6 +605,11 @@ pub fn verify_kdf_format(format: &str, hash: &str, candidate: &str) -> Result<bo
         // binary 14600 header has no text RecoveryTarget and stays deferred.
         "luks" => {
             let parsed = salted_variants::LuksRipemd160Aes::parse(hash)?;
+            parsed.verify(candidate)
+        }
+        // MongoDB ServerKey SCRAM-SHA-1 (format batch 10).
+        "mongodb-scram" => {
+            let parsed = mongodb::MongoDbScramSha1::parse(hash)?;
             parsed.verify(candidate)
         }
         // Composed salted/HMAC digests carry an explicit algorithm hint; the

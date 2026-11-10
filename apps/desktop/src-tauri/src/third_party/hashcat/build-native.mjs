@@ -29,7 +29,7 @@ const capabilities = JSON.parse(readFileSync(capabilityPath, "utf8"));
 if (capabilities.schema !== 1 ||
     capabilities.source_commit !== "1994b513b550edfe3e7fcaa1103759a9343e57a4" ||
     capabilities.abi_version !== 4 ||
-    capabilities.hash_modes.map(x => x.id).join(",") !== "0,10,20,50,100,110,120,121,122,131,132,150,300,400,500,1000,1100,1400,1500,1700,1731,1800,2100,3100,3200,5500,5600,7400,9400,9600,9700,10400,10500,10600,11300,11600,12500,13000,13100,13400,13600,15600,15700,16800,17200,17210,18200,19600,19700,22000,22100,29541,34300,34301") {
+    capabilities.hash_modes.map(x => x.id).join(",") !== "0,10,20,50,100,110,120,121,122,131,132,150,300,400,500,1000,1100,1400,1500,1700,1731,1800,2100,3100,3200,5500,5600,7400,9400,9600,9700,10400,10500,10600,11300,11600,12500,13000,13100,13400,13600,15600,15700,16800,17200,17210,18200,19600,19700,22000,22100,24100,29541,34300,34301") {
   throw new Error("embedded Hashcat capability manifest conflicts with pinned C/worker contract");
 }
 const argIndex = process.argv.indexOf("--out");
@@ -156,6 +156,7 @@ const supportedModes = [
   { id: 10600, algorithm: "pdf-1.7" },
   { id: 16800, algorithm: "wpa-pmkid" },
   { id: 22000, algorithm: "wpa" },
+  { id: 24100, algorithm: "mongodb-scram" },
   { id: 29541, algorithm: "luks" },
 ];
 const moduleNames = supportedModes.map(({ id }) =>

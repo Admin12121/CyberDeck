@@ -20,6 +20,23 @@ pub enum StageEngine {
     Cpu,
     /// Embedded pinned Hashcat core on the operator's GPU (KAT-verified modes only).
     Gpu,
+    /// john GPLv2 sidecar process (registered sidecar-routed algorithms only).
+    Sidecar,
+}
+
+/// Minimal honest sidecar registry: algorithms the SAME recovery ladder may
+/// hand to the john GPLv2 sidecar process. Only formats whose end-to-end
+/// sidecar path is wired and tested are registered — never a format the
+/// route cannot prove. gost-yescrypt is the registered precedent: the native
+/// crate detects `$gy$` (cyberdeck_crypto::kdf_format) but has deliberately
+/// no verifier (verify_kdf_format errors honestly), and john's generic
+/// crypt(3) format auto-selects the gost-yescrypt subformat from the `$gy$`
+/// salt prefix (vendored john: src/c3_fmt.c, tunable cost 11).
+pub fn sidecar_john_format(algorithm: &str) -> Option<&'static str> {
+    match algorithm {
+        "gost-yescrypt" => Some("crypt"),
+        _ => None,
+    }
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -57,20 +74,29 @@ pub fn detect_target(target_hash: &str) -> Result<Detection, String> {
         return Err("target is empty".into());
     }
     if let Some(format) = cyberdeck_crypto::kdf_format(text) {
+        let algorithm = match format {
+            "wpa-pmkid" => "wpa-pmkid",
+            "mongodb-scram" => "mongodb-scram",
+            "bcrypt" => "bcrypt",
+            "argon2id" => "argon2id",
+            "argon2i" => "argon2i",
+            "argon2d" => "argon2d",
+            "scrypt" => "scrypt",
+            "yescrypt" => "yescrypt",
+            other => other,
+        };
+        // Name where the algorithm will actually run: sidecar-routed formats
+        // (gost-yescrypt) say so up front, everything else stays CPU.
+        let engine_note = if sidecar_john_format(algorithm).is_some() {
+            "john sidecar wordlist attack"
+        } else {
+            "CPU wordlist attack"
+        };
         return Ok(Detection {
-            algorithms: vec![match format {
-                "wpa-pmkid" => "wpa-pmkid",
-                "bcrypt" => "bcrypt",
-                "argon2id" => "argon2id",
-                "argon2i" => "argon2i",
-                "argon2d" => "argon2d",
-                "scrypt" => "scrypt",
-                "yescrypt" => "yescrypt",
-                other => other,
-            }],
+            algorithms: vec![algorithm],
             kdf: true,
             detail: format!(
-                "KDF hash detected ({format}); CPU wordlist attack with a bounded candidate budget"
+                "KDF hash detected ({format}); {engine_note} with a bounded candidate budget"
             ),
         });
     }
@@ -142,8 +168,13 @@ pub fn build_plan(
         .first()
         .ok_or("no algorithm candidate")?;
     for algorithm in &detection.algorithms {
+        // KAT-verified GPU modes first, then the registered sidecar fallback,
+        // then the native multi-core CPU. The announced label follows the
+        // route honestly.
         let engine = if gpu_algorithms.iter().any(|gpu| gpu == algorithm) {
             StageEngine::Gpu
+        } else if sidecar_john_format(algorithm).is_some() {
+            StageEngine::Sidecar
         } else {
             StageEngine::Cpu
         };
@@ -155,10 +186,10 @@ pub fn build_plan(
             engine,
             label: format!(
                 "{wordlist_name} wordlist as {algorithm} ({})",
-                if engine == StageEngine::Gpu {
-                    "GPU"
-                } else {
-                    "CPU"
+                match engine {
+                    StageEngine::Gpu => "GPU",
+                    StageEngine::Sidecar => "john sidecar",
+                    StageEngine::Cpu => "CPU",
                 }
             ),
         });
@@ -249,6 +280,64 @@ mod tests {
         .unwrap();
         assert!(yes.kdf);
         assert_eq!(yes.algorithms, vec!["yescrypt"]);
+    }
+
+    #[test]
+    fn sidecar_registry_is_minimal_and_honest() {
+        // gost-yescrypt is the registered precedent: detected ($gy$) but
+        // deliberately unverified natively; john's crypt(3) format is its
+        // sidecar route (vendored john c3_fmt.c subformat 11).
+        assert_eq!(sidecar_john_format("gost-yescrypt"), Some("crypt"));
+        // Standard yescrypt verifies natively and never routes to the sidecar.
+        assert_eq!(sidecar_john_format("yescrypt"), None);
+        // Nothing else is advertised without an end-to-end tested path.
+        assert_eq!(sidecar_john_format("md5"), None);
+        assert_eq!(sidecar_john_format("bcrypt"), None);
+        assert_eq!(sidecar_john_format("scrypt"), None);
+        assert_eq!(sidecar_john_format(""), None);
+    }
+
+    #[test]
+    fn gost_yescrypt_detection_announces_and_plans_the_sidecar_route() {
+        let detection =
+            detect_target("$gy$j9T$Rt9jcSbmNRUKSenPHUxJp/$4zprMvVKuU/xwoYe3gB5k6WFKfpxRv6IbTkdBfVQQu3")
+                .unwrap();
+        assert!(detection.kdf);
+        assert_eq!(detection.algorithms, vec!["gost-yescrypt"]);
+        assert!(detection.detail.contains("john sidecar wordlist attack"));
+        let plan = build_plan(
+            &detection,
+            &wordlists(&["rockyou"]),
+            &rules(&["best66"]),
+            &[],
+        )
+        .unwrap();
+        // KDF targets get exactly the sidecar wordlist stage: no rule or mask
+        // escalation exists for the sidecar route.
+        assert_eq!(plan.stages.len(), 1);
+        assert_eq!(plan.stages[0].engine, StageEngine::Sidecar);
+        assert_eq!(plan.stages[0].algorithm, "gost-yescrypt");
+        assert_eq!(plan.stages[0].wordlist_id, "rockyou");
+        assert!(plan.stages[0].label.contains("(john sidecar)"));
+        assert_eq!(plan.stages[0].rules_set, None);
+        assert_eq!(plan.stages[0].mask, None);
+    }
+
+    #[test]
+    fn kat_verified_gpu_route_wins_over_the_sidecar_fallback() {
+        // Defensive: should a sidecar-registered algorithm ever pass the GPU
+        // KAT, the verified GPU route keeps the stage.
+        let detection =
+            detect_target("$gy$j9T$Rt9jcSbmNRUKSenPHUxJp/$4zprMvVKuU/xwoYe3gB5k6WFKfpxRv6IbTkdBfVQQu3")
+                .unwrap();
+        let plan = build_plan(
+            &detection,
+            &wordlists(&["rockyou"]),
+            &[],
+            &["gost-yescrypt".to_string()],
+        )
+        .unwrap();
+        assert_eq!(plan.stages[0].engine, StageEngine::Gpu);
     }
 
     #[test]

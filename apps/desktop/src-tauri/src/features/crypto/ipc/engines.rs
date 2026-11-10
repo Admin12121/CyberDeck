@@ -20,14 +20,14 @@ pub use engine_formats::{parse_hashcat_outfile, parse_john_show};
 #[path = "../application/engines.rs"]
 mod application;
 #[path = "../infrastructure/sidecar.rs"]
-mod sidecar;
+pub(crate) mod sidecar;
 
 #[path = "../infrastructure/executables.rs"]
 mod executables;
 pub use executables::which_exists;
 
 #[path = "../infrastructure/scratch.rs"]
-mod scratch;
+pub(crate) mod scratch;
 
 #[path = "../infrastructure/process.rs"]
 pub(crate) mod process;

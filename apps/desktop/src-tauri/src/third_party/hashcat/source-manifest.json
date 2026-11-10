@@ -1445,6 +1445,10 @@
       "sha256": "06a24789bc27528a9c52f8c82c19f2ebb7fd700ff85db586fad33e1e69e01344",
       "bytes": 22549
     },
+    "OpenCL/m24100-pure.cl": {
+      "sha256": "939c2b3cb6358388af9ee589f54ef28ae8bf400e18e1eef5b7cadb2411695898",
+      "bytes": 8766
+    },
     "OpenCL/m34300-pure.cl": {
       "sha256": "76ca2814e5270e4650a7fe0f6ea4c15b8f17c8471ba22045758695bb442a0ba9",
       "bytes": 8719
@@ -2936,6 +2940,10 @@
     "src/modules/module_22100.c": {
       "sha256": "f1fc8ae6ec9f8967d27f120adee879efb532b37f33c07de215013841057c2011",
       "bytes": 20342
+    },
+    "src/modules/module_24100.c": {
+      "sha256": "3da2e09d1e0e037fe99ea6142b0efbe9fc91944fd3778c4946de42d4ae1d5d31",
+      "bytes": 15966
     },
     "src/modules/module_29541.c": {
       "sha256": "457ead78e28c9da8e1f8c423ee84d9422e88d0383a94d26eaf00c07aa9c99cdf",

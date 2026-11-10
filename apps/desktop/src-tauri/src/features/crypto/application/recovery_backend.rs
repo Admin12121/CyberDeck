@@ -408,6 +408,7 @@ pub(super) fn embedded_result(
                 "wpa-pmkid" => "embedded_hashcat_16800",
                 "wpa" => "embedded_hashcat_22000",
                 "luks" => "embedded_hashcat_29541",
+        "mongodb-scram" => "embedded_hashcat_24100",
                 _ => "embedded_hashcat_unsupported",
             }
             .into(),

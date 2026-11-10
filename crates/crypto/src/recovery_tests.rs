@@ -676,3 +676,336 @@ fn batch7_9_targets_self_detect_or_verify_via_hints() {
     assert!(kdf_format("87c7b8262d3208503687a0b37014057a334c19e4").is_none());
 }
 
+// --- SIMD batched fast-digest engine equivalence ---------------------------
+//
+// recover_checked routes bare md5/sha256 digests through the multi-buffer
+// engine. These tests pin it to the per-candidate scalar engine: a fixed
+// candidate set goes through both engines under identical limits and the
+// full results — tried, hits (indices, candidates, target field), flags and
+// progress samples — must be identical.
+
+/// Deterministic byte pattern (mirrors simd_digest's test helper).
+fn simd_test_pattern(len: usize) -> Vec<u8> {
+    (0..len).map(|i| (i as u8).wrapping_mul(31).wrapping_add(7)).collect()
+}
+
+/// Fresh owned stream over a fixed candidate set (engines consume iterators).
+fn simd_test_stream(
+    candidates: &[Vec<u8>],
+) -> impl Iterator<Item = Result<Vec<u8>, String>> + use<'_> {
+    candidates.iter().cloned().map(|c| Ok::<Vec<u8>, String>(c))
+}
+
+fn simd_test_limits(cap: u64, max_matches: usize) -> RecoveryLimits {
+    RecoveryLimits {
+        max_candidates: cap,
+        max_matches,
+    }
+}
+
+fn assert_engines_agree(
+    scalar: &RecoveryResult,
+    batched: &RecoveryResult,
+    context: &str,
+) {
+    assert_eq!(scalar.engine, batched.engine, "{context}: engine id");
+    assert_eq!(scalar.tried, batched.tried, "{context}: tried");
+    assert_eq!(scalar.hits, batched.hits, "{context}: hits and indices");
+    assert_eq!(scalar.cancelled, batched.cancelled, "{context}: cancelled");
+    assert_eq!(
+        scalar.limit_reached, batched.limit_reached,
+        "{context}: limit_reached"
+    );
+}
+
+/// The dispatcher must select the multi-buffer engine for bare md5/sha256
+/// digests only; every other target shape keeps the scalar engine.
+#[test]
+fn simd_batch_engine_selects_only_bare_md5_and_sha256() {
+    let md5 = RecoveryTarget::parse("md5", &"00".repeat(16)).unwrap();
+    let sha256 = RecoveryTarget::parse("sha256", &"00".repeat(32)).unwrap();
+    assert!(matches!(
+        DigestBatch::for_target(&md5),
+        Some(DigestBatch::Md5(_))
+    ));
+    assert!(matches!(
+        DigestBatch::for_target(&sha256),
+        Some(DigestBatch::Sha256(_))
+    ));
+    // Same 16-byte digest size, different family: scalar engine.
+    let ntlm = RecoveryTarget::parse("ntlm", "8846f7eaee8fb117ad06bdd830b7586c").unwrap();
+    let sha1 = RecoveryTarget::parse("sha1", &"00".repeat(20)).unwrap();
+    let bcrypt = RecoveryTarget::parse(
+        "sha256",
+        "$2b$04$CCCCCCCCCCCCCCCCCCCCCCabcdefghijklmnopqrstuvwxyZ1234567890AB",
+    )
+    .unwrap();
+    let multi = RecoveryTarget::parse_multi(
+        "md5",
+        &["5d41402abc4b2a76b9719d911017c592".to_string(), "00".repeat(16)],
+    )
+    .unwrap();
+    for target in [&ntlm, &sha1, &bcrypt, &multi] {
+        assert!(
+            DigestBatch::for_target(target).is_none(),
+            "{target:?} must keep the scalar engine"
+        );
+    }
+}
+
+/// Fixed candidate set, both engines, identical outcomes. The set spans a
+/// full 4096 batch plus change, with matches at the edges (first, mid,
+/// duplicated, last-of-batch, first-of-next-batch, tail) and an empty
+/// candidate, against every match-quota and cap boundary that changes where
+/// the scalar engine stops.
+#[test]
+fn simd_batched_fast_digest_engine_matches_scalar_engine_exactly() {
+    // Prove the multi-buffer path itself is live on this machine (not the
+    // in-module scalar fallback): AVX2 must select the 8-lane path.
+    #[cfg(target_arch = "x86_64")]
+    {
+        if is_x86_feature_detected!("avx2") {
+            assert_eq!(crate::simd_digest::active_path(), "avx2-8-lane");
+        } else {
+            assert_ne!(crate::simd_digest::active_path(), "scalar");
+        }
+    }
+
+    let mut candidates: Vec<Vec<u8>> = vec![Vec::new()]; // empty candidate
+    for len in [1usize, 3, 31, 54, 55, 56, 57, 63, 64, 65, 119, 120, 127, 128, 255, 256] {
+        candidates.push(simd_test_pattern(len));
+    }
+    let filler = simd_test_pattern(40);
+    while candidates.len() < 4100 {
+        candidates.push(filler.clone());
+    }
+    // Matches at stop-boundary-sensitive positions.
+    candidates[1] = b"alpha-match".to_vec();
+    candidates[2050] = b"mid-match".to_vec();
+    candidates[2051] = b"mid-match".to_vec(); // duplicate: both must be hit
+    candidates[4095] = b"boundary-match".to_vec(); // last of batch one
+    candidates[4096] = b"post-boundary-match".to_vec(); // first of batch two
+    candidates[4099] = b"tail-match".to_vec(); // last candidate overall
+
+    for (algo, size) in [("md5", 16usize), ("sha256", 32)] {
+        for password in [
+            "alpha-match",
+            "mid-match",
+            "boundary-match",
+            "post-boundary-match",
+            "tail-match",
+            "no-such-candidate",
+        ] {
+            let target = RecoveryTarget::parse(
+                algo,
+                &hex::encode(apply_op(algo, password.as_bytes(), None).unwrap()),
+            )
+            .unwrap();
+            assert!(!target.is_kdf());
+            let batch = DigestBatch::for_target(&target)
+                .unwrap_or_else(|| panic!("{algo} digest must take the batched engine"));
+            let expected = apply_op(algo, password.as_bytes(), None).unwrap();
+            assert_eq!(expected.len(), size);
+            match batch {
+                DigestBatch::Md5(digest) => {
+                    assert_eq!(&digest[..], &expected[..]);
+                }
+                DigestBatch::Sha256(digest) => {
+                    assert_eq!(&digest[..], &expected[..]);
+                }
+            }
+            for max_matches in [1usize, 2, 5] {
+                for cap in [10u64, 4095, 4096, 4097, 5000, 1u64 << 40] {
+                    let limits = simd_test_limits(cap, max_matches);
+                    let context = format!("{algo} {password} max_matches={max_matches} cap={cap}");
+                    let mut scalar_progress = Vec::new();
+                    let scalar = recover_checked_scalar(
+                        &target,
+                        simd_test_stream(&candidates),
+                        limits,
+                        || false,
+                        |p| scalar_progress.push(p),
+                    )
+                    .unwrap();
+                    let mut batched_progress = Vec::new();
+                    let batched = recover_checked_batched(
+                        batch,
+                        simd_test_stream(&candidates),
+                        limits,
+                        || false,
+                        |p| batched_progress.push(p),
+                    )
+                    .unwrap();
+                    assert_engines_agree(&scalar, &batched, &context);
+                    assert_eq!(
+                        scalar_progress, batched_progress,
+                        "{context}: progress samples"
+                    );
+                    // Every recorded hit verifies through the scalar
+                    // single-candidate path and maps back to its index.
+                    for hit in &batched.hits {
+                        assert_eq!(
+                            target.match_target(&hit.candidate).unwrap(),
+                            Some(0),
+                            "{context}: hit must verify scalar-side"
+                        );
+                        assert_eq!(
+                            candidates[hit.index as usize], hit.candidate,
+                            "{context}: hit index must address its candidate"
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Cancellation granularity: both engines poll once per pull attempt, so a
+/// counter-based cancel flips at the same attempt and must stop both engines
+/// at the same stream position with the same flags and poll counts.
+#[test]
+fn simd_batched_engine_cancellation_stops_at_the_same_position() {
+    // Zero digest: no candidate ever matches, so quota never interferes.
+    let target = RecoveryTarget::parse("md5", &"00".repeat(16)).unwrap();
+    let batch = DigestBatch::for_target(&target).unwrap();
+    let candidates: Vec<Vec<u8>> = (0..100u32).map(|i| simd_test_pattern(i as usize + 1)).collect();
+    for flip_after in [0usize, 1, 50, 99, 100, 101, 4096] {
+        let mut scalar_polls = 0usize;
+        let scalar = recover_checked_scalar(
+            &target,
+            simd_test_stream(&candidates),
+            simd_test_limits(1_000_000, 1),
+            || {
+                scalar_polls += 1;
+                scalar_polls > flip_after
+            },
+            |_| {},
+        )
+        .unwrap();
+        let mut batched_polls = 0usize;
+        let batched = recover_checked_batched(
+            batch,
+            simd_test_stream(&candidates),
+            simd_test_limits(1_000_000, 1),
+            || {
+                batched_polls += 1;
+                batched_polls > flip_after
+            },
+            |_| {},
+        )
+        .unwrap();
+        let context = format!("flip_after={flip_after}");
+        assert_engines_agree(&scalar, &batched, &context);
+        assert_eq!(scalar_polls, batched_polls, "{context}: cancel poll count");
+    }
+}
+
+/// Error visibility: the scalar engine stops pulling once the match quota
+/// fills, so a stream error or oversized candidate sitting after the
+/// quota-filling candidate must never surface. The batched engine pulls it
+/// during fill, so it defers the error and must reproduce the scalar
+/// outcome in both directions.
+#[test]
+fn simd_batched_engine_error_visibility_matches_scalar_exactly() {
+    let password = b"found-early";
+    let target = RecoveryTarget::parse(
+        "md5",
+        &hex::encode(apply_op("md5", password, None).unwrap()),
+    )
+    .unwrap();
+    let batch = DigestBatch::for_target(&target).unwrap();
+    let wrong = RecoveryTarget::parse("md5", &"00".repeat(16)).unwrap();
+    let wrong_batch = DigestBatch::for_target(&wrong).unwrap();
+    let oversized = vec![b'X'; MAX_CANDIDATE_BYTES + 1];
+    let limits = simd_test_limits(100, 1);
+
+    // Oversized candidate after the quota-filling match: clean Ok on both.
+    let after_match = vec![
+        Ok(b"miss".to_vec()),
+        Ok(password.to_vec()),
+        Ok(oversized.clone()),
+    ];
+    let scalar = recover_checked_scalar(
+        &target,
+        after_match.clone().into_iter(),
+        limits,
+        || false,
+        |_| {},
+    )
+    .unwrap();
+    let batched = recover_checked_batched(
+        batch,
+        after_match.clone().into_iter(),
+        limits,
+        || false,
+        |_| {},
+    )
+    .unwrap();
+    assert_engines_agree(&scalar, &batched, "oversized after quota fill");
+    assert_eq!(scalar.tried, 2);
+    assert_eq!(scalar.hits[0].candidate, password);
+
+    // Same oversized candidate with nothing matching: identical Err on both.
+    let scalar = recover_checked_scalar(
+        &wrong,
+        after_match.clone().into_iter(),
+        limits,
+        || false,
+        |_| {},
+    );
+    let batched = recover_checked_batched(
+        wrong_batch,
+        after_match.clone().into_iter(),
+        limits,
+        || false,
+        |_| {},
+    );
+    assert_eq!(
+        scalar.unwrap_err(),
+        batched.unwrap_err(),
+        "oversized with no quota fill must error on both engines"
+    );
+
+    // Stream error instead of an oversized candidate: same two directions.
+    let with_error = vec![
+        Ok(b"miss".to_vec()),
+        Err("fixture disk error".to_string()),
+        Ok(password.to_vec()),
+    ];
+    let scalar = recover_checked_scalar(
+        &wrong,
+        with_error.clone().into_iter(),
+        limits,
+        || false,
+        |_| {},
+    );
+    let batched = recover_checked_batched(
+        wrong_batch,
+        with_error.clone().into_iter(),
+        limits,
+        || false,
+        |_| {},
+    );
+    assert_eq!(scalar.unwrap_err(), batched.unwrap_err(), "stream error");
+    let error_after_match = vec![Ok(password.to_vec()), Err("fixture disk error".to_string())];
+    let scalar = recover_checked_scalar(
+        &target,
+        error_after_match.clone().into_iter(),
+        limits,
+        || false,
+        |_| {},
+    )
+    .unwrap();
+    let batched = recover_checked_batched(
+        batch,
+        error_after_match.clone().into_iter(),
+        limits,
+        || false,
+        |_| {},
+    )
+    .unwrap();
+    assert_engines_agree(&scalar, &batched, "stream error after quota fill");
+    assert_eq!(scalar.tried, 1);
+    assert_eq!(scalar.hits.len(), 1);
+}
+

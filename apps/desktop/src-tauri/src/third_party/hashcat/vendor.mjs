@@ -186,6 +186,13 @@ if (mode === "--import") {
   }
   dirFiles("OpenCL", (name) =>
     /^m(01410|16800|22000|14611|14612|14613|14621|14622|14623|14631|14632|14633|14641|14642|14643)[-a-z0-9_]*\.cl$/.test(name));
+  // Batch-10 databases: MongoDB ServerKey SCRAM-SHA-1 (24100, pure-only —
+  // no m24100 optimized kernel exists upstream).
+  for (const mode of ["24100"]) {
+    add("src/modules/module_" + mode + ".c");
+  }
+  dirFiles("OpenCL", (name) =>
+    /^m(24100)[-a-z0-9_]*\.cl$/.test(name));
   // Apple Metal/OpenCL extension sources pinned for macOS runtime parity.
   add("src/ext_metal.m");
   add("src/ext_iokit.m");

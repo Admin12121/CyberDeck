@@ -702,6 +702,29 @@ pub fn verify_md5_batch(candidates: &[&[u8]], target: &[u8; 16]) -> Option<usize
         .position(|digest| digest_eq(&digest, target))
 }
 
+/// Ascending indices of every candidate whose raw SHA-256 equals `target`.
+/// This is the batched equivalent of comparing each candidate in order, so
+/// the match set and positions are identical to a per-candidate scalar
+/// comparison; unlike [`verify_sha256_batch`] it reports all matches, which
+/// the recovery engine needs for `max_matches > 1` runs.
+pub fn sha256_batch_matches(candidates: &[&[u8]], target: &[u8; 32]) -> Vec<usize> {
+    sha256_batch(candidates)
+        .iter()
+        .enumerate()
+        .filter_map(|(index, digest)| digest_eq(digest, target.as_slice()).then_some(index))
+        .collect()
+}
+
+/// Ascending indices of every candidate whose raw MD5 equals `target`.
+/// See [`sha256_batch_matches`] for the equivalence contract.
+pub fn md5_batch_matches(candidates: &[&[u8]], target: &[u8; 16]) -> Vec<usize> {
+    md5_batch(candidates)
+        .iter()
+        .enumerate()
+        .filter_map(|(index, digest)| digest_eq(digest, target.as_slice()).then_some(index))
+        .collect()
+}
+
 /// Constant-time digest comparison (same shape as `constant_time_eq` in
 /// `archives.rs`).
 fn digest_eq(a: &[u8], b: &[u8]) -> bool {

@@ -967,6 +967,32 @@ where
 
 fn recover_checked<I, B, F, P>(
     target: &RecoveryTarget,
+    candidates: I,
+    limits: RecoveryLimits,
+    cancel: F,
+    on_progress: P,
+) -> Result<RecoveryResult, String>
+where
+    I: Iterator<Item = Result<B, String>>,
+    B: AsRef<[u8]>,
+    F: FnMut() -> bool,
+    P: FnMut(RecoveryProgress),
+{
+    match DigestBatch::for_target(target) {
+        // Fast raw md5/sha256 digests: candidates are hashed through the
+        // multi-buffer SIMD path (which falls back to its own scalar
+        // reference wherever AVX2/SSE4.1 is unavailable). Results are
+        // byte-identical to the per-candidate engine below.
+        Some(batch) => recover_checked_batched(batch, candidates, limits, cancel, on_progress),
+        None => recover_checked_scalar(target, candidates, limits, cancel, on_progress),
+    }
+}
+
+/// The per-candidate verification engine, unchanged: one `match_target`
+/// call per candidate for every target shape that does not take the
+/// multi-buffer path (KDF, composed, multi-target, non-md5/sha256 digests).
+fn recover_checked_scalar<I, B, F, P>(
+    target: &RecoveryTarget,
     mut candidates: I,
     limits: RecoveryLimits,
     mut cancel: F,
@@ -1026,6 +1052,208 @@ where
             }
         }
         if result.tried % interval == 0 {
+            on_progress(RecoveryProgress {
+                tried: result.tried,
+                budget: cap,
+                matches: result.hits.len(),
+            });
+            last_reported = result.tried;
+        }
+    }
+    if result.tried != last_reported || result.tried == 0 {
+        on_progress(RecoveryProgress {
+            tried: result.tried,
+            budget: cap,
+            matches: result.hits.len(),
+        });
+    }
+    Ok(result)
+}
+
+/// Candidates verified per multi-buffer dispatch on the fast-digest path.
+/// 4096 aligns with the fast-hash progress interval so batched runs report
+/// progress at the same attempt boundaries as the scalar engine. Worst-case
+/// staging is 4096 x MAX_CANDIDATE_BYTES (16 MiB), bounded like every other
+/// engine buffer.
+const SIMD_BATCH_CANDIDATES: usize = 4096;
+
+/// The multi-buffer verifier for a raw digest target. Only bare MD5 and
+/// SHA-256 digests hash candidates through `simd_digest`; every other
+/// target shape (KDF, composed, multi-target, other digest families) keeps
+/// the per-candidate scalar engine. Parse already pins the digest length;
+/// the size guards keep the adapter total regardless.
+#[derive(Clone, Copy)]
+enum DigestBatch {
+    Md5([u8; 16]),
+    Sha256([u8; 32]),
+}
+impl DigestBatch {
+    fn for_target(target: &RecoveryTarget) -> Option<Self> {
+        match target {
+            RecoveryTarget::Digest {
+                algorithm: FastHash::Md5,
+                bytes,
+            } if bytes.len() == 16 => {
+                let mut digest = [0u8; 16];
+                digest.copy_from_slice(bytes);
+                Some(Self::Md5(digest))
+            }
+            RecoveryTarget::Digest {
+                algorithm: FastHash::Sha256,
+                bytes,
+            } if bytes.len() == 32 => {
+                let mut digest = [0u8; 32];
+                digest.copy_from_slice(bytes);
+                Some(Self::Sha256(digest))
+            }
+            _ => None,
+        }
+    }
+}
+
+/// The fast-digest engine: same budget, cancellation, progress and match
+/// semantics as [`recover_checked_scalar`], with pending candidates hashed
+/// in batches through the multi-buffer SIMD path instead of one
+/// `match_target` call per candidate. Every scalar stop condition is
+/// reproduced exactly:
+///
+/// - cancel and the candidate cap are re-checked before every pull, so
+///   batched runs stop at the same stream positions and never prefetch
+///   past the cap;
+/// - a batch that fills the match quota ends the run at the quota-filling
+///   candidate: trailing candidates count as never checked (`tried`
+///   settles there) and no cancel/cap flag from the fill boundary applies,
+///   because the scalar loop breaks before its next top-of-iteration check;
+/// - a stream error or oversized candidate pulled during the fill is
+///   deferred: the batch still verifies, and the error surfaces only if
+///   the quota did not fill — exactly when the scalar loop would have
+///   reached that candidate.
+fn recover_checked_batched<I, B, F, P>(
+    batch: DigestBatch,
+    mut candidates: I,
+    limits: RecoveryLimits,
+    mut cancel: F,
+    mut on_progress: P,
+) -> Result<RecoveryResult, String>
+where
+    I: Iterator<Item = Result<B, String>>,
+    B: AsRef<[u8]>,
+    F: FnMut() -> bool,
+    P: FnMut(RecoveryProgress),
+{
+    if limits.max_candidates == 0 || limits.max_matches == 0 || limits.max_matches > MAX_MATCHES {
+        return Err("invalid limits".into());
+    }
+    // Digest targets are fast hashes: the cap mirrors recover_checked.
+    let cap = limits.max_candidates.min(MAX_FAST_CANDIDATES);
+    let mut result = RecoveryResult {
+        engine: "cyberdeck-crypto-cpu",
+        tried: 0,
+        hits: Vec::new(),
+        cancelled: false,
+        limit_reached: false,
+    };
+    let interval = 4096; // fast-hash progress interval, as in the scalar engine
+    let mut last_reported = 0u64;
+    let mut pending: Vec<Vec<u8>> = Vec::with_capacity(SIMD_BATCH_CANDIDATES.min(cap as usize));
+    /// Why the fill stopped. Flags are applied only after the batch cannot
+    /// fill the match quota, mirroring the scalar loop's check order.
+    enum Stop {
+        Fill,
+        Cancel,
+        Cap,
+        Stream,
+        Error(String),
+    }
+    loop {
+        pending.clear();
+        let mut stop = Stop::Fill;
+        while pending.len() < SIMD_BATCH_CANDIDATES {
+            if cancel() {
+                stop = Stop::Cancel;
+                break;
+            }
+            if result.tried + pending.len() as u64 >= cap {
+                stop = Stop::Cap;
+                break;
+            }
+            match candidates.next() {
+                Some(Ok(candidate)) => {
+                    let candidate = candidate.as_ref();
+                    if candidate.len() > MAX_CANDIDATE_BYTES {
+                        stop = Stop::Error("candidate too long".into());
+                        break;
+                    }
+                    pending.push(candidate.to_vec());
+                }
+                Some(Err(message)) => {
+                    stop = Stop::Error(message);
+                    break;
+                }
+                None => {
+                    stop = Stop::Stream;
+                    break;
+                }
+            }
+        }
+        if pending.is_empty() {
+            match stop {
+                Stop::Cancel => result.cancelled = true,
+                Stop::Cap => result.limit_reached = true,
+                Stop::Error(message) => return Err(message),
+                Stop::Fill | Stop::Stream => {}
+            }
+            break;
+        }
+        // Hash phase: one multi-buffer dispatch over the pending batch;
+        // global ordinals stay committed + batch position.
+        let committed = result.tried;
+        let slices: Vec<&[u8]> = pending.iter().map(Vec::as_slice).collect();
+        let matched = match batch {
+            DigestBatch::Md5(digest) => crate::simd_digest::md5_batch_matches(&slices, &digest),
+            DigestBatch::Sha256(digest) => {
+                crate::simd_digest::sha256_batch_matches(&slices, &digest)
+            }
+        };
+        let mut last_match = None;
+        for &position in &matched {
+            if result.hits.len() == limits.max_matches {
+                break;
+            }
+            result.hits.push(RecoveryHit {
+                index: committed + position as u64,
+                // mem::take avoids cloning; the batch is dropped afterwards.
+                candidate: std::mem::take(&mut pending[position]),
+                target: None,
+            });
+            last_match = Some(position);
+        }
+        if result.hits.len() == limits.max_matches {
+            // The quota filled inside this batch: the scalar engine stops
+            // pulling at the quota-filling candidate, so the batch tail
+            // counts as unchecked and no fill-boundary flag applies.
+            result.tried = committed + last_match.map_or(pending.len() as u64, |p| p as u64 + 1);
+            break;
+        }
+        result.tried = committed + pending.len() as u64;
+        match stop {
+            Stop::Cancel => {
+                result.cancelled = true;
+                break;
+            }
+            Stop::Cap => {
+                result.limit_reached = true;
+                break;
+            }
+            Stop::Stream => break,
+            Stop::Error(message) => {
+                // Scalar returns Err the moment it pulls this candidate and
+                // the quota did not fill; the partial result is discarded.
+                return Err(message);
+            }
+            Stop::Fill => {}
+        }
+        if result.tried / interval > last_reported / interval {
             on_progress(RecoveryProgress {
                 tried: result.tried,
                 budget: cap,
