@@ -273,6 +273,12 @@ impl RecoveryTarget {
                     // material size and cipher/mode combos are enforced here.
                     super::salted_variants::LuksRipemd160Aes::parse(text)?;
                 }
+                "mongodb-scram" => {
+                    // MongoDB ServerKey SCRAM-SHA-1 (batch 10): the wire is
+                    // the $mongodb-scram$*0* record; the verifier enforces the
+                    // field shapes and iteration policy.
+                    super::mongodb::MongoDbScramSha1::parse(text)?;
+                }
                 "wpa-pmkid" => {
                     // PMKID captures (batch 9): the strict wire-shape parser
                     // fails fast before any GPU work is scheduled.

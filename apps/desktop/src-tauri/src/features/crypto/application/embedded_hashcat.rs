@@ -514,7 +514,7 @@ fn self_test_mode(root: &Path, mode: u32, word: &str, digest: &str) -> Result<()
             122 => "macos-salted-sha1",
             121 => "smf",
             10600 | 12500 | 13000 | 16800 | 19600 | 19700 | 22000
-            | 29541 | 34300 | 34301 => "kdf",
+            | 24100 | 29541 | 34300 | 34301 => "kdf",
             1100 => "mscash",
             1500 => "descrypt",
             _ => return Err("Hashcat self-test mode unsupported".into()),
@@ -1389,7 +1389,7 @@ mod tests {
                 // Batch-7/8/9: self-describing wires likewise; the bare-digest
                 // rows need their explicit hints.
                 131 | 10600 | 12500 | 13000 | 16800 | 19600 | 19700
-                | 22000 | 29541 | 34300 | 34301 => "kdf",
+                | 22000 | 24100 | 29541 | 34300 | 34301 => "kdf",
                 300 => "mysql4.1",
                 3100 => "oracle-h",
                 122 => "macos-salted-sha1",
