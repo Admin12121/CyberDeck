@@ -12,7 +12,7 @@
 //! self-contained on purpose: it compiles both inside cyberdeck-crypto and
 //! standalone in the authoring test crate.
 
-use sha1::{Digest as _, Sha1};
+use sha1::Sha1;
 
 /// The wire salt is exactly 8 hex characters (4 raw bytes).
 const SALT_HEX: usize = 8;

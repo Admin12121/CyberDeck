@@ -101,6 +101,54 @@ pub fn native_operation(id: &str) -> bool {
             | "normalize_unicode"
             | "unix_to_datetime"
             | "datetime_to_unix"
+            | "to_base45"
+            | "from_base45"
+            | "to_base58"
+            | "from_base58"
+            | "to_base58check"
+            | "from_base58check"
+            | "to_base62"
+            | "from_base62"
+            | "to_base85"
+            | "from_base85"
+            | "to_base92"
+            | "from_base92"
+            | "to_bech32"
+            | "from_bech32"
+            | "to_base"
+            | "from_base"
+            | "to_octal"
+            | "from_octal"
+            | "to_bcd"
+            | "from_bcd"
+            | "to_float"
+            | "from_float"
+            | "escape_unicode"
+            | "unescape_unicode"
+            | "escape_smart_chars"
+            | "to_hex_content"
+            | "from_hex_content"
+            | "caret_m_decode"
+            | "to_modhex"
+            | "from_modhex"
+            | "to_quoted_printable"
+            | "from_quoted_printable"
+            | "to_punycode"
+            | "from_punycode"
+            | "mime_decode"
+            | "pem_to_hex"
+            | "hex_to_pem"
+            | "parse_asn1_hex_string"
+            | "parse_tlv"
+            | "change_ip_format"
+            | "text_integer_conversion"
+            | "to_braille"
+            | "from_braille"
+            | "to_cobs"
+            | "from_cobs"
+            | "encode_text"
+            | "decode_text"
+            | "unicode_text_format"
     )
 }
 
@@ -380,6 +428,9 @@ fn transform(op: &str, bytes: &[u8], param: Option<&str>) -> Result<Vec<u8>, Str
     }
     if crate::recipe_datetime::supports(op) {
         return crate::recipe_datetime::apply(op, bytes, param);
+    }
+    if crate::encoding_ops::supports(op) {
+        return crate::encoding_ops::apply(op, bytes, param);
     }
     match op {
         "to_base64" => Ok(STANDARD.encode(bytes).into_bytes()),

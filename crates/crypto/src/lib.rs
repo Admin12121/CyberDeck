@@ -2,6 +2,7 @@
 
 pub mod aead;
 pub mod recipes;
+pub mod encoding_ops;
 mod recipe_native_parity;
 mod recipe_text_parity;
 mod recipe_escape_parity;
@@ -79,6 +80,54 @@ pub fn catalog() -> Vec<OpInfo> {
         op("from_hex", "From Hex", "encoding", "Decode hexadecimal to bytes", false),
         op("url_encode", "URL Encode", "encoding", "Percent-encode the input", false),
         op("url_decode", "URL Decode", "encoding", "Decode percent-encoding", false),
+        op("to_base45", "To Base45", "encoding", "Encode bytes to Base45 (RFC 9285)", true),
+        op("from_base45", "From Base45", "encoding", "Decode Base45 to bytes", true),
+        op("to_base58", "To Base58", "encoding", "Encode bytes to Base58 (Bitcoin alphabet default)", true),
+        op("from_base58", "From Base58", "encoding", "Decode Base58 to bytes", true),
+        op("to_base58check", "To Base58Check", "encoding", "Encode with version byte and sha256d checksum", true),
+        op("from_base58check", "From Base58Check", "encoding", "Decode Base58Check to the payload", true),
+        op("to_base62", "To Base62", "encoding", "Encode bytes as a big-number in Base62", true),
+        op("from_base62", "From Base62", "encoding", "Decode a Base62 big-number to bytes", true),
+        op("to_base85", "To Base85", "encoding", "Encode bytes to Base85 (Ascii85, Z85 or RFC 1924)", true),
+        op("from_base85", "From Base85", "encoding", "Decode Base85 to bytes", true),
+        op("to_base92", "To Base92", "encoding", "Encode bytes to Base92", false),
+        op("from_base92", "From Base92", "encoding", "Decode Base92 to bytes", false),
+        op("to_bech32", "To Bech32", "encoding", "Encode bytes to a Bech32/Bech32m string", true),
+        op("from_bech32", "From Bech32", "encoding", "Decode a Bech32/Bech32m string to bytes", false),
+        op("to_base", "To Base", "encoding", "Convert a number to an arbitrary radix (2-36)", true),
+        op("from_base", "From Base", "encoding", "Convert a radix-encoded number back to decimal", true),
+        op("to_octal", "To Octal", "encoding", "Encode bytes to octal values", true),
+        op("from_octal", "From Octal", "encoding", "Decode octal values to bytes", true),
+        op("to_bcd", "To BCD", "encoding", "Encode a decimal number as Binary Coded Decimal", true),
+        op("from_bcd", "From BCD", "encoding", "Decode Binary Coded Decimal to a number", true),
+        op("to_float", "To Float", "encoding", "Decode IEEE-754 floats from bytes", true),
+        op("from_float", "From Float", "encoding", "Encode numbers as IEEE-754 floats", true),
+        op("escape_unicode", "Escape Unicode Characters", "encoding", "Escape non-ASCII characters as \\uXXXX / %uXXXX / U+XXXX", true),
+        op("unescape_unicode", "Unescape Unicode Characters", "encoding", "Resolve unicode escape sequences to characters", true),
+        op("escape_smart_chars", "Escape Smart Characters", "transforms", "Replace smart quotes, dashes and symbols with ASCII", true),
+        op("to_hex_content", "To Hex Content", "encoding", "Escape non-alphanumeric bytes as |hex| runs", true),
+        op("from_hex_content", "From Hex Content", "encoding", "Resolve |hex| runs back to bytes", false),
+        op("caret_m_decode", "Caret/M-decode", "parsing", "Decode ^ and M- control notation to bytes", false),
+        op("to_modhex", "To Modhex", "encoding", "Encode bytes to YubiKey modhex", true),
+        op("from_modhex", "From Modhex", "encoding", "Decode modhex to bytes", false),
+        op("to_quoted_printable", "To Quoted Printable", "encoding", "Encode bytes as Quoted-Printable (RFC 2045)", false),
+        op("from_quoted_printable", "From Quoted Printable", "encoding", "Decode Quoted-Printable to bytes", false),
+        op("to_punycode", "To Punycode", "encoding", "Encode text with punycode (RFC 3492)", true),
+        op("from_punycode", "From Punycode", "encoding", "Decode punycode to text", true),
+        op("mime_decode", "MIME Decoding", "parsing", "Decode RFC 2047 encoded-words (utf-8, us-ascii, iso-8859-1)", false),
+        op("pem_to_hex", "PEM to Hex", "formatting", "Extract PEM blocks as hex", false),
+        op("hex_to_pem", "Hex to PEM", "formatting", "Wrap hex data in a PEM header/footer", true),
+        op("parse_asn1_hex_string", "Parse ASN.1 hex string", "parsing", "Walk a DER structure and present the tree", true),
+        op("parse_tlv", "Parse TLV", "parsing", "Parse type-length-value records to JSON", true),
+        op("change_ip_format", "Change IP format", "parsing", "Convert IPv4 addresses between dotted, decimal, octal and hex", true),
+        op("text_integer_conversion", "Text-Integer Conversion", "parsing", "Convert Latin-1 text to a big integer and back", true),
+        op("to_braille", "To Braille", "encoding", "Convert letters and digits to Braille patterns", false),
+        op("from_braille", "From Braille", "encoding", "Convert Braille patterns back to characters", false),
+        op("to_cobs", "To COBS", "encoding", "Consistent Overhead Byte Stuffing encode", false),
+        op("from_cobs", "From COBS", "encoding", "Consistent Overhead Byte Stuffing decode", false),
+        op("encode_text", "Encode text", "encoding", "Encode text to the chosen charset", true),
+        op("decode_text", "Decode text", "encoding", "Decode bytes from the chosen charset to text", true),
+        op("unicode_text_format", "Unicode Text Format", "transforms", "Append underline / strikethrough combining marks", true),
         op("xor", "XOR with key", "transforms", "Byte-wise XOR against the repeating key", true),
         op("rot13", "ROT13", "transforms", "Caesar shift letters by 13", false),
         op("gzip", "Gzip", "compression", "Compress input with gzip", false),
@@ -173,18 +222,25 @@ pub fn apply_op(op_id: &str, input: &[u8], key: Option<&[u8]>) -> Result<Vec<u8>
             }
             Ok(out)
         }
+        other if encoding_ops::supports(other) => {
+            let param = key.map(|k| String::from_utf8_lossy(k).into_owned());
+            encoding_ops::apply(other, input, param.as_deref())
+        }
         other => Err(format!("unknown operation: {other}")),
     }
 }
 
 fn percent_encode(input: &[u8]) -> Vec<u8> {
+    const HEX_UPPER: &[u8; 16] = b"0123456789ABCDEF";
     let mut out = Vec::with_capacity(input.len() * 3);
     for &b in input {
         // unreserved set per RFC 3986
         if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~') {
             out.push(b);
         } else {
-            out.extend_from_slice(format!("%{b:02X}").as_bytes());
+            out.push(b'%');
+            out.push(HEX_UPPER[usize::from(b >> 4)]);
+            out.push(HEX_UPPER[usize::from(b & 0x0f)]);
         }
     }
     out

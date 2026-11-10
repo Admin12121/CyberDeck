@@ -699,6 +699,7 @@ dependencies = [
  "bcrypt",
  "blake2",
  "crc32fast",
+ "cyberdeck-storage",
  "des",
  "flate2",
  "hex",

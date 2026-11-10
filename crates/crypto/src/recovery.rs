@@ -1,5 +1,5 @@
 //! Native bounded offline recovery engine. No external tool execution or secret persistence.
-use crate::{apply_op, kdf_format, verify_kdf, verify_kdf_format};
+use crate::{apply_op, kdf_format, verify_kdf_format};
 use serde::Serialize;
 
 pub const MAX_FAST_CANDIDATES: u64 = 10_000_000;
@@ -252,36 +252,24 @@ impl RecoveryTarget {
                     // verifier enforces the rest.
                 }
                 "rar3-hp" => {
-                    // Archive containers (batch 9): the strict wire-shape
-                    // parsers fail fast before any GPU work is scheduled.
                     super::rar::Rar3Hp::parse(text)?;
                 }
                 "rar5" => {
                     super::rar::Rar5::parse(text)?;
                 }
                 "keepass-kdbx4" => {
-                    // KDBX v4 container: KDF UUID, cost policy and header
-                    // shape are enforced at parse time.
                     super::kdbx4::Kdbx4::parse(text)?;
                 }
                 "pdf-1.7" => {
-                    // Document container (batch 9): revision 5 Level 3 only.
                     super::salted_variants::Pdf17L3::parse(text)?;
                 }
                 "luks" => {
-                    // LUKS v1 RIPEMD-160 + AES text form (batch 9): key
-                    // material size and cipher/mode combos are enforced here.
                     super::salted_variants::LuksRipemd160Aes::parse(text)?;
                 }
                 "mongodb-scram" => {
-                    // MongoDB ServerKey SCRAM-SHA-1 (batch 10): the wire is
-                    // the $mongodb-scram$*0* record; the verifier enforces the
-                    // field shapes and iteration policy.
                     super::mongodb::MongoDbScramSha1::parse(text)?;
                 }
                 "wpa-pmkid" => {
-                    // PMKID captures (batch 9): the strict wire-shape parser
-                    // fails fast before any GPU work is scheduled.
                     super::salted_variants::WpaPmkid::parse(text)?;
                 }
                 "wpa" => {
@@ -291,15 +279,11 @@ impl RecoveryTarget {
                     // and nothing secret is computed at parse time.
                 }
                 "kerberos-tgs-rep-17" | "kerberos-tgs-rep-18" => {
-                    // Kerberos etype 17/18 (batch 8): ticket field shapes are
-                    // enforced at parse time.
                     super::kerberos_etype1718::KerberosTgs1718::parse(text)?;
                 }
                 "winzip-aes" | "7zip" | "zip-legacy" => {
-                    // Archive containers: the strict wire-shape parsers fail
-                    // fast before any GPU work is scheduled; unsupported
-                    // variants (compressed 7-Zip headers, multi-entry PKZIP,
-                    // checksum-only entries) are rejected here.
+                    // Unsupported variants (compressed 7-Zip headers,
+                    // multi-entry PKZIP, checksum-only entries) are rejected here.
                     if format == "winzip-aes" {
                         super::archives::WinZipAes::parse(text)?;
                     } else if format == "7zip" {
@@ -310,9 +294,6 @@ impl RecoveryTarget {
                 }
                 "office-97-2003" | "office-2007" | "office-2013" | "pdf-1.1-1.3"
                 | "pdf-1.4-1.6" => {
-                    // Document containers (batch B2): same fail-fast shape
-                    // validation; unsupported revisions and key sizes are
-                    // rejected at parse time.
                     match format {
                         "office-97-2003" => {
                             super::documents::Office97::parse(text)?;
@@ -332,9 +313,6 @@ impl RecoveryTarget {
                     }
                 }
                 "bitcoin" | "keepass" | "ethereum-pbkdf2" | "ethereum-scrypt" => {
-                    // Wallet containers (batch B3): fail-fast shape
-                    // validation; Twofish KeePass and out-of-policy scrypt
-                    // costs are rejected at parse time.
                     match format {
                         "bitcoin" => {
                             super::wallets::BitcoinWallet::parse(text)?;
@@ -351,13 +329,9 @@ impl RecoveryTarget {
                     }
                 }
                 "bitlocker" => {
-                    // Disk encryption (batch B4): fail-fast shape
-                    // validation, pinned iteration count.
                     super::bitlocker::BitLocker::parse(text)?;
                 }
                 "kerberos-tgs-rep" | "kerberos-as-rep" => {
-                    // Kerberos etype 23 (batch B4): fail-fast shape
-                    // validation for both wire formats.
                     if format == "kerberos-tgs-rep" {
                         super::kerberos::KerberosTgsRep::parse(text)?;
                     } else {
@@ -456,7 +430,7 @@ impl RecoveryTarget {
             return Err(format!("hash list exceeds {} targets", MAX_TARGETS));
         }
         let mut targets = Vec::with_capacity(lines.len());
-        for (index, line) in lines.iter().enumerate() {
+        for line in lines.iter() {
             let text = line.trim();
             if text.is_empty() || text.starts_with('#') {
                 continue;
@@ -632,7 +606,7 @@ pub fn recover_wordlist_resumable<R, F, P>(
     skip: u64,
     limits: RecoveryLimits,
     mut cancel: F,
-    mut on_progress: P,
+    on_progress: P,
 ) -> Result<RecoveryResult, String>
 where
     R: std::io::BufRead,
@@ -715,7 +689,6 @@ pub fn recover_wordlist_parallel(
     let stop = Arc::new(AtomicBool::new(false));
     let hits: Arc<std::sync::Mutex<Vec<RecoveryHit>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
     let first_error: Arc<std::sync::Mutex<Option<String>>> = Arc::new(std::sync::Mutex::new(None));
-    let started = std::time::Instant::now();
     std::thread::scope(|scope| {
     for worker in 0..workers {
         let target = target.clone();

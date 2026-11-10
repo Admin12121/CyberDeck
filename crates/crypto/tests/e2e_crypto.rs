@@ -37,17 +37,72 @@ fn tempdir(tag: &str) -> std::path::PathBuf {
     dir
 }
 
+/// XORSHIFT-derived 1 MiB buffer for the binary pair round-trips.
+fn large_binary() -> Vec<u8> {
+    let mut state = 0x243f_6a88_85a3_08d3u64;
+    let mut random = move || {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        state.to_le_bytes().to_vec()
+    };
+    let mut out = Vec::with_capacity(1024 * 1024);
+    while out.len() < 1024 * 1024 {
+        out.extend_from_slice(&random());
+    }
+    out.truncate(1024 * 1024);
+    out
+}
+
 fn write_wordlist(dir: &std::path::Path, words: &[&str]) -> std::path::PathBuf {
     let path = dir.join("wordlist.txt");
     std::fs::write(&path, words.join("\n") + "\n").unwrap();
     path
 }
 
+/// Encoding pairs that round-trip arbitrary text, including the 1 MiB input:
+/// every codec here is linear-time, so the full-size input stays fast.
 fn encoding_pairs() -> Vec<(&'static str, &'static str)> {
     vec![
         ("to_base64", "from_base64"),
         ("to_hex", "from_hex"),
         ("url_encode", "url_decode"),
+        ("to_base45", "from_base45"),
+        ("to_base85", "from_base85"),
+        ("to_base92", "from_base92"),
+        ("to_bech32", "from_bech32"),
+        ("to_octal", "from_octal"),
+        ("escape_unicode", "unescape_unicode"),
+        ("to_hex_content", "from_hex_content"),
+        ("to_modhex", "from_modhex"),
+        ("to_quoted_printable", "from_quoted_printable"),
+        ("to_punycode", "from_punycode"),
+        ("encode_text", "decode_text"),
+    ]
+}
+
+/// COBS output is binary, so the pair cannot travel through the executor's
+/// UTF-8 text pipeline; it round-trips through apply_op instead.
+fn binary_pairs() -> Vec<(&'static str, &'static str)> {
+    vec![("to_cobs", "from_cobs")]
+}
+
+/// Big-number codecs: CyberChef's digit-array method is quadratic, so these
+/// round-trip over short inputs only.
+fn big_number_pairs() -> Vec<(&'static str, &'static str)> {
+    vec![
+        ("to_base58", "from_base58"),
+        ("to_base58check", "from_base58check"),
+        ("to_base62", "from_base62"),
+    ]
+}
+
+/// Number-string codecs: tested with inputs from their own domain.
+fn domain_pairs() -> Vec<(&'static str, &'static str, Vec<&'static str>)> {
+    vec![
+        ("to_base", "from_base", vec!["0", "4276803"]),
+        ("to_bcd", "from_bcd", vec!["0", "1234567890"]),
+        ("to_float", "from_float", vec!["", "abcd1234"]),
     ]
 }
 
@@ -59,9 +114,19 @@ fn catalog_encoding_pairs_round_trip_through_recipe_executor() {
         .filter(|op| op.category == "encoding")
         .map(|op| op.id.as_str())
         .collect();
-    let pairs = encoding_pairs();
-    let pair_ids: Vec<&str> = pairs.iter().flat_map(|(e, d)| [*e, *d]).collect();
-    assert_eq!(encoding_ids, pair_ids, "catalog encoding ops changed; update the pair table");
+    let mut pair_ids: Vec<&str> = encoding_pairs()
+        .iter()
+        .chain(binary_pairs().iter())
+        .chain(big_number_pairs().iter())
+        .flat_map(|(e, d)| [*e, *d])
+        .collect();
+    pair_ids.extend(domain_pairs().iter().flat_map(|(e, d, _)| [*e, *d]));
+    pair_ids.push("to_braille");
+    pair_ids.push("from_braille");
+    let mut expected = encoding_ids.clone();
+    expected.sort_unstable();
+    pair_ids.sort_unstable();
+    assert_eq!(expected, pair_ids, "catalog encoding ops changed; update the pair table");
     for id in &pair_ids {
         assert!(native_operation(id), "{id} is not a native recipe op");
     }
@@ -69,7 +134,7 @@ fn catalog_encoding_pairs_round_trip_through_recipe_executor() {
     let mebibyte = "cyberdeck-e2e-42".repeat(65536);
     assert_eq!(mebibyte.len(), 1024 * 1024);
     let inputs: Vec<&str> = vec!["", "abc", "CyberDeck ❄️ héllo 雪 🔑", &mebibyte];
-    for (encode, decode) in pairs {
+    for (encode, decode) in encoding_pairs() {
         for input in &inputs {
             let encoded_bytes = run_recipe(input, &[step(encode)]);
             let encoded = std::str::from_utf8(&encoded_bytes)
@@ -78,6 +143,33 @@ fn catalog_encoding_pairs_round_trip_through_recipe_executor() {
             assert_eq!(restored, input.as_bytes(), "{decode}({encode}(x)) != x");
         }
     }
+    for (encode, decode) in big_number_pairs() {
+        for input in ["", "abc", "CyberDeck ❄️ héllo 雪 🔑"] {
+            let encoded_bytes = run_recipe(input, &[step(encode)]);
+            let encoded = std::str::from_utf8(&encoded_bytes)
+                .unwrap_or_else(|_| panic!("{encode} emitted non-UTF-8 output"));
+            assert_eq!(run_recipe(encoded, &[step(decode)]), input.as_bytes());
+        }
+    }
+    for (encode, decode, inputs) in domain_pairs() {
+        for input in inputs {
+            let encoded_bytes = run_recipe(input, &[step(encode)]);
+            let encoded = std::str::from_utf8(&encoded_bytes)
+                .unwrap_or_else(|_| panic!("{encode} emitted non-UTF-8 output"));
+            assert_eq!(run_recipe(encoded, &[step(decode)]), input.as_bytes());
+        }
+    }
+    for (encode, decode) in binary_pairs() {
+        for input in [&Vec::new(), &b"abc\x00\x01\xfe"[..], &large_binary()] {
+            let encoded = apply_op(encode, input, None).unwrap();
+            assert_eq!(apply_op(decode, &encoded, None).unwrap(), *input);
+        }
+    }
+    // CyberChef's To Braille uppercases before lookup, so the decode is the
+    // uppercased text rather than the original.
+    let encoded_bytes = run_recipe("Hello, World! 123", &[step("to_braille")]);
+    let encoded = std::str::from_utf8(&encoded_bytes).unwrap();
+    assert_eq!(run_recipe(encoded, &[step("from_braille")]), b"HELLO, WORLD! 123");
 }
 
 #[test]

@@ -9,7 +9,7 @@ use aes::cipher::generic_array::GenericArray;
 use aes::cipher::{BlockDecrypt, BlockEncrypt, KeyInit};
 use sha2::Digest;
 
-use crate::documents::{aes_decrypt_block, constant_time_eq};
+use crate::documents::constant_time_eq;
 
 fn sha512(data: &[u8]) -> [u8; 64] {
     sha2::Sha512::digest(data).into()

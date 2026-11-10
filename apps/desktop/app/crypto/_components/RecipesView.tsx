@@ -54,6 +54,16 @@ const NATIVE_RECIPE_OPS = new Set([
   "escape_string", "unescape_string",
   "extract_urls", "extract_ips", "extract_emails", "extract_domains", "jwt_decode",
   "normalize_unicode", "unix_to_datetime", "datetime_to_unix",
+  "to_base45", "from_base45", "to_base58", "from_base58", "to_base58check", "from_base58check",
+  "to_base62", "from_base62", "to_base85", "from_base85", "to_base92", "from_base92",
+  "to_bech32", "from_bech32", "to_base", "from_base", "to_octal", "from_octal",
+  "to_bcd", "from_bcd", "to_float", "from_float", "escape_unicode", "unescape_unicode",
+  "escape_smart_chars", "to_hex_content", "from_hex_content", "caret_m_decode",
+  "to_modhex", "from_modhex", "to_quoted_printable", "from_quoted_printable",
+  "to_punycode", "from_punycode", "mime_decode", "pem_to_hex", "hex_to_pem",
+  "parse_asn1_hex_string", "parse_tlv", "change_ip_format", "text_integer_conversion",
+  "to_braille", "from_braille", "to_cobs", "from_cobs", "encode_text", "decode_text",
+  "unicode_text_format",
 ]);
 
 function nativeUiResult(wire: RecipeRunWire): RecipeResult {

@@ -12,8 +12,8 @@
 //! bottom of this file, so the module compiles everywhere. The scalar
 //! compressors double as the in-file reference for the KAT tests.
 //!
-//! This module is intentionally self-contained and NOT wired into
-//! `lib.rs`: which verifiers adopt it is a decision for the session owner.
+//! Adopted by the CPU recovery engine for bare MD5/SHA-256 targets
+//! (recovery.rs `DigestBatch`); every other target shape stays scalar.
 
 // ---------------------------------------------------------------- SHA-256
 

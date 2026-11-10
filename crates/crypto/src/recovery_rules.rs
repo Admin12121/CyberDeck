@@ -144,6 +144,16 @@ fn checked_push(bytes: &mut Vec<u8>, count: usize) -> Result<(), String> {
     Ok(())
 }
 
+/// Hex-encode every byte with the given digit table (avoids per-byte format!).
+fn hex_digits(bytes: &[u8], table: &[u8; 16]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(bytes.len() * 2);
+    for &b in bytes {
+        out.push(table[usize::from(b >> 4)]);
+        out.push(table[usize::from(b & 0x0f)]);
+    }
+    out
+}
+
 impl CompiledRule {
     /// Strict parse of one rule line; syntax: Hashcat rule subset.
     pub fn parse(source: &str) -> Result<Self, String> {
@@ -632,14 +642,14 @@ impl CompiledRule {
                     false
                 }
                 RuleAction::ToHexLower => {
-                    bytes = bytes.iter().map(|b| format!("{b:02x}")).collect::<String>().into_bytes();
+                    bytes = hex_digits(&bytes, b"0123456789abcdef");
                     if bytes.len() > MAX_CANDIDATE_BYTES {
                         return Err("rule expansion exceeds byte cap".into());
                     }
                     false
                 }
                 RuleAction::ToHexUpper => {
-                    bytes = bytes.iter().map(|b| format!("{b:02X}")).collect::<String>().into_bytes();
+                    bytes = hex_digits(&bytes, b"0123456789ABCDEF");
                     if bytes.len() > MAX_CANDIDATE_BYTES {
                         return Err("rule expansion exceeds byte cap".into());
                     }

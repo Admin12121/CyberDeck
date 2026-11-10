@@ -66,7 +66,6 @@ pub fn mysql5_digest(password: &[u8]) -> [u8; 20] {
 
 /// md5 over the concatenation of two byte strings (salted digest family).
 pub fn md5_hex(a: &str, b: &str) -> Result<String, String> {
-    use md5::Digest as _;
     Ok(hex::encode(<md5::Md5 as md5::Digest>::digest(
         [a.as_bytes(), b.as_bytes()].concat(),
     )))

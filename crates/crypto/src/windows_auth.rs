@@ -5,11 +5,9 @@
 use des::cipher::{BlockEncrypt, KeyInit};
 use des::Des;
 use hmac::{Hmac, Mac};
-use hmac::digest::KeyInit as _;
 use md4::Md4;
 use md5::Md5;
 use sha1::Sha1;
-use sha2::Digest;
 
 const MAX_USERNAME_BYTES: usize = 128;
 const MAX_BLOB_BYTES: usize = 4096;

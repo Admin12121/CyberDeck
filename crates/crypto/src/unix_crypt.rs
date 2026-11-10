@@ -36,7 +36,7 @@ fn md5_crypt_encode(password: &[u8], salt: &[u8], magic: &[u8]) -> String {
     b.update(password);
     b.update(salt);
     b.update(password);
-    let mut final_digest = b.finalize();
+    let final_digest = b.finalize();
     let mut remaining = password.len();
     while remaining > 0 {
         let take = remaining.min(16);

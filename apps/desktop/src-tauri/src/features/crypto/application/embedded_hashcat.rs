@@ -104,23 +104,31 @@ fn hashcat_library_name() -> &'static str {
     }
 }
 
+/// Module shared-object path for one hashcat mode, platform suffix included.
+fn module_file_name(mode: u32) -> String {
+    if cfg!(windows) {
+        format!("modules/module_{mode:05}.dll")
+    } else {
+        format!("modules/module_{mode:05}.so")
+    }
+}
+
+/// A runtime component is present only when it exists as a file and is non-empty.
+fn missing_or_empty(path: &Path) -> bool {
+    !path.is_file() || path.metadata().map(|meta| meta.len() == 0).unwrap_or(true)
+}
+
 pub fn runtime_available(root: &Path) -> Result<(), String> {
     // A native library without its exact SHA-256 mode, kernels and notices
     // cannot be advertised as a complete bundled recovery capability.
+    let module_00000 = module_file_name(0);
+    let module_01400 = module_file_name(1400);
     let required_files = [
         worker_name(),
         shim_name(),
         hashcat_library_name(),
-        if cfg!(windows) {
-            "modules/module_00000.dll"
-        } else {
-            "modules/module_00000.so"
-        },
-        if cfg!(windows) {
-            "modules/module_01400.dll"
-        } else {
-            "modules/module_01400.so"
-        },
+        module_00000.as_str(),
+        module_01400.as_str(),
         // Upstream loads the generic recipe preflight kernel during startup.
         "OpenCL/m04000-pure.cl",
         "OpenCL/m01400_a0-optimized.cl",
@@ -132,25 +140,18 @@ pub fn runtime_available(root: &Path) -> Result<(), String> {
         "licenses/OPENCL_HEADERS.txt",
     ];
     for relative in required_files {
-        let path = root.join(relative);
-        if !path.is_file() || path.metadata().map(|meta| meta.len() == 0).unwrap_or(true) {
+        if missing_or_empty(&root.join(relative)) {
             return Err("source-built Hashcat runtime is incomplete".into());
         }
     }
     // A bundled mode needs its actual module plus the optimized kernel family.
     for mode in [0u32, 100, 1000, 1400, 1700] {
-        let module = if cfg!(windows) {
-            format!("modules/module_{mode:05}.dll")
-        } else {
-            format!("modules/module_{mode:05}.so")
-        };
-        let path = root.join(module);
-        if !path.is_file() || path.metadata().map(|m| m.len() == 0).unwrap_or(true) {
+        if missing_or_empty(&root.join(module_file_name(mode))) {
             return Err("source-built Hashcat runtime is incomplete".into());
         }
         for attack in [0, 1, 3] {
             let kernel = root.join(format!("OpenCL/m{mode:05}_a{attack}-optimized.cl"));
-            if !kernel.is_file() || kernel.metadata().map(|m| m.len() == 0).unwrap_or(true) {
+            if missing_or_empty(&kernel) {
                 return Err("source-built Hashcat runtime is incomplete".into());
             }
         }
@@ -236,18 +237,12 @@ pub fn runtime_available(root: &Path) -> Result<(), String> {
             ] as &[&str],
         ),
     ] {
-        let module = if cfg!(windows) {
-            format!("modules/module_{mode:05}.dll")
-        } else {
-            format!("modules/module_{mode:05}.so")
-        };
-        let path = root.join(module);
-        if !path.is_file() || path.metadata().map(|m| m.len() == 0).unwrap_or(true) {
+        if missing_or_empty(&root.join(module_file_name(mode))) {
             return Err("source-built Hashcat runtime is incomplete".into());
         }
         for kernel in kernels {
             let path = root.join("OpenCL").join(kernel);
-            if !path.is_file() || path.metadata().map(|m| m.len() == 0).unwrap_or(true) {
+            if missing_or_empty(&path) {
                 return Err("source-built Hashcat runtime is incomplete".into());
             }
         }
