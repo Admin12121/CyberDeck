@@ -10,6 +10,7 @@ pub mod active_syn;
 pub mod active_syn6;
 pub mod application;
 pub mod arp_watch;
+pub mod crypto;
 pub mod dns;
 pub mod dns_monitor;
 pub mod domain;
