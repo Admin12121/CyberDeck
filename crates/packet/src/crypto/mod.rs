@@ -11,6 +11,11 @@ pub mod gcm;
 pub mod hkdf;
 pub mod sha256;
 
+// --- coordinator-insert (TLS 1.3 keylog slice): additive module declarations
+// --- for the new files below; the existing primitives above are untouched.
+pub mod keylog;
+pub mod tls13;
+
 /// RFC 9001 §5.2: the salt for version 1
 /// (`0x38762cf7f55934b34d179ae6a4c80cadccbb7f0a`).
 pub const INITIAL_SALT_V1: [u8; 20] = [

@@ -41,6 +41,8 @@ fn main() {
         .manage(features::network::ipc::pcap::PcapCtx {
             current: std::sync::Mutex::new(None),
         })
+        // coordinator-insert (TLS 1.3 keylog slice): per-session keylog state
+        .manage(features::network::ipc::pcap::KeylogCtx::default())
         .manage(features::network::ipc::network_lab::NetworkLabCtx::default())
         .manage(features::web::ipc::web::WebCtx {
             proxy_running: std::sync::atomic::AtomicBool::new(false),
@@ -133,6 +135,10 @@ fn main() {
             features::network::ipc::pcap::pcap_case_packet_bytes_v1,
             features::network::ipc::pcap::pcap_case_follow_stream_v1,
             features::network::ipc::pcap::pcap_follow_stream,
+            // coordinator-insert (TLS 1.3 keylog slice): keylog attach/status/clear
+            features::network::ipc::pcap::packet_stream_keylog_attach_v1,
+            features::network::ipc::pcap::packet_stream_keylog_status_v1,
+            features::network::ipc::pcap::packet_stream_keylog_clear_v1,
             features::network::ipc::network_lab::network_lab_analyze_pcap_v1,
             features::network::ipc::network_lab::network_lab_set_scope_v1,
             features::network::ipc::network_lab::network_lab_scope_v1,

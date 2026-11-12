@@ -3,7 +3,14 @@
 //! bytes, flag conflicting overlaps, and preserve explicit gaps. This is not a full
 //! TCP state machine: captures may begin midstream and overlapping conflicting
 //! payloads, multiple sessions on one tuple, and >2GiB seq spans are not solved.
+//!
+//! TLS 1.3 decryption is strictly opt-in: only `follow_stream_with_keylog`
+//! attempts it, only with a user-supplied keylog whose ClientHello random
+//! matches the stream, and only per verified GCM tag. The plain
+//! `follow_stream` path never touches key material.
 
+use crate::crypto::keylog::KeylogStore;
+use crate::crypto::tls13;
 use crate::PacketMeta;
 use serde::Serialize;
 
@@ -346,7 +353,8 @@ fn dns_over_tcp_hint(stream_id: &str, payload: &[u8]) -> Option<String> {
 }
 
 /// Return two direction-grouped TCP transcripts or a capture-order UDP datagram
-/// list. No network I/O, filesystem access or external executables.
+/// list. No network I/O, filesystem access or external executables, and no
+/// decryption: every existing caller keeps exactly the prior behavior.
 pub fn follow_stream(packets: &[PacketMeta], stream_id: &str) -> Result<StreamTranscript, String> {
     if stream_id.len() > 512 {
         return Err("stream identifier too long".into());
@@ -436,6 +444,287 @@ pub fn follow_stream(packets: &[PacketMeta], stream_id: &str) -> Result<StreamTr
         }
     }
     Ok(result)
+}
+
+/// [`follow_stream`] with an optional user-imported NSS keylog attached.
+/// When a keylog is present and its ClientHello random matches this stream,
+/// each direction is walked as TLS 1.3 records and every record whose GCM
+/// tag verifies is emitted as decrypted content; everything else stays
+/// ciphertext with an honest marker. Without a keylog the output is
+/// byte-identical to [`follow_stream`].
+pub fn follow_stream_with_keylog(
+    packets: &[PacketMeta],
+    stream_id: &str,
+    keylog: Option<&KeylogStore>,
+) -> Result<StreamTranscript, String> {
+    let transcript = follow_stream(packets, stream_id)?;
+    Ok(match keylog {
+        Some(store) => apply_keylog_to_transcript(&transcript, store),
+        None => transcript,
+    })
+}
+
+/// Pure post-processing step that applies a user-imported keylog to an
+/// already-built [`StreamTranscript`]. The IPC layer calls this on the
+/// transcript its (unchanged) follow-stream helpers produce, so decryption
+/// stays a strictly additive, verifiable transformation of packet-crate
+/// output. TCP transcripts only; the transformation is exact: each
+/// direction's `data` chunks carry the direction's reconstructed bytes as
+/// hex, which is precisely the byte sequence the TLS record walk consumes.
+pub fn apply_keylog_to_transcript(
+    transcript: &StreamTranscript,
+    store: &KeylogStore,
+) -> StreamTranscript {
+    let mut result = transcript.clone();
+    if result.protocol != "TCP" {
+        return result;
+    }
+    let empty = Vec::new();
+    let mut direction_bytes: Vec<(&str, Vec<u8>)> = Vec::new();
+    for dir in ["A", "B"] {
+        let mut bytes = Vec::new();
+        for chunk in &result.chunks {
+            if chunk.dir != dir || chunk.kind != "data" {
+                continue;
+            }
+            let hex = chunk.hex_data.as_deref().unwrap_or("");
+            for pair in hex.as_bytes().chunks_exact(2) {
+                let hi = (pair[0] as char).to_digit(16).unwrap_or(0) as u8;
+                let lo = (pair[1] as char).to_digit(16).unwrap_or(0) as u8;
+                bytes.push((hi << 4) | lo);
+            }
+        }
+        direction_bytes.push((dir, bytes));
+    }
+    let a = direction_bytes
+        .iter()
+        .find(|(dir, _)| *dir == "A")
+        .map(|(_, bytes)| bytes)
+        .unwrap_or(&empty);
+    let b = direction_bytes
+        .iter()
+        .find(|(dir, _)| *dir == "B")
+        .map(|(_, bytes)| bytes)
+        .unwrap_or(&empty);
+    apply_tls13_keylog(&mut result, a, b, store);
+    result
+}
+
+/// True when the direction's first bytes frame as a TLS record, used only
+/// to decide whether an honest "ciphertext" marker is warranted for a
+/// direction the keylog cannot open.
+fn looks_like_tls_stream(data: &[u8]) -> bool {
+    data.len() >= 5 && matches!(data[0], 20..=23) && data[1] == 3
+}
+
+/// Apply a user-imported keylog to a reconstructed TCP transcript. Every
+/// decrypted record here passed its GCM tag with keys the keylog explicitly
+/// provided for this stream's ClientHello random; nothing is ever guessed.
+fn apply_tls13_keylog(result: &mut StreamTranscript, a: &[u8], b: &[u8], store: &KeylogStore) {
+    if result.gaps > 0 || result.truncated {
+        note(
+            result,
+            "A",
+            "TLS 1.3 keylog attached: transcript has gaps or conflicts — decryption skipped",
+        );
+        return;
+    }
+    // Bind the keylog entry through the stream's own ClientHello random:
+    // the hello may sit in either direction depending on the capture's
+    // endpoint ordering.
+    let mut hello_dir: Option<&str> = None;
+    let mut client_random: Option<[u8; 32]> = None;
+    for (dir, data) in [("A", a), ("B", b)] {
+        if let Some(hello) = crate::application::tls_hello(data) {
+            if hello.client {
+                if let Some(random) = tls13::client_hello_random(&hello.payload) {
+                    hello_dir = Some(dir);
+                    client_random = Some(random);
+                    break;
+                }
+            }
+        }
+    }
+    let (Some(hello_dir), Some(client_random)) = (hello_dir, client_random) else {
+        note(
+            result,
+            "A",
+            "TLS 1.3 keylog attached: no ClientHello found in this stream — nothing decrypted",
+        );
+        return;
+    };
+    let Some(mut decryptor) = tls13::Tls13Decryptor::new(store, &client_random) else {
+        note(
+            result,
+            hello_dir,
+            "TLS 1.3 keylog attached: no keylog entry matches this stream's ClientHello — ciphertext left as-is",
+        );
+        return;
+    };
+    let client_is_a = hello_dir == "A";
+    for (dir, data) in [("A", a), ("B", b)] {
+        let from_client = (dir == "A") == client_is_a;
+        let has_keys = decryptor.direction_has_keys(from_client);
+        let walk = tls13::walk_stream(&mut decryptor, from_client, data);
+        if walk.decrypted_records > 0 {
+            // The decrypted view replaces this direction's ciphertext data
+            // chunks; gap/notice chunks stay (they describe TCP events).
+            result
+                .chunks
+                .retain(|chunk| !(chunk.dir == dir && chunk.kind == "data"));
+            let mut summary = format!(
+                "side {dir}: decrypted (TLS 1.3, keylog): {} record(s), {} byte(s)",
+                walk.decrypted_records,
+                walk.plaintext.len(),
+            );
+            if walk.undecryptable_records > 0 {
+                summary.push_str(&format!(
+                    "; {} record(s) stayed ciphertext (tag mismatch)",
+                    walk.undecryptable_records
+                ));
+            }
+            if !walk.complete {
+                summary.push_str("; record walk stopped at a framing/limit bound");
+            }
+            if result.chunks.len() < crate::streams::MAX_STREAM_CHUNKS {
+                note(result, dir, summary);
+            } else {
+                result.truncated = true;
+            }
+            if result.chunks.len() < crate::streams::MAX_STREAM_CHUNKS {
+                result.chunks.push(StreamChunk {
+                    dir: dir.to_string(),
+                    text: display_bytes(&walk.plaintext),
+                    kind: "decrypted".into(),
+                    hex_data: Some(hex_bytes(&walk.plaintext)),
+                });
+            } else {
+                result.truncated = true;
+            }
+            // Decrypted application data feeds the same hint surface the
+            // plaintext path uses, anchored on each decrypted
+            // application-data record (handshake bytes precede application
+            // bytes in the concatenated stream).
+            for record in &walk.app_records {
+                if let Some(line) = crate::application::http_start_line(record) {
+                    result.application_hints.push(StreamApplicationHint {
+                        dir: dir.to_string(),
+                        protocol: "HTTP".into(),
+                        summary: format!("decrypted (TLS 1.3, keylog): {line}"),
+                    });
+                    break;
+                }
+                if let Some(hint) = http2_hint(record) {
+                    result.application_hints.push(StreamApplicationHint {
+                        dir: dir.to_string(),
+                        protocol: "HTTP/2".into(),
+                        summary: hint,
+                    });
+                    break;
+                }
+            }
+        } else if !has_keys && looks_like_tls_stream(data) {
+            note(
+                result,
+                dir,
+                format!(
+                    "side {dir}: ciphertext — no matching keylog entry for this direction ({} TLS record(s))",
+                    walk.plain_records + walk.undecryptable_records,
+                ),
+            );
+        } else if has_keys && walk.undecryptable_records > 0 {
+            note(
+                result,
+                dir,
+                format!(
+                    "side {dir}: {} TLS record(s) could not be decrypted — GCM verification failed (missing key phase or capture mismatch)",
+                    walk.undecryptable_records,
+                ),
+            );
+        }
+    }
+    if decryptor.limit_reached() {
+        note(
+            result,
+            "A",
+            format!(
+                "TLS 1.3 decryption stopped at the {} record bound; remaining records left as ciphertext",
+                tls13::MAX_DECRYPTED_RECORDS,
+            ),
+        );
+    }
+}
+
+/// Bounded HTTP/2 hint over decrypted application data: the prior-knowledge
+/// preface plus the first frames' names, mirroring the packet dissector's
+/// bounded walk. A HEADERS body is decoded only when the static HPACK
+/// table suffices; anything needing connection state degrades honestly.
+fn http2_hint(payload: &[u8]) -> Option<String> {
+    const MAGIC: &[u8; 24] = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
+    if payload.len() < MAGIC.len() || &payload[..MAGIC.len()] != MAGIC {
+        return None;
+    }
+    let mut summary = String::from("HTTP/2 connection preface");
+    let mut at = MAGIC.len();
+    for _ in 0..4 {
+        if at + 9 > payload.len() {
+            break;
+        }
+        let length = (usize::from(payload[at]) << 16)
+            | (usize::from(payload[at + 1]) << 8)
+            | usize::from(payload[at + 2]);
+        let type_byte = payload[at + 3];
+        let flags = payload[at + 4];
+        let stream = (u32::from(payload[at + 5]) & 0x7f) << 24
+            | u32::from(payload[at + 6]) << 16
+            | u32::from(payload[at + 7]) << 8
+            | u32::from(payload[at + 8]);
+        let body_at = at + 9;
+        let body_end = match body_at.checked_add(length) {
+            Some(end) if end <= payload.len() => end,
+            _ => {
+                summary.push_str(", frame truncated at record boundary");
+                break;
+            }
+        };
+        if type_byte == 1 {
+            // HEADERS: strip PADDED/PRIORITY framing, then decode with the
+            // static-table-only HPACK decoder (bounded, honest on error).
+            let body = &payload[body_at..body_end];
+            let mut start = 0usize;
+            let mut pad = 0usize;
+            if flags & 0x08 != 0 && !body.is_empty() {
+                pad = usize::from(body[0]);
+                start = 1;
+            }
+            if flags & 0x20 != 0 {
+                start += 5;
+            }
+            let block_end = body.len().saturating_sub(pad);
+            let block = if start <= block_end {
+                &body[start..block_end]
+            } else {
+                &body[..0]
+            };
+            match crate::hpack::decode_header_block(block, 4) {
+                Ok(headers) if !headers.is_empty() => {
+                    let shown: Vec<String> = headers
+                        .iter()
+                        .take(3)
+                        .map(|(name, value)| format!("{name}={value}"))
+                        .collect();
+                    summary.push_str(&format!(", HEADERS(s{stream}) {}", shown.join(" ")));
+                }
+                Ok(_) => summary.push_str(&format!(", HEADERS(s{stream}) (no decodable headers)")),
+                Err(_) => summary.push_str(&format!(
+                    ", HEADERS(s{stream}) body needs connection HPACK state (not decoded)"
+                )),
+            }
+            break;
+        }
+        at = body_end;
+    }
+    Some(summary)
 }
 
 #[cfg(test)]
@@ -840,5 +1129,273 @@ mod tests {
         let result = follow_stream(&[a, b], id).unwrap();
         assert_eq!(result.chunks[0].dir, "A");
         assert_eq!(result.chunks[1].dir, "B");
+    }
+
+    // ------------------------------------------------- TLS 1.3 keylog ----
+
+    use crate::crypto::gcm;
+    use crate::crypto::hkdf::hkdf_expand_label;
+    use crate::crypto::keylog::KeylogStore;
+
+    const KLOG_RANDOM: [u8; 32] = [0x4au8; 32];
+
+    /// Derive the AES-128-GCM traffic keys exactly as the decryptor does.
+    fn traffic_keys(secret: &[u8; 32]) -> ([u8; 16], [u8; 12]) {
+        let mut key = [0u8; 16];
+        let mut iv = [0u8; 12];
+        assert!(hkdf_expand_label(secret, b"key", &[], &mut key));
+        assert!(hkdf_expand_label(secret, b"iv", &[], &mut iv));
+        (key, iv)
+    }
+
+    /// Encrypt one TLS 1.3 record the way the wire carries it, using the
+    /// crate's own primitives (encrypt-then-decrypt self-consistency).
+    fn seal_tls13_record(secret: &[u8; 32], seq: u64, content: &[u8], content_type: u8) -> Vec<u8> {
+        let (key, iv) = traffic_keys(secret);
+        let mut inner = content.to_vec();
+        inner.push(content_type);
+        let body_len = (inner.len() as u16 + 16).to_be_bytes();
+        let header = [23u8, 3, 3, body_len[0], body_len[1]];
+        let mut nonce = iv;
+        let seq_bytes = seq.to_be_bytes();
+        for i in 0..8 {
+            nonce[4 + i] ^= seq_bytes[i];
+        }
+        let mut record = header.to_vec();
+        record.extend_from_slice(&gcm::seal(&key, &nonce, &header, &inner));
+        record
+    }
+
+    fn keylog_entry(label: &str, secret: &[u8; 32]) -> String {
+        let mut hex = String::new();
+        for byte in secret {
+            hex.push_str(&format!("{byte:02x}"));
+        }
+        let mut random = String::new();
+        for byte in KLOG_RANDOM {
+            random.push_str(&format!("{byte:02x}"));
+        }
+        format!("{label} {random} {hex}\n")
+    }
+
+    fn full_keylog() -> KeylogStore {
+        let hs = [0x11u8; 32];
+        let app = [0x22u8; 32];
+        let text = format!(
+            "{}{}{}{}",
+            keylog_entry("CLIENT_HANDSHAKE_TRAFFIC_SECRET", &hs),
+            keylog_entry("SERVER_HANDSHAKE_TRAFFIC_SECRET", &hs),
+            keylog_entry("CLIENT_TRAFFIC_SECRET_0", &app),
+            keylog_entry("SERVER_TRAFFIC_SECRET_0", &app),
+        );
+        KeylogStore::parse(&text).unwrap()
+    }
+
+    fn tls13_packets() -> Vec<PacketMeta> {
+        let client_hs = [0x11u8; 32];
+        let client_app = [0x22u8; 32];
+        let server_app = [0x22u8; 32];
+        // A->B: plaintext ClientHello, encrypted client Finished, CCS, app.
+        let mut a_bytes = fixture_tls_client_hello();
+        a_bytes.extend_from_slice(&seal_tls13_record(&client_hs, 0, b"finished", 22));
+        a_bytes.extend_from_slice(&[20, 3, 3, 0, 1, 1]);
+        a_bytes.extend_from_slice(&seal_tls13_record(
+            &client_app,
+            0,
+            b"GET /a HTTP/1.1\r\n",
+            23,
+        ));
+        // B->A: server app data under the server application secret.
+        let b_bytes = seal_tls13_record(&server_app, 0, b"HTTP/1.1 200 OK\r\n", 23);
+        let mut packets = Vec::new();
+        let mut seq = 1000u32;
+        for chunk in a_bytes.chunks(24) {
+            packets.push(packet("A", seq, 0, chunk));
+            seq += chunk.len() as u32;
+        }
+        let mut seq = 5000u32;
+        for chunk in b_bytes.chunks(24) {
+            packets.push(packet("B", seq, 0, chunk));
+            seq += chunk.len() as u32;
+        }
+        packets
+    }
+
+    fn notice_texts(out: &StreamTranscript) -> Vec<String> {
+        out.chunks
+            .iter()
+            .filter(|c| c.kind == "notice")
+            .map(|c| c.text.clone())
+            .collect()
+    }
+
+    #[test]
+    fn keylog_decrypts_synthetic_tls13_stream_round_trip() {
+        let store = full_keylog();
+        let packets = tls13_packets();
+        let out = follow_stream_with_keylog(&packets, ID, Some(&store)).unwrap();
+        // Decrypted chunks replace the ciphertext data chunks.
+        let decrypted: Vec<&StreamChunk> = out
+            .chunks
+            .iter()
+            .filter(|c| c.kind == "decrypted")
+            .collect();
+        assert_eq!(decrypted.len(), 2);
+        let a_plain = decrypted.iter().find(|c| c.dir == "A").unwrap();
+        assert!(a_plain.text.contains("GET /a HTTP/1.1"));
+        assert!(a_plain
+            .hex_data
+            .as_deref()
+            .unwrap()
+            .contains("474554202f61"));
+        let b_plain = decrypted.iter().find(|c| c.dir == "B").unwrap();
+        assert!(b_plain.text.contains("HTTP/1.1 200 OK"));
+        // Honest per-direction labels.
+        let notices = notice_texts(&out).join("\n");
+        assert!(notices.contains("side A: decrypted (TLS 1.3, keylog)"));
+        assert!(notices.contains("side B: decrypted (TLS 1.3, keylog)"));
+        // Ciphertext data chunks are gone.
+        assert!(out.chunks.iter().all(|c| c.kind != "data"));
+        // Decrypted application data feeds the existing hint surface.
+        assert!(out.application_hints.iter().any(|h| {
+            h.protocol == "HTTP" && h.summary.starts_with("decrypted (TLS 1.3, keylog): GET /a")
+        }));
+        // Sending to Recipes uses the decrypted hex.
+        let hex = out
+            .chunks
+            .iter()
+            .filter(|c| c.dir == "A" && (c.kind == "data" || c.kind == "decrypted"))
+            .map(|c| c.hex_data.as_deref().unwrap_or(""))
+            .collect::<String>();
+        assert!(hex.contains("474554202f6120485454502f312e310d0a"));
+    }
+
+    #[test]
+    fn wrong_client_hello_random_leaves_ciphertext_with_honest_marker() {
+        let store = full_keylog();
+        // Same packets but a ClientHello random the keylog does not know.
+        let mut hello = vec![3, 3];
+        hello.extend_from_slice(&[0x4b; 32]);
+        hello.push(0);
+        hello.extend_from_slice(&[0, 2, 0x13, 0x01, 1, 0]);
+        let mut message = vec![1, 0, 0, hello.len() as u8];
+        message.extend_from_slice(&hello);
+        let mut record = vec![22, 3, 3];
+        record.extend_from_slice(&(message.len() as u16).to_be_bytes());
+        record.extend(message);
+        let mut p = packet("A", 1000, 0, &record);
+        p.dissected.stream_id = Some(ID.into());
+        let out = follow_stream_with_keylog(&[p], ID, Some(&store)).unwrap();
+        assert!(out.chunks.iter().all(|c| c.kind != "decrypted"));
+        assert!(notice_texts(&out)
+            .iter()
+            .any(|t| t.contains("no keylog entry matches this stream's ClientHello")));
+    }
+
+    #[test]
+    fn direction_without_keylog_entry_is_labeled_ciphertext() {
+        // Only CLIENT secrets in the keylog: side B stays labeled ciphertext.
+        let client_hs = [0x11u8; 32];
+        let text = keylog_entry("CLIENT_HANDSHAKE_TRAFFIC_SECRET", &client_hs)
+            + &keylog_entry("CLIENT_TRAFFIC_SECRET_0", &[0x22u8; 32]);
+        let store = KeylogStore::parse(&text).unwrap();
+        let out = follow_stream_with_keylog(&tls13_packets(), ID, Some(&store)).unwrap();
+        let notices = notice_texts(&out).join("\n");
+        assert!(notices.contains("side B: ciphertext — no matching keylog entry"));
+        assert!(out.chunks.iter().any(|c| c.dir == "B" && c.kind == "data"));
+        assert!(out
+            .chunks
+            .iter()
+            .any(|c| c.dir == "A" && c.kind == "decrypted"));
+    }
+
+    #[test]
+    fn keylog_attached_but_gapped_stream_skips_decryption() {
+        let store = full_keylog();
+        let mut packets = tls13_packets();
+        // Introduce a sequence gap in A by shifting the later packets.
+        for p in packets
+            .iter_mut()
+            .skip(2)
+            .filter(|p| p.dissected.source == "10.0.0.1")
+        {
+            if let Some(tcp) = &mut p.dissected.tcp {
+                tcp.sequence = tcp.sequence.wrapping_add(64);
+            }
+        }
+        let out = follow_stream_with_keylog(&packets, ID, Some(&store)).unwrap();
+        assert!(out.chunks.iter().all(|c| c.kind != "decrypted"));
+        assert!(notice_texts(&out)
+            .iter()
+            .any(|t| t.contains("gaps or conflicts — decryption skipped")));
+        assert!(out.application_hints.is_empty());
+    }
+
+    #[test]
+    fn keylog_without_clienthello_or_stream_without_tls_is_not_decrypted() {
+        let store = full_keylog();
+        // A plaintext HTTP stream never claims decryption under a keylog.
+        let line = b"GET / HTTP/1.1\r\nHost: x\r\n\r\n";
+        let out =
+            follow_stream_with_keylog(&[packet("A", 100, 0, line)], ID, Some(&store)).unwrap();
+        assert!(out.chunks.iter().all(|c| c.kind != "decrypted"));
+        assert!(notice_texts(&out)
+            .iter()
+            .any(|t| t.contains("no ClientHello found")));
+    }
+
+    #[test]
+    fn plain_follow_stream_and_none_keylog_are_byte_identical() {
+        let packets = tls13_packets();
+        let plain = follow_stream(&packets, ID).unwrap();
+        let none = follow_stream_with_keylog(&packets, ID, None).unwrap();
+        assert_eq!(plain.chunks.len(), none.chunks.len());
+        for (a, b) in plain.chunks.iter().zip(&none.chunks) {
+            assert_eq!(a.dir, b.dir);
+            assert_eq!(a.text, b.text);
+            assert_eq!(a.kind, b.kind);
+            assert_eq!(a.hex_data, b.hex_data);
+        }
+        assert_eq!(plain.application_hints.len(), none.application_hints.len());
+        for (a, b) in plain.application_hints.iter().zip(&none.application_hints) {
+            assert_eq!(a.dir, b.dir);
+            assert_eq!(a.protocol, b.protocol);
+            assert_eq!(a.summary, b.summary);
+        }
+        assert_eq!(plain.gaps, none.gaps);
+        assert_eq!(plain.truncated, none.truncated);
+        // And no keylog ever produces a decrypted claim.
+        assert!(plain.chunks.iter().all(|c| c.kind != "decrypted"));
+    }
+
+    #[test]
+    fn decrypted_http2_application_data_feeds_the_http2_hint() {
+        let server_app = [0x22u8; 32];
+        // Preface + SETTINGS + HEADERS with static-table HPACK bytes.
+        let mut plain = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n".to_vec();
+        plain.extend_from_slice(&[0, 0, 0, 4, 0, 0, 0, 0, 0]); // empty SETTINGS
+        plain.extend_from_slice(&[0, 0, 2, 1, 0, 0, 0, 0, 1, 0x82, 0x84]); // HEADERS :method=GET :path=/
+        let b_bytes = seal_tls13_record(&server_app, 0, &plain, 23);
+        let mut packets = Vec::new();
+        for (i, chunk) in b_bytes.chunks(24).enumerate() {
+            packets.push(packet("B", (5000 + i * 24) as u32, 0, chunk));
+        }
+        let mut hello_packet = packet("A", 1000, 0, &fixture_tls_client_hello());
+        // Client direction must exist for the hello binding; give A no keys
+        // so only B decrypts.
+        packets.push(hello_packet);
+        let text = keylog_entry("CLIENT_HANDSHAKE_TRAFFIC_SECRET", &[0x11u8; 32])
+            + &keylog_entry("SERVER_TRAFFIC_SECRET_0", &[0x22u8; 32]);
+        let store = KeylogStore::parse(&text).unwrap();
+        let out = follow_stream_with_keylog(&packets, ID, Some(&store)).unwrap();
+        let hint = out
+            .application_hints
+            .iter()
+            .find(|h| h.protocol == "HTTP/2")
+            .expect("HTTP/2 hint from decrypted bytes");
+        assert_eq!(hint.dir, "B");
+        assert!(hint.summary.contains("decrypted") || hint.summary.contains("preface"));
+        assert!(hint.summary.contains("HEADERS(s1)"));
+        assert!(hint.summary.contains(":method=GET"));
     }
 }

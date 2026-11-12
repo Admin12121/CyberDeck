@@ -1,8 +1,8 @@
 "use client";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { ChevronRight, CornerUpLeft, Download, FileDown, FolderOpen } from "lucide-react";
+import { ChevronRight, CornerUpLeft, Download, FileDown, FolderOpen, KeyRound, X } from "lucide-react";
 import { Chip, EmptyState, TextInput, ToolButton, WorkspaceTabs } from "@ds/panes";
-import { ErrorStrip, IconButton, ProgressBar, WorkspaceShell } from "@ds/compact";
+import { ErrorStrip, IconButton, InfoTip, ProgressBar, WorkspaceShell } from "@ds/compact";
 import { hexDump } from "@lib/hex";
 import {
   isDesktop,
@@ -33,6 +33,13 @@ import { LiveCaptureView } from "./LiveCaptureView";
 import { PacketStartView } from "./PacketStartView";
 import { PacketTable } from "./PacketTable";
 import { PacketPaneSplit } from "./PacketPaneSplit";
+import {
+  keylogCardLine,
+  packetStreamKeylogAttachV1,
+  packetStreamKeylogClearV1,
+  packetStreamKeylogStatusV1,
+  type KeylogStatusWire,
+} from "./packet-stream-keylog-ipc";
 import {
   PROTOCOL_COLORS,
   SAMPLE_PACKETS,
@@ -510,7 +517,7 @@ function ImportedCaptureView() {
                 }}
               />
             ) : (
-              <FollowStreamView packets={filtered} artifactId={savedArtifactId} />
+              <StreamsTabWithKeylog packets={filtered} artifactId={savedArtifactId} />
             )}
           </div>
   }
@@ -736,7 +743,104 @@ function DetailBranch({ node, depth }: { node: DetailNode; depth: number }) {  c
 
 // ---------------------------------------------------------- follow stream ---
 
-function FollowStreamView({ packets, artifactId }: { packets: DisplayPacket[]; artifactId?: string | null }) {
+/**
+ * Streams tab with the TLS 1.3 keylog import affordance (Wireshark
+ * SSLKEYLOGFILE parity). The card owns no case management: it reflects the
+ * backend's per-session attachment, offers native-dialog import and clear,
+ * and re-triggers stream fetches when the attachment changes so transcripts
+ * show decrypted content immediately.
+ */
+function StreamsTabWithKeylog({ packets, artifactId }: { packets: DisplayPacket[]; artifactId?: string | null }) {
+  const [keylogVersion, setKeylogVersion] = useState(0);
+  return (
+    <div className="flex h-full min-h-0 flex-col">
+      <TlsKeylogCard onApplied={() => setKeylogVersion((v) => v + 1)} />
+      <div className="min-h-0 flex-1">
+        <FollowStreamView packets={packets} artifactId={artifactId} keylogVersion={keylogVersion} />
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Centered keylog import card. One line of state + InfoTip; import opens
+ * the native file dialog on the Rust side (no path handling in the UI);
+ * decrypted content appears only per verified GCM tag with a matching
+ * ClientHello random — never without an imported keylog.
+ */
+function TlsKeylogCard({ onApplied }: { onApplied: () => void }) {
+  const desktop = isDesktop();
+  const wb = useWorkbench();
+  const [status, setStatus] = useState<KeylogStatusWire | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    if (!desktop) return;
+    let cancelled = false;
+    packetStreamKeylogStatusV1()
+      .then((wire) => { if (!cancelled) setStatus(wire); })
+      .catch(() => { if (!cancelled) setStatus(null); });
+    return () => { cancelled = true; };
+  }, [desktop, wb.caseId]);
+
+  const attach = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      const wire = await packetStreamKeylogAttachV1();
+      setStatus(wire);
+      onApplied();
+    } catch (cause) {
+      const message = cause instanceof Error ? cause.message : String(cause);
+      if (message !== "cancelled") setError(message);
+    } finally {
+      setBusy(false);
+    }
+  };
+  const clear = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      const wire = await packetStreamKeylogClearV1();
+      setStatus(wire);
+      onApplied();
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="flex shrink-0 flex-wrap justify-center border-b border-line bg-panel px-3 py-2">
+      <div className="flex flex-wrap items-center justify-center gap-2">
+        <IconButton
+          icon={KeyRound}
+          onClick={() => void attach()}
+          disabled={!desktop || busy}
+          title={desktop
+            ? "Import an NSS keylog file (TLS 1.3) to decrypt stream transcripts passively"
+            : "Keylog import requires the desktop runtime"} />
+        {status?.attached ? (
+          <IconButton
+            icon={X}
+            tone="danger"
+            onClick={() => void clear()}
+            disabled={!desktop || busy}
+            title="Remove the imported keylog; transcripts fall back to ciphertext" />
+        ) : null}
+        <span className="font-mono text-2xs text-fg-muted">{keylogCardLine(status)}</span>
+        <InfoTip text="Passive TLS 1.3 decryption for stream transcripts: records are decrypted only when the imported keylog carries the traffic secrets for a stream's own ClientHello random, and only when the GCM tag verifies. The keylog stays in memory for this case session, is never persisted, and streams without a matching entry stay ciphertext." />
+      </div>
+      {error ? (
+        <p role="alert" className="w-full truncate text-center font-mono text-3xs text-err">{error}</p>
+      ) : null}
+    </div>
+  );
+}
+
+function FollowStreamView({ packets, artifactId, keylogVersion = 0 }: { packets: DisplayPacket[]; artifactId?: string | null; keylogVersion?: number }) {
   const wb = useWorkbench();
   const desktop = isDesktop();
   const withStream = packets.filter((p) => p.stream_id);
@@ -744,8 +848,11 @@ function FollowStreamView({ packets, artifactId }: { packets: DisplayPacket[]; a
   const [transcript, setTranscript] = useState<StreamTranscriptWire | null>(null);
   const [streamError, setStreamError] = useState<string | null>(null);
 
+  // The backend adds kind "decrypted" chunks only when a TLS 1.3 keylog is
+  // attached and records verified; the shared wire type predates that, so
+  // the kind is compared as string here (see keylog integration snippets).
   const sideHex = (dir: "A" | "B"): string => (transcript?.chunks ?? [])
-    .filter((chunk) => chunk.dir === dir && (chunk.kind === "data" || chunk.kind === "datagram"))
+    .filter((chunk) => chunk.dir === dir && (chunk.kind === "data" || chunk.kind === "datagram" || (chunk.kind as string) === "decrypted"))
     .map((chunk) => chunk.hex_data ?? "").join("");
   const canSend = (dir: "A" | "B"): boolean => {
     if (!transcript || transcript.gaps > 0 || transcript.truncated) return false;
@@ -785,7 +892,7 @@ function FollowStreamView({ packets, artifactId }: { packets: DisplayPacket[]; a
     return () => {
       cancelled = true;
     };
-  }, [selected, packets, artifactId]);
+  }, [selected, packets, artifactId, keylogVersion]);
 
   if (!desktop) {
     return (
@@ -839,6 +946,7 @@ function FollowStreamView({ packets, artifactId }: { packets: DisplayPacket[]; a
               <div key={i} className={`whitespace-pre-wrap break-all ${chunk.kind === "gap" || chunk.kind === "notice" ? "my-1 text-warn" : ""}`}>
                 <span className={chunk.dir === "A" ? "text-fg-dim" : "text-orange"}>[{chunk.dir}] </span>
                 <span className={chunk.kind === "data" || chunk.kind === "datagram" ? "text-fg" : "text-warn"}>
+                  {(chunk.kind as string) === "decrypted" ? "[decrypted] " : ""}
                   {chunk.kind === "gap" ? "⚠ " : ""}{chunk.text}
                 </span>
               </div>
