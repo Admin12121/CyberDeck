@@ -1,0 +1,38 @@
+@SET_MAKE@
+CC = @CC@
+CXX = @CXX@
+AS = @CC@
+LD = @CC@
+CPP = @CC@
+CPPFLAGS = @CPPFLAGS@
+CFLAGS = -c -DAC_BUILT @CC_CPU@ @CC_MAIN_CPU@ @CFLAGS@ @JOHN_NO_SIMD@ @CFLAGS_EXTRA@ @OPENSSL_CFLAGS@ @OPENMP_CFLAGS@ @HAVE_MPI@ @PTHREAD_CFLAGS@ @CPPFLAGS@ -Wno-unused-function
+ASFLAGS = @ASFLAGS@ -c @EXTRA_AS_FLAGS@
+LDFLAGS = @LDFLAGS@ @OPENSSL_LIBS@
+AR = @AR@
+FIND = @FIND@
+RM = /bin/rm -f
+
+IN = ed25519-donna.o
+
+all: ed25519-donna.a
+default: ed25519-donna.a
+
+ed25519-donna.o: ed25519-donna.c
+	$(CC) -DHAVE_CONFIG_H $(CFLAGS) $(CPPFLAGS) -c ed25519-donna.c -o ed25519-donna.o
+
+.PHONY: subdirs $(SUBDIRS)
+
+subdirs: $(SUBDIRS)
+
+$(SUBDIRS):
+	$(MAKE) -C $@ all
+
+ed25519-donna.a: $(SUBDIRS) ed25519-donna.o
+	$(AR) -rs $@ $(IN)
+
+clean:
+	$(FIND) . -name \*.a -exec $(RM) {} \;
+	$(FIND) . -name \*.o -exec $(RM) {} \;
+
+distclean: clean
+	$(RM) Makefile

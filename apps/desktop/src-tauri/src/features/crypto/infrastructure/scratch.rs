@@ -70,6 +70,39 @@ impl ScratchDir {
         Ok(file)
     }
 
+    /// Write the hash input in john's `login:ciphertext` shape with the hash
+    /// itself as login. john's `--show` prints `login:plaintext` and falls
+    /// back to "?" as the login for bare `ciphertext` lines (vendored john
+    /// loader.c:565, `no_username`), which the pair mapping cannot map back
+    /// to its target; this keeps the hash inside every extracted pair for
+    /// both the exe-spawn and DLL sidecar branches. The pot always stores
+    /// `ciphertext:plaintext`, so a login of the hash itself makes --show
+    /// print exactly `hash:plaintext`.
+    pub fn write_john_hash_file(&self, hash: &str) -> Result<PathBuf, String> {
+        let file = self.join("target.hash");
+        use std::io::Write as _;
+        let mut opts = std::fs::OpenOptions::new();
+        opts.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::OpenOptionsExt;
+            opts.mode(0o600);
+        }
+        let mut handle = opts
+            .open(&file)
+            .map_err(|e| format!("cannot create hash file: {e}"))?;
+        for line in hash.lines().filter(|line| !line.trim().is_empty()) {
+            let line = line.trim();
+            handle
+                .write_all(format!("{line}:{line}\n").as_bytes())
+                .map_err(|e| format!("cannot write hash file: {e}"))?;
+        }
+        handle
+            .flush()
+            .map_err(|e| format!("cannot write hash file: {e}"))?;
+        Ok(file)
+    }
+
     /// Private bounded candidates copy for one recovery sidecar stage:
     /// at most `max_lines` wordlist lines are streamed into the scratch dir,
     /// capping the sidecar at the same candidate budget every native stage
@@ -165,5 +198,21 @@ mod tests {
             assert!(file.exists());
         }
         assert!(!first.exists());
+    }
+
+    #[test]
+    fn john_hash_file_carries_the_hash_as_its_own_login() {
+        let base = tempfile::tempdir().unwrap();
+        let dir = ScratchDir::create(base.path()).unwrap();
+        let file = dir
+            .write_john_hash_file("$1$cddeck$abc\n\n$gy$j9T$two\n")
+            .unwrap();
+        assert_eq!(file.file_name().unwrap(), "target.hash");
+        // login:ciphertext per line, blanks dropped — john --show then prints
+        // hash:plaintext pairs (loader.c:565 prints "?" for bare ciphertexts).
+        assert_eq!(
+            std::fs::read_to_string(&file).unwrap(),
+            "$1$cddeck$abc:$1$cddeck$abc\n$gy$j9T$two:$gy$j9T$two\n"
+        );
     }
 }

@@ -1,0 +1,761 @@
+#
+# This file is part of John the Ripper password cracker,
+# Copyright (c) 1996-2014 by Solar Designer
+#
+# ...with changes in the jumbo patch, by various authors
+#
+# Redistribution and use in source and binary forms, with or without
+# modification, are permitted.
+#
+# There's ABSOLUTELY NO WARRANTY, express or implied.
+#
+# This file converted into autoconf format by JimF and
+# magnum, in 2014. That is still a work in progress.
+#
+
+@SET_MAKE@
+CC = @CC@
+PTHREAD_CC = @PTHREAD_CC@
+ifdef PTHREAD_CC
+CC = @PTHREAD_CC@
+endif
+AR = @AR@
+AS = @AS@
+LD = @LD@
+CPP = @CPP@
+CP = cp
+LN = @LN_S@
+MV = mv -f
+RM = rm -f
+MKDIR = @MKDIR_P@
+TR = tr
+SED = @SED@
+FIND = @FIND@
+NULL = /dev/null
+SORT = LC_ALL=C @SORT@
+STRIP = @STRIP@
+PEFLAGS = peflags --dynamicbase=true --nxcompat=true
+
+SHELL = /bin/sh
+VPATH = @srcdir@
+
+subdirs = mbedtls secp256k1 ed25519-donna poly1305-donna @ZTEX_SUBDIRS@
+top_srcdir = @top_srcdir@
+srcdir = @srcdir@
+prefix = @prefix@
+F = ""
+
+JTR_GIT_COMMIT = \"-$(shell git rev-parse --short=10 HEAD 2>/dev/null)\"
+ifeq ($(JTR_GIT_COMMIT), \"-\")
+# this format string will be replaced by git archive:
+JTR_ARCHIVE_VERSION_STRING = $Format:-%h %ci$
+JTR_GIT_VERSION = JUMBO_VERSION "\"$(shell echo "$(JTR_ARCHIVE_VERSION_STRING)" | "$(SED)" 's/ormat:-%h %ci/-/g')\""
+else
+JTR_GIT_HEAD_TS = \" $(shell git show -s --format=%ci HEAD 2>/dev/null)\"
+JTR_GIT_VERSION = JUMBO_VERSION "$(JTR_GIT_COMMIT) $(JTR_GIT_HEAD_TS)"
+endif
+
+ifdef JTR_RAW_BINARY
+JTR_GIT_VERSION = JUMBO_VERSION \"-stabilized\"
+endif
+
+CPPFLAGS = @CPPFLAGS@
+# CFLAGS for use on the main john.c file only
+CFLAGS_MAIN = @CC_MAIN_CPU@ -c @CFLAGS@ -DAC_BUILT @JOHN_NO_SIMD@ @CFLAGS_EXTRA@ @OPENSSL_CFLAGS@ @OPENMP_CFLAGS@ @HAVE_MPI@ @PTHREAD_CFLAGS@ @DEPFLAGS@ $(CPPFLAGS)
+CFLAGS = @CC_CPU@ $(CFLAGS_MAIN)
+ASFLAGS = -DAC_BUILT @ASFLAGS@ @JOHN_NO_SIMD@ @CC_CPU@ @CC_MAIN_CPU@ -c @OPENMP_CFLAGS@ @HAVE_MPI@ @EXTRA_AS_FLAGS@
+LIBS = @LIBS@
+LDFLAGS = -g @LDFLAGS@ $(LIBS) @HAVE_MPI@
+#
+OPT_NORMAL = @OPT_NORMAL_FLAGS@
+OPT_INLINE = @OPT_INLINE_FLAGS@
+#
+
+PLUGFORMATS_SRCS := $(filter-out opencl_%_fmt_plug.c, $(wildcard *_fmt_plug.c))
+PLUGIN_OBJS := $(filter-out opencl_%_plug.c, $(wildcard *_plug.c))
+PLUGIN_OBJS := $(PLUGIN_OBJS:.c=.o)
+OPENCL_PLUGIN_OBJS := $(wildcard opencl*_plug.c)
+OPENCL_PLUGIN_OBJS := $(OPENCL_PLUGIN_OBJS:.c=.o)
+
+##### Auto dependency generation
+AUTODEP=@DEPFLAGS@
+ifdef AUTODEP
+  DEPDIR := .deps
+endif
+
+JOHN_OBJS = \
+	jumbo.o john_mpi.o \
+	DES_fmt.o DES_std.o DES_bs.o DES_bs_b.o \
+	BSDI_fmt.o \
+	MD5_fmt.o MD5_std.o md5crypt_common.o md5crypt_long_fmt.o \
+	BF_fmt.o BF_std.o BF_common.o \
+	scrypt_fmt.o \
+	yescrypt/yescrypt-opt.o yescrypt/yescrypt-common.o \
+	yescrypt/sha256.o \
+	AFS_fmt.o \
+	LM_fmt.o \
+	trip_fmt.o \
+	KeccakDuplex.o KeccakF-1600-opt64.o KeccakHash.o KeccakSponge.o \
+	whirlpool.o haval.o skein.o md2.o panama.o \
+	timer.o omp_autotune.o \
+	md5.o \
+	rc4.o \
+	hmacmd5.o \
+	base64_convert.o \
+	md4.o sha1.o sha2.o \
+	dynamic_fmt.o dynamic_parser.o dynamic_preloads.o dynamic_utils.o dynamic_big_crypt.o \
+	dynamic_compiler.o dynamic_compiler_lib.o \
+	ripemd.o tiger.o \
+	@UNRAR_OBJS@ \
+	rar2john.o \
+	zip2john.o pkzip.o \
+	$(PLUGIN_OBJS) \
+	dyna_salt.o dummy.o \
+	gost.o \
+	gpu_common.o \
+	batch.o bench.o charset.o common.o compiler.o config.o cracker.o crc32.o external.o \
+	formats.o getopt.o idle.o inc.o john.o list.o loader.o logger.o mask.o mask_ext.o \
+	memory.o misc.o options.o params.o path.o recovery.o rpp.o rules.o signals.o single.o status.o \
+	suppressor.o tty.o wordlist.o \
+	mkv.o mkvlib.o \
+	subsets.o unicode_range.o \
+	listconf.o \
+	fake_salts.o \
+	win32_memmap.o mmap-windows.o \
+	uaf_encode.o \
+	unicode.o \
+	unshadow.o \
+	unafs.o \
+	undrop.o \
+	regex.o pp.o \
+	c3_fmt.o \
+	lzma/LzmaDec.o lzma/Lzma2Dec.o lzma/Bra.o lzma/Bra86.o lzma/BraIA64.o lzma/CpuArch.o lzma/Delta.o \
+	unique.o gpg2john.o \
+	showformats.o \
+	color.o sm3.o
+
+OPENCL_OBJS = opencl_common.o opencl_dynamic_loader.o opencl_autotune.o bt.o bt_hash_type_64.o bt_hash_type_128.o bt_hash_type_192.o bt_twister.o
+
+ZTEX_OBJS = ztex_descrypt.o ztex_bcrypt.o ztex_sha512crypt.o ztex_drupal7.o ztex_sha256crypt.o ztex_md5crypt.o ztex_phpass.o ztex_common.o
+
+FUZZ_OBJS = fuzz.o
+
+GENMKVPWD_OBJS = \
+	genmkvpwd.o mkvlib.o memory.o miscnl.o path.o jumbo.o
+
+PROJ = ../run/john@EXE_EXT@ ../run/unshadow@EXE_EXT@ ../run/unafs@EXE_EXT@ ../run/unique@EXE_EXT@ ../run/undrop@EXE_EXT@ \
+	../run/rar2john@EXE_EXT@ ../run/zip2john@EXE_EXT@ \
+	../run/genmkvpwd@EXE_EXT@ ../run/mkvcalcproba@EXE_EXT@ ../run/calc_stat@EXE_EXT@ \
+	../run/tgtsnarf@EXE_EXT@ ../run/racf2john@EXE_EXT@ ../run/hccap2john@EXE_EXT@ \
+	../run/raw2dyna@EXE_EXT@ ../run/keepass2john@EXE_EXT@ ../run/bitlocker2john@EXE_EXT@ \
+	../run/dmg2john@EXE_EXT@ ../run/putty2john@EXE_EXT@ ../run/uaf2john@EXE_EXT@ \
+	../run/wpapcap2john@EXE_EXT@ \
+	../run/gpg2john@EXE_EXT@ ../run/cprepair@EXE_EXT@ ../run/base64conv@EXE_EXT@
+
+WITH_PCAP = @HAVE_PCAP@
+ifdef WITH_PCAP
+PROJ += ../run/SIPdump@EXE_EXT@ ../run/vncpcap2john@EXE_EXT@ ../run/eapmd5tojohn@EXE_EXT@
+endif
+
+WITH_OPENCL=@CL_LIBS@
+ifdef WITH_OPENCL
+CFLAGS += -DHAVE_OPENCL @CL_CFLAGS@
+CFLAGS_MAIN += -DHAVE_OPENCL @CL_CFLAGS@
+PLUGFORMATS_SRCS += $(wildcard opencl_*_fmt_plug.c)
+JOHN_OBJS += $(OPENCL_OBJS) $(OPENCL_PLUGIN_OBJS)
+
+# core OpenCL dependencies
+CL_DEVICE_HEADER = ../run/opencl/opencl_device_info.h
+CL_COMMON_HEADER = opencl_common.h gpu_common.h gpu_sensors.h
+endif
+
+WITH_ZTEX=@ZTEX_LIBS@
+ifdef WITH_ZTEX
+CFLAGS += -DHAVE_ZTEX
+CFLAGS_MAIN += -DHAVE_ZTEX
+JOHN_OBJS += $(ZTEX_OBJS)
+endif
+
+WITH_FUZZ=@HAVE_FUZZ@
+ifdef WITH_FUZZ
+CFLAGS += -DHAVE_FUZZ
+CFLAGS_MAIN += -DHAVE_FUZZ
+JOHN_OBJS += $(FUZZ_OBJS)
+endif
+
+WITH_LIBFUZZER=@HAVE_LIBFUZZER@
+ifdef WITH_LIBFUZZER
+CFLAGS += -DHAVE_LIBFUZZER  -fsanitize=address -fsanitize-coverage=trace-pc-guard,trace-cmp,trace-gep,trace-div
+CFLAGS_MAIN += -DHAVE_LIBFUZZER -fsanitize=address -fsanitize-coverage=trace-pc-guard,trace-cmp,trace-gep,trace-div
+LDFLAGS += -fsanitize=fuzzer,address
+endif
+
+#########################################################
+# this is what ./configure && make
+# gets you.
+#
+#  also need to figure out -DUNDERSCORES and add to ASFLAGS
+#  also need to figure out -mpreferred-stack-boundary=4 and add (or whatever the stack size is)
+#
+#########################################################
+default:
+	@$(MAKE) $(PROJ) \
+		JOHN_OBJS="$(JOHN_OBJS) @CC_ASM_OBJS@"
+
+	@if [ "$(OS)" = "Windows_NT" ]; then \
+		$(MAKE) peflags; \
+	fi
+	@echo
+	@echo Make process completed.
+
+#########################################################
+## This is the 'END' of the main default make target.
+#########################################################
+
+# Default build is always using -g (stripped when 'make install') but this
+# target turns off optimizations for better debugging, and defines DEBUG
+# so code can adopt.
+debug:
+	$(MAKE) default CFLAGS="-DDEBUG $(CFLAGS) @O_DEBUG@" CFLAGS_MAIN="-DDEBUG $(CFLAGS_MAIN) @O_DEBUG@"
+
+help:
+	@echo "The 'older' fat makefile can be done with make --file=Makefile.legacy [target]"
+
+dynamic_big_crypt.c: dynamic_big_crypt_hash.cin dynamic_big_crypt_header.cin dynamic_big_crypt_generator.sh dynamic_big_crypt_chopper.pl dynamic_big_crypt_generated.c
+	$(shell ./dynamic_big_crypt_generator.sh)
+	@if [ ! -f dynamic_big_crypt.c ] ; then $(CP) dynamic_big_crypt_generated.c dynamic_big_crypt.c ; fi
+
+# Digital/Compaq's cc and make use the .S suffix for a different purpose...
+digipaq-alpha.o: alpha.S
+	$(CPP) $(CPPFLAGS) alpha.S > tmp.s
+	$(AS) $(ASFLAGS) tmp.s -o digipaq-alpha.o
+	$(RM) tmp.s
+
+princeprocessor: | $(DEPDIR)
+	$(CC) @CFLAGS@ @JOHN_NO_SIMD@ @CFLAGS_EXTRA@ @OPENSSL_CFLAGS@ @OPENMP_CFLAGS@ @HAVE_MPI@ @PTHREAD_CFLAGS@ $(CPPFLAGS) $(OPT_NORMAL) -DLINUX pp.c $(LDFLAGS) -o ../run/pp
+
+pp.o: pp.c prince.h | $(DEPDIR)
+	$(CC) $(CFLAGS) $(OPT_NORMAL) -DJTR_MODE -c pp.c
+
+options.o: options.c options.h version.h
+
+listconf.o: listconf.c listconf.h version.h
+
+# Phony without the side-effects
+FORCE:
+
+version.h.new: FORCE
+	echo "#define JTR_GIT_VERSION $(JTR_GIT_VERSION)" > $@
+
+version.h: version.h.new
+	cmp -s $@.new $@ && $(RM) $@.new || $(MV) $@.new $@
+
+# Rebuild the list of plugins, but don't bump timestamp unless content changed.
+.plugin_fmt_list: FORCE
+	@echo $(PLUGFORMATS_SRCS) > $@.new
+	cmp -s $@.new $@ && $(RM) $@.new || $(MV) $@.new $@
+
+# These are SLOW nowadays, lots of plugins.
+fmt_externs.h: .plugin_fmt_list
+	$(CC) -DFMT_EXTERNS_H -E -P $(CFLAGS) $(PLUGFORMATS_SRCS) | grep -F "extern struct fmt_main" > $@ || true
+
+fmt_registers.h: .plugin_fmt_list
+	$(CC) -DFMT_REGISTERS_H -E -P $(CFLAGS) $(filter-out opencl_%_fmt_plug.c, $(wildcard *_fmt_plug.c)) | grep -F "john_register_one" | $(SORT) -f > $@ || true
+	$(CC) -DFMT_REGISTERS_H -E -P $(CFLAGS) $(wildcard opencl_*_fmt_plug.c) | grep -F "john_register_one" | $(SORT) -f >> $@ || true
+
+SUBDIRS = mbedtls secp256k1 ed25519-donna poly1305-donna @ZTEX_SUBDIRS@
+
+.PHONY: subdirs $(SUBDIRS)
+
+subdirs: $(SUBDIRS)
+
+$(SUBDIRS):
+	$(MAKE) -C $@ all
+
+# Inlining the S-boxes produces faster code as long as they fit in the cache.
+DES_bs_b.o: DES_bs_b.c sboxes.c nonstd.c sboxes-s.c sboxes-t.c | $(DEPDIR)
+	$(CC) $(CFLAGS) $(OPT_INLINE) DES_bs_b.c
+
+miscnl.o: misc.c | $(DEPDIR)
+	$(CC) $(CFLAGS) $(OPT_NORMAL) -D_JOHN_MISC_NO_LOG misc.c -o miscnl.o
+
+mbedtls/aes.a:
+	$(MAKE) -C mbedtls all
+
+secp256k1/secp256k1.a:
+	$(MAKE) -C secp256k1 all
+
+ed25519-donna/ed25519-donna.a:
+	$(MAKE) -C ed25519-donna all
+
+poly1305-donna/poly1305-donna.a:
+	$(MAKE) -C poly1305-donna all
+
+
+###############################################################################
+#  Process targets.  Note, these are *nix targets, but also work fine under
+#  cygwin.  The only problem with cygwin, is that the ln -s will NOT generate
+#  a valid exe which can be run under native Win32 cmd shell
+#  If a use wants that behavior, then run configure, with --enable-ln-s
+#  By default, it is set to cygwin will use the .EXE symlink.c building,
+#  where the macro EXE_EXT is .exe.  Mingw builds always set EXE_EXT to .exe
+###############################################################################
+
+# PTHREAD_CFLAGS and OPENMP_CFLAGS may actually contain linker options,
+# like -fopenmp
+../run/john@EXE_EXT@: $(JOHN_OBJS) mbedtls/aes.a secp256k1/secp256k1.a ed25519-donna/ed25519-donna.a poly1305-donna/poly1305-donna.a @ZTEX_SUBDIRS@
+	$(LD) $(JOHN_OBJS) $(LDFLAGS) @OPENSSL_LIBS@ @OPENMP_CFLAGS@ @GMP_LIBS@ @SKEY_LIBS@ @REXGEN_LIBS@ @CL_LIBS@ @PTHREAD_CFLAGS@ @PTHREAD_LIBS@ @M_LIBS@ @RT_LIBS@ @Z_LIBS@ @DL_LIBS@ @CRYPT_LIBS@ @BZ2_LIBS@ @ZTEX_LIBS@ mbedtls/aes.a secp256k1/secp256k1.a ed25519-donna/ed25519-donna.a poly1305-donna/poly1305-donna.a -o $@
+
+../run/unshadow: ../run/john
+	$(RM) ../run/unshadow
+	$(LN) john ../run/unshadow
+
+../run/unafs: ../run/john
+	$(RM) ../run/unafs
+	$(LN) john ../run/unafs
+
+../run/undrop: ../run/john
+	$(RM) ../run/undrop
+	$(LN) john ../run/undrop
+
+../run/zip2john: ../run/john
+	$(RM) ../run/zip2john
+	$(LN) john ../run/zip2john
+
+../run/gpg2john: ../run/john
+	$(RM) ../run/gpg2john
+	$(LN) john ../run/gpg2john
+
+../run/rar2john: ../run/john
+	$(RM) ../run/rar2john
+	$(LN) john ../run/rar2john
+
+../run/base64conv: ../run/john
+	$(RM) ../run/base64conv
+	$(LN) john ../run/base64conv
+
+../run/unique: ../run/john
+	$(RM) ../run/unique
+	$(LN) john ../run/unique
+
+#####################################################################
+# These targets MUST match ALL of the john targets that use ln -s
+# These are built for Win32, so that we have a 'native' symlink back
+# to the john exe.  The john exe is still built fat, but there is no
+# workable ln -s, so we have built a 'symlink.c' file. It works in
+# a limited way, like symlink. Mingw and default cygwin use these.
+# cygwin can override this within ./configure using --enable-ln-s
+#####################################################################
+../run/unshadow.exe: symlink.c
+	$(CC) symlink.c -o ../run/unshadow.exe
+	$(STRIP) ../run/unshadow.exe
+
+../run/unafs.exe: symlink.c
+	$(CC) symlink.c -o ../run/unafs.exe
+	$(STRIP) ../run/unafs.exe
+
+../run/undrop.exe: symlink.c
+	$(CC) symlink.c -o ../run/undrop.exe
+	$(STRIP) ../run/undrop.exe
+
+../run/rar2john.exe: symlink.c
+	$(CC) symlink.c -o ../run/rar2john.exe
+	$(STRIP) ../run/rar2john.exe
+
+../run/zip2john.exe: symlink.c
+	$(CC) symlink.c -o ../run/zip2john.exe
+	$(STRIP) ../run/zip2john.exe
+
+../run/gpg2john.exe: symlink.c
+	$(CC) symlink.c -o ../run/gpg2john.exe
+	$(STRIP) ../run/gpg2john.exe
+
+../run/base64conv.exe: symlink.c
+	$(CC) symlink.c -o ../run/base64conv.exe
+	$(STRIP) ../run/base64conv.exe
+
+../run/unique.exe: symlink.c
+	$(CC) symlink.c -o ../run/unique.exe
+	$(STRIP) ../run/unique.exe
+
+########################################################
+# Not linked to symlink for a .exe file, so simply make
+# single targets, using the EXE_EXT macro
+########################################################
+../run/genmkvpwd@EXE_EXT@: $(GENMKVPWD_OBJS)
+	$(LD) $(GENMKVPWD_OBJS) $(LDFLAGS) @M_LIBS@ @OPENMP_CFLAGS@ -o $@
+
+../run/mkvcalcproba@EXE_EXT@: mkvcalcproba.o
+	$(LD) mkvcalcproba.o $(LDFLAGS) @M_LIBS@ @OPENMP_CFLAGS@ -o $@
+
+../run/calc_stat@EXE_EXT@: calc_stat.o
+	$(LD) calc_stat.o $(LDFLAGS) @M_LIBS@ @OPENMP_CFLAGS@ -o $@
+
+../run/raw2dyna@EXE_EXT@: raw2dyna.o
+	$(LD) raw2dyna.o $(LDFLAGS) @OPENMP_CFLAGS@ -o $@
+
+../run/SIPdump@EXE_EXT@: SIPdump.o
+	$(LD) SIPdump.o $(LDFLAGS) @PCAP_LIBS@ @OPENMP_CFLAGS@ -o $@
+
+../run/vncpcap2john@EXE_EXT@: vncpcap2john.o
+	$(CC) -Wall vncpcap2john.o -DAC_BUILT $(LDFLAGS) @PCAP_LIBS@ @OPENMP_CFLAGS@ @DEPFLAGS@ -o $@
+
+../run/eapmd5tojohn@EXE_EXT@: eapmd5tojohn.o
+	$(CC) -Wall eapmd5tojohn.o -DAC_BUILT $(LDFLAGS) @PCAP_LIBS@ @OPENMP_CFLAGS@ @DEPFLAGS@ -o $@
+
+../run/uaf2john@EXE_EXT@: uaf2john.o uaf_encode.o
+	$(LD) $(LDFLAGS) @PTHREAD_CFLAGS@ @PTHREAD_LIBS@ uaf2john.o uaf_encode.o @OPENMP_CFLAGS@ -o $@
+
+../run/keepass2john@EXE_EXT@: keepass2john.c jumbo.c base64_convert.c misc.c common.c memory.c sha2.o
+	$(CC) -DAC_BUILT -Wall -O2 @CPPFLAGS@ @CFLAGS@ @OPENSSL_CFLAGS@ @CFLAGS_EXTRA@ @PTHREAD_CFLAGS@ @PTHREAD_LIBS@ keepass2john.c jumbo.c base64_convert.c -D_JOHN_MISC_NO_LOG misc.c common.c memory.c sha2.o $(LDFLAGS) @OPENMP_CFLAGS@ @OPENSSL_LIBS@ -o $@
+
+../run/dmg2john@EXE_EXT@: dmg2john.o jumbo.o
+	$(LD) $(LDFLAGS) @PTHREAD_CFLAGS@ @PTHREAD_LIBS@ dmg2john.o jumbo.o @OPENMP_CFLAGS@ -o $@
+
+../run/bitlocker2john@EXE_EXT@: bitlocker2john.c jumbo.c base64_convert.c misc.c common.o memory.c
+	$(CC) -DAC_BUILT -Wall -O2 @CPPFLAGS@ @CFLAGS@ @OPENSSL_CFLAGS@ @CFLAGS_EXTRA@ @PTHREAD_CFLAGS@ @PTHREAD_LIBS@ bitlocker2john.c jumbo.c base64_convert.c -D_JOHN_MISC_NO_LOG misc.c common.c memory.c  $(LDFLAGS) @OPENMP_CFLAGS@ @OPENSSL_LIBS@ -o $@
+
+../run/racf2john@EXE_EXT@: racf2john.o jumbo.o
+	$(LD) $(LDFLAGS) @PTHREAD_CFLAGS@ @PTHREAD_LIBS@ racf2john.o jumbo.o @OPENMP_CFLAGS@ -o $@
+
+../run/hccap2john@EXE_EXT@: hccap2john.o common.o jumbo.o
+	$(LD) $(LDFLAGS) @PTHREAD_CFLAGS@ @PTHREAD_LIBS@ common.o hccap2john.o jumbo.o @OPENMP_CFLAGS@ -o $@
+
+../run/putty2john@EXE_EXT@: putty2john.o jumbo.o
+	$(LD) $(LDFLAGS) @PTHREAD_CFLAGS@ @PTHREAD_LIBS@ putty2john.o jumbo.o @OPENMP_CFLAGS@ -o $@
+
+# Note that this is NOT depending on PCAP lib. It is self-contained.
+../run/wpapcap2john@EXE_EXT@: wpapcap2john.o jumbo.o
+	$(LD) $(LDFLAGS) wpapcap2john.o jumbo.o @OPENMP_CFLAGS@ -o $@
+
+# Note, this one is NOT build by default. To get it, do a make ../run/dynacomptest (or ../run/dynacomptest.exe for cygwin/mingw builds)
+../run/dynacomptest@EXE_EXT@: dynamic_compiler.c dynamic_compiler_lib.c dynamic_utils.c misc.c unicode.c base64_convert.o base64.o common.o crc32.o KeccakDuplex.o KeccakF-1600-opt64.o KeccakHash.o KeccakSponge.o gost.o jumbo.o memory.o ripemd.o tiger.o haval.o skein.o md2.o panama.o whirlpool.o sha1.o sha2.o
+	$(CC) -DAC_BUILT -Wall -O2 @CPPFLAGS@ @CFLAGS@ @CFLAGS_EXTRA@ @OPENSSL_CFLAGS@ @OPENMP_CFLAGS@ -DWITH_MAIN -D_JOHN_MISC_NO_LOG -DUNICODE_NO_OPTIONS dynamic_compiler.c dynamic_compiler_lib.c dynamic_utils.c misc.c unicode.c base64_convert.o base64.o common.o crc32.o KeccakDuplex.o KeccakF-1600-opt64.o KeccakHash.o KeccakSponge.o gost.o jumbo.o memory.o ripemd.o tiger.o haval.o skein.o md2.o panama.o whirlpool.o sha1.o sha2.o $(LDFLAGS)  @OPENSSL_LIBS@ -o $@
+
+../run/cprepair@EXE_EXT@: cprepair.c unicode.c misc.c | $(DEPDIR)
+	$(CC) -DAC_BUILT -Wall -O3 @CFLAGS_EXTRA@ @OPENSSL_CFLAGS@ -DNOT_JOHN -D_JOHN_MISC_NO_LOG $(CPPFLAGS) cprepair.c unicode.c misc.c memory.c -o $@
+
+../run/tgtsnarf@EXE_EXT@: tgtsnarf.o
+	$(LD) tgtsnarf.o $(LDFLAGS) @OPENMP_CFLAGS@ -o $@
+
+john.o: john.c john.h fmt_externs.h fmt_registers.h | $(DEPDIR)
+	$(CC) $(CFLAGS_MAIN) $(OPT_NORMAL) -O1 $*.c
+
+path.o: path.c path.h arch.h params.h misc.h memory.h | $(DEPDIR)
+	$(CC) $(CFLAGS_MAIN) $(OPT_NORMAL) -O1 $*.c
+
+# Workaround for gcc 3.4.6 (seen on Sparc32) (do not use -funroll-loops)
+unrarppm.o: unrarppm.c | $(DEPDIR)
+	$(CC) -DAC_BUILT $(CFLAGS) $< -o $@
+
+ifdef AUTODEP
+
+$(DEPDIR):
+	@mkdir -p $@
+
+%.o: %.c | $(DEPDIR)
+	$(CC) $(CFLAGS) $(OPT_NORMAL) -c $< -o $@
+
+DEPFILES := $(JOHN_OBJS:%.o=$(DEPDIR)/$(notdir %.d))
+include $(wildcard $(DEPFILES))
+
+else
+
+##### Auto dependency generation not supported by compiler
+.c.o:
+	$(CC) $(CFLAGS) $(OPT_NORMAL) $< -o $@
+
+endif
+
+.S.o:
+	$(AS) $(ASFLAGS) $*.S
+
+../run/oui.txt:
+	cd ../run && wget http://standards-oui.ieee.org/oui.txt
+
+# For jumbo, --make_check fails for the first thin format that is linked
+# to a dynamic format in a config file, so we deviate from core here.
+check: default
+	../run/john --list=build-info
+	$(MAKE) unit-tests
+	../run/john --test=0 --verbosity=2 --format=cpu
+	../run/john --test=0 --verbosity=2 --format=+dynamic,all
+	if [ -x /usr/bin/md5sum ]; then \
+		JOHN=../run/john tests/test_externals.sh | md5sum -c tests/test_externals.md5; \
+	fi
+
+depend:
+	makedepend -fMakefile.dep -Y *.c 2>> /dev/null
+
+test: default
+	cd ../test && perl jtrts.pl -q
+
+test_full: default
+	cd ../test && perl jtrts.pl -q -type full
+
+test_utf8: default
+	cd ../test && perl jtrts.pl -q -type utf-8
+
+test_verbose: default
+	cd ../test && perl jtrts.pl
+
+test_full_verbose: default
+	cd ../test && perl jtrts.pl -type full
+
+test_utf8_verbose: default
+	cd ../test && perl jtrts.pl -type utf-8
+
+testfiles:
+	../run/john --list=format-tests -format=cpu | LC_ALL=C cut -f3 > all_tests.in
+	../run/john --list=format-tests -format=cpu | LC_ALL=C cut -f4 > all_tests.lst
+
+
+###############################################################################
+#  unit-tests target.  Note, this is a stand along target. It builds and tests
+#  some unique tests, against john 'common' codebase.  Source files like misc.c
+#  common.c, etc have a test suite file built to test each one.  Code such as
+#  compiler.c/external.c have special test suite john.conf files, where we run
+#  the 'real' john against them, and expect certain results.  Test cases will
+#  be added to the john-tc.conf file as needed when any issue shows up
+#  same type thing for testing base64_convert.c which contains it's own ST
+#  code, and for dynamic, which has the dynamic test suite.
+###############################################################################
+
+UNIT_TEST_OBJS = \
+	tests/unit-tests.o tests/misc.o tests/common.o tests/memory.o tests/sha2.o tests/unicode.o
+
+UNIT_TEST_INCLUDED_PIECES = \
+	tests/test_valid_utf8.c
+
+tests/unit-tests.o: tests/unit-tests.c | $(DEPDIR)
+	$(CC) -o tests/unit-tests.o $(CFLAGS) -DFORCE_GENERIC_SHA2 -D_JOHN_MISC_NO_LOG  tests/unit-tests.c
+
+tests/sha2.o: sha2.c | $(DEPDIR)
+	$(CC) -o tests/sha2.o $(CFLAGS) -DFORCE_GENERIC_SHA2 -D_JOHN_MISC_NO_LOG  sha2.c
+
+tests/misc.o: misc.c misc.h | $(DEPDIR)
+	$(CC) -o tests/misc.o $(CFLAGS) -D_JOHN_MISC_NO_LOG  misc.c
+
+tests/common.o: common.c common.h | $(DEPDIR)
+	$(CC) -o tests/common.o $(CFLAGS) -D_JOHN_MISC_NO_LOG  common.c
+
+tests/memory.o: memory.c memory.h | $(DEPDIR)
+	$(CC) -o tests/memory.o $(CFLAGS) -D_JOHN_MISC_NO_LOG  memory.c
+
+tests/unicode.o: unicode.o | $(DEPDIR)
+	$(CC) -o tests/unicode.o $(CFLAGS) -DUNICODE_NO_OPTIONS -DNOT_JOHN  unicode.c
+
+# keep the 'easy name' build target of unit-tests   The 'real' target is ../run/unit-tests[.exe]
+unit-tests:	../run/unit-tests@EXE_EXT@
+
+../run/unit-tests@EXE_EXT@:	$(UNIT_TEST_OBJS) $(UNIT_TEST_INCLUDED_PIECES)
+	$(LD) $(UNIT_TEST_OBJS) $(LDFLAGS) @OPENSSL_LIBS@ -o $@
+	@ echo "Now Running the Unit Tests"
+	@ ${POSSIBLE_WINE_MSG}
+	@ ${POSSIBLE_WINE_ENV}
+	@ ${POSSIBLE_WINE} ../run/unit-tests@EXE_EXT@
+	@ # Extra testing past the unit-tests code commented out for now until I figure out how best to do this.
+	@ # echo "Now Testing john 'external' mode"
+	@ # ../run/john -conf=tests/john-tc.conf -stdout -extern=double 2> /dev/null > tests/external.tst
+	@ # diff tests/external.expect tests/external.tst
+	@ # rm tests/external.tst
+
+###############################################################################
+
+bash-completion:
+	[ -d $(DESTDIR)/etc/bash_completion.d ] && $(CP) ../run/john.bash_completion $(DESTDIR)/etc/bash_completion.d/ || true
+	[ -d $(DESTDIR)/usr/local/etc/bash_completion.d ] && $(CP) ../run/john.bash_completion $(DESTDIR)/usr/local/etc/bash_completion.d/ || true
+	[ -d $(DESTDIR)/opt/local/etc/bash_completion.d ] && $(CP) ../run/john.bash_completion $(DESTDIR)/opt/local/etc/bash_completion.d/ || true
+	[ -d $(DESTDIR)/opt/homebrew/etc/bash_completion.d ] && $(CP) ../run/john.bash_completion $(DESTDIR)/opt/homebrew/etc/bash_completion.d/ || true
+	@echo Bash-completion for JtR opportunistically installed.
+	@echo Source \". ../run/john.bash_completion\" or logout/login to activate the changes
+
+zsh-completion:
+	[ -d $(DESTDIR)/usr/share/zsh/functions/Completion/Unix ] && $(CP) ../run/john.zsh_completion $(DESTDIR)/usr/share/zsh/functions/Completion/Unix/_john || true
+	[ -d $(DESTDIR)/usr/share/zsh/site-functions ] && $(CP) ../run/john.zsh_completion $(DESTDIR)/usr/share/zsh/site-functions/_john || true
+	[ -d $(DESTDIR)/usr/local/share/zsh/site-functions ] && $(CP) ../run/john.zsh_completion $(DESTDIR)/usr/local/share/zsh/site-functions/_john || true
+	@echo zsh-completion for JtR opportunistically installed.
+	@echo Source \". ../run/john.zsh_completion\" or logout/login to activate the changes
+
+shell-completion: bash-completion zsh-completion
+
+kernel-cache-clean-nvidia:
+	$(RM) -fr ~/.nv/ComputeCache
+
+kernel-cache-clean-john:
+	$(RM) -f ../run/opencl/*.bin ../run/opencl/*.config
+
+kernel-cache-clean: kernel-cache-clean-nvidia kernel-cache-clean-john
+
+clean:
+	$(RM) $(PROJ) fmt_registers.h fmt_externs.h
+	@for exe in ${PROJ}; do \
+	  ($(RM) $$exe.exe) \
+	done
+	$(RM) ../run/unit-tests@EXE_EXT@
+	$(RM) john-macosx-* *.o yescrypt/*.o *.bak core
+	$(RM) lzma/*.o
+	$(RM) tests/*.o
+	$(RM) detect bench generic.h tmp.s
+	$(RM) *~
+	$(CP) $(NULL) Makefile.dep
+	@for dir in ${subdirs}; do \
+	  (cd $$dir && $(MAKE) clean) \
+	  || case "$(MFLAGS)" in *k*) fail=yes;; *) exit 1;; esac; \
+	done && test -z "$$fail"
+
+# These are mostly for internal use.
+charsets: ../run/ascii.chr ../run/alpha.chr ../run/lowernum.chr ../run/uppernum.chr ../run/lowerspace.chr ../run/lower.chr ../run/upper.chr ../run/digits.chr ../run/alnum.chr ../run/lanman.chr ../run/lm_ascii.chr ../run/alnumspace.chr ../run/latin1.chr ../run/utf8.chr
+
+../run/ascii.chr: charset.c params.h
+	../run/john -make-charset=../run/ascii.chr -pot:rockyou.ansi.pot -ext:filter_ascii
+
+../run/alpha.chr: charset.c params.h
+	../run/john -make-charset=../run/alpha.chr -pot:rockyou.ansi.pot -ext:filter_alpha
+
+../run/lowernum.chr: charset.c params.h
+	../run/john -make-charset=../run/lowernum.chr -pot:rockyou.ansi.pot -ext:filter_lowernum
+
+../run/uppernum.chr: charset.c params.h
+	../run/john -make-charset=../run/uppernum.chr -pot:rockyou.ansi.pot -ext:filter_uppernum
+
+../run/lowerspace.chr: charset.c params.h
+	../run/john -make-charset=../run/lowerspace.chr -pot:rockyou.ansi.pot -ext:filter_lowerspace
+
+../run/lower.chr: charset.c params.h
+	../run/john -make-charset=../run/lower.chr -pot:rockyou.ansi.pot -ext:filter_lower
+
+../run/upper.chr: charset.c params.h
+	../run/john -make-charset=../run/upper.chr -pot:rockyou.ansi.pot -ext:filter_upper
+
+../run/digits.chr: charset.c params.h
+	../run/john -make-charset=../run/digits.chr -pot:rockyou.ansi.pot -ext:filter_digits
+
+../run/alnum.chr: charset.c params.h
+	../run/john -make-charset=../run/alnum.chr -pot:rockyou.ansi.pot -ext:filter_alnum
+
+../run/lanman.chr: charset.c params.h
+	../run/john -make-charset=../run/lanman.chr -pot:rockyou.lm850.pot -ext:filter_lanman
+
+../run/lm_ascii.chr: charset.c params.h
+	../run/john -make-charset=../run/lm_ascii.chr -pot:rockyou.lm850.pot -ext:filter_lm_ascii
+
+../run/alnumspace.chr: charset.c params.h
+	../run/john -make-charset=../run/alnumspace.chr -pot:rockyou.ansi.pot -ext:filter_alnumspace
+
+../run/latin1.chr: charset.c params.h
+	../run/john -make-charset=../run/latin1.chr -pot:rockyou.ansi.16.pot
+
+../run/utf8.chr: charset.c params.h
+	../run/john -make-charset=../run/utf8.chr -pot:rockyou.utf8.24.pot
+
+
+#######################################################################
+## NOTE, auto re-building configure will ONLY happen IF the user has ##
+## CONFIG_MAINT=1 environment variable.  Beware.                     ##
+#######################################################################
+
+M4_INCLUDES=@M4_INCLUDES@
+
+## automatic re-running of configure if the configure.ac file has changed
+ifeq ($(CONFIG_MAINT), 1)
+configure: configure.ac
+	autoconf
+else
+configure: configure.ac
+	@touch configure
+endif
+
+# autoheader might not change autoconfig.h.in, so touch a stamp file
+ifeq ($(CONFIG_MAINT), 1)
+autoconfig.h.in: autoconfig-stamp-h-in
+autoconfig-stamp-h-in: configure.ac $(M4_INCLUDES)
+	autoheader
+	echo "timestamp from Makefile" > autoconfig-stamp-h-in
+else
+autoconfig.h.in: autoconfig-stamp-h-in
+autoconfig-stamp-h-in: configure.ac $(M4_INCLUDES)
+	echo "timestamp from Makefile" > autoconfig-stamp-h-in
+endif
+
+ifeq ($(CONFIG_MAINT), 1)
+autoconfig.h: autoconfig-stamp-h
+autoconfig-stamp-h: autoconfig.h.in config.status
+	./config.status
+else
+autoconfig.h: autoconfig-stamp-h
+autoconfig-stamp-h: autoconfig.h.in config.status
+	@touch config.status
+	@touch autoconfig.h.in
+	@touch autoconfig-stamp-h
+	@touch autoconfig.h
+endif
+
+ifeq ($(CONFIG_MAINT), 1)
+Makefile: Makefile.in config.status
+	./config.status
+endif
+
+ifeq ($(CONFIG_MAINT), 1)
+config.status: configure
+	./config.status --recheck
+endif
+
+all:
+	@for dir in ${subdirs}; do \
+	  (cd $$dir && $(MAKE) all) \
+	  || case "$(MFLAGS)" in *k*) fail=yes;; *) exit 1;; esac; \
+	done && test -z "$$fail"
+
+distclean: clean kernel-cache-clean-john
+	$(RM) -r $(DEPDIR)
+	$(RM) -r autom4te.cache
+	@for dir in ${subdirs}; do \
+	  (cd $$dir && $(MAKE) distclean) \
+	  || case "$(MFLAGS)" in *k*) fail=yes;; *) exit 1;; esac; \
+	done && test -z "$$fail"
+	$(RM) Makefile autoconfig.h config.status config.cache arch.h \
+		config.log autoconfig-stamp-h autoconfig-stamp-h-in stamp-h1 \
+		fmt_registers.h fmt_externs.h dynamic_big_crypt.c john_build_rule.h \
+		version.h .plugin_fmt_list
+	$(LN) Makefile.stub Makefile
+
+strip: default
+	@echo Stripping executables.
+	$(STRIP) $(PROJ)
+
+.PHONY: peflags
+peflags:
+	@echo Securing executables.
+	$(PEFLAGS) $(PROJ)
+
+###############################################################################
+# To use it, run
+# $ make -s windows-tiny-link-to-john MAIN_NAME=john-avx2.exe
+# We intentionally do not use CFLAGS here: must not have this binary depend on
+# any non-guaranteed SIMD instruction set.
+###############################################################################
+.PHONY: windows-tiny-link-to-john
+windows-tiny-link-to-john: symlink.c
+	@echo Build a tiny john.exe that calls the best SIMD binary.
+	$(CC) -DMAIN_NAME=\"$(MAIN_NAME)\" symlink.c -O2 -Wall -s -o ../run/john.exe
+
+.PHONY: windows-package
+windows-package: default
+	@echo Make JtR suitable for Windows.
+	$(RM) ../doc/README
+	$(FIND) ../doc ../run/rules -type f -exec $(SED) -i -e 's/\r*$$/\r/' {} ';'
+	$(SED) -i -e 's/\r*$$/\r/' ../README.md ../run/*.conf ../run/password.lst
+	$(FIND) ../doc -type f -not -name '*.txt' -not -name '*.md' -exec $(MV) -v '{}' '{}'.txt \;
+
+install: strip shell-completion
+#ifneq ($(prefix), ../run)
+#	@echo Copying binaries to $(prefix)
+#	$(MKDIR) $(prefix)
+#	$(CP) -p -P -R ../run/*.{py,pl,rb} $(PROJ) $(prefix)
+#	@echo Copying data and config files to $(prefix)
+#	$(MKDIR) $(prefix)
+#	$(CP) -p -P -R ../run/*.{chr,conf,lst} $(prefix)
+#endif
+
+include Makefile.dep

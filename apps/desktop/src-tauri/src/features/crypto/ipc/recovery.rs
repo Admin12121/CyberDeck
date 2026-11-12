@@ -1904,6 +1904,36 @@ fn resolve_john_sidecar(app: &AppHandle) -> Option<PathBuf> {
     None
 }
 
+/// Resolve the recovery sidecar engine. The supervised john DLL worker is
+/// the primary engine when the full bundle is present (worker helper,
+/// john.dll and john.exe side by side in the engines resource directory —
+/// john.exe provides argv[0] and john.conf for the DLL sessions); otherwise
+/// the john.exe CLI spawn stays the fallback, including PATH-only installs
+/// where no bundled DLL exists.
+fn resolve_john_sidecar_engine(
+    app: &AppHandle,
+) -> Option<engines_support::sidecar::JohnSidecarEngine> {
+    use engines_support::sidecar::JohnSidecarEngine;
+    if let Ok(resource_dir) = app.path().resource_dir() {
+        let engines = resource_dir.join("engines");
+        let worker_name = if cfg!(windows) {
+            format!(
+                "{}.exe",
+                engines_support::sidecar::JOHN_WORKER_BINARY
+            )
+        } else {
+            engines_support::sidecar::JOHN_WORKER_BINARY.to_string()
+        };
+        let worker = engines.join(&worker_name);
+        let dll = engines.join("john.dll");
+        let exe = engines.join(if cfg!(windows) { "john.exe" } else { "john" });
+        if worker.is_file() && dll.is_file() && exe.is_file() {
+            return Some(JohnSidecarEngine::Dll { worker, john_exe: exe });
+        }
+    }
+    resolve_john_sidecar(app).map(JohnSidecarEngine::Exe)
+}
+
 /// Re-enter a sidecar-reported candidate through the same verified-match
 /// path the native engine uses: when the crate has a verifier for the target
 /// the candidate is independently re-checked; when it has none — the honest
@@ -1955,11 +1985,13 @@ fn sidecar_verified_matches(
 /// Execute one sidecar-routed ladder stage through the john GPLv2 sidecar
 /// with the library wordlist: progress streams into the same stage-event wire
 /// the native engines use, RecoveryCancel kills the child, and the run is
-/// bounded by an honest wall-clock timeout. Candidates are bounded at the
-/// stage budget with a private scratch copy, like every native stage.
+/// bounded by an honest wall-clock timeout. The stage runs the primary DLL
+/// engine when the supervised worker bundle is present and falls back to the
+/// john.exe CLI spawn otherwise. Candidates are bounded at the stage budget
+/// with a private scratch copy, like every native stage.
 #[allow(clippy::too_many_arguments)]
 fn run_sidecar_stage_with_binary(
-    binary: &Path,
+    engine: &engines_support::sidecar::JohnSidecarEngine,
     scratch: &engines_support::scratch::ScratchDir,
     label: &str,
     format: &str,
@@ -1976,7 +2008,10 @@ fn run_sidecar_stage_with_binary(
     } else {
         targets.join("\n")
     };
-    let hash_file = scratch.write_hash_file(&hash_text)?;
+    // john's `--show` prints `login:plaintext` and falls back to "?" as the
+    // login for bare `ciphertext` input lines (vendored john loader.c:565);
+    // the hash:hash login shape keeps the hash inside every extracted pair.
+    let hash_file = scratch.write_john_hash_file(&hash_text)?;
     let pot = scratch.join("sidecar.pot");
     let session = scratch.join("sidecar-session");
     // Bound the candidates honestly at the stage budget. A rule-expanded run
@@ -1992,7 +2027,7 @@ fn run_sidecar_stage_with_binary(
     };
     let mut last_tried = 0u64;
     let run = engines_support::sidecar::john_recovery(
-        binary,
+        engine,
         format,
         &hash_file,
         &candidates,
@@ -2056,7 +2091,7 @@ fn run_sidecar_stage_with_binary(
     Ok(RecoveryRun::from_parts(summary, Vec::new()))
 }
 
-/// Resolve the sidecar binary and private scratch, then run the stage.
+/// Resolve the sidecar engine and private scratch, then run the stage.
 #[allow(clippy::too_many_arguments)]
 fn run_sidecar_stage(
     app: &AppHandle,
@@ -2069,7 +2104,7 @@ fn run_sidecar_stage(
     token: &RecoveryCancel,
     forward: &mut (dyn FnMut(RecoveryProgressWire) + Send),
 ) -> Result<RecoveryRun, String> {
-    let binary = resolve_john_sidecar(app).ok_or(
+    let engine = resolve_john_sidecar_engine(app).ok_or(
         "john sidecar binary was not found on this machine; the sidecar fallback stage cannot run",
     )?;
     let cache = app
@@ -2078,7 +2113,7 @@ fn run_sidecar_stage(
         .map_err(|e| format!("cannot resolve cache dir: {e}"))?;
     let scratch = engines_support::scratch::ScratchDir::create(&cache)?;
     run_sidecar_stage_with_binary(
-        &binary, &scratch, label, format, request, targets, wordlist, rules, token, forward,
+        &engine, &scratch, label, format, request, targets, wordlist, rules, token, forward,
     )
 }
 
@@ -2978,7 +3013,7 @@ mod tests {
         let token = RecoveryCancel::new();
         let label = "rockyou wordlist as gost-yescrypt (john sidecar)";
         let run = run_sidecar_stage_with_binary(
-            &stub,
+            &engines_support::sidecar::JohnSidecarEngine::Exe(stub),
             &scratch,
             label,
             "crypt",
@@ -3025,7 +3060,7 @@ mod tests {
         };
         let mut progress = Vec::new();
         let run = run_sidecar_stage_with_binary(
-            &stub,
+            &engines_support::sidecar::JohnSidecarEngine::Exe(stub),
             &scratch,
             "stage",
             "crypt",
@@ -3063,7 +3098,7 @@ mod tests {
             target_hashes: targets.clone(),
         };
         let run = run_sidecar_stage_with_binary(
-            &stub,
+            &engines_support::sidecar::JohnSidecarEngine::Exe(stub),
             &scratch,
             "stage",
             "crypt",
