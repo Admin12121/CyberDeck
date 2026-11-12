@@ -12,18 +12,25 @@ const http2Rs = fs.readFileSync(path.join(packetSrc, "domain/dissection/http2.rs
 const transportRs = fs.readFileSync(path.join(packetSrc, "domain/dissection/transport.rs"), "utf8");
 const model = read("model/index.ts");
 
-test("QUIC rows state the protected payload plainly and never claim names or contents", () => {
+test("QUIC rows state the protected payload plainly and claim contents only from verified decryption", () => {
   assert.match(quicRs, /"QUIC protected payload"/);
   assert.match(quicRs, /byte\(s\), keys unavailable/);
-  // The dissector has no header-protection keys: SNI, server names and
-  // decrypted frame contents must never appear in any emitted value. Match
-  // against the non-test, comment-stripped code so the "no SNI" promise in
-  // the docs and the dissector's own negative test do not count as claims.
+  // Decryption exists (RFC 9001 Initial keys statelessly; Handshake/1-RTT
+  // only through a session-scoped keylog) but every plaintext use is
+  // tag-gated: values are emitted only after a verified GCM open, and any
+  // failure keeps the header-only layers with an honest per-phase note.
+  // Match against the non-test, comment-stripped code so the docs and the
+  // dissector's own negative tests do not count as claims.
   const quicBody = quicRs.slice(0, quicRs.indexOf("#[cfg(test)]"));
   const quicCode = quicBody.replace(/\/\/[^\n]*/g, "").replace(/\/\*[\s\S]*?\*\//g, "");
-  assert.doesNotMatch(quicCode, /sni|server name/i);
-  assert.doesNotMatch(quicCode, /decrypt/);
-  // Short headers are exactly the honest sentence, nothing more.
+  assert.match(quicCode, /crypto::gcm::open/);
+  assert.match(quicCode, /protected payload — Initial keys mismatch/);
+  assert.match(
+    quicCode,
+    /protected payload — no keylog binding for this connection \(Handshake attempted\)/,
+  );
+  // Short headers are exactly the honest sentence when no decryptor state
+  // is installed, nothing more.
   assert.match(quicRs, /QUIC short header \(1-RTT\); DCID not recoverable without prior state/);
 });
 
