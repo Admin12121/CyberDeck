@@ -193,18 +193,27 @@ impl ArtifactStore {
         let mut entries = Vec::new();
         for record in indexed {
             let path = Path::new(&record.stored_path);
-            if path.parent() != Some(canonical_case.as_path()) {
-                entries.push(ReconciliationEntry {
-                    name: path
-                        .file_name()
-                        .map(|n| n.to_string_lossy().into_owned())
-                        .unwrap_or_default(),
-                    artifact_id: Some(record.id),
-                    state: ReconciliationState::IndexedTampered,
-                    size: Some(record.size),
-                    sha256: None,
-                });
-                continue;
+            // stored_path is published from the uncanonicalized artifacts
+            // dir, which on macOS traverses /var -> /private/var; resolve it
+            // before comparing so the membership check stays exact without
+            // reporting valid evidence as tampered. A symlinked member
+            // resolves outside the case directory and still fails here, and
+            // an unresolvable path is not tampering: the presence check below
+            // decides between IndexedMissing and UnindexedPublished.
+            if let Ok(resolved) = std::fs::canonicalize(path) {
+                if resolved.parent() != Some(canonical_case.as_path()) {
+                    entries.push(ReconciliationEntry {
+                        name: path
+                            .file_name()
+                            .map(|n| n.to_string_lossy().into_owned())
+                            .unwrap_or_default(),
+                        artifact_id: Some(record.id),
+                        state: ReconciliationState::IndexedTampered,
+                        size: Some(record.size),
+                        sha256: None,
+                    });
+                    continue;
+                }
             }
             if let Some(leaf) = path.file_name() {
                 by_name

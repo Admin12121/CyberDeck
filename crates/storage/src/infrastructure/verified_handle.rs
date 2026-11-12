@@ -101,7 +101,12 @@ fn contained_leaf(record: &ArtifactRecord, root: &Path) -> Result<(PathBuf, Stri
         std::fs::canonicalize(root).map_err(|e| format!("cannot resolve evidence root: {e}"))?;
     let case_dir = canonical_root.join(&record.case_id);
     let stored = Path::new(&record.stored_path);
-    if stored.parent() != Some(case_dir.as_path()) {
+    // stored_path is published from the uncanonicalized artifacts dir, which
+    // on macOS traverses /var -> /private/var; resolve it before comparing so
+    // the membership check stays exact without rejecting valid evidence.
+    let resolved_stored =
+        std::fs::canonicalize(stored).map_err(|e| format!("cannot resolve evidence file: {e}"))?;
+    if resolved_stored.parent() != Some(case_dir.as_path()) {
         return Err("evidence pathname is not a direct case member".into());
     }
     let name = stored
