@@ -6,10 +6,10 @@
  * IconRail pill rail sits in the shell's rail slot (icon-only pills,
  * tooltip = label, active pill, no tab underline), per-mode controls move to
  * the toolbar slot once data exists, and status chips render in the
- * StatusStrip slot. Exactly one of Scope, ARP, Live, DNS, Report renders at a
- * time. Scope is the exemplar: controls live INSIDE the shared ModeCard
- * (state chip header, InfoTip with the honesty wording, panel with the
- * controls); ARP, Live and DNS use the same shared ModeCard when idle and
+ * StatusStrip slot. Exactly one of Scope, ARP, Live, DNS, Spoof, Report
+ * renders at a time. Scope is the exemplar: controls live INSIDE the shared
+ * ModeCard (state chip header, InfoTip with the honesty wording, panel with
+ * the controls); ARP, Live and DNS use the same shared ModeCard when idle and
  * switch to the shell toolbar row (only the still-needed controls) above
  * full-width result tables once data exists. The active-interaction gate
  * cluster lives only in the Scope mode. Long explanations are card InfoTips,
@@ -19,11 +19,15 @@
  * in memory only; the authorization acknowledgment happens through the
  * backend's native confirmation dialogs, not on-screen checkbox chrome; ARP
  * analysis, the DNS monitor and the event timeline are passive reductions
- * over the opened capture or a subscribed Packet Studio session; the lab
- * never transmits.
+ * over the opened capture or a subscribed Packet Studio session. The two
+ * ACTIVE exceptions are explicitly scoped and dialog-gated: the lab ARP sweep
+ * and the Spoof mode (full-duplex ARP cache poisoning) transmit ONLY to
+ * addresses the backend resolved from the saved lab scope, and nothing else
+ * in this view ever transmits.
  */
 import { useEffect, useRef, useState } from "react";
 import { Ban, Crosshair, FileText, FolderOpen, Globe, Network, Radar } from "lucide-react";
+import { Syringe } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import { CheckBox, Chip, Select, TextArea, TextInput, ToolButton } from "@ds/panes";
 import { ErrorStrip, IconRail, IconButton, InfoTip, ModeCard, StatusStrip, WorkspaceShell } from "@ds/compact";
@@ -75,11 +79,18 @@ import {
   type NetworkLabAnalysisWire,
   type NetworkLabScopeWire,
 } from "./network-lab-model";
+import {
+  networkLabSpoofStartV1,
+  networkLabSpoofStopV1,
+  networkLabSpoofStatusV1,
+  type SpoofStartWire,
+  type SpoofStatusWire,
+} from "@lib/ipc";
 
 const SCOPE_TEXT_MAX_CHARS = 8192;
 
 /** Rail modes: one visible at a time (icon-only pill rail navigation). */
-type LabMode = "scope" | "arp" | "live" | "dns" | "report";
+type LabMode = "scope" | "arp" | "live" | "dns" | "spoof" | "report";
 
 export function NetworkLabView() {
   const desktop = isDesktop();
@@ -131,6 +142,17 @@ export function NetworkLabView() {
   const [sweepProgress, setSweepProgress] = useState<LabSweepProgressWire | null>(null);
   const [sweepResults, setSweepResults] = useState<LabArpNeighborWire[] | null>(null);
   const [sweepError, setSweepError] = useState<string | null>(null);
+  // Bettercap-parity ARP spoof (the arc's second ACTIVE command, gated like
+  // the sweep): the backend resolves targets from the saved scope alone, the
+  // native dialog is the authorization, and the view only ever reads honest
+  // status back — it never widens the scope.
+  const [spoofGateway, setSpoofGateway] = useState("");
+  const [spoofTargetCount, setSpoofTargetCount] = useState("1");
+  const [spoofRate, setSpoofRate] = useState("1");
+  const [spoofBusy, setSpoofBusy] = useState(false);
+  const [spoofStart, setSpoofStart] = useState<SpoofStartWire | null>(null);
+  const [spoofStatus, setSpoofStatus] = useState<SpoofStatusWire | null>(null);
+  const [spoofError, setSpoofError] = useState<string | null>(null);
   const currentCase = useRef(wb.caseId);
   currentCase.current = wb.caseId;
   const openSequence = useRef(0);
@@ -181,6 +203,12 @@ export function NetworkLabView() {
     setSweepProgress(null);
     setSweepResults(null);
     setSweepError(null);
+    // The spoof's case-revision ownership is revoked with the case too, so
+    // per-run spoof state never survives into the new revision.
+    setSpoofBusy(false);
+    setSpoofStart(null);
+    setSpoofStatus(null);
+    setSpoofError(null);
   }, [wb.caseId]);
 
   // Live subscription poll: every ~2s while enabled. A self-rescheduling
@@ -260,6 +288,7 @@ export function NetworkLabView() {
     { id: "arp", label: "ARP", icon: Network, badge: arpConflicts },
     { id: "live", label: "Live", icon: Radar, badge: liveGatewayChanges },
     { id: "dns", label: "DNS", icon: Globe, badge: dnsFindings },
+    { id: "spoof", label: "Spoof", icon: Syringe },
     { id: "report", label: "Report", icon: FileText },
   ];
   const dnsState = !dnsResult
@@ -595,6 +624,64 @@ export function NetworkLabView() {
       await networkLabArpSweepStopV1();
     } catch (err) {
       setSweepError(err instanceof Error ? err.message : String(err));
+    }
+  };
+
+  // Spoof lifecycle: start → backend native dialog → poll honest counters
+  // (1s) while starting/spoofing/stopping → stop (never refused) → stopped
+  // state shows the backend-rendered restoration summary.
+  const spoofPhase = spoofStatus?.state ?? "idle";
+  const spoofActive =
+    spoofPhase === "starting" || spoofPhase === "spoofing" || spoofPhase === "stopping";
+  const spoofBlock = spoofBlockReason(scope);
+
+  useEffect(() => {
+    if (!desktop || !spoofActive) return;
+    let cancelled = false;
+    const timer = setInterval(() => {
+      networkLabSpoofStatusV1()
+        .then((wire) => {
+          if (!cancelled) setSpoofStatus(wire);
+        })
+        .catch(() => {
+          // A failed poll keeps the last honest status; the next tick retries.
+        });
+    }, 1000);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, [desktop, spoofPhase, spoofActive]);
+
+  const runSpoofStart = async () => {
+    const rate = parseSpoofRate(spoofRate);
+    const count = parseSpoofTargetCount(spoofTargetCount);
+    if (rate === null || count === null || !spoofGateway) return;
+    setSpoofBusy(true);
+    setSpoofError(null);
+    try {
+      const wire = await networkLabSpoofStartV1(
+        sweepInterface,
+        spoofGateway,
+        count,
+        rate,
+        true,
+        wb.caseId,
+      );
+      setSpoofStart(wire);
+      setSpoofStatus(wire.status);
+    } catch (err) {
+      setSpoofError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setSpoofBusy(false);
+    }
+  };
+
+  const stopSpoof = async () => {
+    try {
+      await networkLabSpoofStopV1();
+    } catch (err) {
+      setSpoofError(err instanceof Error ? err.message : String(err));
     }
   };
 
@@ -966,8 +1053,184 @@ export function NetworkLabView() {
           </ModeCard>
         </section>
       )}
+
+      {mode === "spoof" && (
+        <section aria-label="ARP spoof" className="flex min-h-0 flex-1 flex-col">
+          {spoofError ? <ErrorStrip>{spoofError}</ErrorStrip> : null}
+          <ModeCard
+            title="ARP spoof"
+            icon={Syringe}
+            state={spoofStatus ? spoofPhase : "not running"}
+            stateTone={
+              spoofPhase === "spoofing"
+                ? "orange"
+                : spoofPhase === "stopped"
+                  ? spoofStatus?.last_error
+                    ? "err"
+                    : "ok"
+                  : "muted"
+            }
+            info="Authorized full-duplex ARP cache poisoning against the saved lab scope only — native dialog on start, rate-limited, auto-restores real MACs on stop."
+          >
+            <div className="grid gap-3 md:grid-cols-2">
+              <label className="block text-xs text-fg-dim">
+                <span className="mb-1 block font-medium text-fg-muted">Gateway (from saved scope)</span>
+                <Select
+                  value={spoofGateway}
+                  onChange={setSpoofGateway}
+                  options={[
+                    { value: "", label: "Choose gateway from scope" },
+                    ...spoofGatewayCandidates(scope).map((ip) => ({ value: ip, label: ip })),
+                  ]}
+                  ariaLabel="Gateway IPv4 chosen from the saved lab scope"
+                  className="w-44"
+                />
+              </label>
+              <div className="text-xs text-fg-dim">
+                <span className="mb-1 block font-medium text-fg-muted">Saved scope (read-only)</span>
+                <p className="font-mono text-2xs leading-relaxed text-fg-muted">
+                  {scopeSummary(scope)}
+                </p>
+              </div>
+            </div>
+            <div className="flex flex-wrap items-center gap-3">
+              <Select
+                value={sweepInterface}
+                onChange={setSweepInterface}
+                options={[
+                  { value: "", label: "Choose Ethernet NIC" },
+                  ...sweepInterfaces.map((iface) => ({
+                    value: iface.name,
+                    label: iface.name,
+                  })),
+                ]}
+                ariaLabel="ARP spoof Ethernet interface"
+                className="w-44"
+              />
+              <TextInput
+                value={spoofTargetCount}
+                onChange={(text) => setSpoofTargetCount(text.replace(/[^0-9]/g, "").slice(0, 2))}
+                placeholder="targets"
+                ariaLabel="Targets to poison: first N IPv4 hosts resolved from the saved scope (1-32)"
+                className="h-8 w-24 sm:h-7"
+              />
+              <TextInput
+                value={spoofRate}
+                onChange={(text) => setSpoofRate(text.replace(/[^0-9]/g, "").slice(0, 2))}
+                placeholder="rounds/s"
+                ariaLabel="Spoof rounds per second (1-10, default 1)"
+                className="h-8 w-24 sm:h-7"
+              />
+              {spoofActive ? (
+                <ToolButton
+                  tone="danger"
+                  onClick={() => void stopSpoof()}
+                  title="Stop the authorized spoof: the backend ends poisoning and runs the restoration pass (real MACs re-announced both ways, unknowns reported) before publishing the result"
+                >
+                  Stop spoof
+                </ToolButton>
+              ) : (
+                <ToolButton
+                  tone="primary"
+                  onClick={() => void runSpoofStart()}
+                  disabled={
+                    !desktop ||
+                    !sweepInterface ||
+                    spoofBlock !== null ||
+                    !spoofGateway ||
+                    parseSpoofRate(spoofRate) === null ||
+                    parseSpoofTargetCount(spoofTargetCount) === null ||
+                    spoofBusy
+                  }
+                  title="Linux only: unsolicited ARP replies claim the gateway's IPv4 with this machine's MAC toward the selected scope targets, and each target's IPv4 toward the gateway; a native Yes/No dialog names exactly what will be sent, the backend refuses anything outside the saved lab scope, 1-10 rounds/s, max 32 pairs, 30-minute hard runtime cap, restoration pass on stop"
+                >
+                  {spoofBusy ? "starting…" : "Start spoof"}
+                </ToolButton>
+              )}
+              {spoofBlock ? <Chip tone="muted">{spoofBlock}</Chip> : null}
+            </div>
+            {spoofStart ? (
+              <div className="space-y-2">
+                <p className="font-mono text-2xs text-fg-muted">
+                  gateway {spoofStart.gateway} · {spoofStart.rate_per_sec} round(s)/s · runtime
+                  cap {spoofStart.runtime_cap_minutes} min
+                </p>
+                <p className="font-mono text-2xs text-fg-muted">
+                  targets: {spoofStart.targets.join(", ") || "none resolved"}
+                </p>
+                <div className="max-h-64 overflow-auto rounded-lg border border-line">
+                  <table className="data-table">
+                    <thead>
+                      <tr>
+                        <th className="w-24">Pairs</th>
+                        <th className="w-32">Frames sent</th>
+                        <th className="w-24">Elapsed</th>
+                        <th className="w-32">Restored</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <tr>
+                        <td>{spoofStatus?.pairs ?? 0}</td>
+                        <td>{spoofStatus?.packets_sent ?? 0}</td>
+                        <td>{spoofStatus ? `${(spoofStatus.elapsed_ms / 1000).toFixed(1)} s` : "0.0 s"}</td>
+                        <td>{spoofStatus?.restored_targets ?? 0}</td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+                {spoofPhase === "stopped" ? (
+                  <p className="text-xs text-fg-muted">
+                    {spoofStatus?.restoration_note ?? "restoration summary unavailable"} — the
+                    spoof's own replies also appear as ARP conflicts in the lab timeline
+                  </p>
+                ) : null}
+                {spoofStatus?.last_error ? (
+                  <p className="text-xs text-fg-muted">last error: {spoofStatus.last_error}</p>
+                ) : null}
+              </div>
+            ) : null}
+          </ModeCard>
+        </section>
+      )}
     </WorkspaceShell>
   );
+}
+
+/**
+ * Pinned IPv4 scope entries usable as spoof gateway candidates. CIDR and
+ * IPv6 entries are excluded client-side only as a convenience — the backend
+ * re-validates the gateway against the parsed scope either way.
+ */
+export function spoofGatewayCandidates(scope: NetworkLabScopeWire | null): string[] {
+  if (!scope || !scope.authorized) return [];
+  return [...scope.targets_t1, ...scope.targets_t2]
+    .map((entry) => entry.trim())
+    .filter((entry) => /^\d{1,3}(\.\d{1,3}){3}$/.test(entry));
+}
+
+/** Pure UI gate mirroring the backend's scope + gateway requirements. */
+export function spoofBlockReason(scope: NetworkLabScopeWire | null): string | null {
+  if (!scope || !scope.authorized) {
+    return "No lab scope is set — set Target 1 / Target 2 first";
+  }
+  if (spoofGatewayCandidates(scope).length === 0) {
+    return "The lab scope has no pinned IPv4 entry to use as the gateway — add an IPv4 address entry";
+  }
+  return null;
+}
+
+/** Parse the rounds-per-second input; null = not a usable rate (1-10). */
+export function parseSpoofRate(text: string): number | null {
+  const value = Number(text);
+  if (!Number.isInteger(value) || value < 1 || value > 10) return null;
+  return value;
+}
+
+/** Parse the target-count input; null = not a usable count (1-32). */
+export function parseSpoofTargetCount(text: string): number | null {
+  const value = Number(text);
+  if (!Number.isInteger(value) || value < 1 || value > 32) return null;
+  return value;
 }
 
 /** One-line label per timeline event kind; pure so node tests cover it. */

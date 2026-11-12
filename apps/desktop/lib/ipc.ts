@@ -1318,6 +1318,61 @@ export async function networkLabDnsMonitorV1(): Promise<DnsMonitorWire> {
   return invoke<DnsMonitorWire>("network_lab_dns_monitor_v1", {});
 }
 
+// --- Network Lab ARP spoofing (Bettercap-mode, gated) ------------------------
+// Wire types mirror features/network/ipc/network_lab_spoof.rs.
+
+/** Live spoofer state; phase machine idle→starting→spoofing→stopping→stopped. */
+export interface SpoofStatusWire {
+  state: string;
+  packets_sent: number;
+  pairs: number;
+  elapsed_ms: number;
+  restored_targets: number;
+  restoration_note: string | null;
+  last_error: string | null;
+}
+
+/** Start receipt: the exact gateway/targets the backend authorized. */
+export interface SpoofStartWire {
+  gateway: string;
+  targets: string[];
+  rate_per_sec: number;
+  runtime_cap_minutes: number;
+  status: SpoofStatusWire;
+}
+
+/** Start the gated full-duplex ARP spoof; native dialog happens backend-side. */
+export async function networkLabSpoofStartV1(
+  interfaceName: string,
+  gateway: string,
+  targetCount: number,
+  ratePerSec: number,
+  authorized: boolean,
+  caseId: string,
+): Promise<SpoofStartWire> {
+  if (!inTauri) throw new Error("Lab ARP spoofing requires the desktop runtime");
+  return invoke<SpoofStartWire>("network_lab_spoof_start_v1", {
+    interfaceName,
+    gateway,
+    targetCount,
+    ratePerSec,
+    authorized,
+    caseId,
+  });
+}
+
+/** Stop the spoofer; never refused, always runs the restoration pass. */
+export async function networkLabSpoofStopV1(): Promise<SpoofStatusWire> {
+  if (!inTauri) throw new Error("Lab ARP spoofing requires the desktop runtime");
+  return invoke<SpoofStatusWire>("network_lab_spoof_stop_v1", {});
+}
+
+/** Poll spoofer status (counts, phase, restoration note once ended). */
+export async function networkLabSpoofStatusV1(): Promise<SpoofStatusWire> {
+  if (!inTauri) throw new Error("Lab ARP spoofing requires the desktop runtime");
+  return invoke<SpoofStatusWire>("network_lab_spoof_status_v1", {});
+}
+
 // --- Packet Studio export view -> case ---------------------------------------
 // Wire types mirror features/network/ipc/pcap_export.rs and pcap_wire.rs.
 

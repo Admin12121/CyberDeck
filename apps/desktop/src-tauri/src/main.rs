@@ -44,6 +44,10 @@ fn main() {
         // coordinator-insert (TLS 1.3 keylog slice): per-session keylog state
         .manage(features::network::ipc::pcap::KeylogCtx::default())
         .manage(features::network::ipc::network_lab::NetworkLabCtx::default())
+        // coordinator-insert (Bettercap spoof slice): gated ARP spoofer state
+        .manage(std::sync::Arc::new(
+            features::network::ipc::network_lab_spoof::NetworkLabSpoofCtx::default(),
+        ))
         .manage(features::web::ipc::web::WebCtx {
             proxy_running: std::sync::atomic::AtomicBool::new(false),
             proxy_port: std::sync::atomic::AtomicU16::new(8080),
@@ -144,6 +148,10 @@ fn main() {
             features::network::ipc::network_lab::network_lab_scope_v1,
             features::network::ipc::network_lab::network_lab_events_v1,
             features::network::ipc::network_lab::network_lab_dns_monitor_v1,
+            // coordinator-insert (Bettercap spoof slice): gated ARP spoofer commands
+            features::network::ipc::network_lab_spoof::network_lab_spoof_start_v1,
+            features::network::ipc::network_lab_spoof::network_lab_spoof_stop_v1,
+            features::network::ipc::network_lab_spoof::network_lab_spoof_status_v1,
             features::network::ipc::pcap_export::pcap_export_view_v1,
             features::network::ipc::pcap_export::pcap_export_view_ng_v1,
             features::network::ipc::os_hints_ipc::capture_os_hints_v1,

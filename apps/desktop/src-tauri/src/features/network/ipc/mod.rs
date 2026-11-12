@@ -5,6 +5,7 @@ pub mod netscan;
 pub mod network_lab;
 pub mod network_lab_live;
 pub mod network_lab_report;
+pub mod network_lab_spoof;
 pub mod network_lab_targeting;
 pub mod operation_gate;
 pub mod os_hints_ipc;
