@@ -399,6 +399,7 @@ mod tests {
         assert!(valid_on_link_targets(local, mask, &vec![local; MAX_ARP_TARGETS + 1]).is_err());
     }
     #[test]
+    #[cfg(target_os = "linux")]
     fn invalid_interface_scope_aborts_without_any_raw_transmission() {
         let stopped = AtomicBool::new(true);
         let result =
@@ -407,6 +408,20 @@ mod tests {
             result,
             Err(ArpDiscoveryError {
                 code: ArpErrorCode::Cancelled,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    #[cfg(not(target_os = "linux"))]
+    fn arp_discovery_reports_unsupported_off_linux_regardless_of_scope() {
+        let stopped = AtomicBool::new(false);
+        let result = discover_on_link_arp("lo0", &[], &stopped, &|| true);
+        assert!(matches!(
+            result,
+            Err(ArpDiscoveryError {
+                code: ArpErrorCode::Unsupported,
                 ..
             })
         ));
