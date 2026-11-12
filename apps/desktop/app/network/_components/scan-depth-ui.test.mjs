@@ -208,14 +208,22 @@ test("NSE-lite checks are a bounded registry over probe evidence, never a script
   const canonical = read("../../../lib/ipc.ts");
   const view = read("ScanView.tsx");
   // Fixed registry with a hard cap: no user-supplied scripts, no eval.
-  assert.match(registry, /static REGISTRY: \[CheckDefinition; 13\]/);
-  assert.match(registry, /MAX_CHECKS: usize = 16/);
+  assert.match(registry, /static REGISTRY: \[CheckDefinition; 32\]/);
+  assert.match(registry, /MAX_CHECKS: usize = 40/);
   assert.match(registry, /MAX_FINDINGS: usize = 16/);
   // No dynamic code evaluation primitives anywhere in the registry.
   assert.ok(!/new Function|eval\(|Function\(/.test(registry), "registry must be static");
   // Redis unauthenticated access is medium severity; banner disclosures info.
   assert.match(registry, /redis-unauthenticated-access/);
   assert.match(registry, /http-server-version-disclosure/);
+  // Wave 5 additions stay bounded registry entries with explicit evidence
+  // bases (cleartext capability lists, protocol error payloads, binary
+  // responder shapes gated to their well-known ports).
+  assert.match(registry, /smtp-cleartext-capabilities/);
+  assert.match(registry, /imap-cleartext-capabilities/);
+  assert.match(registry, /postgresql-error-disclosure/);
+  assert.match(registry, /kerberos-kdc-error-response/);
+  assert.match(registry, /rdp-binary-response/);
   // The command reuses the probe machinery and gates identically.
   assert.match(backend, /pub async fn netscan_service_checks_v1/);
   assert.match(backend, /netscan_service_probe_v1\(/);
