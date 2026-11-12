@@ -37,3 +37,6 @@ target-agent-*
 *.md
 
 .agents/
+
+# Generated per-platform engine runtime (build-john.mjs / build-native.mjs --install)
+apps/desktop/src-tauri/resources/engines/
