@@ -604,7 +604,12 @@ mod scope_tests {
 /// ("Authorized TCP scan #12\nHost: ..."). Pure so hydration rules are
 /// testable without a store.
 fn parse_scan_id(details: &str) -> Option<u64> {
-    let rest = details.split("Scan #").nth(1)?;
+    // The producer writes lowercase "scan #{id}" (case_findings.rs); match the
+    // marker ASCII-case-insensitively and take digits of the FIRST marker only.
+    // to_ascii_lowercase preserves byte length, so the index maps 1:1.
+    const MARKER: &str = "scan #";
+    let idx = details.to_ascii_lowercase().find(MARKER)?;
+    let rest = &details[idx + MARKER.len()..];
     let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
     digits.parse::<u64>().ok()
 }
