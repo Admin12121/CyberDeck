@@ -58,7 +58,7 @@ impl ScratchDir {
         opts.write(true).create_new(true);
         #[cfg(unix)]
         {
-            use std::os::unix::OpenOptionsExt;
+            use std::os::unix::fs::OpenOptionsExt;
             opts.mode(0o600);
         }
         let mut handle = opts
@@ -85,7 +85,7 @@ impl ScratchDir {
         opts.write(true).create_new(true);
         #[cfg(unix)]
         {
-            use std::os::unix::OpenOptionsExt;
+            use std::os::unix::fs::OpenOptionsExt;
             opts.mode(0o600);
         }
         let mut handle = opts

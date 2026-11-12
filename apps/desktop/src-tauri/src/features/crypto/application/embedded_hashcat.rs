@@ -322,7 +322,11 @@ const PUBLIC_KATS: &[(u32, &str, &str)] = &[
     // stay CPU-routed through windows_auth::verify_netntlmv1.
     (5600, "password", "NTLMV2TEST::WORKGROUP:1122334455667788:07659A550D5E9D02996DFD95C87EC1D5:0101000000000000006CF6385B74CA01B3610B02D99732DD000000000200120057004F0052004B00470052004F00550050000100200044004100540041002E00420049004E0043002D0053004500430055005200490000000000"),
     (7400, "cyberdeck-kat-2026", "$5$CyberDeckKAT$kGyqS./awuvI5h4KB95ES/o9w3pxHqKFF8aBBpvSGvD"),
-    (1500, "cyberdeck-descrypt-kat", "KySCHrKHoR6zc"),
+    // descrypt uses at most 8 password characters: hashcat SKIPS longer
+    // candidates instead of truncating them, so the fixture word must live
+    // in the format's own domain. "cyberdec" is the 8-character truncation
+    // of the original "cyberdeck-descrypt-kat" — the same effective key.
+    (1500, "cyberdec", "KySCHrKHoR6zc"),
     (132, "cyberdeck", "0x01004b617431118f284707047f3aca6a8aa6efc55a14ebf4bda1"),
     (1731, "cyberdeck", "0x02004b617432e84f1ad231ba962162606f404c602512e47115fe3318ce08ee7cb1bcb1a87794e8c7c903d8aef844b99c020ec88a21bc36f6c2d4f931e92491ddc919d49e70d5"),
     // Batch-3 archive containers: upstream hashcat example hashes
@@ -391,6 +395,15 @@ const PUBLIC_KATS: &[(u32, &str, &str)] = &[
     // pair verifies independently.
     (5500, "hashcat", "::5V4T:ada06359242920a500000000000000000000000000000000:0556d5297b5daa70eaffde82ef99293a3f3bb59b7c9704ea:9c23f6c094853920"),
 ];
+/// Modes whose OpenCL kernels are NOT vendored in the curated runtime
+/// (absent from source-manifest.json and from upstream/OpenCL). Their
+/// fixtures stay in PUBLIC_KATS so the no-GPU CPU-verifier gate keeps
+/// covering them, but they are excluded from the on-device worker sweep: a
+/// mode the present runtime cannot execute must never be advertised as
+/// bundled-ready. Remove an entry here only together with vendoring its
+/// kernel files.
+const CPU_VERIFIED_ONLY_MODES: &[u32] = &[121, 122, 131, 132, 1731, 10600, 29541];
+
 type Readiness = Result<Vec<u32>, String>;
 static READINESS_CACHE: OnceLock<Mutex<HashMap<PathBuf, Readiness>>> = OnceLock::new();
 
@@ -545,7 +558,15 @@ pub fn verified_modes(root: &Path) -> Readiness {
 /// The uncached readiness gate: a full sequential sweep of every public
 /// known-answer test through the exact bundled private worker. This takes
 /// roughly 452s on first execution because every KDF mode compiles and runs
-/// its on-device KAT.
+/// its on-device KAT. Failures get a deferred second pass instead of an
+/// immediate retry: on some runtimes a long stretch of continuous sessions
+/// produces one-off fast session failures (a mode that passes standalone and
+/// in fresh sweeps), and the transient clears after the short idle the
+/// deferred pass provides — the verdict stays about capability, not about
+/// scheduling noise.
+const SWEEP_INTER_SESSION_REST: Duration = Duration::from_secs(2);
+const SWEEP_DEFERRED_RETRY_REST: Duration = Duration::from_secs(30);
+
 fn run_readiness_sweep(root: &Path) -> Readiness {
     runtime_available(root)?;
     if !probe_opencl_loader(root)? {
@@ -553,7 +574,19 @@ fn run_readiness_sweep(root: &Path) -> Readiness {
     }
     let mut verified = Vec::new();
     let mut first_failure = None;
+    let mut deferred: Vec<(u32, &str, &str)> = Vec::new();
     for &(mode, word, digest) in PUBLIC_KATS {
+        if CPU_VERIFIED_ONLY_MODES.contains(&mode) {
+            continue;
+        }
+        match self_test_mode(root, mode, word, digest) {
+            Ok(()) => verified.push(mode),
+            Err(_) => deferred.push((mode, word, digest)),
+        }
+        thread::sleep(SWEEP_INTER_SESSION_REST);
+    }
+    for &(mode, word, digest) in &deferred {
+        thread::sleep(SWEEP_DEFERRED_RETRY_REST);
         match self_test_mode(root, mode, word, digest) {
             Ok(()) => verified.push(mode),
             Err(error) if first_failure.is_none() => first_failure = Some(error),
@@ -1437,12 +1470,22 @@ mod tests {
     #[test]
     fn every_public_kat_mode_passes_its_on_device_worker_kat() {
         // The strongest gate: the readiness sweep runs a real worker KAT for
-        // every PUBLIC_KAT row. If a mode is advertised as bundled, it must
-        // crack its fixture on the present devices — a mode that cannot is a
-        // packaging or portability defect, not something to advertise.
+        // every PUBLIC_KAT row whose kernels are vendored. If a mode is
+        // advertised as on-device ready, it must crack its fixture on the
+        // present devices — a mode that cannot is a packaging or portability
+        // defect, not something to advertise. CPU_VERIFIED_ONLY_MODES are
+        // verified through the independent CPU verifiers instead and must
+        // never appear in the on-device set while their kernels are absent.
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("resources/hashcat");
         let modes = verified_modes(&root).expect("worker readiness run failed");
         for mode in PUBLIC_KATS.iter().map(|row| row.0) {
+            if CPU_VERIFIED_ONLY_MODES.contains(&mode) {
+                assert!(
+                    !modes.contains(&mode),
+                    "mode {mode} lacks vendored kernels and must not be advertised on-device"
+                );
+                continue;
+            }
             assert!(
                 modes.contains(&mode),
                 "bundled mode {mode} failed its on-device worker KAT"
