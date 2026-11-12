@@ -63,8 +63,14 @@ pub(crate) fn original_capture_packet(
 }
 
 #[tauri::command]
-pub fn pcap_open_dialog(app: AppHandle, ctx: State<'_, PcapCtx>) -> Result<PcapOpenWire, String> {
-    pcap_commands::open_dialog(app, ctx)
+pub fn pcap_open_dialog(
+    app: AppHandle,
+    ctx: State<'_, PcapCtx>,
+    keylog: State<'_, KeylogCtx>,
+    session: State<'_, CaseSessionCtx>,
+) -> Result<PcapOpenWire, String> {
+    let store = keylog.capture_store_for(&session);
+    pcap_commands::open_dialog(app, ctx, store.as_ref())
 }
 
 #[tauri::command]
@@ -94,8 +100,14 @@ pub fn pcap_open_case_v1(
     artifact_id: String,
     evidence: State<'_, EvidenceCtx>,
     session: State<'_, CaseSessionCtx>,
+    keylog: State<'_, KeylogCtx>,
 ) -> Result<PcapOpenWire, String> {
-    saved_capture::open(&evidence, &session, &artifact_id)
+    saved_capture::open(
+        &evidence,
+        &session,
+        &artifact_id,
+        keylog.capture_store_for(&session).as_ref(),
+    )
 }
 
 /// Read an original saved frame through Agent5's pinned verified handle.
@@ -107,8 +119,17 @@ pub fn pcap_case_packet_bytes_v1(
     len: i64,
     evidence: State<'_, EvidenceCtx>,
     session: State<'_, CaseSessionCtx>,
+    keylog: State<'_, KeylogCtx>,
 ) -> Result<HexResponse, String> {
-    saved_capture::packet_bytes(&evidence, &session, &artifact_id, index, offset, len)
+    saved_capture::packet_bytes(
+        &evidence,
+        &session,
+        &artifact_id,
+        index,
+        offset,
+        len,
+        keylog.capture_store_for(&session).as_ref(),
+    )
 }
 
 #[tauri::command]
@@ -119,7 +140,9 @@ pub fn pcap_case_follow_stream_v1(
     session: State<'_, CaseSessionCtx>,
     keylog: State<'_, KeylogCtx>,
 ) -> Result<cyberdeck_packet::streams::StreamTranscript, String> {
-    let transcript = saved_capture::follow_stream(&evidence, &session, &artifact_id, &stream_id)?;
+    let store = keylog.capture_store_for(&session);
+    let transcript =
+        saved_capture::follow_stream(&evidence, &session, &artifact_id, &stream_id, store.as_ref())?;
     Ok(apply_session_keylog(&keylog, &session, transcript))
 }
 
@@ -163,6 +186,24 @@ pub struct KeylogCtx {
 }
 
 impl KeylogCtx {
+    /// The session-scoped keylog store, or None when nothing is attached or
+    /// the attachment belongs to a different case session. Shared by the
+    /// transcript post-processing path and the capture-parse guard that
+    /// enables QUIC Handshake/1-RTT decryption at import time.
+    pub(crate) fn capture_store_for(
+        &self,
+        session: &CaseSessionCtx,
+    ) -> Option<cyberdeck_packet::crypto::keylog::KeylogStore> {
+        let guard = self.attachment.lock().ok()?;
+        let attachment = guard.as_ref()?;
+        let current = session.snapshot().ok()?;
+        if current.case_id != attachment.scope.case_id || current.revision != attachment.scope.revision
+        {
+            return None;
+        }
+        Some(attachment.store.clone())
+    }
+
     fn status_for(&self, session: &CaseSessionCtx) -> Result<KeylogStatusWire, String> {
         let guard = self
             .attachment

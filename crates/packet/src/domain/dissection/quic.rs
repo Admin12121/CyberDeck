@@ -1,22 +1,38 @@
 //! Bounded QUIC dissection over UDP/443: long-header version, packet type
-//! and destination connection id — plus, for version-1 Initial packets only,
-//! full payload decryption. The Initial keys derive from the public
-//! Destination Connection ID (RFC 9001 §5.2), so the header protection is
-//! removed (§5.4), the AEAD tag is verified (AES-128-GCM, §5.3) and the
-//! frames (PADDING, PING, ACK, CRYPTO, CONNECTION_CLOSE) are decoded.
-//! CRYPTO bytes surface the TLS handshake they carry through the existing
-//! hello walk, the same shape the TCP path feeds it.
+//! and destination connection id — plus, for version-1 Initial packets,
+//! full payload decryption; and, when per-capture
+//! [`crypto::QuicDecryptor`] state is bound to a user-supplied NSS keylog,
+//! Handshake (long-header) and 1-RTT (short-header) decryption for the
+//! connections whose ClientHello random the keylog covers. The Initial
+//! keys derive from the public Destination Connection ID (RFC 9001 §5.2);
+//! Handshake and 1-RTT keys derive from the keylog's TLS 1.3 traffic
+//! secrets (RFC 9001 §5.1, in `crypto::quic_protection_keys`). Header
+//! protection is removed (§5.4), the AEAD tag is verified (AES-128-GCM,
+//! §5.3) and the frames are decoded — PADDING, PING, ACK, CRYPTO and the
+//! closes everywhere, plus STREAM (bounded reassembly), NEW_CONNECTION_ID
+//! and the PATH frames for 1-RTT. CRYPTO bytes surface the TLS handshake
+//! they carry through the existing hello walk, the same shape the TCP path
+//! feeds it.
 //!
 //! Honesty contracts, enforced everywhere below:
-//! - 0-RTT and Handshake payloads need per-connection traffic secrets a
-//!   passive observer cannot reconstruct; they stay header-only.
-//! - Server Initials derive their keys from the CLIENT's first DCID, which
-//!   is not in the server packet's header, so a standalone server Initial is
-//!   expected to fail verification and fall back honestly.
-//! - Any AEAD failure degrades to the header-only view plus a note; partial
-//!   plaintext is never claimed.
+//! - A packet is decrypted only when its AEAD tag verifies under keys the
+//!   keylog explicitly provides — Initial keys derived from the DCID, or
+//!   Handshake/application keys bound through the connection's own
+//!   ClientHello random. Partial plaintext is never claimed.
+//! - 0-RTT payloads and key-phase-1 (key update) 1-RTT payloads stay
+//!   header-only: no secret for either exists in a keylog binding here.
+//! - A standalone server Initial still fails verification (its keys derive
+//!   from the CLIENT's first DCID, absent from its own header). When bound
+//!   state already saw the client flight, the stored DCID derives the keys
+//!   and the tag decides.
+//! - Without bound state, short headers stay header-only: the DCID length
+//!   the header omits is unrecoverable, and packet numbers cannot be
+//!   reconstructed (RFC 9000 §A) or keyed.
+//! - Any AEAD failure degrades to the header-only view plus a note naming
+//!   the phase attempted; packet-number state moves only on verified tags.
 
 use super::link::color_for;
+use crate::crypto::{QuicDecryptor, QuicKeySlot, QuicSide};
 use crate::{crypto, Dissected, Layer};
 
 const LONG_HEADER_BIT: u8 = 0x80;
@@ -35,6 +51,10 @@ const MAX_ACK_RANGES: usize = 64;
 const MAX_CRYPTO_BYTES: usize = 16_384;
 const AEAD_TAG: usize = 16; // AES-128-GCM tag (RFC 9001 §5.1)
 const SAMPLE_LEN: usize = 16; // header-protection sample (RFC 9001 §5.4.2)
+/// Reassembled STREAM data bound per 1-RTT packet (TLS-record sized).
+const MAX_STREAM_PAYLOAD: usize = 16_384;
+/// NEW_CONNECTION_ID frames registered per decoded 1-RTT packet.
+const MAX_NEW_CIDS_PER_PACKET: usize = 8;
 
 fn layer(label: &str, value: impl ToString) -> Layer {
     Layer {
@@ -107,13 +127,99 @@ fn hex_bounded(bytes: &[u8]) -> String {
     out
 }
 
-/// One Initial packet whose AEAD tag verified: which direction's keys
-/// matched, the decoded packet number, and the plaintext frames.
-struct DecodedInitial {
+/// One packet whose AEAD tag verified: which direction's keys matched, the
+/// decoded packet number, whether per-connection state reconstructed it,
+/// and the plaintext frames.
+struct DecodedPacket {
     client_keys: bool,
     packet_number: u64,
     pn_len: usize,
+    pn_reconstructed: bool,
     plaintext: Vec<u8>,
+}
+
+/// The header-protection-removed first byte and packet-number bytes of a
+/// long header (RFC 9001 §5.4.1: the low 4 bits of the first byte).
+struct UnprotectedLong {
+    first: u8,
+    pn_len: usize,
+    pn_bytes: [u8; 4],
+}
+
+/// RFC 9001 §5.4.1/§5.4.2 long-header protection removal with `hp`: the
+/// 16-byte sample starts 4 bytes after the packet-number field begins (a
+/// fixed offset, read from the bytes as received — coalesced bytes count;
+/// RFC 9000 §17.1 guarantees the space exists). Returns None unless the
+/// unmasked header is a valid long header (form, fixed and reserved bits),
+/// so a wrong key unmask is visible immediately.
+fn unprotect_long_header(
+    payload: &[u8],
+    pn_offset: usize,
+    hp: &[u8; 16],
+) -> Option<UnprotectedLong> {
+    let sample = payload.get(pn_offset + 4..pn_offset + 4 + SAMPLE_LEN)?;
+    let mask = crypto::header_protection_mask(hp, sample)?;
+    let first = payload[0] ^ (mask[0] & 0x0f);
+    if first & LONG_HEADER_BIT == 0 || first & 0x40 == 0 || first & 0x0c != 0 {
+        return None;
+    }
+    let pn_len = usize::from(first & 0x03) + 1;
+    let mut pn_bytes = [0u8; 4];
+    for i in 0..pn_len {
+        pn_bytes[i] = payload[pn_offset + i] ^ mask[1 + i];
+    }
+    Some(UnprotectedLong {
+        first,
+        pn_len,
+        pn_bytes,
+    })
+}
+
+/// The header-protection-removed first byte and packet-number bytes of a
+/// short header. Short headers protect the low 5 bits (RFC 9001 §5.4.1):
+/// packet-number length, key phase and the reserved bits — the spin, fixed
+/// and form bits above them are already readable in the protected byte.
+struct UnprotectedShort {
+    first: u8,
+    pn_len: usize,
+    pn_bytes: [u8; 4],
+}
+
+fn unprotect_short_header(
+    payload: &[u8],
+    pn_offset: usize,
+    hp: &[u8; 16],
+) -> Option<UnprotectedShort> {
+    let sample = payload.get(pn_offset + 4..pn_offset + 4 + SAMPLE_LEN)?;
+    let mask = crypto::header_protection_mask(hp, sample)?;
+    let first = payload[0] ^ (mask[0] & 0x1f);
+    // Form and fixed bits sit above the protected mask, so the raw byte
+    // already carries them; the reserved bits must unmask to zero.
+    if payload[0] & 0xc0 != 0x40 || first & 0x18 != 0 {
+        return None;
+    }
+    let pn_len = usize::from(first & 0x03) + 1;
+    let mut pn_bytes = [0u8; 4];
+    for i in 0..pn_len {
+        pn_bytes[i] = payload[pn_offset + i] ^ mask[1 + i];
+    }
+    Some(UnprotectedShort {
+        first,
+        pn_len,
+        pn_bytes,
+    })
+}
+
+/// Stateless packet-number decode: the on-wire value as-is. The RFC 9000
+/// §A.3 sliding window needs per-connection largest-pn state a stateless
+/// caller does not have; taking the wire value is exact for first-flight
+/// traffic — the only packets a stateless dissector can verify — and never
+/// fabricated.
+fn wire_packet_number(pn_bytes: &[u8; 4], pn_len: usize) -> u64 {
+    pn_bytes
+        .iter()
+        .take(pn_len)
+        .fold(0u64, |pn, byte| (pn << 8) | u64::from(*byte))
 }
 
 /// RFC 9001 §5.2/§5.3/§5.4 decode of one version-1 Initial packet, tried
@@ -126,7 +232,7 @@ fn decode_initial(
     pn_offset: usize,
     declared: usize,
     dcid: &[u8],
-) -> Option<DecodedInitial> {
+) -> Option<DecodedPacket> {
     let secret = crypto::initial_secret(dcid);
     for client_keys in [true, false] {
         let direction = if client_keys {
@@ -135,48 +241,28 @@ fn decode_initial(
             crypto::server_initial_secret(&secret)
         };
         let keys = crypto::protection_keys(&direction);
-        // RFC 9001 §5.4.2: the 16-byte sample starts 4 bytes after the
-        // packet-number field begins — a fixed offset, read from the bytes
-        // as received (coalesced bytes count; RFC 9000 §17.1 guarantees the
-        // space exists).
-        let sample = payload.get(pn_offset + 4..pn_offset + 4 + SAMPLE_LEN)?;
-        let mask = crypto::header_protection_mask(&keys.hp, sample)?;
-        // Long headers protect the low 4 bits of the first byte (RFC 9001
-        // §5.4.1). Bits 0-1 then carry the packet-number length and bits 2-3
-        // are reserved-zero, so a wrong key unmask is visible immediately.
-        let first = payload[0] ^ (mask[0] & 0x0f);
-        if first & LONG_HEADER_BIT == 0 || first & 0x40 == 0 || first & 0x0c != 0 {
+        let Some(unprotected) = unprotect_long_header(payload, pn_offset, &keys.hp) else {
             continue; // these keys did not produce a valid long header
-        }
-        let pn_len = usize::from(first & 0x03) + 1;
+        };
+        let pn_len = unprotected.pn_len;
         if declared < pn_len + AEAD_TAG {
             continue; // cannot hold packet number + tag in this encoding
         }
-        let mut pn_bytes = [0u8; 4];
-        for i in 0..pn_len {
-            pn_bytes[i] = payload[pn_offset + i] ^ mask[1 + i];
-        }
-        // Stateless packet-number reconstruction: with no connection state
-        // the RFC 9000 §A.3 sliding window cannot be applied, so the on-wire
-        // value is taken as-is. That is exact for first-flight traffic — the
-        // only Initials this dissector can verify — and never fabricated.
-        let mut packet_number: u64 = 0;
-        for i in 0..pn_len {
-            packet_number = (packet_number << 8) | u64::from(pn_bytes[i]);
-        }
+        let packet_number = wire_packet_number(&unprotected.pn_bytes, pn_len);
         // nonce = static IV XOR packet number (RFC 9001 §5.3).
         let nonce = crypto::aead_nonce(&keys.iv, packet_number);
         // AAD: the full header with header protection removed — everything
         // before the packet number plus the unmasked packet-number bytes.
         let mut aad = payload[..pn_offset].to_vec();
-        aad[0] = first;
-        aad.extend_from_slice(&pn_bytes[..pn_len]);
+        aad[0] = unprotected.first;
+        aad.extend_from_slice(&unprotected.pn_bytes[..pn_len]);
         let ciphertext = payload.get(pn_offset + pn_len..pn_offset + declared)?;
         if let Some(plaintext) = crypto::gcm::open(&keys.key, &nonce, &aad, ciphertext) {
-            return Some(DecodedInitial {
+            return Some(DecodedPacket {
                 client_keys,
                 packet_number,
                 pn_len,
+                pn_reconstructed: false,
                 plaintext,
             });
         }
@@ -184,16 +270,290 @@ fn decode_initial(
     None
 }
 
-/// Bounded frame walk (RFC 9000 §12.4, §19) over a decrypted Initial
-/// payload. Initials may only carry PADDING, PING, ACK, CRYPTO and
+/// The two long-header payload phases this dissector decrypts.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Phase {
+    Handshake,
+    Application,
+}
+
+fn key_slot(side: QuicSide, phase: Phase) -> QuicKeySlot {
+    match (side, phase) {
+        (QuicSide::Client, Phase::Handshake) => QuicKeySlot::ClientHandshake,
+        (QuicSide::Server, Phase::Handshake) => QuicKeySlot::ServerHandshake,
+        (QuicSide::Client, Phase::Application) => QuicKeySlot::ClientApplication,
+        (QuicSide::Server, Phase::Application) => QuicKeySlot::ServerApplication,
+    }
+}
+
+fn side_name(side: QuicSide) -> &'static str {
+    match side {
+        QuicSide::Client => "client",
+        QuicSide::Server => "server",
+    }
+}
+
+/// RFC 9001 decode of one Handshake packet with the keylog-bound connection
+/// keys. The routed side is tried first and the opposite side second — the
+/// AEAD tag, not the routing, decides. Packet numbers reconstruct through
+/// the per-connection state (RFC 9000 §A.3) and the winning number is
+/// committed only after its tag verified.
+fn decode_handshake_tracked(
+    payload: &[u8],
+    pn_offset: usize,
+    declared: usize,
+    dcid: &[u8],
+    decryptor: &mut QuicDecryptor,
+) -> Result<(DecodedPacket, usize, QuicSide), &'static str> {
+    let Some((slot, routed_side)) = decryptor.route_lookup(dcid) else {
+        return Err(
+            "protected payload — no keylog binding for this connection (Handshake attempted)",
+        );
+    };
+    decryptor.touch(slot);
+    let mut keys_missing = true;
+    for side in [routed_side, routed_side.opposite()] {
+        let slot_key = key_slot(side, Phase::Handshake);
+        let Some(conn) = decryptor.conn_mut(slot) else {
+            continue;
+        };
+        let Some(pk) = (match side {
+            QuicSide::Client => conn.keys.keys.client_handshake.as_ref(),
+            QuicSide::Server => conn.keys.keys.server_handshake.as_ref(),
+        })
+        .cloned() else {
+            continue;
+        };
+        keys_missing = false;
+        let Some(unprotected) = unprotect_long_header(payload, pn_offset, &pk.hp) else {
+            continue;
+        };
+        let pn_len = unprotected.pn_len;
+        if declared < pn_len + AEAD_TAG {
+            continue;
+        }
+        let pn_reconstructed = conn.keys.slot_has_state(slot_key);
+        let truncated = wire_packet_number(&unprotected.pn_bytes, pn_len);
+        let (candidates, candidate_count) = conn.keys.pn_candidates(slot_key, truncated, pn_len);
+        let mut aad = payload[..pn_offset].to_vec();
+        aad[0] = unprotected.first;
+        aad.extend_from_slice(&unprotected.pn_bytes[..pn_len]);
+        let ciphertext = payload
+            .get(pn_offset + pn_len..pn_offset + declared)
+            .ok_or("protected payload — Handshake frame length exceeds capture")?;
+        for &packet_number in candidates[..candidate_count].iter() {
+            let nonce = crypto::aead_nonce(&pk.iv, packet_number);
+            if let Some(plaintext) = crypto::gcm::open(&pk.key, &nonce, &aad, ciphertext) {
+                decryptor
+                    .conn_mut(slot)
+                    .expect("slot borrowed above")
+                    .keys
+                    .commit_pn(slot_key, packet_number);
+                return Ok((
+                    DecodedPacket {
+                        client_keys: side == QuicSide::Client,
+                        packet_number,
+                        pn_len,
+                        pn_reconstructed,
+                        plaintext,
+                    },
+                    slot,
+                    side,
+                ));
+            }
+        }
+    }
+    Err(if keys_missing {
+        "protected payload — no Handshake secrets for this connection in the keylog (Handshake attempted)"
+    } else {
+        "protected payload — Handshake keys did not verify (Handshake attempted)"
+    })
+}
+
+/// RFC 9000 §17.3 short-header decode with bound state: the route supplies
+/// the DCID length the header omits; key phase 0 decrypts with the routed
+/// side's application keys; key phase 1 (key update) is refused honestly —
+/// update secrets are never in a keylog binding. Returns Err with the
+/// untouched layers plus the honest note when one is due (a packet too
+/// truncated to attempt stays silent, mirroring the Initial path).
+fn decode_1rtt_tracked(
+    payload: &[u8],
+    decryptor: &mut QuicDecryptor,
+    layers: Vec<Layer>,
+) -> Result<Dissected, (Vec<Layer>, Option<&'static str>)> {
+    let candidates = decryptor.short_header_routes(&payload[1..]);
+    if candidates.is_empty() {
+        return Err((
+            layers,
+            Some("protected payload — no keylog binding for this DCID (1-RTT attempted)"),
+        ));
+    }
+    let mut key_phase_one = false;
+    let mut sample_possible = false;
+    let mut keys_available = false;
+    let mut keys_tried = false;
+    for (cid, slot, routed_side) in candidates {
+        let pn_offset = 1 + cid.len();
+        // Attempt space: the full 16-byte protection sample after the
+        // packet-number field's start, and a payload within the decode cap.
+        if payload.len() < pn_offset + 4 + SAMPLE_LEN {
+            continue;
+        }
+        let remaining = payload.len() - pn_offset;
+        if remaining > MAX_DECODE_PAYLOAD {
+            continue;
+        }
+        sample_possible = true;
+        for side in [routed_side, routed_side.opposite()] {
+            let slot_key = key_slot(side, Phase::Application);
+            let Some(conn) = decryptor.conn_mut(slot) else {
+                continue;
+            };
+            let Some(pk) = (match side {
+                QuicSide::Client => conn.keys.keys.client_application.as_ref(),
+                QuicSide::Server => conn.keys.keys.server_application.as_ref(),
+            })
+            .cloned() else {
+                continue;
+            };
+            keys_available = true;
+            let Some(unprotected) = unprotect_short_header(payload, pn_offset, &pk.hp) else {
+                continue;
+            };
+            keys_tried = true;
+            // Key phase 1 selects key-update keys (RFC 9000 §17.3); the
+            // keylog carries none, so nothing is attempted and the fact is
+            // reported once no phase-0 candidate verified.
+            if unprotected.first & 0x04 != 0 {
+                key_phase_one = true;
+                continue;
+            }
+            let pn_len = unprotected.pn_len;
+            if remaining < pn_len + AEAD_TAG {
+                continue;
+            }
+            let pn_reconstructed = conn.keys.slot_has_state(slot_key);
+            let truncated = wire_packet_number(&unprotected.pn_bytes, pn_len);
+            let (candidates_pn, candidate_count) =
+                conn.keys.pn_candidates(slot_key, truncated, pn_len);
+            let mut aad = payload[..pn_offset].to_vec();
+            aad[0] = unprotected.first;
+            aad.extend_from_slice(&unprotected.pn_bytes[..pn_len]);
+            let ciphertext = &payload[pn_offset + pn_len..];
+            for &packet_number in candidates_pn[..candidate_count].iter() {
+                let nonce = crypto::aead_nonce(&pk.iv, packet_number);
+                if let Some(plaintext) = crypto::gcm::open(&pk.key, &nonce, &aad, ciphertext) {
+                    decryptor
+                        .conn_mut(slot)
+                        .expect("slot borrowed above")
+                        .keys
+                        .commit_pn(slot_key, packet_number);
+                    let parsed = parse_frames(&plaintext, FrameClass::OneRtt);
+                    // The packet's NEW_CONNECTION_ID frames enrich the
+                    // connection's route set for later packets.
+                    decryptor.bind_new_cids(slot, side, &parsed.new_cids);
+                    let decoded = DecodedPacket {
+                        client_keys: side == QuicSide::Client,
+                        packet_number,
+                        pn_len,
+                        pn_reconstructed,
+                        plaintext,
+                    };
+                    return Ok(emit_1rtt(
+                        layers,
+                        side,
+                        cid.bytes(),
+                        &decoded,
+                        ciphertext.len(),
+                        &parsed,
+                    ));
+                }
+            }
+        }
+    }
+    let note = if !sample_possible {
+        None
+    } else if !keys_available {
+        Some("protected payload — no application secrets for this connection in the keylog (1-RTT attempted)")
+    } else if key_phase_one {
+        Some("protected payload — key phase 1 (key update) secrets are not in the keylog (1-RTT attempted)")
+    } else if keys_tried {
+        Some("protected payload — 1-RTT application keys did not verify (1-RTT attempted)")
+    } else {
+        None
+    };
+    Err((layers, note))
+}
+
+/// The 32-byte ClientHello random of a well-formed reassembled ClientHello
+/// (message type 1, bounded declared length, random at message offset 6).
+/// TLS 1.3 keylogs bind to exactly this random; anything else binds nothing.
+fn client_hello_random(crypto_data: &[u8]) -> Option<[u8; 32]> {
+    if crypto_data.len() < 6 || crypto_data[0] != 0x01 {
+        return None;
+    }
+    let handshake_len = ((crypto_data[1] as usize) << 16)
+        | ((crypto_data[2] as usize) << 8)
+        | crypto_data[3] as usize;
+    if !(34..=MAX_CRYPTO_BYTES).contains(&handshake_len) || crypto_data.len() < 4 + handshake_len {
+        return None;
+    }
+    Some(crypto_data[6..38].try_into().expect("length checked above"))
+}
+
+/// Binding after a verified Initial. A client Initial carries the
+/// ClientHello random the keylog is keyed by (no keylog entry, no
+/// binding); a server Initial's sender SCID becomes the destination the
+/// client's later packets target.
+fn bind_after_initial(
+    decryptor: &mut QuicDecryptor,
+    dcid: &[u8],
+    scid: &[u8],
+    decoded: &DecodedPacket,
+    crypto_data: &[u8],
+) {
+    if decoded.client_keys {
+        if let Some(random) = client_hello_random(crypto_data) {
+            decryptor.bind_client_initial(dcid, scid, random);
+        }
+    } else if let Some((slot, _side)) = decryptor.route_lookup(dcid) {
+        decryptor.bind_scid(slot, scid, QuicSide::Server);
+    }
+}
+
+/// Which frame set one decrypted packet's payload may carry (RFC 9000
+/// §17.2): long-header packets (Initial, Handshake) carry the handshake
+/// frames only, 1-RTT adds STREAM, NEW_CONNECTION_ID and the PATH frames.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum FrameClass {
+    LongHeader,
+    OneRtt,
+}
+
+/// The bounded frame walk's output: frame descriptions, the CRYPTO bytes
+/// reassembled from a contiguous run starting at offset 0 (the handshake
+/// flight shape; empty when the frames are gapped or past the cap), the
+/// STREAM data reassembled for 1-RTT (bounded), the honest stop note and
+/// the NEW_CONNECTION_ID CIDs the decryptor can route on.
+struct ParsedFrames {
+    frames: Vec<String>,
+    crypto: Vec<u8>,
+    stream: Vec<u8>,
+    stream_truncated: bool,
+    stop: Option<String>,
+    new_cids: Vec<Vec<u8>>,
+}
+
+/// Bounded frame walk (RFC 9000 §12.4, §19) over a decrypted payload.
+/// Long-header packets may only carry PADDING, PING, ACK, CRYPTO and
 /// CONNECTION_CLOSE; anything else stops the walk with an honest note.
-/// Returns the frame descriptions, the CRYPTO bytes reassembled from a
-/// contiguous run starting at offset 0 (the handshake flight shape; empty
-/// when the frames are gapped or past the cap) and the stop note, if any.
-fn parse_initial_frames(plaintext: &[u8]) -> (Vec<String>, Vec<u8>, Option<String>) {
+fn parse_frames(plaintext: &[u8], class: FrameClass) -> ParsedFrames {
     let mut frames: Vec<String> = Vec::new();
     let mut crypto_data = Vec::new();
     let mut crypto_contiguous = true;
+    let mut stream_data = Vec::new();
+    let mut stream_truncated = false;
+    let mut new_cids = Vec::new();
     let mut stop = None;
     let mut at = 0usize;
     'walk: while at < plaintext.len() {
@@ -309,6 +669,114 @@ fn parse_initial_frames(plaintext: &[u8]) -> (Vec<String>, Vec<u8>, Option<Strin
                 at = data_end as usize;
                 frames.push(format!("CRYPTO offset={offset}, {length} byte(s)"));
             }
+            0x08..=0x0f if class == FrameClass::OneRtt => {
+                // STREAM (RFC 9000 §19.8): stream id, optional offset and
+                // length, data. The AEAD tag verified this packet, so the
+                // data may be claimed; reassembly is bounded.
+                let flags = plaintext[at];
+                let mut cursor = at + 1;
+                let Some(stream_id) = varint_at(plaintext, &mut cursor) else {
+                    stop = Some("STREAM fields truncated".into());
+                    break 'walk;
+                };
+                let mut offset = 0u64;
+                if flags & 0x04 != 0 {
+                    let Some(value) = varint_at(plaintext, &mut cursor) else {
+                        stop = Some("STREAM fields truncated".into());
+                        break 'walk;
+                    };
+                    offset = value;
+                }
+                let (data_start, data_len) = if flags & 0x02 != 0 {
+                    let Some(length) = varint_at(plaintext, &mut cursor) else {
+                        stop = Some("STREAM fields truncated".into());
+                        break 'walk;
+                    };
+                    if cursor as u64 + length > plaintext.len() as u64 {
+                        stop = Some(format!(
+                            "STREAM data truncated ({length} byte(s) declared, {} captured)",
+                            plaintext.len().saturating_sub(cursor)
+                        ));
+                        break 'walk;
+                    }
+                    (cursor, length as usize)
+                } else {
+                    // A length-less STREAM frame runs to the end of the
+                    // packet (RFC 9000 §19.8: only valid as the last frame).
+                    (cursor, plaintext.len() - cursor)
+                };
+                if stream_data.len() + data_len <= MAX_STREAM_PAYLOAD {
+                    stream_data.extend_from_slice(&plaintext[data_start..data_start + data_len]);
+                } else {
+                    let take = MAX_STREAM_PAYLOAD - stream_data.len();
+                    stream_data.extend_from_slice(&plaintext[data_start..data_start + take]);
+                    stream_truncated = true;
+                }
+                at = data_start + data_len;
+                let fin = if flags & 0x01 != 0 { ", FIN" } else { "" };
+                let offset_part = if flags & 0x04 != 0 {
+                    format!("offset={offset}, ")
+                } else {
+                    String::new()
+                };
+                frames.push(format!(
+                    "STREAM id={stream_id}, {offset_part}{} byte(s){fin}",
+                    data_len
+                ));
+            }
+            0x18 if class == FrameClass::OneRtt => {
+                // NEW_CONNECTION_ID (RFC 9000 §19.15): sequence, retire
+                // prior-to, CID length, CID, stateless reset token. The CID
+                // joins the connection's route set (bounded); the token is
+                // never decoded.
+                let mut cursor = at + 1;
+                let Some(sequence) = varint_at(plaintext, &mut cursor) else {
+                    stop = Some("NEW_CONNECTION_ID fields truncated".into());
+                    break 'walk;
+                };
+                let Some(_retire) = varint_at(plaintext, &mut cursor) else {
+                    stop = Some("NEW_CONNECTION_ID fields truncated".into());
+                    break 'walk;
+                };
+                let Some(cid_len) = plaintext.get(cursor).copied() else {
+                    stop = Some("NEW_CONNECTION_ID truncated".into());
+                    break 'walk;
+                };
+                cursor += 1;
+                if usize::from(cid_len) > MAX_CONNECTION_ID {
+                    stop = Some(format!(
+                        "NEW_CONNECTION_ID CID length {cid_len} exceeds the {MAX_CONNECTION_ID}-byte limit"
+                    ));
+                    break 'walk;
+                }
+                let cid_end = cursor + usize::from(cid_len) + 16; // + reset token
+                if cid_end > plaintext.len() {
+                    stop = Some("NEW_CONNECTION_ID truncated".into());
+                    break 'walk;
+                }
+                if new_cids.len() < MAX_NEW_CIDS_PER_PACKET {
+                    new_cids.push(plaintext[cursor..cursor + usize::from(cid_len)].to_vec());
+                }
+                at = cid_end;
+                frames.push(format!(
+                    "NEW_CONNECTION_ID seq={sequence}, CID {cid_len} byte(s)"
+                ));
+            }
+            0x1a | 0x1b if class == FrameClass::OneRtt => {
+                // PATH_CHALLENGE / PATH_RESPONSE (RFC 9000 §19.17/§19.18):
+                // exactly 8 opaque bytes; contents are never claimed.
+                let name = if plaintext[at] == 0x1a {
+                    "PATH_CHALLENGE"
+                } else {
+                    "PATH_RESPONSE"
+                };
+                if plaintext.len() < at + 9 {
+                    stop = Some(format!("{name} truncated"));
+                    break 'walk;
+                }
+                at += 9;
+                frames.push(format!("{name} 8 byte(s) (not decoded)"));
+            }
             0x1c | 0x1d => {
                 // CONNECTION_CLOSE (RFC 9000 §19.4): error code, the
                 // triggering frame type (QUIC-close form only), reason
@@ -367,36 +835,23 @@ fn parse_initial_frames(plaintext: &[u8]) -> (Vec<String>, Vec<u8>, Option<Strin
     } else {
         Vec::new()
     };
-    (frames, reassembled, stop)
+    if stream_truncated && stop.is_none() {
+        stop = Some(format!(
+            "stream data cap {MAX_STREAM_PAYLOAD} reached; remainder not reassembled"
+        ));
+    }
+    ParsedFrames {
+        frames,
+        crypto: reassembled,
+        stream: stream_data,
+        stream_truncated,
+        stop,
+        new_cids,
+    }
 }
 
-/// Layer emission for a verified Initial: packet number, frame listing,
-/// TLS hello (when the CRYPTO bytes carry one) and the handshake bytes as
-/// the payload for further analysis.
-fn emit_decrypted_initial(
-    mut layers: Vec<Layer>,
-    mut info: String,
-    decoded: DecodedInitial,
-    declared: usize,
-    coalesced: usize,
-) -> Dissected {
-    let side = if decoded.client_keys {
-        "client"
-    } else {
-        "server"
-    };
-    layers.push(layer(
-        "QUIC protected payload",
-        format!("{declared} byte(s), decrypted with {side} Initial keys"),
-    ));
-    layers.push(layer(
-        "packet number",
-        format!(
-            "{} ({}-byte encoding, stateless decode)",
-            decoded.packet_number, decoded.pn_len
-        ),
-    ));
-    let (frames, crypto_data, stop) = parse_initial_frames(&decoded.plaintext);
+/// Bounded frame-listing layers shared by every decrypted emission.
+fn push_frame_layers(layers: &mut Vec<Layer>, frames: &[String], stop: &Option<String>) {
     for describe in frames.iter().take(MAX_LISTED_FRAMES) {
         layers.push(layer("QUIC frame", describe.clone()));
     }
@@ -410,23 +865,61 @@ fn emit_decrypted_initial(
         ));
     }
     if let Some(note) = stop {
-        layers.push(layer("frame decode", note));
+        layers.push(layer("frame decode", note.clone()));
     }
+}
+
+/// Layer emission for a verified long-header packet (Initial or Handshake):
+/// packet number, frame listing, TLS hello (when the CRYPTO bytes carry
+/// one) and the handshake bytes as the payload for further analysis.
+/// Returns the reassembled CRYPTO bytes for the keylog binding step.
+fn emit_decrypted_long_header(
+    mut layers: Vec<Layer>,
+    mut info: String,
+    decoded: &DecodedPacket,
+    phase: &str,
+    declared: usize,
+    coalesced: usize,
+) -> (Dissected, Vec<u8>) {
+    let side = if decoded.client_keys {
+        "client"
+    } else {
+        "server"
+    };
+    layers.push(layer(
+        "QUIC protected payload",
+        format!("{declared} byte(s), decrypted with {side} {phase} keys"),
+    ));
+    layers.push(layer(
+        "packet number",
+        format!(
+            "{} ({}-byte encoding, {})",
+            decoded.packet_number,
+            decoded.pn_len,
+            if decoded.pn_reconstructed {
+                "reconstructed from connection state"
+            } else {
+                "stateless decode"
+            }
+        ),
+    ));
+    let parsed = parse_frames(&decoded.plaintext, FrameClass::LongHeader);
+    push_frame_layers(&mut layers, &parsed.frames, &parsed.stop);
     info.push_str(&format!(
         ", pn {}, {} frame(s)",
         decoded.packet_number,
-        frames.len()
+        parsed.frames.len()
     ));
     // QUIC CRYPTO frames carry raw TLS handshake messages (no record
     // layer). Wrapping them in a synthetic TLS record header lets the
     // existing hello walk — the same one TCP streams feed — decode them.
-    if !crypto_data.is_empty() {
-        match crypto_data.first() {
+    if !parsed.crypto.is_empty() {
+        match parsed.crypto.first() {
             Some(&0x01) | Some(&0x02) => {
-                let mut record = Vec::with_capacity(crypto_data.len() + 5);
+                let mut record = Vec::with_capacity(parsed.crypto.len() + 5);
                 record.extend_from_slice(&[0x16, 0x03, 0x03]);
-                record.extend_from_slice(&(crypto_data.len() as u16).to_be_bytes());
-                record.extend_from_slice(&crypto_data);
+                record.extend_from_slice(&(parsed.crypto.len() as u16).to_be_bytes());
+                record.extend_from_slice(&parsed.crypto);
                 match super::protocol::tls_hello(&record) {
                     Some(hello) => {
                         info.push_str(if hello.client {
@@ -459,15 +952,103 @@ fn emit_decrypted_initial(
     let mut dissected = dissected(layers, info);
     // The decrypted handshake bytes become the transport payload, mirroring
     // what a TCP flow exposes to payload consumers.
-    dissected.payload = crypto_data;
+    dissected.payload = parsed.crypto.clone();
+    (dissected, parsed.crypto)
+}
+
+/// Layer emission for a verified 1-RTT packet: the bound route's DCID, the
+/// application keys that verified, the reconstructed packet number and the
+/// frame listing; verified STREAM data becomes the transport payload.
+fn emit_1rtt(
+    mut layers: Vec<Layer>,
+    side: QuicSide,
+    cid: &[u8],
+    decoded: &DecodedPacket,
+    payload_len: usize,
+    parsed: &ParsedFrames,
+) -> Dissected {
+    layers.push(layer(
+        "QUIC",
+        format!(
+            "short header (1-RTT), key phase 0, decrypted with {} application keys",
+            side_name(side)
+        ),
+    ));
+    layers.push(layer("destination connection id", hex_bounded(cid)));
+    layers.push(layer(
+        "QUIC protected payload",
+        format!(
+            "{payload_len} byte(s), decrypted with {} application keys (1-RTT)",
+            side_name(side)
+        ),
+    ));
+    layers.push(layer(
+        "packet number",
+        format!(
+            "{} ({}-byte encoding, {})",
+            decoded.packet_number,
+            decoded.pn_len,
+            if decoded.pn_reconstructed {
+                "reconstructed from connection state"
+            } else {
+                "stateless decode"
+            }
+        ),
+    ));
+    push_frame_layers(&mut layers, &parsed.frames, &parsed.stop);
+    if !parsed.stream.is_empty() {
+        layers.push(layer(
+            "stream data",
+            format!(
+                "{} byte(s) reassembled{}",
+                parsed.stream.len(),
+                if parsed.stream_truncated {
+                    format!(" (cap {MAX_STREAM_PAYLOAD})")
+                } else {
+                    String::new()
+                }
+            ),
+        ));
+    }
+    let mut info = format!("QUIC short header (1-RTT), DCID {}", hex_bounded(cid));
+    info.push_str(&format!(
+        ", pn {}, {} frame(s)",
+        decoded.packet_number,
+        parsed.frames.len()
+    ));
+    let mut dissected = dissected(layers, info);
+    // Verified STREAM data is the packet's application payload.
+    dissected.payload = parsed.stream.clone();
     dissected
 }
 
 /// Dissect one QUIC datagram (the UDP payload on port 443). The protocol
 /// claim follows the port plus the header-form bit — the same strength as
 /// the TLS claim on TCP/443 — and every structural refusal degrades to an
-/// honest QUIC row instead of a bare truncation note.
-pub fn dissect_quic(payload: &[u8], mut layers: Vec<Layer>) -> Dissected {
+/// honest QUIC row instead of a bare truncation note. When a capture-scoped
+/// [`crypto::QuicDecryptor`] is installed (`crypto::quic_capture_install`)
+/// decryption routes through its bound state; without one the stateless
+/// view below applies verbatim.
+pub fn dissect_quic(payload: &[u8], layers: Vec<Layer>) -> Dissected {
+    crypto::with_quic_capture(|decryptor| dissect_quic_inner(payload, layers, decryptor))
+}
+
+impl QuicDecryptor {
+    /// Dissect one QUIC datagram through this capture's bound state: the
+    /// same honest layers as [`dissect_quic`], with Handshake and 1-RTT
+    /// decryption attempted wherever this state binds the connection.
+    pub fn dissect(&mut self, payload: &[u8], layers: Vec<Layer>) -> Dissected {
+        dissect_quic_inner(payload, layers, Some(self))
+    }
+}
+
+/// The dissection body, parameterized over the optional bound decryptor so
+/// the stateless path stays exactly what it was.
+fn dissect_quic_inner(
+    payload: &[u8],
+    mut layers: Vec<Layer>,
+    mut decryptor: Option<&mut QuicDecryptor>,
+) -> Dissected {
     let first = match payload.first() {
         Some(&first) => first,
         None => {
@@ -485,11 +1066,27 @@ pub fn dissect_quic(payload: &[u8], mut layers: Vec<Layer>) -> Dissected {
         );
     }
     if first & LONG_HEADER_BIT == 0 {
+        // Bound state supplies the DCID length the short header omits; a
+        // verified AEAD tag then decides. Without a matching route the
+        // header-only view below stays exactly as it was.
+        let mut attempted: Option<&'static str> = None;
+        if let Some(decryptor) = decryptor.as_deref_mut() {
+            match decode_1rtt_tracked(payload, decryptor, layers) {
+                Ok(dissected) => return dissected,
+                Err((layers_back, note)) => {
+                    layers = layers_back;
+                    attempted = note;
+                }
+            }
+        }
         layers.push(layer(
             "QUIC",
             "QUIC short header (1-RTT); DCID not recoverable without prior state",
         ));
         layers.push(layer("packet type", "short header (1-RTT)"));
+        if let Some(note) = attempted {
+            layers.push(layer("payload decryption", note));
+        }
         return dissected(
             layers,
             "QUIC short header (1-RTT); DCID not recoverable without prior state".into(),
@@ -606,6 +1203,9 @@ pub fn dissect_quic(payload: &[u8], mut layers: Vec<Layer>) -> Dissected {
         ));
         return dissected(layers, format!("{info}, SCID truncated"));
     }
+    // The SCID is skipped for decoding but kept: a verified packet's SCID
+    // is the destination its opposite side targets (route registration).
+    let scid = &payload[cursor..scid_end];
     cursor = scid_end;
 
     if type_name == "Initial" {
@@ -656,8 +1256,9 @@ pub fn dissect_quic(payload: &[u8], mut layers: Vec<Layer>) -> Dissected {
 
     // Initial, 0-RTT and Handshake end with the frame length varint. For
     // version-1 Initial packets the RFC 9001 §5.2 keys derive from the
-    // public DCID, so decryption is attempted below; 0-RTT and Handshake
-    // need session traffic secrets and stay header-only by design.
+    // public DCID, so decryption is attempted below; 0-RTT stays header-only
+    // (no keylog carries early secrets), and Handshake decrypts only with
+    // bound state's keylog-derived connection keys.
     let Some((declared, width)) = varint(payload, cursor) else {
         layers.push(layer(
             "QUIC protected payload",
@@ -690,7 +1291,33 @@ pub fn dissect_quic(payload: &[u8], mut layers: Vec<Layer>) -> Dissected {
             && declared <= MAX_DECODE_PAYLOAD;
         if attemptable {
             if let Some(decoded) = decode_initial(payload, cursor, declared, dcid) {
-                return emit_decrypted_initial(layers, info, decoded, declared, coalesced);
+                let (dissected, crypto_data) = emit_decrypted_long_header(
+                    layers, info, &decoded, "Initial", declared, coalesced,
+                );
+                if let Some(decryptor) = decryptor.as_deref_mut() {
+                    // The verified ClientHello random binds the keylog's
+                    // traffic secrets to this connection for later packets.
+                    bind_after_initial(decryptor, dcid, scid, &decoded, &crypto_data);
+                }
+                return dissected;
+            }
+            // With bound state a server Initial can finally verify: its
+            // keys derive from the CLIENT's first DCID, which the bound
+            // connection stored when the client Initial decrypted.
+            if let Some(decryptor) = decryptor.as_deref_mut() {
+                if let Some(initial_dcid) = decryptor.initial_dcid_for(dcid) {
+                    if initial_dcid.as_slice() != dcid {
+                        if let Some(decoded) =
+                            decode_initial(payload, cursor, declared, &initial_dcid)
+                        {
+                            let (dissected, crypto_data) = emit_decrypted_long_header(
+                                layers, info, &decoded, "Initial", declared, coalesced,
+                            );
+                            bind_after_initial(decryptor, dcid, scid, &decoded, &crypto_data);
+                            return dissected;
+                        }
+                    }
+                }
             }
             // Verification failed with both directions' keys: fall back to
             // the header-only view plus the honest note. No partial
@@ -699,6 +1326,37 @@ pub fn dissect_quic(payload: &[u8], mut layers: Vec<Layer>) -> Dissected {
                 "payload decryption",
                 "protected payload — Initial keys mismatch",
             ));
+        }
+    }
+    if type_name == "Handshake" {
+        // Bound-state Handshake decryption: the same HP/AEAD machinery as
+        // the Initial path, keyed by the connection's keylog-derived
+        // handshake secrets instead of the public DCID. No route, no
+        // attempt — and every failure keeps the header-only layers verbatim
+        // plus a note naming the phase attempted.
+        if let Some(decryptor) = decryptor {
+            let attemptable = declared >= 1 + AEAD_TAG
+                && payload.len() >= cursor + 4 + SAMPLE_LEN
+                && declared <= MAX_DECODE_PAYLOAD;
+            if attemptable {
+                match decode_handshake_tracked(payload, cursor, declared, dcid, decryptor) {
+                    Ok((decoded, slot, side)) => {
+                        let (dissected, _crypto) = emit_decrypted_long_header(
+                            layers,
+                            info,
+                            &decoded,
+                            "Handshake",
+                            declared,
+                            coalesced,
+                        );
+                        // The sender's SCID is the destination its opposite
+                        // side targets — route it for later 1-RTT packets.
+                        decryptor.bind_scid(slot, scid, side);
+                        return dissected;
+                    }
+                    Err(note) => layers.push(layer("payload decryption", note)),
+                }
+            }
         }
     }
     if coalesced > 0 {
@@ -1076,6 +1734,7 @@ mod tests {
     /// §17.1), exactly as a real sender would pad.
     fn protected_initial(
         dcid: &[u8],
+        scid: &[u8],
         client_keys: bool,
         packet_number: u64,
         frames: &[u8],
@@ -1086,40 +1745,98 @@ mod tests {
         } else {
             crypto::server_initial_secret(&secret)
         };
-        let keys = crypto::protection_keys(&direction);
-        // Header up to (not including) the length varint, to learn the
-        // packet-number offset.
-        let mut packet = vec![0xc1u8]; // Initial, 2-byte packet number
+        protected_long_header(
+            0,
+            dcid,
+            scid,
+            &crypto::protection_keys(&direction),
+            packet_number,
+            2,
+            frames,
+        )
+    }
+
+    /// Encrypt one protected long-header packet with explicit keys — the
+    /// encrypt side of the round-trip harness. `type_bits` selects Initial
+    /// (0, empty token) or Handshake (2).
+    fn protected_long_header(
+        type_bits: u8,
+        dcid: &[u8],
+        scid: &[u8],
+        keys: &crypto::ProtectionKeys,
+        packet_number: u64,
+        pn_len: usize,
+        frames: &[u8],
+    ) -> Vec<u8> {
+        let mut packet = vec![0xc0u8 | (type_bits << 4) | (pn_len as u8 - 1)];
         packet.extend_from_slice(&VERSION_V1.to_be_bytes());
         packet.push(dcid.len() as u8);
         packet.extend_from_slice(dcid);
-        packet.push(0); // SCID length
-        packet.push(0); // token length
-                        // Pad the payload so the header-protection sample — 16 bytes
-                        // starting 4 after the pn field — is inside the datagram.
+        packet.push(scid.len() as u8);
+        packet.extend_from_slice(scid);
+        if type_bits == 0 {
+            packet.push(0); // Initial token: none
+        }
+        let payload = padded_payload(frames, pn_len);
+        let protected_len = pn_len + payload.len() + AEAD_TAG;
+        packet.extend(encode_varint(protected_len as u64));
+        seal_and_protect(&mut packet, keys, packet_number, pn_len, &payload, 0x0f);
+        packet
+    }
+
+    /// Encrypt one 1-RTT short-header packet (RFC 9000 §17.3 shape) with
+    /// explicit application keys; `key_phase` sets the protected K bit.
+    fn protected_1rtt(
+        dcid: &[u8],
+        keys: &crypto::ProtectionKeys,
+        packet_number: u64,
+        pn_len: usize,
+        key_phase: bool,
+        frames: &[u8],
+    ) -> Vec<u8> {
+        let mut packet = vec![0x40u8 | (pn_len as u8 - 1) | if key_phase { 0x04 } else { 0x00 }];
+        packet.extend_from_slice(dcid);
+        let payload = padded_payload(frames, pn_len);
+        seal_and_protect(&mut packet, keys, packet_number, pn_len, &payload, 0x1f);
+        packet
+    }
+
+    /// Pad the frames so the header-protection sample — 16 bytes starting 4
+    /// after the pn field — sits inside the datagram.
+    fn padded_payload(frames: &[u8], pn_len: usize) -> Vec<u8> {
         let mut payload = frames.to_vec();
-        let min_frames = 4 + SAMPLE_LEN - 2 - AEAD_TAG;
+        let min_frames = 4 + SAMPLE_LEN - pn_len - AEAD_TAG;
         while payload.len() < min_frames {
             payload.push(0x00); // PADDING frames
         }
-        let protected_len = 2 + payload.len() + AEAD_TAG;
-        packet.extend(encode_varint(protected_len as u64));
-        let pn_offset = packet.len(); // packet number starts here
-        let pn_bytes = (packet_number as u16).to_be_bytes();
+        payload
+    }
+
+    /// Seal `payload` onto `packet` (the packet-number field starts at the
+    /// current length) and apply header protection over `first_byte_bits`.
+    fn seal_and_protect(
+        packet: &mut Vec<u8>,
+        keys: &crypto::ProtectionKeys,
+        packet_number: u64,
+        pn_len: usize,
+        payload: &[u8],
+        first_byte_bits: u8,
+    ) {
+        let pn_offset = packet.len();
+        let pn_bytes = packet_number.to_be_bytes();
+        let pn_slice = &pn_bytes[8 - pn_len..];
         let nonce = crypto::aead_nonce(&keys.iv, packet_number);
         let mut aad = packet.clone();
-        aad.extend_from_slice(&pn_bytes);
-        let sealed = crypto::gcm::seal(&keys.key, &nonce, &aad, &payload);
-        packet.extend_from_slice(&pn_bytes);
+        aad.extend_from_slice(pn_slice);
+        let sealed = crypto::gcm::seal(&keys.key, &nonce, &aad, payload);
+        packet.extend_from_slice(pn_slice);
         packet.extend_from_slice(&sealed);
-        // Apply header protection (RFC 9001 §5.4.1).
         let mask = crypto::header_protection_mask(&keys.hp, &packet[pn_offset + 4..pn_offset + 20])
             .expect("16-byte sample");
-        packet[0] ^= mask[0] & 0x0f;
-        for i in 0..2 {
+        packet[0] ^= mask[0] & first_byte_bits;
+        for i in 0..pn_len {
             packet[pn_offset + i] ^= mask[1 + i];
         }
-        packet
     }
 
     #[test]
@@ -1130,7 +1847,7 @@ mod tests {
         let dcid = [0x83u8, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08];
         let mut frames = vec![0x01u8]; // PING
         frames.extend([0x02, 0x00, 0x00, 0x01, 0x01]); // ACK largest=0, 1 range
-        let packet = protected_initial(&dcid, false, 1, &frames);
+        let packet = protected_initial(&dcid, &[], false, 1, &frames);
         let d = dissect_quic(&packet, Vec::new());
         assert!(d.layers.iter().any(|l| l.label == "QUIC protected payload"
             && l.value.contains("decrypted with server Initial keys")));
@@ -1157,7 +1874,7 @@ mod tests {
         // 300 PING frames trip the frame cap at 256 parsed; only 12 are
         // listed and the remainder is summarized.
         let frames = vec![0x01u8; 300];
-        let packet = protected_initial(&dcid, true, 0, &frames);
+        let packet = protected_initial(&dcid, &[], true, 0, &frames);
         let d = dissect_quic(&packet, Vec::new());
         let listed: Vec<&Layer> = d
             .layers
@@ -1175,7 +1892,7 @@ mod tests {
         // naming the type.
         let mut frames = vec![0x01u8, 0x08, 0x00];
         frames.extend([0x00; 24]);
-        let packet = protected_initial(&dcid, true, 0, &frames);
+        let packet = protected_initial(&dcid, &[], true, 0, &frames);
         let d = dissect_quic(&packet, Vec::new());
         assert!(d
             .layers
@@ -1201,7 +1918,7 @@ mod tests {
             frames.push(0x00); // gap = 0
             frames.push(0x00); // range = 0
         }
-        let packet = protected_initial(&dcid, true, 0, &frames);
+        let packet = protected_initial(&dcid, &[], true, 0, &frames);
         let d = dissect_quic(&packet, Vec::new());
         assert!(d
             .layers
@@ -1210,7 +1927,7 @@ mod tests {
 
         // A truncated ACK (declared ranges missing) stops with a note.
         let frames = vec![0x02u8, 0x05, 0x00, 0x05, 0x01]; // 5 ranges, none present
-        let packet = protected_initial(&dcid, true, 0, &frames);
+        let packet = protected_initial(&dcid, &[], true, 0, &frames);
         let d = dissect_quic(&packet, Vec::new());
         assert!(d
             .layers
@@ -1230,7 +1947,7 @@ mod tests {
         frames.extend([0x40, 0x0a, 0x04]); // offset 10, length 4 — gap
         frames.extend([0x00; 4]);
         frames.extend([0x00; 16]); // PADDING so the sample region exists
-        let packet = protected_initial(&dcid, true, 0, &frames);
+        let packet = protected_initial(&dcid, &[], true, 0, &frames);
         let d = dissect_quic(&packet, Vec::new());
         assert!(d
             .layers
@@ -1249,7 +1966,7 @@ mod tests {
         let mut frames = vec![0x06u8, 0x00]; // CRYPTO offset 0
         frames.extend(encode_varint(17_000));
         frames.extend([0x41u8; 17_000]);
-        let packet = protected_initial(&dcid, true, 0, &frames);
+        let packet = protected_initial(&dcid, &[], true, 0, &frames);
         let d = dissect_quic(&packet, Vec::new());
         assert!(d
             .layers
@@ -1263,7 +1980,7 @@ mod tests {
         let mut frames = vec![0x06u8, 0x00, 0x04]; // CRYPTO offset 0, 4 bytes
         frames.extend([0x41u8; 4]);
         frames.extend([0x00u8; 16]); // PADDING for the sample region
-        let packet = protected_initial(&dcid, true, 0, &frames);
+        let packet = protected_initial(&dcid, &[], true, 0, &frames);
         let d = dissect_quic(&packet, Vec::new());
         assert!(d
             .layers
@@ -1282,7 +1999,7 @@ mod tests {
         let dcid = [0x44u8; 8];
         let mut frames = vec![0x01u8]; // PING
         frames.extend([0x1c, 0x03, 0x01, 0x00]); // QUIC close, code 3, frame 1, no reason
-        let packet = protected_initial(&dcid, true, 0, &frames);
+        let packet = protected_initial(&dcid, &[], true, 0, &frames);
         let d = dissect_quic(&packet, Vec::new());
         assert!(d
             .layers
@@ -1296,7 +2013,7 @@ mod tests {
         // Application-close with a reason length is summarized by length.
         let mut frames = vec![0x1du8, 0x00, 0x03];
         frames.extend(b"abc");
-        let packet = protected_initial(&dcid, true, 0, &frames);
+        let packet = protected_initial(&dcid, &[], true, 0, &frames);
         let d = dissect_quic(&packet, Vec::new());
         assert!(d.layers.iter().any(|l| l.label == "QUIC frame"
             && l.value == "APPLICATION_CLOSE code=0x0, reason 3 byte(s)"));
@@ -1333,5 +2050,543 @@ mod tests {
                 assert!(d.payload.is_empty());
             }
         }
+    }
+
+    // ------------------------------------------- keylog-bound decryption ----
+    //
+    // The RFC 9001 A.2/A.3 self-consistency approach, extended: a synthetic
+    // connection derives its Initial keys from a chosen DCID, carries a
+    // ClientHello with a known random in its CRYPTO frame, and continues
+    // with Handshake/1-RTT packets sealed under per-label traffic secrets
+    // written into a synthetic keylog — the same encrypt-then-dissect
+    // round trip through the crate's own crypto path.
+
+    const CH_RANDOM_HEX: &str = "b3b1b0aa97b0fdfbbfb17e26bfd11b7fb2b252db4f6dfe95f4a25a77ba01d988";
+
+    /// An EncryptedExtensions-shaped handshake message (never a hello, so
+    /// the TLS layer must refuse it honestly).
+    const ENCRYPTED_EXTENSIONS: &[u8] = &[0x08, 0x00, 0x00, 0x02, 0x00, 0x00];
+
+    /// A deterministic per-label traffic secret (FNV-1a over the label), so
+    /// distinct labels never collide by construction.
+    fn secret_for(label: &str) -> [u8; 32] {
+        let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+        for byte in label.bytes() {
+            hash ^= u64::from(byte);
+            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+        hex_bytes(&format!("{hash:064x}")).try_into().unwrap()
+    }
+
+    /// A keylog covering `random_hex` with all four traffic secrets.
+    fn keylog_for(random_hex: &str) -> crypto::keylog::KeylogStore {
+        let mut text = String::new();
+        for label in [
+            "CLIENT_HANDSHAKE_TRAFFIC_SECRET",
+            "SERVER_HANDSHAKE_TRAFFIC_SECRET",
+            "CLIENT_TRAFFIC_SECRET_0",
+            "SERVER_TRAFFIC_SECRET_0",
+        ] {
+            text.push_str(&format!(
+                "{label} {random_hex} {}\n",
+                hex(&secret_for(label))
+            ));
+        }
+        crypto::keylog::KeylogStore::parse(&text).unwrap()
+    }
+
+    /// A minimal well-framed ClientHello message carrying `random_hex` at
+    /// message offset 6 — exactly the shape the binding step reads, and
+    /// complete enough for the hello walk to decode (empty session id, one
+    /// cipher suite, the null compression method, no extensions).
+    fn client_hello(random_hex: &str) -> Vec<u8> {
+        let mut hello = vec![0x03, 0x03];
+        hello.extend(hex_bytes(random_hex));
+        hello.extend([0x00, 0x00, 0x02, 0x13, 0x01, 0x01, 0x00, 0x00, 0x00]);
+        let mut message = vec![0x01, 0x00, 0x00, hello.len() as u8];
+        message.extend(hello);
+        message
+    }
+
+    /// A CRYPTO frame at offset 0 carrying one handshake message.
+    fn crypto_frame(message: &[u8]) -> Vec<u8> {
+        let mut frame = vec![0x06u8, 0x00];
+        frame.extend(encode_varint(message.len() as u64));
+        frame.extend_from_slice(message);
+        frame
+    }
+
+    /// Bind one synthetic connection: feed the client Initial (decrypts and
+    /// registers the keylog's secrets for its ClientHello random) and the
+    /// server Handshake (registers the server's SCID route). Returns the
+    /// connection's CIDs for the later packets.
+    fn bind_connection(dec: &mut QuicDecryptor) -> ([u8; 8], [u8; 8], [u8; 4]) {
+        let dcid = [0x83u8, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08];
+        let client_scid = [0xf0u8, 0x67, 0xa5, 0x50, 0x2a, 0x42, 0x62, 0xb5];
+        let server_scid = [0x5au8, 0x5b, 0x5c, 0x5d];
+        let initial = protected_initial(
+            &dcid,
+            &client_scid,
+            true,
+            0,
+            &crypto_frame(&client_hello(CH_RANDOM_HEX)),
+        );
+        let d = dec.dissect(&initial, Vec::new());
+        assert!(d.layers.iter().any(
+            |l| l.label == "QUIC protected payload" && l.value.contains("client Initial keys")
+        ));
+        assert!(d.info.contains("ClientHello"), "info: {}", d.info);
+        let server_hs = crypto::protection_keys(&secret_for("SERVER_HANDSHAKE_TRAFFIC_SECRET"));
+        let handshake = protected_long_header(
+            2,
+            &client_scid,
+            &server_scid,
+            &server_hs,
+            0,
+            2,
+            &crypto_frame(ENCRYPTED_EXTENSIONS),
+        );
+        let d = dec.dissect(&handshake, Vec::new());
+        assert!(d
+            .layers
+            .iter()
+            .any(|l| l.label == "QUIC protected payload"
+                && l.value.contains("server Handshake keys")));
+        // The connection's first Handshake packet decodes statelessly.
+        assert!(d
+            .layers
+            .iter()
+            .any(|l| l.label == "packet number"
+                && l.value == "0 (2-byte encoding, stateless decode)"));
+        (dcid, client_scid, server_scid)
+    }
+
+    #[test]
+    fn handshake_round_trips_through_bound_state() {
+        let mut dec = QuicDecryptor::new(keylog_for(CH_RANDOM_HEX));
+        let (_dcid, client_scid, server_scid) = bind_connection(&mut dec);
+        let server_hs = crypto::protection_keys(&secret_for("SERVER_HANDSHAKE_TRAFFIC_SECRET"));
+        let packet = protected_long_header(
+            2,
+            &client_scid,
+            &server_scid,
+            &server_hs,
+            0,
+            2,
+            &crypto_frame(ENCRYPTED_EXTENSIONS),
+        );
+        let d = dec.dissect(&packet, Vec::new());
+        assert!(d.layers.iter().any(|l| l.label == "QUIC protected payload"
+            && l.value.ends_with("decrypted with server Handshake keys")));
+        // The slot has state now, so this packet number reconstructs.
+        assert!(d.layers.iter().any(|l| l.label == "packet number"
+            && l.value == "0 (2-byte encoding, reconstructed from connection state)"));
+        assert!(d
+            .layers
+            .iter()
+            .any(|l| l.label == "QUIC frame" && l.value == "CRYPTO offset=0, 6 byte(s)"));
+        // EncryptedExtensions are not a hello: the TLS layer refuses
+        // honestly instead of claiming anything.
+        assert!(d
+            .layers
+            .iter()
+            .any(|l| l.label == "TLS" && l.value.contains("not decoded")));
+        assert_eq!(d.payload, ENCRYPTED_EXTENSIONS.to_vec());
+    }
+
+    #[test]
+    fn one_rtt_round_trips_stream_data_and_reconstructs_packet_numbers() {
+        let mut dec = QuicDecryptor::new(keylog_for(CH_RANDOM_HEX));
+        let (_dcid, client_scid, server_scid) = bind_connection(&mut dec);
+        let client_app = crypto::protection_keys(&secret_for("CLIENT_TRAFFIC_SECRET_0"));
+        let mut frames = vec![0x0au8, 0x00, 0x05]; // STREAM id=0, length present
+        frames.extend_from_slice(b"hello");
+        frames.extend([0x02, 0x00, 0x00, 0x01, 0x01]); // ACK largest=0, 1 range
+        let packet = protected_1rtt(&server_scid, &client_app, 2, 1, false, &frames);
+        let d = dec.dissect(&packet, Vec::new());
+        assert!(d.layers.iter().any(|l| l.label == "QUIC protected payload"
+            && l.value
+                .ends_with("decrypted with client application keys (1-RTT)")));
+        assert!(d
+            .layers
+            .iter()
+            .any(|l| l.label == "packet number"
+                && l.value == "2 (1-byte encoding, stateless decode)"));
+        assert!(d
+            .layers
+            .iter()
+            .any(|l| l.label == "QUIC frame" && l.value == "STREAM id=0, 5 byte(s)"));
+        assert!(d
+            .layers
+            .iter()
+            .any(|l| l.label == "QUIC frame" && l.value == "ACK largest=0, 1 range(s)"));
+        assert_eq!(d.payload, b"hello".to_vec());
+        assert!(d
+            .info
+            .contains("QUIC short header (1-RTT), DCID 5a5b5c5d, pn 2, 2 frame(s)"));
+
+        // The large packet-number jump from the slice scope: pn 0-committed
+        // state, then pn 1300 in a 2-byte encoding, then pn 1301 in a 1-byte
+        // encoding — RFC 9000 §A window reconstruction with verified tags.
+        let packet = protected_1rtt(&server_scid, &client_app, 1300, 2, false, &[0x01, 0x00]);
+        let d = dec.dissect(&packet, Vec::new());
+        assert!(d.layers.iter().any(|l| l.label == "packet number"
+            && l.value == "1300 (2-byte encoding, reconstructed from connection state)"));
+        let packet = protected_1rtt(
+            &server_scid,
+            &client_app,
+            1301,
+            1,
+            false,
+            &[0x01, 0x00, 0x00],
+        );
+        let d = dec.dissect(&packet, Vec::new());
+        assert!(d.layers.iter().any(|l| l.label == "packet number"
+            && l.value == "1301 (1-byte encoding, reconstructed from connection state)"));
+
+        // Server→client 1-RTT with NEW_CONNECTION_ID: the announced CID
+        // routes later client packets on the same connection.
+        let server_app = crypto::protection_keys(&secret_for("SERVER_TRAFFIC_SECRET_0"));
+        let mut ncid = vec![0x18u8, 0x01, 0x00, 0x04]; // seq=1, retire=0, CID len 4
+        ncid.extend([0xaau8, 0xbb, 0xcc, 0xdd]);
+        ncid.extend([0u8; 16]); // stateless reset token, never decoded
+        let packet = protected_1rtt(&client_scid, &server_app, 0, 1, false, &ncid);
+        let d = dec.dissect(&packet, Vec::new());
+        assert!(d.layers.iter().any(|l| l.label == "QUIC protected payload"
+            && l.value
+                .ends_with("decrypted with server application keys (1-RTT)")));
+        assert!(d.layers.iter().any(
+            |l| l.label == "QUIC frame" && l.value == "NEW_CONNECTION_ID seq=1, CID 4 byte(s)"
+        ));
+        let packet = protected_1rtt(
+            &[0xaau8, 0xbb, 0xcc, 0xdd],
+            &client_app,
+            1302,
+            1,
+            false,
+            &[0x01, 0x00, 0x00],
+        );
+        let d = dec.dissect(&packet, Vec::new());
+        assert!(d.layers.iter().any(|l| l.label == "QUIC protected payload"
+            && l.value
+                .ends_with("decrypted with client application keys (1-RTT)")));
+        assert!(d
+            .layers
+            .iter()
+            .any(|l| l.label == "destination connection id" && l.value == "aabbccdd"));
+    }
+
+    #[test]
+    fn server_initial_verifies_through_bound_state_and_chains_forward() {
+        // A standalone server Initial cannot verify (its keys derive from
+        // the CLIENT's first DCID, absent from its own header). With the
+        // client flight bound, the stored DCID derives the keys — and the
+        // verified server SCID then routes the client's own Handshake.
+        let dcid = [0x83u8, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08];
+        let client_scid = [0xf0u8, 0x67, 0xa5, 0x50, 0x2a, 0x42, 0x62, 0xb5];
+        let server_scid = [0x5au8, 0x5b, 0x5c, 0x5d];
+        let mut dec = QuicDecryptor::new(keylog_for(CH_RANDOM_HEX));
+        let initial = protected_initial(
+            &dcid,
+            &client_scid,
+            true,
+            0,
+            &crypto_frame(&client_hello(CH_RANDOM_HEX)),
+        );
+        assert!(dec
+            .dissect(&initial, Vec::new())
+            .info
+            .contains("ClientHello"));
+        let server_hello = [0x02u8, 0x00, 0x00, 0x04, 0x03, 0x03, 0xaa, 0xbb];
+        let server_initial_keys = crypto::protection_keys(&crypto::server_initial_secret(
+            &crypto::initial_secret(&dcid),
+        ));
+        let packet = protected_long_header(
+            0,
+            &client_scid,
+            &server_scid,
+            &server_initial_keys,
+            1,
+            2,
+            &crypto_frame(&server_hello),
+        );
+        // Stateless first: the server Initial fails honestly on its own.
+        let d = dissect_quic(&packet.clone(), Vec::new());
+        assert!(d
+            .layers
+            .iter()
+            .any(|l| l.value == "protected payload — Initial keys mismatch"));
+        // Bound: the stored original DCID derives the server keys.
+        let d = dec.dissect(&packet, Vec::new());
+        assert!(d.layers.iter().any(|l| l.label == "QUIC protected payload"
+            && l.value.contains("decrypted with server Initial keys")));
+        // The verified server SCID now routes the client→server flight.
+        let client_hs = crypto::protection_keys(&secret_for("CLIENT_HANDSHAKE_TRAFFIC_SECRET"));
+        let handshake = protected_long_header(
+            2,
+            &server_scid,
+            &client_scid,
+            &client_hs,
+            0,
+            2,
+            &crypto_frame(ENCRYPTED_EXTENSIONS),
+        );
+        let d = dec.dissect(&handshake, Vec::new());
+        assert!(d.layers.iter().any(|l| l.label == "QUIC protected payload"
+            && l.value.contains("decrypted with client Handshake keys")));
+    }
+
+    #[test]
+    fn one_rtt_without_binding_stays_header_only_with_the_verbatim_view() {
+        let mut dec = QuicDecryptor::new(keylog_for(CH_RANDOM_HEX));
+        // No Initial fed: no route, so the DCID length is unrecoverable and
+        // the stateless view applies verbatim — plus the honest note.
+        let client_app = crypto::protection_keys(&secret_for("CLIENT_TRAFFIC_SECRET_0"));
+        let packet = protected_1rtt(
+            &[0x11u8, 0x22],
+            &client_app,
+            0,
+            1,
+            false,
+            &[0x01, 0x00, 0x00],
+        );
+        let d = dec.dissect(&packet, Vec::new());
+        assert!(d.layers.iter().any(|l| l.label == "QUIC"
+            && l.value == "QUIC short header (1-RTT); DCID not recoverable without prior state"));
+        assert!(d.layers.iter().any(|l| l.label == "payload decryption"
+            && l.value == "protected payload — no keylog binding for this DCID (1-RTT attempted)"));
+        assert!(d.layers.iter().all(|l| l.label != "QUIC frame"));
+        assert!(d.payload.is_empty());
+    }
+
+    #[test]
+    fn wrong_keylog_random_binds_nothing_and_handshake_stays_ciphertext() {
+        // The keylog covers a different connection: the A2 client Initial
+        // still decrypts (its keys derive from the public DCID) but binds
+        // nothing, so the Handshake flight stays header-only.
+        let mut dec = QuicDecryptor::new(keylog_for(&format!("{:064x}", 0xfeed_u128)));
+        let d = dec.dissect(&hex_bytes(RFC9001_A2_CLIENT_INITIAL), Vec::new());
+        assert!(d.layers.iter().any(
+            |l| l.label == "QUIC protected payload" && l.value.contains("client Initial keys")
+        ));
+        let server_hs = crypto::protection_keys(&secret_for("SERVER_HANDSHAKE_TRAFFIC_SECRET"));
+        let packet = protected_long_header(
+            2,
+            &[0xf0u8, 0x67, 0xa5, 0x50, 0x2a, 0x42, 0x62, 0xb5],
+            &[0x5au8, 0x5b, 0x5c, 0x5d],
+            &server_hs,
+            0,
+            2,
+            &crypto_frame(ENCRYPTED_EXTENSIONS),
+        );
+        let d = dec.dissect(&packet, Vec::new());
+        assert!(d.layers.iter().any(|l| l.label == "payload decryption"
+            && l.value
+                .contains("no keylog binding for this connection (Handshake attempted)")));
+        assert!(d
+            .layers
+            .iter()
+            .any(|l| l.label == "QUIC protected payload" && l.value.ends_with("keys unavailable")));
+        assert!(d.layers.iter().all(|l| l.label != "QUIC frame"));
+        assert!(d.payload.is_empty());
+    }
+
+    #[test]
+    fn corrupted_1rtt_tag_and_key_phase_one_report_honestly() {
+        let mut dec = QuicDecryptor::new(keylog_for(CH_RANDOM_HEX));
+        let (_dcid, _client_scid, server_scid) = bind_connection(&mut dec);
+        let client_app = crypto::protection_keys(&secret_for("CLIENT_TRAFFIC_SECRET_0"));
+        let packet = protected_1rtt(
+            &server_scid,
+            &client_app,
+            0,
+            1,
+            false,
+            &[0x0au8, 0x00, 0x02, 0x41, 0x42], // STREAM "AB"
+        );
+        let mut corrupted = packet.clone();
+        let last = corrupted.len() - 1;
+        corrupted[last] ^= 0xff; // break the AEAD tag
+        let d = dec.dissect(&corrupted, Vec::new());
+        assert!(d.layers.iter().any(|l| l.label == "payload decryption"
+            && l.value
+                == "protected payload — 1-RTT application keys did not verify (1-RTT attempted)"));
+        assert!(d.layers.iter().all(|l| l.label != "QUIC frame"));
+        assert!(d.payload.is_empty());
+
+        // Key phase 1 selects key-update keys, which no keylog carries:
+        // refused without any plaintext claim.
+        let packet = protected_1rtt(
+            &server_scid,
+            &client_app,
+            1,
+            1,
+            true,
+            &[0x0au8, 0x00, 0x02, 0x41, 0x42],
+        );
+        let d = dec.dissect(&packet, Vec::new());
+        assert!(d.layers.iter().any(|l| l.label == "payload decryption"
+            && l.value
+                == "protected payload — key phase 1 (key update) secrets are not in the keylog (1-RTT attempted)"));
+        assert!(d.payload.is_empty());
+    }
+
+    #[test]
+    fn path_frames_are_named_but_never_decoded() {
+        let mut dec = QuicDecryptor::new(keylog_for(CH_RANDOM_HEX));
+        let (_dcid, _client_scid, server_scid) = bind_connection(&mut dec);
+        let client_app = crypto::protection_keys(&secret_for("CLIENT_TRAFFIC_SECRET_0"));
+        let mut frames = vec![0x1au8]; // PATH_CHALLENGE
+        frames.extend([0x42u8; 8]);
+        frames.push(0x01); // PING
+        let packet = protected_1rtt(&server_scid, &client_app, 0, 1, false, &frames);
+        let d = dec.dissect(&packet, Vec::new());
+        assert!(d.layers.iter().any(
+            |l| l.label == "QUIC frame" && l.value == "PATH_CHALLENGE 8 byte(s) (not decoded)"
+        ));
+        assert!(d
+            .layers
+            .iter()
+            .any(|l| l.label == "QUIC frame" && l.value == "PING"));
+        assert!(d.payload.is_empty());
+    }
+
+    #[test]
+    fn stateless_dissect_quic_stays_header_only_without_capture_state() {
+        // No decryptor installed: the stateless entry behaves exactly as
+        // before this slice — no notes, no claims.
+        let server_hs = crypto::protection_keys(&secret_for("SERVER_HANDSHAKE_TRAFFIC_SECRET"));
+        let packet = protected_long_header(
+            2,
+            &[0xf0u8, 0x67, 0xa5, 0x50, 0x2a, 0x42, 0x62, 0xb5],
+            &[0x5au8, 0x5b, 0x5c, 0x5d],
+            &server_hs,
+            0,
+            2,
+            &crypto_frame(ENCRYPTED_EXTENSIONS),
+        );
+        let d = dissect_quic(&packet, Vec::new());
+        assert!(d
+            .layers
+            .iter()
+            .any(|l| l.label == "QUIC protected payload" && l.value.ends_with("keys unavailable")));
+        assert!(d.layers.iter().all(|l| l.label != "payload decryption"));
+        assert!(d.payload.is_empty());
+        let client_app = crypto::protection_keys(&secret_for("CLIENT_TRAFFIC_SECRET_0"));
+        let short = protected_1rtt(
+            &[0x11u8, 0x22],
+            &client_app,
+            0,
+            1,
+            false,
+            &[0x01, 0x00, 0x00],
+        );
+        let d = dissect_quic(&short, Vec::new());
+        assert!(d.layers.iter().any(|l| l.label == "QUIC"
+            && l.value == "QUIC short header (1-RTT); DCID not recoverable without prior state"));
+        assert!(d.layers.iter().all(|l| l.label != "payload decryption"));
+    }
+
+    #[test]
+    fn capture_scoped_install_decrypts_and_the_guard_clears() {
+        let mut dec = QuicDecryptor::new(keylog_for(CH_RANDOM_HEX));
+        let (_dcid, client_scid, server_scid) = bind_connection(&mut dec);
+        let server_hs = crypto::protection_keys(&secret_for("SERVER_HANDSHAKE_TRAFFIC_SECRET"));
+        let packet = protected_long_header(
+            2,
+            &client_scid,
+            &server_scid,
+            &server_hs,
+            0,
+            2,
+            &crypto_frame(ENCRYPTED_EXTENSIONS),
+        );
+        {
+            let guard = crypto::quic_capture_install(dec);
+            let d = dissect_quic(&packet, Vec::new());
+            assert!(d.layers.iter().any(|l| l.label == "QUIC protected payload"
+                && l.value.contains("server Handshake keys")));
+            drop(guard);
+        }
+        // The guard cleared the installation: later parses on this thread
+        // see the stateless view again.
+        let d = dissect_quic(&packet, Vec::new());
+        assert!(d
+            .layers
+            .iter()
+            .any(|l| l.label == "QUIC protected payload" && l.value.ends_with("keys unavailable")));
+        assert!(d.layers.iter().all(|l| l.label != "QUIC frame"));
+    }
+
+    /// A deterministic per-connection traffic secret for the LRU test.
+    fn lru_secret(connection: u8, label_index: usize) -> [u8; 32] {
+        let value = ((connection as u128) << 8) | label_index as u128;
+        hex_bytes(&format!("{value:064x}")).try_into().unwrap()
+    }
+
+    #[test]
+    fn connection_state_is_lru_bounded_at_64() {
+        // 65 synthetic connections, each a client Initial with its own
+        // random and SCID; the keylog covers all of them. The oldest falls
+        // out of the LRU (routes included) while the newest keeps working.
+        let mut text = String::new();
+        for i in 0..65u8 {
+            for (label_index, label) in [
+                "CLIENT_HANDSHAKE_TRAFFIC_SECRET",
+                "SERVER_HANDSHAKE_TRAFFIC_SECRET",
+                "CLIENT_TRAFFIC_SECRET_0",
+                "SERVER_TRAFFIC_SECRET_0",
+            ]
+            .iter()
+            .enumerate()
+            {
+                text.push_str(&format!(
+                    "{label} {:064x} {}\n",
+                    0x1000u128 + i as u128,
+                    hex(&lru_secret(i, label_index))
+                ));
+            }
+        }
+        let store = crypto::keylog::KeylogStore::parse(&text).unwrap();
+        let mut dec = QuicDecryptor::new(store);
+        for i in 0..65u8 {
+            let random_hex = format!("{:064x}", 0x1000u128 + i as u128);
+            let dcid = [i, 0, 0, 0, 0, 0, 0, 8];
+            let scid = [0x50u8 + i, 1, 2, 3];
+            let initial = protected_initial(
+                &dcid,
+                &scid,
+                true,
+                0,
+                &crypto_frame(&client_hello(&random_hex)),
+            );
+            let d = dec.dissect(&initial, Vec::new());
+            assert!(d
+                .layers
+                .iter()
+                .any(|l| l.label == "QUIC protected payload"
+                    && l.value.contains("client Initial keys")));
+        }
+        assert_eq!(dec.connections.len(), crypto::MAX_QUIC_CONNECTIONS);
+        // Connection 0 was evicted: its SCID route is gone.
+        let app0 = crypto::protection_keys(&lru_secret(0, 2));
+        let packet = protected_1rtt(&[0x50u8, 1, 2, 3], &app0, 0, 1, false, &[0x01, 0x00, 0x00]);
+        let d = dec.dissect(&packet, Vec::new());
+        assert!(d.layers.iter().any(|l| l.label == "payload decryption"
+            && l.value.contains("no keylog binding for this DCID")));
+        // The newest connection still decrypts.
+        let app64 = crypto::protection_keys(&lru_secret(64, 2));
+        let packet = protected_1rtt(
+            &[0x50u8 + 64, 1, 2, 3],
+            &app64,
+            0,
+            1,
+            false,
+            &[0x01, 0x00, 0x00],
+        );
+        let d = dec.dissect(&packet, Vec::new());
+        assert!(d.layers.iter().any(|l| l.label == "QUIC protected payload"
+            && l.value
+                .ends_with("decrypted with client application keys (1-RTT)")));
     }
 }

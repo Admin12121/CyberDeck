@@ -1,15 +1,21 @@
 //! Capture IPC adapters; stable command macros remain in pcap.rs.
 use super::{
     capture_file, capture_service, hex_format, pcap_wire::reassembly_summary,
-    pcap_wire::wire_packet, PcapCtx, PcapOpenWire,
+    pcap_wire::wire_packet, KeylogCtx, PcapCtx, PcapOpenWire,
 };
 use crate::features::forensics::ipc::evidence::HexResponse;
+use crate::features::shared::session::CaseSessionCtx;
+use cyberdeck_packet::crypto::keylog::KeylogStore;
 use tauri::{AppHandle, State};
 use tauri_plugin_dialog::DialogExt;
 
 const MAX_UI_PACKETS: usize = 20_000;
 
-pub(super) fn open_dialog(app: AppHandle, ctx: State<'_, PcapCtx>) -> Result<PcapOpenWire, String> {
+pub(super) fn open_dialog(
+    app: AppHandle,
+    ctx: State<'_, PcapCtx>,
+    keylog: Option<&KeylogStore>,
+) -> Result<PcapOpenWire, String> {
     let picked = app
         .dialog()
         .file()
@@ -20,7 +26,7 @@ pub(super) fn open_dialog(app: AppHandle, ctx: State<'_, PcapCtx>) -> Result<Pca
         .ok_or("unsupported file location")?
         .to_path_buf();
     let bytes = capture_file::read_capture(&path)?;
-    let imported = capture_service::import_bytes(bytes)?;
+    let imported = capture_service::import_bytes(bytes, keylog)?;
     let file_name = path
         .file_name()
         .map(|n| n.to_string_lossy().to_string())

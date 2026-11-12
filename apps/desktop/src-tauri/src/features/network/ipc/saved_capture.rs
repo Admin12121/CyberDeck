@@ -10,6 +10,7 @@ use crate::features::cases::infrastructure::authorized_transfer::{
 };
 use crate::features::forensics::ipc::evidence::{EvidenceCtx, HexResponse};
 use crate::features::shared::session::CaseSessionCtx;
+use cyberdeck_packet::crypto::keylog::KeylogStore;
 use cyberdeck_packet::streams::StreamTranscript;
 
 const MAX_UI_PACKETS: usize = 20_000;
@@ -18,6 +19,7 @@ pub(super) fn open(
     evidence: &EvidenceCtx,
     selected: &CaseSessionCtx,
     artifact_id: &str,
+    keylog: Option<&KeylogStore>,
 ) -> Result<PcapOpenWire, String> {
     with_verified_artifact(
         evidence,
@@ -25,7 +27,7 @@ pub(super) fn open(
         artifact_id,
         EvidenceConsumer::PacketAnalysis,
         |record, bytes| {
-            let source = capture_service::import_bytes(bytes.to_vec())?;
+            let source = capture_service::import_bytes(bytes.to_vec(), keylog)?;
             if source.format != "pcap" || source.malformed_tail {
                 return Err("saved original PCAP failed strict format validation".into());
             }
@@ -60,6 +62,7 @@ pub(super) fn packet_bytes(
     index: usize,
     offset: i64,
     len: i64,
+    keylog: Option<&KeylogStore>,
 ) -> Result<HexResponse, String> {
     // Reject oversized pages before doing any disk I/O.
     if offset < 0 || len < 0 || len > 4_096 {
@@ -71,7 +74,7 @@ pub(super) fn packet_bytes(
         artifact_id,
         EvidenceConsumer::PacketAnalysis,
         |_, bytes| {
-            let parsed = capture_service::import_bytes(bytes.to_vec())?;
+            let parsed = capture_service::import_bytes(bytes.to_vec(), keylog)?;
             if parsed.malformed_tail {
                 return Err("saved original capture is malformed".into());
             }
@@ -86,6 +89,7 @@ pub(super) fn follow_stream(
     selected: &CaseSessionCtx,
     artifact_id: &str,
     stream_id: &str,
+    keylog: Option<&KeylogStore>,
 ) -> Result<StreamTranscript, String> {
     if stream_id.is_empty() || stream_id.len() > 256 {
         return Err("invalid saved stream identifier".into());
@@ -96,7 +100,7 @@ pub(super) fn follow_stream(
         artifact_id,
         EvidenceConsumer::PacketAnalysis,
         |_, bytes| {
-            let parsed = capture_service::import_bytes(bytes.to_vec())?;
+            let parsed = capture_service::import_bytes(bytes.to_vec(), keylog)?;
             if parsed.malformed_tail {
                 return Err("saved original capture is malformed".into());
             }
@@ -153,17 +157,17 @@ mod tests {
         selected
             .select(&evidence.store.lock().unwrap(), &a.id)
             .unwrap();
-        let wire = open(&evidence, &selected, &record.id).unwrap();
+        let wire = open(&evidence, &selected, &record.id, None).unwrap();
         assert_eq!(wire.packet_count, 1);
         assert_eq!(wire.packets[0].protocol, "ARP");
         assert_eq!(wire.packets[0].index, 0);
-        let saved = packet_bytes(&evidence, &selected, &record.id, 0, 0, 48).unwrap();
+        let saved = packet_bytes(&evidence, &selected, &record.id, 0, 0, 48, None).unwrap();
         assert!(!saved.rows.is_empty());
-        assert!(packet_bytes(&evidence, &selected, &record.id, 0, 0, 4_097).is_err());
+        assert!(packet_bytes(&evidence, &selected, &record.id, 0, 0, 4_097, None).is_err());
         selected
             .select(&evidence.store.lock().unwrap(), &b.id)
             .unwrap();
-        assert!(open(&evidence, &selected, &record.id).is_err());
-        assert!(packet_bytes(&evidence, &selected, &record.id, 0, 0, 16).is_err());
+        assert!(open(&evidence, &selected, &record.id, None).is_err());
+        assert!(packet_bytes(&evidence, &selected, &record.id, 0, 0, 16, None).is_err());
     }
 }

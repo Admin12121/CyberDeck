@@ -14,7 +14,17 @@ pub(super) struct CaptureImport {
 }
 
 /// Keep original bytes exactly as imported; parsed packets refer back to them.
-pub(super) fn import_bytes(bytes: Vec<u8>) -> Result<CaptureImport, String> {
+/// A session-scoped keylog store enables QUIC Handshake/1-RTT decryption
+/// during parsing: the RAII guard lives only for this call, so no key
+/// material ever outlives the import.
+pub(super) fn import_bytes(
+    bytes: Vec<u8>,
+    keylog: Option<&cyberdeck_packet::crypto::keylog::KeylogStore>,
+) -> Result<CaptureImport, String> {
+    let _decryptor_guard =
+        keylog.map(|store| cyberdeck_packet::crypto::quic_capture_install(
+            cyberdeck_packet::crypto::QuicDecryptor::new(store.clone()),
+        ));
     let parsed = parse_capture(&bytes)?;
     let format = if bytes.starts_with(&[0x0a, 0x0d, 0x0d, 0x0a]) {
         "pcapng"
@@ -78,7 +88,7 @@ mod tests {
         pcap.extend_from_slice(&(frame.len() as u32).to_le_bytes());
         pcap.extend_from_slice(&frame);
         let original = pcap.clone();
-        let imported = import_bytes(pcap).expect("valid classic pcap");
+        let imported = import_bytes(pcap, None).expect("valid classic pcap");
         assert_eq!(imported.format, "pcap");
         assert_eq!(imported.cache.bytes, original);
         assert_eq!(imported.cache.packets[0].offset, 40);
