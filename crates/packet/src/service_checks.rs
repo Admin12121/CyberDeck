@@ -11,7 +11,7 @@ use serde::Serialize;
 /// Hard registry and output bounds. MAX_CHECKS bounds how many registry
 /// entries are evaluated per excerpt; it must stay >= REGISTRY.len() so the
 /// registry is never silently truncated — raise it when the registry grows.
-pub const MAX_CHECKS: usize = 40;
+pub const MAX_CHECKS: usize = 48;
 pub const MAX_FINDINGS: usize = 16;
 pub const MAX_EXCERPT_BYTES: usize = 2048;
 
@@ -33,11 +33,22 @@ pub struct ServiceCheckFinding {
     pub evidence: String,
 }
 
+/// Which transport captured the excerpt. UDP services live on well-known UDP
+/// ports and their check families must never fire on TCP excerpts (and vice
+/// versa): silence semantics, framing shapes and port meanings differ.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProbeTransport {
+    Tcp,
+    Udp,
+}
+
 /// The probe excerpt context checks evaluate: what the service sent first
 /// (banner or response head), lowercased for matching, bounded.
 pub struct ProbeExcerpt<'a> {
     pub service: &'a str,
     pub port: u16,
+    pub transport: ProbeTransport,
     pub text: &'a str,
 }
 
@@ -75,7 +86,30 @@ fn is_non_printable_response(text: &str) -> bool {
     !text.is_empty() && !text.chars().any(|c| c != '?')
 }
 
-static REGISTRY: [CheckDefinition; 32] = [
+/// True when the text still contains, after the LAST occurrence of `marker`,
+/// a run of at least two ASCII alphanumeric characters including a digit.
+/// DNS replies echo the question verbatim, so a version.bind marker alone
+/// proves nothing; answer content (a version token like "9.18.28") shows up
+/// as printable runs the echoed question cannot explain. Header/count bytes
+/// around the echo are control bytes and sanitize to '?'. The marker is the
+/// wire shape "version?bind": DNS labels are length-prefixed, so the echoed
+/// question never contains a presentation-format dotted name.
+fn printable_version_token_after(text: &str, marker: &str) -> bool {
+    let Some(end) = text.rfind(marker).map(|at| at + marker.len()) else {
+        return false;
+    };
+    text[end..]
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .any(|token| token.len() >= 2 && token.chars().any(|c| c.is_ascii_digit()))
+}
+
+/// The sanitized wire shape of the echoed CH TXT version.bind question:
+/// length-prefixed labels render as `version?bind` (the '?' is the 0x04
+/// label-length byte). This marker can only appear in replies to a
+/// version.bind query — never a presentation-format dotted name.
+const DNS_VERSION_BIND_ECHO: &str = "version?bind";
+
+static REGISTRY: [CheckDefinition; 42] = [
     CheckDefinition {
         name: "ssh-version-disclosure",
         severity: CheckSeverity::Info,
@@ -442,8 +476,13 @@ static REGISTRY: [CheckDefinition; 32] = [
             // sanitizer; the length/code octets do not. "r?????" is honest
             // evidence of an auth exchange, and nothing more — the method
             // code (cleartext vs md5 vs ok) is NOT recoverable, so no claim
-            // beyond the exchange itself is made here. Gated to 5432.
-            if port_matches(5432, excerpt) && excerpt.text.starts_with("r?????") {
+            // beyond the exchange itself is made here. PostgreSQL is TCP
+            // only, so the check is gated to the TCP transport as well.
+            // Gated to 5432.
+            if excerpt.transport == ProbeTransport::Tcp
+                && port_matches(5432, excerpt)
+                && excerpt.text.starts_with("r?????")
+            {
                 Some(format!(
                     "PostgreSQL authentication exchange (R-message head) received; method code not recoverable from the sanitized excerpt: {}",
                     quote_line(excerpt.text, 12)
@@ -590,8 +629,13 @@ static REGISTRY: [CheckDefinition; 32] = [
             // port gate plus that shape is honest evidence of a binary
             // protocol speaking on the RDP port; negotiation bytes
             // (PROTOCOL_HYBRID etc.) are NOT recoverable, so no claim about
-            // NLA or encryption level is made. Gated to 3389.
-            if port_matches(3389, excerpt) && is_non_printable_response(excerpt.text) {
+            // NLA or encryption level is made. X.224/TPKT is TCP framing,
+            // so the check is also gated to the TCP transport — a UDP
+            // responder on 3389 speaks RDP-UDP, whose framing differs.
+            if excerpt.transport == ProbeTransport::Tcp
+                && port_matches(3389, excerpt)
+                && is_non_printable_response(excerpt.text)
+            {
                 Some(format!(
                     "port 3389 answered with a non-printable response consistent with RDP X.224/TPKT framing; negotiation bytes not recoverable from the sanitized excerpt: {}",
                     quote_line(excerpt.text, 12)
@@ -667,12 +711,270 @@ static REGISTRY: [CheckDefinition; 32] = [
             None
         },
     },
+    // --- wave 6 additions: honest UDP check families ---------------------------
+    // Every check below is gated to ProbeTransport::Udp and its well-known
+    // UDP port. UDP silence is NOT closed and yields no excerpt, so a check
+    // only ever sees bytes a responder actually sent.
+
+    CheckDefinition {
+        name: "ntp-mode6-disclosure",
+        severity: CheckSeverity::Low,
+        evaluate: |excerpt| {
+            // A mode-6 (ntpq/ntpdc) READVAR reply carries the server's system
+            // variables as ASCII "key=value" text (associd, status, leap,
+            // stratum, …). Disclosing the full variable set to any client is
+            // reconnaissance exposure beyond identity disclosure. Gated to
+            // UDP/123; the ASCII variable shape is the trigger, not the port.
+            if excerpt.transport == ProbeTransport::Udp && port_matches(123, excerpt) {
+                if excerpt.text.contains("associd=")
+                    && (excerpt.text.contains("stratum=") || excerpt.text.contains("leap="))
+                {
+                    return Some(format!(
+                        "NTP mode-6 READVAR reply discloses server variables to any client: {}",
+                        quote_line(excerpt.text, 72)
+                    ));
+                }
+            }
+            None
+        },
+    },
+    CheckDefinition {
+        name: "ntp-version-reply",
+        severity: CheckSeverity::Info,
+        evaluate: |excerpt| {
+            // The mode-6 variable dump usually names the exact ntpd build
+            // ("version=ntpd 4.2.8p15@…"). Only a "version=" variable naming
+            // the NTP daemon counts; the port gate plus both markers keep a
+            // stray "version=" from another protocol from mislabeling.
+            if excerpt.transport == ProbeTransport::Udp && port_matches(123, excerpt) {
+                if let Some(at) = excerpt
+                    .text
+                    .find("version=")
+                    .filter(|_| excerpt.text.contains("ntp"))
+                {
+                    return Some(format!(
+                        "NTP variable reply discloses the daemon build: {}",
+                        quote_line(&excerpt.text[at..], 64)
+                    ));
+                }
+            }
+            None
+        },
+    },
+    CheckDefinition {
+        name: "ntp-binary-response",
+        severity: CheckSeverity::Info,
+        evaluate: |excerpt| {
+            // A mode-3 client request answered with the 0x24 head byte (LI 0,
+            // VN 4, server mode 4 — sanitized to '$' because it is printable)
+            // followed by non-printable body bytes is honest evidence of an
+            // NTP server reply. Timestamps and reference IDs are NOT
+            // recoverable from the sanitized excerpt, so no clock or leap
+            // claim is made.
+            if excerpt.transport == ProbeTransport::Udp
+                && port_matches(123, excerpt)
+                && excerpt.text.starts_with('$')
+                && excerpt.text.len() >= 8
+                && !excerpt.text[1..].chars().any(|c| c != '?')
+            {
+                Some(format!(
+                    "port 123 answered with an NTP v4 server-mode head (0x24) followed by a non-printable body; timestamp fields not recoverable from the sanitized excerpt: {}",
+                    quote_line(excerpt.text, 12)
+                ))
+            } else {
+                None
+            }
+        },
+    },
+    CheckDefinition {
+        name: "mdns-responder-disclosure",
+        severity: CheckSeverity::Info,
+        evaluate: |excerpt| {
+            // A unicast mDNS reply to "_services._dns-sd._udp.local" lists
+            // the device's advertised service types ("_ipp._tcp.local", …) —
+            // an enumeration of the host's surface to anyone who asks. Wire
+            // labels are length-prefixed, so the sanitized echo reads
+            // "_services?_dns-sd?_udp?local" and an _tcp answer record reads
+            // "_ipp?_tcp?local": the "_dns-sd" marker proves the reply is to
+            // OUR enumeration query and "_tcp?local" is answer content the
+            // question echo cannot contain. Replies advertising no _tcp
+            // services make no claim (honest miss, documented in the probe
+            // machinery).
+            if excerpt.transport == ProbeTransport::Udp
+                && port_matches(5353, excerpt)
+                && excerpt.text.contains("_dns-sd")
+                && excerpt.text.contains("_tcp?local")
+            {
+                Some(format!(
+                    "mDNS responder enumerates advertised service types: {}",
+                    quote_line(excerpt.text, 80)
+                ))
+            } else {
+                None
+            }
+        },
+    },
+    CheckDefinition {
+        name: "ssdp-server-header-disclosure",
+        severity: CheckSeverity::Info,
+        evaluate: |excerpt| {
+            // An SSDP M-SEARCH response head ("HTTP/1.1 200 OK") with a
+            // Server header names the UPnP stack and often the OS/firmware —
+            // identity disclosure to any unicast querier. Gated to UDP/1900
+            // and the M-SEARCH response shape. The UDP sanitizer renders
+            // CRLFs as spaces, so headers are matched positionally, not
+            // line-by-line.
+            if excerpt.transport == ProbeTransport::Udp
+                && port_matches(1900, excerpt)
+                && excerpt.text.starts_with("http/1.1")
+            {
+                if let Some(at) = excerpt.text.find("server:") {
+                    return Some(format!(
+                        "SSDP reply discloses UPnP server identity: {}",
+                        quote_line(&excerpt.text[at..], 64)
+                    ));
+                }
+            }
+            None
+        },
+    },
+    CheckDefinition {
+        name: "ssdp-location-disclosure",
+        severity: CheckSeverity::Low,
+        evaluate: |excerpt| {
+            // The Location header in an SSDP response is the device
+            // description/control URL — it maps where the UPnP control
+            // surface lives for an attacker. Gated to UDP/1900; only an
+            // http(s) URL counts as a disclosed endpoint.
+            if excerpt.transport == ProbeTransport::Udp && port_matches(1900, excerpt) {
+                if let Some(at) = excerpt.text.find("location:") {
+                    let rest = &excerpt.text[at..];
+                    if rest.contains("http") {
+                        return Some(format!(
+                            "SSDP reply discloses a UPnP description/control URL: {}",
+                            quote_line(rest, 80)
+                        ));
+                    }
+                }
+            }
+            None
+        },
+    },
+    CheckDefinition {
+        name: "snmp-default-community-response",
+        severity: CheckSeverity::Medium,
+        evaluate: |excerpt| {
+            // An SNMP agent that replies to our GET carrying the default
+            // community "public" (echoed in every response) grants readable
+            // device data to unauthenticated clients — real exposure, not
+            // mere presence. The sanitized BER head keeps the 0x30 SEQUENCE
+            // tag as "0"; "public" can only be the echoed community. Gated
+            // to UDP/161.
+            if excerpt.transport == ProbeTransport::Udp
+                && port_matches(161, excerpt)
+                && excerpt.text.starts_with('0')
+                && excerpt.text.contains("public")
+            {
+                Some(format!(
+                    "SNMP agent accepted the default community 'public'; device data is readable without authentication: {}",
+                    quote_line(excerpt.text, 48)
+                ))
+            } else {
+                None
+            }
+        },
+    },
+    CheckDefinition {
+        name: "snmp-present",
+        severity: CheckSeverity::Info,
+        evaluate: |excerpt| {
+            // An SNMP-shaped reply on UDP/161 that does NOT echo the default
+            // community proves an agent is present while explicitly NOT
+            // proving default-community access. Presence classification
+            // only: the community value itself is not recoverable from the
+            // sanitized excerpt.
+            if excerpt.transport == ProbeTransport::Udp
+                && port_matches(161, excerpt)
+                && excerpt.text.starts_with('0')
+                && !excerpt.text.contains("public")
+            {
+                Some(format!(
+                    "SNMP responder replied on 161 without echoing the default community; presence confirmed, default-community access not proven: {}",
+                    quote_line(excerpt.text, 48)
+                ))
+            } else {
+                None
+            }
+        },
+    },
+    CheckDefinition {
+        name: "dns-version-bind-reply",
+        severity: CheckSeverity::Info,
+        evaluate: |excerpt| {
+            // A CH TXT version.bind answer carries the server's version
+            // token as printable TXT rdata. Every DNS reply echoes the
+            // question, so the echo marker alone proves nothing: a disclosed
+            // version requires printable alphanumeric answer content (with
+            // a digit) beyond the echoed question. Gated to UDP/53.
+            if excerpt.transport == ProbeTransport::Udp && port_matches(53, excerpt) {
+                if excerpt.text.contains(DNS_VERSION_BIND_ECHO) {
+                    let at = excerpt
+                        .text
+                        .rfind(DNS_VERSION_BIND_ECHO)
+                        .unwrap_or(0)
+                        + DNS_VERSION_BIND_ECHO.len();
+                    if printable_version_token_after(excerpt.text, DNS_VERSION_BIND_ECHO) {
+                        return Some(format!(
+                            "DNS/UDP CH TXT version.bind reply discloses a server version token: {}",
+                            quote_line(excerpt.text[at..].trim_matches('?'), 48)
+                        ));
+                    }
+                }
+            }
+            None
+        },
+    },
+    CheckDefinition {
+        name: "dns-refusal-shape",
+        severity: CheckSeverity::Info,
+        evaluate: |excerpt| {
+            // Classification only: a reply that echoes the version.bind
+            // question with NO recoverable answer content is a responder
+            // that refused (or answered empty) — the rcode itself is not
+            // printable and cannot be claimed. This documents the response
+            // shape without inventing an rcode or a version.
+            if excerpt.transport == ProbeTransport::Udp && port_matches(53, excerpt) {
+                if excerpt.text.contains(DNS_VERSION_BIND_ECHO)
+                    && !printable_version_token_after(excerpt.text, DNS_VERSION_BIND_ECHO)
+                {
+                    return Some(format!(
+                        "DNS/UDP server echoed the version.bind question with no recoverable answer content; classified as refusal/empty shape (rcode not recoverable from the sanitized excerpt): {}",
+                        quote_line(excerpt.text, 48)
+                    ));
+                }
+            }
+            None
+        },
+    },
 ];
 
-/// Evaluate the registry against one probe excerpt. Excerpts longer than
+/// Evaluate the registry against one TCP probe excerpt. Excerpts longer than
 /// [`MAX_EXCERPT_BYTES`] are truncated before matching; the excerpt is
 /// lowercased once for case-insensitive classification.
 pub fn evaluate(service: &str, port: u16, raw_excerpt: &str) -> Vec<ServiceCheckFinding> {
+    evaluate_transport(service, port, ProbeTransport::Tcp, raw_excerpt)
+}
+
+/// Evaluate the registry against a probe excerpt captured over the given
+/// transport. The transport dimension lets UDP check families port-gate
+/// correctly (UDP/123 NTP, UDP/161 SNMP, …) and keeps them from firing on
+/// TCP excerpts — TCP is the default for the historical [`evaluate`] caller.
+pub fn evaluate_transport(
+    service: &str,
+    port: u16,
+    transport: ProbeTransport,
+    raw_excerpt: &str,
+) -> Vec<ServiceCheckFinding> {
     let truncated: String = raw_excerpt
         .chars()
         .take(MAX_EXCERPT_BYTES)
@@ -681,6 +983,7 @@ pub fn evaluate(service: &str, port: u16, raw_excerpt: &str) -> Vec<ServiceCheck
     let excerpt = ProbeExcerpt {
         service,
         port,
+        transport,
         text: &truncated,
     };
     let mut findings = Vec::new();
@@ -800,8 +1103,270 @@ mod tests {
     fn registry_is_fully_evaluated_within_max_checks() {
         // MAX_CHECKS exists to bound work, not to hide checks: every
         // registered check must stay reachable, so the cap is >= registry size.
-        assert_eq!(REGISTRY.len(), 32);
+        assert_eq!(REGISTRY.len(), 42);
         assert!(REGISTRY.len() <= MAX_CHECKS);
+    }
+
+    // --- wave 6 UDP check tests: trigger + no-trigger per check -----------------
+
+    /// Mirror of the UDP wire path's sanitizer (printable kept, whitespace →
+    /// space, everything else → '?') so fixtures are real protocol bytes.
+    fn udp_sanitize(bytes: &[u8]) -> String {
+        let mut text = String::new();
+        for &b in bytes.iter().take(MAX_EXCERPT_BYTES) {
+            match b {
+                0x20..=0x7e => text.push(b as char),
+                0x09 | 0x0a | 0x0d => text.push(' '),
+                _ => text.push('?'),
+            }
+        }
+        text.trim_end().to_string()
+    }
+
+    fn udp(service: &str, port: u16, raw: &[u8]) -> Vec<ServiceCheckFinding> {
+        let excerpt = udp_sanitize(raw);
+        evaluate_transport(service, port, ProbeTransport::Udp, &excerpt)
+    }
+
+    #[test]
+    fn ntp_mode6_disclosure_fires_on_ascii_variable_dump() {
+        let reply = b"?????associd=0 status=06c4 leap=none, stratum=3, rootdelay=1.500";
+        let findings = udp("ntp", 123, reply);
+        let hit = findings
+            .iter()
+            .find(|f| f.check == "ntp-mode6-disclosure")
+            .expect("mode-6 variable dump should fire the disclosure check");
+        assert_eq!(hit.severity, CheckSeverity::Low);
+        assert!(hit.evidence.contains("associd="));
+        // Variables without the mode-6 associd shape make no claim.
+        assert!(!udp("ntp", 123, b"random text stratum=3")
+            .iter()
+            .any(|f| f.check == "ntp-mode6-disclosure"));
+        // The same ASCII dump captured over TCP is not UDP NTP evidence.
+        assert!(evaluate("ntp", 123, &udp_sanitize(reply))
+            .iter()
+            .all(|f| f.check != "ntp-mode6-disclosure"));
+    }
+
+    #[test]
+    fn ntp_version_reply_fires_on_daemon_build_token() {
+        let findings = udp("ntp", 123, b"??????version=ntpd 4.2.8p15@1.3728-o");
+        let hit = findings
+            .iter()
+            .find(|f| f.check == "ntp-version-reply")
+            .expect("version=ntpd variable should fire");
+        assert_eq!(hit.severity, CheckSeverity::Info);
+        assert!(hit.evidence.contains("4.2.8p15"));
+        // A variable dump without a daemon version token does not claim one.
+        assert!(!udp("ntp", 123, b"associd=0 status=06c4 leap=none")
+            .iter()
+            .any(|f| f.check == "ntp-version-reply"));
+    }
+
+    #[test]
+    fn ntp_binary_response_fires_only_over_udp_on_123() {
+        let binary = [0x24u8, 0x01, 0x00, 0xe9, 0x00, 0x00, 0x00, 0x00];
+        let findings = udp("ntp", 123, &binary);
+        let hit = findings
+            .iter()
+            .find(|f| f.check == "ntp-binary-response")
+            .expect("binary mode-4 reply should fire the shape check");
+        assert_eq!(hit.severity, CheckSeverity::Info);
+        assert!(hit.evidence.contains("not recoverable"));
+        // Printable text on 123 is not a binary NTP reply.
+        assert!(!udp("ntp", 123, b"hello world")
+            .iter()
+            .any(|f| f.check == "ntp-binary-response"));
+        // Binary on an unrelated port does not name NTP.
+        assert!(!udp("unknown", 9999, &binary)
+            .iter()
+            .any(|f| f.check == "ntp-binary-response"));
+    }
+
+    #[test]
+    fn mdns_responder_disclosure_requires_answer_service_types() {
+        // Wire labels are length-prefixed: the question echo reads
+        // "_services?_dns-sd?_udp?local" and answers read "_ipp?_tcp?local".
+        let reply = b"????????????????_services?_dns-sd?_udp?local????_ipp?_tcp?local????_googlecast?_tcp?local";
+        let hit = udp("mdns", 5353, reply)
+            .iter()
+            .find(|f| f.check == "mdns-responder-disclosure")
+            .expect("advertised _tcp service types should fire")
+            .clone();
+        assert_eq!(hit.severity, CheckSeverity::Info);
+        assert!(hit.evidence.contains("_ipp?_tcp?local"));
+        // A reply that only echoes the question (NODATA) makes no claim.
+        assert!(!udp(
+            "mdns",
+            5353,
+            b"????????????????_services?_dns-sd?_udp?local????"
+        )
+        .iter()
+        .any(|f| f.check == "mdns-responder-disclosure"));
+        // TCP captures are not mDNS responder evidence.
+        assert!(evaluate("mdns", 5353, "_ipp?_tcp?local")
+            .iter()
+            .all(|f| f.check != "mdns-responder-disclosure"));
+    }
+
+    #[test]
+    fn ssdp_server_header_disclosure_is_udp_and_head_shaped() {
+        let reply = b"HTTP/1.1 200 OK\r\nST: upnp:rootdevice\r\nSERVER: Linux/5.4 UPnP/1.0 Router/2.1\r\nEXT:\r\n\r\n";
+        let hit = udp("ssdp", 1900, reply)
+            .iter()
+            .find(|f| f.check == "ssdp-server-header-disclosure")
+            .expect("SSDP Server header should fire")
+            .clone();
+        assert_eq!(hit.severity, CheckSeverity::Info);
+        assert!(hit.evidence.contains("upnp/1.0"));
+        // Non-200 SSDP traffic without a Server header makes no claim.
+        assert!(!udp("ssdp", 1900, b"HTTP/1.1 200 OK\r\nST: upnp:rootdevice\r\n")
+            .iter()
+            .any(|f| f.check == "ssdp-server-header-disclosure"));
+        // TCP captures are not SSDP M-SEARCH responses.
+        assert!(evaluate("ssdp", 1900, "HTTP/1.1 200 OK\r\nSERVER: UPnP/1.0\r\n")
+            .iter()
+            .all(|f| f.check != "ssdp-server-header-disclosure"));
+    }
+
+    #[test]
+    fn ssdp_location_disclosure_requires_an_http_url() {
+        let reply = b"HTTP/1.1 200 OK\r\nLOCATION: http://192.0.2.1:49152/description.xml\r\n";
+        let hit = udp("ssdp", 1900, reply)
+            .iter()
+            .find(|f| f.check == "ssdp-location-disclosure")
+            .expect("control URL disclosure should fire")
+            .clone();
+        assert_eq!(hit.severity, CheckSeverity::Low);
+        assert!(hit.evidence.contains("192.0.2.1:49152"));
+        // A Location line without a URL is not endpoint disclosure.
+        assert!(!udp("ssdp", 1900, b"HTTP/1.1 200 OK\r\nLOCATION: \r\n")
+            .iter()
+            .any(|f| f.check == "ssdp-location-disclosure"));
+    }
+
+    #[test]
+    fn snmp_default_community_response_is_medium() {
+        // Real BER GetResponse: SEQUENCE(version, community "public",
+        // GetResponse PDU with our request id).
+        let reply: Vec<u8> = vec![
+            0x30, 0x2b, 0x02, 0x01, 0x01, 0x04, 0x06, b'p', b'u', b'b', b'l', b'i', b'c', 0xa2,
+            0x1e, 0x02, 0x02, 0x80, 0x42, 0x02, 0x01, 0x00, 0x02, 0x01, 0x00, 0x30, 0x12, 0x30,
+            0x10, 0x06, 0x08, 0x2b, 0x06, 0x01, 0x02, 0x01, 0x01, 0x01, 0x00, 0x04, 0x04, b'L',
+            b'a', b'b', b's',
+        ];
+        let hit = udp("snmp", 161, &reply)
+            .iter()
+            .find(|f| f.check == "snmp-default-community-response")
+            .expect("default-community response should fire")
+            .clone();
+        assert_eq!(hit.severity, CheckSeverity::Medium);
+        assert!(hit.evidence.contains("public"));
+        // The same BER over TCP is not UDP SNMP evidence.
+        assert!(evaluate("snmp", 161, &udp_sanitize(&reply))
+            .iter()
+            .all(|f| f.check != "snmp-default-community-response"));
+        // Non-BER text on 161 does not claim community acceptance.
+        assert!(!udp("snmp", 161, b"hello public world")
+            .iter()
+            .any(|f| f.check == "snmp-default-community-response"));
+    }
+
+    #[test]
+    fn snmp_present_fires_when_default_community_is_not_echoed() {
+        // BER response whose community field is NOT "public".
+        let reply: Vec<u8> = vec![
+            0x30, 0x26, 0x02, 0x01, 0x01, 0x04, 0x07, b'c', b'o', b'm', b'm', b'u', b'n', b'i',
+            0xa2, 0x18, 0x02, 0x02, 0x80, 0x42, 0x02, 0x01, 0x00, 0x02, 0x01, 0x00, 0x30, 0x0c,
+            0x30, 0x0a, 0x06, 0x08, 0x2b, 0x06, 0x01, 0x02, 0x01, 0x01, 0x01, 0x00,
+        ];
+        let hit = udp("snmp", 161, &reply)
+            .iter()
+            .find(|f| f.check == "snmp-present")
+            .expect("non-default-community response should prove presence")
+            .clone();
+        assert_eq!(hit.severity, CheckSeverity::Info);
+        assert!(hit.evidence.contains("presence confirmed"));
+        // A default-community echo is graded by the Medium sibling instead.
+        assert!(!udp("snmp", 161, &reply)
+            .iter()
+            .any(|f| f.check == "snmp-default-community-response"));
+    }
+
+    #[test]
+    fn dns_version_bind_reply_requires_answer_content_beyond_the_question() {
+        // Real sanitized wire shape: header '?'s, echoed question
+        // ("version?bind" — length-prefixed labels), then TXT rdata "9.18.28".
+        let answered = "?????????????version?bind?????????????????9.18.28";
+        let hit = evaluate_transport("dns", 53, ProbeTransport::Udp, answered)
+            .iter()
+            .find(|f| f.check == "dns-version-bind-reply")
+            .expect("TXT answer token should fire the version check")
+            .clone();
+        assert_eq!(hit.severity, CheckSeverity::Info);
+        assert!(hit.evidence.contains("9.18.28"));
+        // Question echo without printable answer content is not a version.
+        let refusal = "?????????????version?bind?????";
+        assert!(!evaluate_transport("dns", 53, ProbeTransport::Udp, refusal)
+            .iter()
+            .any(|f| f.check == "dns-version-bind-reply"));
+        // A dotted presentation-format name never appears on the wire.
+        assert!(!evaluate_transport(
+            "dns",
+            53,
+            ProbeTransport::Udp,
+            "?????????????version.bind?????????????????9.18.28"
+        )
+        .iter()
+        .any(|f| f.check == "dns-version-bind-reply"));
+        // TCP captures are not UDP DNS evidence.
+        assert!(evaluate_transport("dns", 53, ProbeTransport::Tcp, answered)
+            .iter()
+            .all(|f| f.check != "dns-version-bind-reply"));
+    }
+
+    #[test]
+    fn dns_refusal_shape_classifies_without_inventing_an_rcode() {
+        let refusal = "?????????????version?bind?????";
+        let hit = evaluate_transport("dns", 53, ProbeTransport::Udp, refusal)
+            .iter()
+            .find(|f| f.check == "dns-refusal-shape")
+            .expect("question echo without answer should classify as refusal/empty shape")
+            .clone();
+        assert_eq!(hit.severity, CheckSeverity::Info);
+        assert!(hit.evidence.contains("not recoverable"));
+        // An answered reply is classified by the version check, not this one.
+        assert!(!evaluate_transport(
+            "dns",
+            53,
+            ProbeTransport::Udp,
+            "?????????????version?bind?????????????????9.18.28"
+        )
+        .iter()
+        .any(|f| f.check == "dns-refusal-shape"));
+        // No question echo → no classification.
+        assert!(!evaluate_transport("dns", 53, ProbeTransport::Udp, "????????????")
+            .iter()
+            .any(|f| f.check == "dns-refusal-shape"));
+    }
+
+    #[test]
+    fn evaluate_defaults_to_tcp_transport() {
+        // The historical entry point must keep defaulting to Tcp: UDP check
+        // families never fire on it, preserving old caller behavior.
+        for text in [
+            "associd=0 status=06c4 leap=none, stratum=3",
+            "_ipp._tcp.local",
+            "HTTP/1.1 200 OK\r\nSERVER: UPnP/1.0\r\nLOCATION: http://lab/\r\n",
+            "0????????public",
+            "?????????????version?bind?????????????????9.18.28",
+        ] {
+            assert!(evaluate("svc", 0, text).is_empty());
+        }
+        // A TCP transport explicitly never fires the UDP families either.
+        assert!(evaluate_transport("ntp", 123, ProbeTransport::Tcp, "????????")
+            .iter()
+            .all(|f| f.check != "ntp-binary-response"));
     }
 
     #[test]

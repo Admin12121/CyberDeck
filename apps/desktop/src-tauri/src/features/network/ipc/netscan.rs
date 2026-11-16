@@ -37,8 +37,11 @@ mod scan_wire;
 mod session;
 #[path = "../infrastructure/probe.rs"]
 mod tcp_probe;
+/// Crate-visible so the scan-depth IPC (`scan_depth.rs`) can run the bounded
+/// UDP service-check probe path for `transport: "udp"` requests. The module
+/// itself is unchanged infrastructure; only its visibility widened.
 #[path = "../infrastructure/udp_probe.rs"]
-mod udp_probe;
+pub(crate) mod udp_probe;
 
 pub use host_targets::parse_targets;
 pub use port_rules::parse_ports;

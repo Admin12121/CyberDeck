@@ -208,8 +208,10 @@ test("NSE-lite checks are a bounded registry over probe evidence, never a script
   const canonical = read("../../../lib/ipc.ts");
   const view = read("ScanView.tsx");
   // Fixed registry with a hard cap: no user-supplied scripts, no eval.
-  assert.match(registry, /static REGISTRY: \[CheckDefinition; 32\]/);
-  assert.match(registry, /MAX_CHECKS: usize = 40/);
+  // Wave 6 grew the registry to 42 checks (10 honest UDP families), so the
+  // cap moved to 48 to keep every entry reachable.
+  assert.match(registry, /static REGISTRY: \[CheckDefinition; 42\]/);
+  assert.match(registry, /MAX_CHECKS: usize = 48/);
   assert.match(registry, /MAX_FINDINGS: usize = 16/);
   // No dynamic code evaluation primitives anywhere in the registry.
   assert.ok(!/new Function|eval\(|Function\(/.test(registry), "registry must be static");

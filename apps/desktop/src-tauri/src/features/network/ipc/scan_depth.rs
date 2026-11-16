@@ -15,6 +15,7 @@ use cyberdeck_packet::active_scan_types::{
     classify_service_response, probe_payload, probe_registry_for_port, sanitize_excerpt,
     ServiceMatch, ServiceProbe, MAX_SERVICE_RESPONSE_BYTES,
 };
+use cyberdeck_packet::service_checks::ProbeTransport;
 use cyberdeck_storage::NewFinding;
 use serde::Serialize;
 use std::collections::VecDeque;
@@ -110,6 +111,11 @@ pub struct StealthFindingWire {
 pub struct ServiceProbeResultWire {
     host: String,
     port: u16,
+    /// Honest port state for the probe: "open" (a response or accepted
+    /// connection was observed), "closed" (TCP refusal / UDP ICMP
+    /// port-unreachable), "open|filtered" (UDP silence — NOT closed),
+    /// "unreachable", or "inconclusive".
+    state: &'static str,
     /// Service identity claimed by the observed protocol behavior, or an empty
     /// string when nothing defensible was observed.
     service_claim: String,
@@ -161,6 +167,24 @@ fn other_scan_active(
     tcp.running.load(Ordering::Acquire)
         || arp.is_running()
         || app.state::<Arc<super::icmp_echo::EchoCtx>>().is_running()
+}
+
+// ---------------------------------------------------------------------------
+// Additive transport selector (wave 6: UDP service checks)
+// ---------------------------------------------------------------------------
+
+/// Parse the optional transport marker. `None`/`"tcp"` keeps the historical
+/// TCP registry behavior for every existing caller; `"udp"` routes to the
+/// bounded UDP service-check probe path. Anything else is a hard error so a
+/// typo can never silently widen or redirect a scan.
+fn parse_transport(transport: Option<&str>) -> Result<ProbeTransport, String> {
+    match transport.map(|value| value.trim().to_ascii_lowercase()).as_deref() {
+        None | Some("tcp") => Ok(ProbeTransport::Tcp),
+        Some("udp") => Ok(ProbeTransport::Udp),
+        Some(other) => Err(format!(
+            "transport must be 'tcp' or 'udp', got '{other}'"
+        )),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -442,22 +466,42 @@ fn read_bounded(stream: &mut TcpStream) -> Vec<u8> {
     data
 }
 
+/// Why one registry probe produced no bytes. The distinction feeds the
+/// honest `state` wire field: a failed connect classifies the port
+/// (refused → closed, unreachable → unreachable), while a failed write or
+/// read on an established connection still means the port is open.
+enum ProbeOnceError {
+    Connect(std::io::Error),
+    Established(std::io::Error),
+}
+
 fn probe_once(
     address: SocketAddr,
     probe: ServiceProbe,
     nonce: &[u8; 32],
-) -> Result<Vec<u8>, String> {
+) -> Result<Vec<u8>, ProbeOnceError> {
     let mut stream = TcpStream::connect_timeout(&address, CONNECT_TIMEOUT)
-        .map_err(|e| format!("connect failed: {e}"))?;
+        .map_err(ProbeOnceError::Connect)?;
     let _ = stream.set_nodelay(true);
     if probe.needs_payload() {
         let payload = probe_payload(probe, nonce);
         let _ = stream.set_write_timeout(Some(WRITE_TIMEOUT));
         stream
             .write_all(&payload)
-            .map_err(|e| format!("probe write failed: {e}"))?;
+            .map_err(ProbeOnceError::Established)?;
     }
     Ok(read_bounded(&mut stream))
+}
+
+/// Map a failed TCP connect to the honest port state: refusal is closed,
+/// unreachable is unreachable, anything else stays inconclusive (never
+/// filtered, never open).
+fn classify_connect_state(kind: ErrorKind) -> &'static str {
+    match kind {
+        ErrorKind::ConnectionRefused => "closed",
+        ErrorKind::HostUnreachable | ErrorKind::NetworkUnreachable => "unreachable",
+        _ => "inconclusive",
+    }
 }
 
 /// Map the best classification over the port-directed registry to the wire
@@ -477,13 +521,29 @@ fn run_registry(
         .map_err(|e| format!("OS random probe nonce unavailable: {e}"))?;
     let registry = probe_registry_for_port(port);
     let mut best: Option<(ServiceProbe, ServiceMatch, String)> = None;
+    // Honest port state: any successful connect promotes to "open"; when every
+    // connect failed, the first failure's classification stands.
+    let mut connect_state: Option<&'static str> = None;
     for probe in registry {
-        // A connect failure or an empty reply simply means this probe produced
-        // no evidence; the registry continues and silence degrades honestly to
-        // basis "none" instead of an invented verdict.
-        let Ok(response) = probe_once(address, *probe, &nonce) else {
-            continue;
+        let response = match probe_once(address, *probe, &nonce) {
+            Ok(response) => {
+                connect_state = Some("open");
+                response
+            }
+            Err(ProbeOnceError::Established(_)) => {
+                connect_state = Some("open");
+                continue;
+            }
+            Err(ProbeOnceError::Connect(error)) => {
+                if connect_state.is_none() {
+                    connect_state = Some(classify_connect_state(error.kind()));
+                }
+                continue;
+            }
         };
+        // An empty reply simply means this probe produced no evidence; the
+        // registry continues and silence degrades honestly to basis "none"
+        // instead of an invented verdict.
         if response.is_empty() {
             continue;
         }
@@ -510,9 +570,15 @@ fn run_registry(
         }
         None => ("none", "low"),
     };
+    let state: &'static str = if best.is_some() || connect_state == Some("open") {
+        "open"
+    } else {
+        connect_state.unwrap_or("inconclusive")
+    };
     Ok(ServiceProbeResultWire {
         host,
         port,
+        state,
         service_claim: best
             .as_ref()
             .map(|(_, found, _)| found.service.to_string())
@@ -535,16 +601,70 @@ fn run_registry(
     })
 }
 
+/// Bounded UDP registry for the checks path: at most two protocol datagrams
+/// per port (see `udp_probe::udp_check_probe_registry`), one connected
+/// socket, honest UDP silence semantics. Per-scan datagram counts stay far
+/// below `udp_probe::MAX_UDP_PROBES_PER_SCAN` (256). Authorization and
+/// gating are the command's, identical to the TCP path.
+fn run_udp_registry(address: SocketAddr, host: String, port: u16) -> Result<ServiceProbeResultWire, String> {
+    let outcome = super::netscan::udp_probe::probe_udp_service_excerpt(
+        address.ip(),
+        port,
+        super::netscan::udp_probe::default_service_probe_window(port),
+        0,
+    );
+    let (basis, confidence, soft): (&'static str, &'static str, bool) =
+        if outcome.excerpt.is_empty() {
+            ("none", "low", false)
+        } else if outcome.reason == "udp_correlated_response" {
+            ("probe_response", "high", false)
+        } else {
+            // Bytes arrived but did not validate against our request identity:
+            // a responder exists; its protocol claim stays honestly soft.
+            ("probe_response", "low", true)
+        };
+    let correlated = outcome.reason == "udp_correlated_response" && outcome.service != "unknown";
+    Ok(ServiceProbeResultWire {
+        host,
+        port,
+        state: outcome.state,
+        service_claim: if correlated {
+            outcome.service.to_string()
+        } else {
+            String::new()
+        },
+        basis,
+        confidence,
+        probe_used: if outcome.excerpt.is_empty() {
+            "none"
+        } else {
+            outcome.probe_used
+        },
+        soft_match: soft,
+        raw_excerpt_trimmed: outcome.excerpt,
+        // UDP responders get no software-identity promotion: the excerpt and
+        // the pure check registry carry any disclosure evidence.
+        remote_software_claim: None,
+        elapsed_ms: outcome.elapsed_ms,
+    })
+}
+
 /// Probe ONE host:port with the bounded port-directed registry. The host must
 /// be an IP literal: the frontend passes backend-observed hosts, and silently
 /// resolving attacker-supplied hostnames from a desktop app would turn this
 /// command into an unintended DNS-based discovery primitive.
+///
+/// `transport` is additive: omitted/`"tcp"` keeps the historical TCP registry
+/// for every existing caller; `"udp"` runs the bounded UDP service-check
+/// probe path (NTP/mDNS/SSDP/SNMP/DNS families per port). Authorization and
+/// saved-case gating are identical for both transports.
 #[tauri::command]
 pub async fn netscan_service_probe_v1(
     host: String,
     port: u16,
     authorized: bool,
     case_id: String,
+    transport: Option<String>,
     session: State<'_, CaseSessionCtx>,
     evidence: State<'_, EvidenceCtx>,
     gate: State<'_, Arc<super::operation_gate::NetworkOperationGate>>,
@@ -560,6 +680,7 @@ pub async fn netscan_service_probe_v1(
     if port == 0 {
         return Err("port must be nonzero".into());
     }
+    let transport = parse_transport(transport.as_deref())?;
     let (scope, verified_case) = scoped_case(&session, &case_id)?;
     {
         let store = evidence
@@ -574,7 +695,12 @@ pub async fn netscan_service_probe_v1(
     let permit = gate.acquire(super::operation_gate::ActiveOperation::TcpUdp)?;
     let result = tokio::task::spawn_blocking(move || {
         let _active_operation = permit;
-        run_registry(SocketAddr::new(address, port), host, port)
+        match transport {
+            ProbeTransport::Udp => {
+                run_udp_registry(SocketAddr::new(address, port), host.clone(), port)
+            }
+            ProbeTransport::Tcp => run_registry(SocketAddr::new(address, port), host, port),
+        }
     })
     .await
     .map_err(|_| "service probe worker unavailable")??;
@@ -586,9 +712,11 @@ pub async fn netscan_service_probe_v1(
             ),
             severity: "info".into(),
             details: format!(
-                "Authorized bounded service probe\nHost: {}\nPort: {}\nProbe: {}\nBasis: {}\nConfidence: {}\nSoft match: {}\nUnverified software claim: {}\nExcerpt: {}\nClaims are remote assertions, never authenticated identities.",
+                "Authorized bounded service probe\nHost: {}\nPort: {}\nTransport: {}\nState: {}\nProbe: {}\nBasis: {}\nConfidence: {}\nSoft match: {}\nUnverified software claim: {}\nExcerpt: {}\nClaims are remote assertions, never authenticated identities.",
                 result.host,
                 result.port,
+                if matches!(transport, ProbeTransport::Udp) { "udp" } else { "tcp" },
+                result.state,
                 result.probe_used,
                 result.basis,
                 result.confidence,
@@ -622,6 +750,9 @@ pub struct ServiceCheckFindingWire {
 pub struct ServiceChecksWire {
     pub host: String,
     pub port: u16,
+    /// Honest port state from the probe stage ("open", "closed",
+    /// "open|filtered", "unreachable", "inconclusive").
+    pub state: &'static str,
     pub service_claim: String,
     pub probe_used: String,
     pub findings: Vec<ServiceCheckFindingWire>,
@@ -629,36 +760,42 @@ pub struct ServiceChecksWire {
 
 /// Run the bounded check registry over a live probe of one host:port. The
 /// probe reuses the same user-mode machinery as `netscan_service_probe_v1`
-/// (same timeouts, same random nonce discipline, same registry); the check
-/// pass itself is pure and never opens sockets. Authorization and saved-case
-/// gating match the probe command exactly.
+/// (same timeouts, same random nonce discipline, same registry, same
+/// optional transport marker); the check pass itself is pure and never opens
+/// sockets. Authorization and saved-case gating match the probe command
+/// exactly.
 #[tauri::command]
 pub async fn netscan_service_checks_v1(
     host: String,
     port: u16,
     authorized: bool,
     case_id: String,
+    transport: Option<String>,
     session: State<'_, CaseSessionCtx>,
     evidence: State<'_, EvidenceCtx>,
     gate: State<'_, Arc<super::operation_gate::NetworkOperationGate>>,
     ctx: State<'_, Arc<ProbeCtx>>,
 ) -> Result<ServiceChecksWire, String> {
+    let transport_kind = parse_transport(transport.as_deref())?;
     let probe = netscan_service_probe_v1(
         host.clone(),
         port,
         authorized,
         case_id,
+        transport,
         session,
         evidence,
         gate,
         ctx,
     )
     .await?;
-    // The registry classifies the raw excerpt; an excerpt that the probe
-    // stage could not capture yields no findings rather than guesses.
-    let findings = cyberdeck_packet::service_checks::evaluate(
+    // The registry classifies the raw excerpt with the probe's transport so
+    // UDP check families port-gate correctly; an excerpt the probe stage
+    // could not capture yields no findings rather than guesses.
+    let findings = cyberdeck_packet::service_checks::evaluate_transport(
         &probe.service_claim,
         port,
+        transport_kind,
         &probe.raw_excerpt_trimmed,
     )
     .into_iter()
@@ -674,8 +811,54 @@ pub async fn netscan_service_checks_v1(
     Ok(ServiceChecksWire {
         host: probe.host,
         port: probe.port,
+        state: probe.state,
         service_claim: probe.service_claim,
         probe_used: probe.probe_used.to_string(),
         findings,
     })
+}
+
+#[cfg(test)]
+mod transport_gate_tests {
+    use super::*;
+    use std::io::ErrorKind;
+
+    #[test]
+    fn transport_marker_defaults_to_tcp_and_rejects_unknown_values() {
+        assert_eq!(parse_transport(None), Ok(ProbeTransport::Tcp));
+        assert_eq!(parse_transport(Some("tcp")), Ok(ProbeTransport::Tcp));
+        assert_eq!(parse_transport(Some(" UDP ")), Ok(ProbeTransport::Udp));
+        assert_eq!(parse_transport(Some("Tcp")), Ok(ProbeTransport::Tcp));
+        assert!(parse_transport(Some("icmp")).is_err());
+        assert!(parse_transport(Some("")).is_err());
+        assert!(parse_transport(Some("tcp;udp")).is_err());
+    }
+
+    #[test]
+    fn tcp_connect_failures_classify_honestly_never_filtered() {
+        assert_eq!(classify_connect_state(ErrorKind::ConnectionRefused), "closed");
+        assert_eq!(
+            classify_connect_state(ErrorKind::HostUnreachable),
+            "unreachable"
+        );
+        assert_eq!(
+            classify_connect_state(ErrorKind::NetworkUnreachable),
+            "unreachable"
+        );
+        assert_eq!(classify_connect_state(ErrorKind::TimedOut), "inconclusive");
+        assert_eq!(classify_connect_state(ErrorKind::WouldBlock), "inconclusive");
+    }
+
+    #[test]
+    fn udp_check_probe_registries_fit_the_scan_datagram_budget() {
+        // One command probes one (host, port) with at most two bounded
+        // datagram families; a 128-port sweep stays far below the 256-datagram
+        // scan bound shared with the netscan UDP scan path.
+        for port in [53u16, 123, 161, 1900, 5353, 8080] {
+            assert!(
+                super::super::netscan::udp_probe::udp_check_probe_registry(port).len() * 128
+                    <= super::super::netscan::udp_probe::MAX_UDP_PROBES_PER_SCAN
+            );
+        }
+    }
 }
