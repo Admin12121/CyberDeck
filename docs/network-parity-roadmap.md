@@ -53,7 +53,9 @@ Landed work stays in the list with ✅ so progress stays countable.
   detection ≠ support — monitor control stays Linux-only) (71fbbd8)
 ✅ SMB bounded dissector — SMB1+SMB2 commands/status/NTLMSSP/share names, dispatch
   after TLS/HTTP claims, 1800-case truncation fuzz clean (32febae)
-- [ ] TLS 1.2 CBC suites (HMAC-SHA1/SHA-256 path)
+✅ TLS 1.2 CBC suites — AES-128-CBC + HMAC-SHA1/SHA-256, both MT-E and RFC 7366 EtM
+  shapes, constant-time strip, seq-advancing failure honesty; validated against live
+  OpenSSL captures (3feea8e)
 - [ ] EAPOL/PMKID capture → case finding → Recipes/cracking pipeline button-through
 
 ## Tier 2 — MITM completion (Bettercap/Ettercap arc)
@@ -64,19 +66,25 @@ Landed work stays in the list with ✅ so progress stays countable.
   (individually toggled, all OFF by default, counted), CONNECT refused to the Web
   studio, full header+excerpt logging, one bounded case finding per session (525cfda)
 - [ ] SSL-strip module (gated, honest about HSTS limits)
-- [ ] NSE-lite growth: UDP probe plumbing (mDNS/SSDP/NTP families are TCP-only today),
-  registry toward ~60 checks
+✅ NSE-lite UDP plumbing — per-family bounded datagrams (NTP/DNS/mDNS/SSDP/SNMP),
+  silence = open|filtered honesty; registry 42 checks (7b4974e)
 - [ ] Filter-language depth: protocol/field expression grammar beyond the current
   subset (Wireshark filter parity for the fields we dissect)
 
 ## Tier 3 — radio + long tail (demand-driven)
 
-- [ ] Wifi injection (deauth/disassociation, gated like the spoofer)
-- [ ] Channel-hop scheduler + regulatory-domain awareness
-- [ ] BLE: Linux raw HCI (advertising + GATT walk), `Unsupported` elsewhere
+✅ Wifi injection — gated deauth (session-observed targets only, ≤4 bursts × 32
+  frames, ≥20 ms pacing, hard 10 s cap, Linux-only) (8b39756)
+✅ Channel-hop scheduler — bounded list ≤ 16, 250–2000 ms interval, pause/resume,
+  hop log ≤ 256, refuses while another gate op runs (8b39756)
+✅ BLE Linux raw HCI — advertising scan (AD structures, names/UUIDs/manufacturer
+  data, LRU ≤ 128), gated scan IPC; UI arc deferred and stated; `Unsupported`
+  elsewhere (8871e09)
 - [ ] WPA-enterprise (EAP) handshake handling beyond PSK
-- [ ] More dissectors per demand: RDP, MQTT, SOCKS, QUIC v2, DHCPv6
-- [ ] IO graph + endpoint statistics depth
+✅ More dissectors: MQTT (3.1/3.1.1/5.0), SOCKS5/4a, DHCPv6, RDP X.224 — landed
+  (e9225d0); QUIC v2 remains demand-driven
+✅ IO graph + endpoints — ≤120 buckets with TCP/UDP/other split from dissector
+  evidence, top-64 endpoints with talker convention, case-scoped paths (ecd0306)
 
 ## Explicitly out of scope (with reason)
 
