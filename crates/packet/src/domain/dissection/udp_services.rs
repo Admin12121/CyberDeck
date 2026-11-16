@@ -365,6 +365,25 @@ pub(super) fn llmnr(payload: &[u8]) -> Option<UdpService> {
     multicast_names(payload, true)
 }
 
+/// DHCPv6 (RFC 8415) joins the UDP dispatch where DNS/DHCPv4 live. Clients
+/// listen on UDP 546 and servers/relays on 547 over link-local UDP, so the
+/// port side decides the direction the dissector may claim message types
+/// for; port pairs that are not 546↔547/547↔546/547↔547 claim nothing.
+pub(super) fn dhcpv6(payload: &[u8], src_port: u16, dst_port: u16) -> Option<UdpService> {
+    let direction = match (src_port, dst_port) {
+        (546, 547) => super::dhcpv6::Direction::ClientToServer,
+        (547, 546) => super::dhcpv6::Direction::ServerToClient,
+        (547, 547) => super::dhcpv6::Direction::Relay,
+        _ => return None,
+    };
+    let service = super::dhcpv6::dissect(payload, direction)?;
+    Some(UdpService {
+        protocol: service.protocol,
+        info: service.info,
+        layers: service.layers,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -379,6 +398,28 @@ mod tests {
         b[236..240].copy_from_slice(&[99, 130, 83, 99]);
         b.extend([53, 1, 5, 54, 4, 192, 0, 2, 1, 51, 4, 0, 0, 0, 60, 255]);
         b
+    }
+    #[test]
+    fn dhcpv6_dispatch_direction_comes_from_the_port_side() {
+        // Minimal SOLICIT with its mandatory client identifier option.
+        let mut solicit = vec![1u8, 0x01, 0x02, 0x03];
+        solicit.extend_from_slice(&[0x00, 0x01, 0x00, 0x0c]);
+        solicit.extend_from_slice(&[
+            0x00, 0x01, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff, 0x00, 0x01, 0x00, 0x0e,
+        ]);
+        // Client → server (546 → 547) claims the DHCPv6 row.
+        let client = dhcpv6(&solicit, 546, 547).unwrap();
+        assert_eq!(client.protocol, "DHCPv6");
+        assert!(client.info.contains("SOLICIT"));
+        // The same SOLICIT arriving on the server side claims nothing —
+        // the ports do not carry client message types in that direction.
+        assert!(dhcpv6(&solicit, 547, 546).is_none());
+        assert!(dhcpv6(&solicit, 547, 547).is_none());
+        // A 546 → 546 port pair is not a DHCPv6 exchange shape.
+        assert!(dhcpv6(&solicit, 546, 546).is_none());
+        // Random bytes on 546/547 keep the plain transport row (None),
+        // like every other UDP service here.
+        assert!(dhcpv6(b"plain udp payload", 546, 547).is_none());
     }
     #[test]
     fn mdns_and_llmnr_decode_complete_questions_and_reject_corrupt_labels() {
