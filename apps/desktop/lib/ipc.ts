@@ -1373,6 +1373,96 @@ export async function networkLabSpoofStatusV1(): Promise<SpoofStatusWire> {
   return invoke<SpoofStatusWire>("network_lab_spoof_status_v1", {});
 }
 
+// --- Network Lab Wifi monitor (passive 802.11 capture, gated) -----------------
+// Wire types mirror features/network/ipc/wifi_monitor.rs.
+
+export interface WifiInterfaceWire {
+  name: string;
+  index: number;
+}
+
+export interface WifiInterfacesWire {
+  monitor_supported: boolean;
+  npcap_detected: boolean;
+  platform_status: string;
+  interfaces: WifiInterfaceWire[];
+}
+
+export interface WifiApWire {
+  bssid: string;
+  essid: string;
+}
+
+export interface WifiStatusWire {
+  state: string;
+  interface: string;
+  channel_mhz: number;
+  channels: number[];
+  frames_seen: number;
+  beacons: number;
+  clients_seen: number;
+  handshakes_captured: number;
+  hashcat_22000_lines: string[];
+  access_points: WifiApWire[];
+  clients: string[];
+  elapsed_ms: number;
+  last_error: string | null;
+}
+
+export interface WifiStartWire {
+  interface: string;
+  channel_mhz: number;
+  channels: number[];
+  status: WifiStatusWire;
+}
+
+export interface WifiEvidenceReceiptWire {
+  case_id: string;
+  line_count: number;
+  byte_len: number;
+  truncated: boolean;
+}
+
+/** Enumerate wifi interfaces and platform monitor support (Npcap probed on Windows). */
+export async function networkWifiInterfacesV1(): Promise<WifiInterfacesWire> {
+  if (!inTauri) throw new Error("Wifi interfaces require the desktop runtime");
+  return invoke<WifiInterfacesWire>("network_wifi_interfaces_v1", {});
+}
+
+/** Start passive monitor-mode capture; native dialog happens backend-side. */
+export async function networkWifiMonitorStartV1(
+  interfaceName: string,
+  channels: string,
+  authorized: boolean,
+  caseId: string,
+): Promise<WifiStartWire> {
+  if (!inTauri) throw new Error("Wifi monitor mode requires the desktop runtime");
+  return invoke<WifiStartWire>("network_wifi_monitor_start_v1", {
+    interfaceName,
+    channels,
+    authorized,
+    caseId,
+  });
+}
+
+/** Stop the monitor; every exit runs the final snapshot publication. */
+export async function networkWifiMonitorStopV1(): Promise<WifiStatusWire> {
+  if (!inTauri) throw new Error("Wifi monitor mode requires the desktop runtime");
+  return invoke<WifiStatusWire>("network_wifi_monitor_stop_v1", {});
+}
+
+/** Poll monitor status (frames, beacons, clients, handshakes, 22000 lines). */
+export async function networkWifiMonitorStatusV1(): Promise<WifiStatusWire> {
+  if (!inTauri) throw new Error("Wifi monitor mode requires the desktop runtime");
+  return invoke<WifiStatusWire>("network_wifi_monitor_status_v1", {});
+}
+
+/** Persist this session's captured 22000 lines as ONE bounded case finding. */
+export async function networkWifiEvidenceSaveV1(caseId: string): Promise<WifiEvidenceReceiptWire> {
+  if (!inTauri) throw new Error("Wifi evidence save requires the desktop runtime");
+  return invoke<WifiEvidenceReceiptWire>("network_wifi_evidence_save_v1", { caseId });
+}
+
 // --- Packet Studio export view -> case ---------------------------------------
 // Wire types mirror features/network/ipc/pcap_export.rs and pcap_wire.rs.
 

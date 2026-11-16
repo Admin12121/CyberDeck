@@ -48,6 +48,10 @@ fn main() {
         .manage(std::sync::Arc::new(
             features::network::ipc::network_lab_spoof::NetworkLabSpoofCtx::default(),
         ))
+        // coordinator-insert (Wifi monitor slice): passive monitor-mode capture state
+        .manage(std::sync::Arc::new(
+            features::network::ipc::wifi_monitor::NetworkWifiCtx::default(),
+        ))
         .manage(features::web::ipc::web::WebCtx {
             proxy_running: std::sync::atomic::AtomicBool::new(false),
             proxy_port: std::sync::atomic::AtomicU16::new(8080),
@@ -152,6 +156,12 @@ fn main() {
             features::network::ipc::network_lab_spoof::network_lab_spoof_start_v1,
             features::network::ipc::network_lab_spoof::network_lab_spoof_stop_v1,
             features::network::ipc::network_lab_spoof::network_lab_spoof_status_v1,
+            // coordinator-insert (Wifi monitor slice): monitor-mode capture commands
+            features::network::ipc::wifi_monitor::network_wifi_interfaces_v1,
+            features::network::ipc::wifi_monitor::network_wifi_monitor_start_v1,
+            features::network::ipc::wifi_monitor::network_wifi_monitor_stop_v1,
+            features::network::ipc::wifi_monitor::network_wifi_monitor_status_v1,
+            features::network::ipc::wifi_monitor::network_wifi_evidence_save_v1,
             features::network::ipc::pcap_export::pcap_export_view_v1,
             features::network::ipc::pcap_export::pcap_export_view_ng_v1,
             features::network::ipc::os_hints_ipc::capture_os_hints_v1,

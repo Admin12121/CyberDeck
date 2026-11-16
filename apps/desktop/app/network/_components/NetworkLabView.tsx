@@ -28,6 +28,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Ban, Crosshair, FileText, FolderOpen, Globe, Network, Radar } from "lucide-react";
 import { Syringe } from "lucide-react";
+import { Wifi } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import { CheckBox, Chip, Select, TextArea, TextInput, ToolButton } from "@ds/panes";
 import { ErrorStrip, IconRail, IconButton, InfoTip, ModeCard, StatusStrip, WorkspaceShell } from "@ds/compact";
@@ -86,11 +87,21 @@ import {
   type SpoofStartWire,
   type SpoofStatusWire,
 } from "@lib/ipc";
+import {
+  networkWifiEvidenceSaveV1,
+  networkWifiInterfacesV1,
+  networkWifiMonitorStartV1,
+  networkWifiMonitorStatusV1,
+  networkWifiMonitorStopV1,
+  type WifiEvidenceReceiptWire,
+  type WifiInterfacesWire,
+  type WifiStatusWire,
+} from "@lib/ipc";
 
 const SCOPE_TEXT_MAX_CHARS = 8192;
 
 /** Rail modes: one visible at a time (icon-only pill rail navigation). */
-type LabMode = "scope" | "arp" | "live" | "dns" | "spoof" | "report";
+type LabMode = "scope" | "arp" | "live" | "dns" | "wifi" | "spoof" | "report";
 
 export function NetworkLabView() {
   const desktop = isDesktop();
@@ -153,6 +164,19 @@ export function NetworkLabView() {
   const [spoofStart, setSpoofStart] = useState<SpoofStartWire | null>(null);
   const [spoofStatus, setSpoofStatus] = useState<SpoofStatusWire | null>(null);
   const [spoofError, setSpoofError] = useState<string | null>(null);
+  // Wifi monitor mode (the arc's passive 802.11 capture): the backend owns
+  // the radio control (Linux nl80211), the native dialog is the
+  // authorization, and the view only ever reads honest status back — it
+  // never widens channels or invents platform support. The interface list
+  // carries the honest platform status (monitor_supported, and Npcap
+  // presence reported on Windows without pretending it is support).
+  const [wifiInterfaces, setWifiInterfaces] = useState<WifiInterfacesWire | null>(null);
+  const [wifiInterface, setWifiInterface] = useState("");
+  const [wifiChannels, setWifiChannels] = useState("1,6,11");
+  const [wifiBusy, setWifiBusy] = useState(false);
+  const [wifiStatus, setWifiStatus] = useState<WifiStatusWire | null>(null);
+  const [wifiReceipt, setWifiReceipt] = useState<WifiEvidenceReceiptWire | null>(null);
+  const [wifiError, setWifiError] = useState<string | null>(null);
   const currentCase = useRef(wb.caseId);
   currentCase.current = wb.caseId;
   const openSequence = useRef(0);
@@ -209,6 +233,13 @@ export function NetworkLabView() {
     setSpoofStart(null);
     setSpoofStatus(null);
     setSpoofError(null);
+    // The wifi monitor's capture session is case-owned on the backend (the
+    // pump stops honestly on revocation), so per-run wifi state never
+    // survives into the new revision either.
+    setWifiBusy(false);
+    setWifiStatus(null);
+    setWifiReceipt(null);
+    setWifiError(null);
   }, [wb.caseId]);
 
   // Live subscription poll: every ~2s while enabled. A self-rescheduling
@@ -283,11 +314,14 @@ export function NetworkLabView() {
       : undefined;
   const dnsFindings =
     dnsResult && dnsResult.findings.length > 0 ? dnsResult.findings.length : undefined;
+  const wifiHandshakeBadge =
+    wifiStatus && wifiStatus.handshakes_captured > 0 ? wifiStatus.handshakes_captured : undefined;
   const railItems: { id: LabMode; label: string; icon: LucideIcon; badge?: number }[] = [
     { id: "scope", label: "Scope", icon: Crosshair },
     { id: "arp", label: "ARP", icon: Network, badge: arpConflicts },
     { id: "live", label: "Live", icon: Radar, badge: liveGatewayChanges },
     { id: "dns", label: "DNS", icon: Globe, badge: dnsFindings },
+    { id: "wifi", label: "Wifi", icon: Wifi, badge: wifiHandshakeBadge },
     { id: "spoof", label: "Spoof", icon: Syringe },
     { id: "report", label: "Report", icon: FileText },
   ];
@@ -685,6 +719,96 @@ export function NetworkLabView() {
     }
   };
 
+  // Wifi monitor lifecycle: enumerate interfaces + honest platform status on
+  // mount, start → backend native dialog → poll honest counters (1s) while
+  // starting/monitoring/stopping → stop (never refused) → save the session's
+  // hashcat 22000 lines as ONE bounded case finding.
+  useEffect(() => {
+    if (!desktop) return;
+    let active = true;
+    void networkWifiInterfacesV1()
+      .then((wire) => {
+        if (!active) return;
+        setWifiInterfaces(wire);
+        setWifiInterface((current) =>
+          current || (wire.interfaces.length > 0 ? wire.interfaces[0].name : ""),
+        );
+      })
+      .catch(() => {
+        // The next explicit action surfaces the failure; the card keeps its
+        // honest "unknown platform" state instead of inventing support.
+        if (active) setWifiInterfaces(null);
+      });
+    return () => {
+      active = false;
+    };
+  }, [desktop]);
+
+  const wifiPhase = wifiStatus?.state ?? "idle";
+  const wifiActive =
+    wifiPhase === "starting" || wifiPhase === "monitoring" || wifiPhase === "stopping";
+  const wifiBlock = wifiPlatformBlock(wifiInterfaces);
+  const wifiSaved = wifiReceipt !== null;
+
+  useEffect(() => {
+    if (!desktop || !wifiActive) return;
+    const timer = setInterval(() => {
+      networkWifiMonitorStatusV1()
+        .then((wire) => {
+          setWifiStatus(wire);
+        })
+        .catch(() => {
+          // A failed poll keeps the last honest status; the next tick retries.
+        });
+    }, 1000);
+    return () => {
+      clearInterval(timer);
+    };
+  }, [desktop, wifiPhase, wifiActive]);
+
+  const runWifiStart = async () => {
+    const channels = parseWifiChannels(wifiChannels);
+    if (!wifiInterface || channels === null) return;
+    setWifiBusy(true);
+    setWifiError(null);
+    try {
+      const wire = await networkWifiMonitorStartV1(wifiInterface, wifiChannels, true, wb.caseId);
+      setWifiStatus(wire.status);
+      // A new capture session has its own one-save evidence slot.
+      setWifiReceipt(null);
+    } catch (err) {
+      setWifiError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setWifiBusy(false);
+    }
+  };
+
+  const stopWifi = async () => {
+    try {
+      await networkWifiMonitorStopV1();
+    } catch (err) {
+      setWifiError(err instanceof Error ? err.message : String(err));
+    }
+  };
+
+  const runWifiEvidenceSave = async () => {
+    const caseId = wb.caseId;
+    const ticket = ++openSequence.current;
+    const isCurrent = () => currentCase.current === caseId && ticket === openSequence.current;
+    setWifiBusy(true);
+    setWifiError(null);
+    try {
+      const wire = await networkWifiEvidenceSaveV1(caseId);
+      if (!isCurrent()) return;
+      setWifiReceipt(wire);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      if (isCurrent() && message !== "cancelled") setWifiError(message);
+    } finally {
+      if (isCurrent()) setWifiBusy(false);
+    }
+  };
+
   // Shell toolbar row per mode: once a run exists the still-needed controls
   // move up here (the idle card holds them inside the shared ModeCard); the
   // trailing chip carries the run's state word.
@@ -1010,6 +1134,189 @@ export function NetworkLabView() {
         </section>
       )}
 
+      {mode === "wifi" && (
+        <section aria-label="Wifi monitor" className="flex min-h-0 flex-1 flex-col">
+          {wifiError ? <ErrorStrip>{wifiError}</ErrorStrip> : null}
+          <ModeCard
+            title="Wifi monitor"
+            icon={Wifi}
+            state={
+              wifiStatus
+                ? wifiPhase
+                : wifiInterfaces && !wifiInterfaces.monitor_supported
+                  ? "unsupported here"
+                  : "not running"
+            }
+            stateTone={
+              wifiPhase === "monitoring"
+                ? "orange"
+                : wifiPhase === "stopped"
+                  ? wifiStatus?.last_error
+                    ? "err"
+                    : "ok"
+                  : wifiPhase === "stopping" || wifiPhase === "starting"
+                    ? "orange"
+                    : "muted"
+            }
+            info="Authorized monitor-mode 802.11 capture on Linux — passive receive-only, native dialog on start, EAPOL handshakes formatted as hashcat 22000 evidence."
+          >
+            <div className="flex flex-wrap items-center gap-3">
+              <span className="font-medium uppercase tracking-wider text-fg-muted">Wifi monitor</span>
+              <Select
+                value={wifiInterface}
+                onChange={setWifiInterface}
+                options={[
+                  { value: "", label: "Choose wifi interface" },
+                  ...(wifiInterfaces?.interfaces ?? []).map((iface) => ({
+                    value: iface.name,
+                    label: iface.name,
+                  })),
+                ]}
+                ariaLabel="Wifi monitor wireless interface"
+                className="w-44"
+              />
+              <TextInput
+                value={wifiChannels}
+                onChange={(text) => setWifiChannels(text.replace(/[^0-9,\s]/g, "").slice(0, 64))}
+                placeholder="channels (1,6,11)"
+                ariaLabel="Capture channels: 2.4/5 GHz channel numbers or explicit MHz frequencies, at most 16, comma separated"
+                className="h-8 w-44 sm:h-7"
+              />
+              {wifiActive ? (
+                <ToolButton
+                  tone="danger"
+                  onClick={() => void stopWifi()}
+                  title="Stop the authorized monitor capture: the backend clears the stop flag before every read, so the pump exits at its next read boundary and the final counters stay pollable"
+                >
+                  Stop capture
+                </ToolButton>
+              ) : (
+                <ToolButton
+                  tone="primary"
+                  onClick={() => void runWifiStart()}
+                  disabled={
+                    !desktop ||
+                    !wifiInterface ||
+                    parseWifiChannels(wifiChannels) === null ||
+                    wifiBlock !== null ||
+                    wifiBusy
+                  }
+                  title="Linux only: switches the selected interface to monitor mode over nl80211 and passively reads 802.11 frames for WPA handshake evidence (hashcat 22000 format); a native Yes/No dialog names exactly what will happen, nothing is transmitted, capture pins the first listed channel — no channel hopping is automated in this arc"
+                >
+                  {wifiBusy ? "starting…" : "Start capture"}
+                </ToolButton>
+              )}
+              {wifiBlock ? <Chip tone="muted">{wifiBlock}</Chip> : null}
+            </div>
+            <p className="text-xs leading-relaxed text-fg-muted">
+              {wifiPlatformNote(wifiInterfaces)}
+            </p>
+            {wifiStatus ? (
+              <div className="space-y-2">
+                <p className="font-mono text-2xs text-fg-muted">
+                  interface {wifiStatus.interface || "unknown"} · pinned{" "}
+                  {wifiStatus.channel_mhz || "—"} MHz of{" "}
+                  {wifiStatus.channels.join(", ") || "none"} · no channel hopping is automated in
+                  this arc
+                </p>
+                <div className="max-h-64 overflow-auto rounded-lg border border-line">
+                  <table className="data-table">
+                    <thead>
+                      <tr>
+                        <th className="w-24">Frames</th>
+                        <th className="w-24">Beacons</th>
+                        <th className="w-24">Clients</th>
+                        <th className="w-32">Handshakes</th>
+                        <th className="w-24">Elapsed</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <tr>
+                        <td>{wifiStatus.frames_seen}</td>
+                        <td>{wifiStatus.beacons}</td>
+                        <td>{wifiStatus.clients_seen}</td>
+                        <td>
+                          <Chip
+                            tone={
+                              wifiStatus.handshakes_captured > 0 ? "orange" : "muted"
+                            }
+                          >
+                            {wifiStatus.handshakes_captured}
+                          </Chip>
+                        </td>
+                        <td>
+                          {wifiStatus ? `${(wifiStatus.elapsed_ms / 1000).toFixed(1)} s` : "0.0 s"}
+                        </td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+                {wifiStatus.access_points.length > 0 ? (
+                  <div className="max-h-48 overflow-auto rounded-lg border border-line">
+                    <table className="data-table">
+                      <thead>
+                        <tr>
+                          <th className="w-40">AP BSSID</th>
+                          <th>ESSID</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {wifiStatus.access_points.map((ap) => (
+                          <tr key={ap.bssid}>
+                            <td className="font-mono text-fg">{ap.bssid}</td>
+                            <td className="font-mono text-fg-dim">{ap.essid || "(hidden)"}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                ) : null}
+                {wifiStatus.hashcat_22000_lines.length > 0 ? (
+                  <div className="space-y-1">
+                    <p className="text-2xs font-semibold text-fg-muted">
+                      Hashcat 22000 evidence ({wifiStatus.hashcat_22000_lines.length} line
+                      {wifiStatus.hashcat_22000_lines.length === 1 ? "" : "s"})
+                    </p>
+                    <div className="max-h-40 overflow-auto rounded-lg border border-line bg-black/20 p-2">
+                      {wifiStatus.hashcat_22000_lines.map((line, index) => (
+                        <p key={`${index}-${line.slice(0, 24)}`} className="font-mono text-2xs break-all text-fg-dim">
+                          {line}
+                        </p>
+                      ))}
+                    </div>
+                    <div className="flex flex-wrap items-center gap-3">
+                      <ToolButton
+                        tone="primary"
+                        disabled={!desktop || wifiBusy || wifiSaved}
+                        title={
+                          wifiSaved
+                            ? "This capture session already saved its one bounded evidence finding — start a new session to capture more"
+                            : "Persist the session's hashcat 22000 lines as ONE bounded case finding in the backend-selected saved case"
+                        }
+                        onClick={() => void runWifiEvidenceSave()}
+                      >
+                        {wifiReceipt ? "saved" : wifiBusy ? "saving…" : "Save to case"}
+                      </ToolButton>
+                      {wifiReceipt ? (
+                        <Chip tone={wifiReceipt.truncated ? "orange" : "ok"}>
+                          saved to {wifiReceipt.case_id} · {wifiReceipt.line_count} line
+                          {wifiReceipt.line_count === 1 ? "" : "s"} · {wifiReceipt.byte_len} bytes
+                          {wifiReceipt.truncated ? " · truncated at the 32 KiB bound" : ""}
+                        </Chip>
+                      ) : null}
+                      <InfoTip text="One bounded artifact per capture session: the backend renders a session header plus the hashcat 22000 lines and persists them as ONE case finding; a second save refuses honestly instead of duplicating case evidence." />
+                    </div>
+                  </div>
+                ) : null}
+                {wifiPhase === "stopped" && wifiStatus.last_error ? (
+                  <p className="text-xs text-fg-muted">last error: {wifiStatus.last_error}</p>
+                ) : null}
+              </div>
+            ) : null}
+          </ModeCard>
+        </section>
+      )}
+
       {mode === "report" && (
         <section aria-label="Session report" className="flex min-h-0 flex-1 flex-col">
           {/* lab-report-ui.test.mjs pins the role="group" label, the muted
@@ -1231,6 +1538,57 @@ export function parseSpoofTargetCount(text: string): number | null {
   const value = Number(text);
   if (!Number.isInteger(value) || value < 1 || value > 32) return null;
   return value;
+}
+
+/**
+ * Client-side mirror of the backend channel list bound: numeric tokens split
+ * on commas/whitespace, at most 16, at least one. Channel numbers and explicit
+ * MHz frequencies are both accepted here; the backend re-validates every
+ * token and resolves the actual capture frequencies.
+ */
+export function parseWifiChannels(text: string): number[] | null {
+  const tokens = text
+    .split(/[,\s]+/)
+    .map((token) => token.trim())
+    .filter((token) => token.length > 0);
+  if (tokens.length === 0 || tokens.length > 16) return null;
+  const channels: number[] = [];
+  for (const token of tokens) {
+    if (!/^\d{1,5}$/.test(token)) return null;
+    const value = Number(token);
+    if (!Number.isInteger(value) || value < 1) return null;
+    channels.push(value);
+  }
+  return channels;
+}
+
+/**
+ * Pure UI gate mirroring the backend's platform honesty: monitor mode is
+ * Linux-only this arc; Windows Npcap presence is reported but never treated
+ * as support; a machine without a wireless interface refuses too.
+ */
+export function wifiPlatformBlock(wire: WifiInterfacesWire | null): string | null {
+  if (!wire) {
+    return "Wifi platform status unknown — the backend interface probe has not answered";
+  }
+  if (!wire.monitor_supported) {
+    if (wire.npcap_detected) {
+      return "Monitor mode requires Linux — Npcap detected, but no Windows monitor-mode control is wired in this arc";
+    }
+    return "Monitor mode requires Linux — monitor-mode capture is unsupported on this platform";
+  }
+  if (wire.interfaces.length === 0) {
+    return "No wireless interface found on this machine — monitor capture needs a wifi NIC";
+  }
+  return null;
+}
+
+/** The backend's honest per-platform status note, rendered verbatim. */
+export function wifiPlatformNote(wire: WifiInterfacesWire | null): string {
+  if (!wire) {
+    return "Wifi platform status unknown — the backend interface probe has not answered yet.";
+  }
+  return wire.platform_status;
 }
 
 /** One-line label per timeline event kind; pure so node tests cover it. */

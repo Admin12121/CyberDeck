@@ -15,3 +15,5 @@ pub mod scan_depth;
 pub mod scan_insights;
 pub mod scan_profiles;
 pub mod syn_scan;
+// coordinator-insert (Wifi monitor slice): monitor-mode capture IPC
+pub mod wifi_monitor;
