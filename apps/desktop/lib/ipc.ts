@@ -1463,6 +1463,200 @@ export async function networkWifiEvidenceSaveV1(caseId: string): Promise<WifiEvi
   return invoke<WifiEvidenceReceiptWire>("network_wifi_evidence_save_v1", { caseId });
 }
 
+// --- Network Lab DNS spoof (gated responder, dns.spoof parity) ----------------
+// Wire types mirror features/network/ipc/dns_spoof.rs.
+
+export interface DnsSpoofLogEntryWire {
+  timestamp_ms: number;
+  client: string;
+  name: string;
+  answered_from: string;
+  answer_ip: string | null;
+}
+
+export interface DnsSpoofStatusWire {
+  state: string;
+  port: number;
+  domains: string[];
+  answer_ip: string;
+  upstream: string;
+  rate_limit_per_sec: number;
+  runtime_cap_minutes: number;
+  queries_seen: number;
+  spoofed_count: number;
+  forwarded_count: number;
+  refused_count: number;
+  rate_limited_count: number;
+  clients_seen: number;
+  elapsed_ms: number;
+  log_entries: DnsSpoofLogEntryWire[];
+  log_dropped: number;
+  log_flushed: boolean;
+  last_error: string | null;
+}
+
+export interface DnsSpoofStartWire {
+  port: number;
+  domains: string[];
+  answer_ip: string;
+  upstream: string;
+  rate_limit_per_sec: number;
+  runtime_cap_minutes: number;
+  status: DnsSpoofStatusWire;
+}
+
+export interface DnsSpoofEvidenceReceiptWire {
+  case_id: string;
+  entry_count: number;
+  byte_len: number;
+  truncated: boolean;
+}
+
+/** Start the gated DNS responder; native dialog happens backend-side. */
+export async function networkDnsSpoofStartV1(
+  port: number,
+  domains: string[],
+  answerIp: string,
+  authorized: boolean,
+  caseId: string,
+): Promise<DnsSpoofStartWire> {
+  if (!inTauri) throw new Error("The lab DNS responder requires the desktop runtime");
+  return invoke<DnsSpoofStartWire>("network_dns_spoof_start_v1", {
+    port,
+    domains,
+    answerIp,
+    authorized,
+    caseId,
+  });
+}
+
+/** Stop the responder; never refused, final log flush published. */
+export async function networkDnsSpoofStopV1(): Promise<DnsSpoofStatusWire> {
+  if (!inTauri) throw new Error("The lab DNS responder requires the desktop runtime");
+  return invoke<DnsSpoofStatusWire>("network_dns_spoof_stop_v1", {});
+}
+
+/** Poll responder status (counts, allowlist, answered-from log). */
+export async function networkDnsSpoofStatusV1(): Promise<DnsSpoofStatusWire> {
+  if (!inTauri) throw new Error("The lab DNS responder requires the desktop runtime");
+  return invoke<DnsSpoofStatusWire>("network_dns_spoof_status_v1", {});
+}
+
+/** Persist this session's query log as ONE bounded case finding. */
+export async function networkDnsSpoofEvidenceSaveV1(caseId: string): Promise<DnsSpoofEvidenceReceiptWire> {
+  if (!inTauri) throw new Error("DNS spoof evidence save requires the desktop runtime");
+  return invoke<DnsSpoofEvidenceReceiptWire>("network_dns_spoof_evidence_save_v1", { caseId });
+}
+
+// --- Network Lab HTTP proxy (gated plain-HTTP forward proxy) ------------------
+// Wire types mirror features/network/ipc/http_proxy.rs.
+
+export interface HttpProxyRulesWire {
+  rewrite_https_links: boolean;
+  strip_hsts: boolean;
+  strip_csp: boolean;
+}
+
+export interface HttpProxyRewriteCountsWire {
+  https_links: number;
+  hsts_stripped: number;
+  csp_stripped: number;
+}
+
+export interface HttpProxyLogEntryWire {
+  ts_ms: number;
+  client: string;
+  method: string;
+  host: string;
+  path: string;
+  status: number;
+  content_length: number | null;
+  excerpt: string;
+  request_headers: string;
+  response_headers: string;
+  rewrites_https_links: number;
+  rewrites_hsts_stripped: number;
+  rewrites_csp_stripped: number;
+  note: string | null;
+}
+
+export interface HttpProxyStatusWire {
+  state: string;
+  port: number;
+  rules: HttpProxyRulesWire;
+  allowlist_count: number;
+  connections: number;
+  requests: number;
+  refused_connections: number;
+  refused_busy: number;
+  refused_header_cap: number;
+  refused_body_cap: number;
+  connect_refusals: number;
+  https_target_refusals: number;
+  upstream_failures: number;
+  rewrites: HttpProxyRewriteCountsWire;
+  runtime_capped: boolean;
+  elapsed_ms: number;
+  runtime_cap_minutes: number;
+  log: HttpProxyLogEntryWire[];
+  last_error: string | null;
+}
+
+export interface HttpProxyStartWire {
+  port: number;
+  active_rules: string[];
+  allowlist_count: number;
+  runtime_cap_minutes: number;
+  status: HttpProxyStatusWire;
+}
+
+export interface HttpProxyEvidenceReceiptWire {
+  case_id: string;
+  entry_count: number;
+  byte_len: number;
+  truncated: boolean;
+}
+
+/** Start the gated lab HTTP proxy; native dialog happens backend-side. */
+export async function networkHttpProxyStartV1(
+  port: number,
+  rewriteHttpsLinks: boolean,
+  stripHsts: boolean,
+  stripCsp: boolean,
+  allowlist: string[],
+  authorized: boolean,
+  caseId: string,
+): Promise<HttpProxyStartWire> {
+  if (!inTauri) throw new Error("The lab HTTP proxy requires the desktop runtime");
+  return invoke<HttpProxyStartWire>("network_http_proxy_start_v1", {
+    port,
+    rewriteHttpsLinks,
+    stripHsts,
+    stripCsp,
+    allowlist,
+    authorized,
+    caseId,
+  });
+}
+
+/** Stop the proxy; never refused, final counters stay readable. */
+export async function networkHttpProxyStopV1(): Promise<HttpProxyStatusWire> {
+  if (!inTauri) throw new Error("The lab HTTP proxy requires the desktop runtime");
+  return invoke<HttpProxyStatusWire>("network_http_proxy_stop_v1", {});
+}
+
+/** Poll proxy status (counters, per-rule rewrites, bounded request log). */
+export async function networkHttpProxyStatusV1(): Promise<HttpProxyStatusWire> {
+  if (!inTauri) throw new Error("The lab HTTP proxy requires the desktop runtime");
+  return invoke<HttpProxyStatusWire>("network_http_proxy_status_v1", {});
+}
+
+/** Persist this session's request log as ONE bounded case finding. */
+export async function networkHttpProxyEvidenceSaveV1(caseId: string): Promise<HttpProxyEvidenceReceiptWire> {
+  if (!inTauri) throw new Error("HTTP proxy evidence save requires the desktop runtime");
+  return invoke<HttpProxyEvidenceReceiptWire>("network_http_proxy_evidence_save_v1", { caseId });
+}
+
 // --- Packet Studio export view -> case ---------------------------------------
 // Wire types mirror features/network/ipc/pcap_export.rs and pcap_wire.rs.
 

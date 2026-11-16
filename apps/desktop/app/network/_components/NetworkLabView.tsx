@@ -29,6 +29,7 @@ import { useEffect, useRef, useState } from "react";
 import { Ban, Crosshair, FileText, FolderOpen, Globe, Network, Radar } from "lucide-react";
 import { Syringe } from "lucide-react";
 import { Wifi } from "lucide-react";
+import { Server, ArrowLeftRight } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import { CheckBox, Chip, Select, TextArea, TextInput, ToolButton } from "@ds/panes";
 import { ErrorStrip, IconRail, IconButton, InfoTip, ModeCard, StatusStrip, WorkspaceShell } from "@ds/compact";
@@ -97,11 +98,29 @@ import {
   type WifiInterfacesWire,
   type WifiStatusWire,
 } from "@lib/ipc";
+import {
+  networkDnsSpoofEvidenceSaveV1,
+  networkDnsSpoofStartV1,
+  networkDnsSpoofStatusV1,
+  networkDnsSpoofStopV1,
+  type DnsSpoofEvidenceReceiptWire,
+  type DnsSpoofStartWire,
+  type DnsSpoofStatusWire,
+} from "@lib/ipc";
+import {
+  networkHttpProxyEvidenceSaveV1,
+  networkHttpProxyStartV1,
+  networkHttpProxyStatusV1,
+  networkHttpProxyStopV1,
+  type HttpProxyEvidenceReceiptWire,
+  type HttpProxyStartWire,
+  type HttpProxyStatusWire,
+} from "@lib/ipc";
 
 const SCOPE_TEXT_MAX_CHARS = 8192;
 
 /** Rail modes: one visible at a time (icon-only pill rail navigation). */
-type LabMode = "scope" | "arp" | "live" | "dns" | "wifi" | "spoof" | "report";
+type LabMode = "scope" | "arp" | "live" | "dns" | "wifi" | "spoof" | "dns_spoof" | "http_proxy" | "report";
 
 export function NetworkLabView() {
   const desktop = isDesktop();
@@ -164,6 +183,30 @@ export function NetworkLabView() {
   const [spoofStart, setSpoofStart] = useState<SpoofStartWire | null>(null);
   const [spoofStatus, setSpoofStatus] = useState<SpoofStatusWire | null>(null);
   const [spoofError, setSpoofError] = useState<string | null>(null);
+  const [dnsSpoofPort, setDnsSpoofPort] = useState("53");
+  const [dnsSpoofDomains, setDnsSpoofDomains] = useState("");
+  const [dnsSpoofAnswerIp, setDnsSpoofAnswerIp] = useState("");
+  const [dnsSpoofBusy, setDnsSpoofBusy] = useState(false);
+  const [dnsSpoofStart, setDnsSpoofStart] = useState<DnsSpoofStartWire | null>(null);
+  const [dnsSpoofStatus, setDnsSpoofStatus] = useState<DnsSpoofStatusWire | null>(null);
+  const [dnsSpoofReceipt, setDnsSpoofReceipt] = useState<DnsSpoofEvidenceReceiptWire | null>(null);
+  const [dnsSpoofError, setDnsSpoofError] = useState<string | null>(null);
+    setDnsSpoofBusy(false);
+    setDnsSpoofStart(null);
+    setDnsSpoofStatus(null);
+    setDnsSpoofReceipt(null);
+    setDnsSpoofError(null);
+
+  const [proxyPort, setProxyPort] = useState("8080");
+  const [proxyRewriteHttps, setProxyRewriteHttps] = useState(false);
+  const [proxyStripHsts, setProxyStripHsts] = useState(false);
+  const [proxyStripCsp, setProxyStripCsp] = useState(false);
+  const [proxyAllowlist, setProxyAllowlist] = useState("");
+  const [proxyBusy, setProxyBusy] = useState(false);
+  const [proxyStart, setProxyStart] = useState<HttpProxyStartWire | null>(null);
+  const [proxyStatus, setProxyStatus] = useState<HttpProxyStatusWire | null>(null);
+  const [proxyReceipt, setProxyReceipt] = useState<HttpProxyEvidenceReceiptWire | null>(null);
+  const [proxyError, setProxyError] = useState<string | null>(null);
   // Wifi monitor mode (the arc's passive 802.11 capture): the backend owns
   // the radio control (Linux nl80211), the native dialog is the
   // authorization, and the view only ever reads honest status back — it
@@ -233,6 +276,16 @@ export function NetworkLabView() {
     setSpoofStart(null);
     setSpoofStatus(null);
     setSpoofError(null);
+    setDnsSpoofBusy(false);
+    setDnsSpoofStart(null);
+    setDnsSpoofStatus(null);
+    setDnsSpoofReceipt(null);
+    setDnsSpoofError(null);
+    setProxyBusy(false);
+    setProxyStart(null);
+    setProxyStatus(null);
+    setProxyReceipt(null);
+    setProxyError(null);
     // The wifi monitor's capture session is case-owned on the backend (the
     // pump stops honestly on revocation), so per-run wifi state never
     // survives into the new revision either.
@@ -323,6 +376,8 @@ export function NetworkLabView() {
     { id: "dns", label: "DNS", icon: Globe, badge: dnsFindings },
     { id: "wifi", label: "Wifi", icon: Wifi, badge: wifiHandshakeBadge },
     { id: "spoof", label: "Spoof", icon: Syringe },
+    { id: "dns_spoof", label: "DNS Spoof", icon: Server },
+    { id: "http_proxy", label: "HTTP Proxy", icon: ArrowLeftRight },
     { id: "report", label: "Report", icon: FileText },
   ];
   const dnsState = !dnsResult
@@ -718,6 +773,161 @@ export function NetworkLabView() {
       setSpoofError(err instanceof Error ? err.message : String(err));
     }
   };
+
+  const dnsSpoofPhase = dnsSpoofStatus?.state ?? "idle";
+  const dnsSpoofActive =
+    dnsSpoofPhase === "starting" || dnsSpoofPhase === "answering" || dnsSpoofPhase === "stopping";
+  const dnsSpoofBlock = dnsSpoofBlockReason(dnsSpoofPort, dnsSpoofDomains, dnsSpoofAnswerIp);
+  const dnsSpoofSaved = dnsSpoofReceipt !== null;
+
+  useEffect(() => {
+    if (!desktop || !dnsSpoofActive) return;
+    const timer = setInterval(() => {
+      networkDnsSpoofStatusV1()
+        .then((wire) => {
+          setDnsSpoofStatus(wire);
+        })
+        .catch(() => {
+          // A failed poll keeps the last honest status; the next tick retries.
+        });
+    }, 1000);
+    return () => {
+      clearInterval(timer);
+    };
+  }, [desktop, dnsSpoofPhase, dnsSpoofActive]);
+
+  const runDnsSpoofStart = async () => {
+    if (dnsSpoofBlock !== null) return;
+    setDnsSpoofBusy(true);
+    setDnsSpoofError(null);
+    try {
+      const wire = await networkDnsSpoofStartV1(
+        parseDnsSpoofPort(dnsSpoofPort) ?? 0,
+        parseDnsSpoofDomains(dnsSpoofDomains) ?? [],
+        dnsSpoofAnswerIp.trim(),
+        true,
+        wb.caseId,
+      );
+      setDnsSpoofStart(wire);
+      setDnsSpoofStatus(wire.status);
+      // A new responder session has its own one-save evidence slot.
+      setDnsSpoofReceipt(null);
+    } catch (err) {
+      setDnsSpoofError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setDnsSpoofBusy(false);
+    }
+  };
+
+  const stopDnsSpoof = async () => {
+    try {
+      await networkDnsSpoofStopV1();
+    } catch (err) {
+      setDnsSpoofError(err instanceof Error ? err.message : String(err));
+    }
+  };
+
+  const proxyEvidenceTicket = useRef(0);
+
+  const runDnsSpoofEvidenceSave = async () => {
+    const caseId = wb.caseId;
+    const ticket = ++openSequence.current;
+    const isCurrent = () => currentCase.current === caseId && ticket === openSequence.current;
+    setDnsSpoofBusy(true);
+    setDnsSpoofError(null);
+    try {
+      const wire = await networkDnsSpoofEvidenceSaveV1(caseId);
+      if (!isCurrent()) return;
+      setDnsSpoofReceipt(wire);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      if (isCurrent() && message !== "cancelled") setDnsSpoofError(message);
+    } finally {
+      if (isCurrent()) setDnsSpoofBusy(false);
+    }
+  };
+
+  const proxyPhase = proxyStatus?.state ?? "idle";
+  const proxyActive =
+    proxyPhase === "starting" || proxyPhase === "serving" || proxyPhase === "stopping";
+  const proxySaved = proxyReceipt !== null;
+
+  useEffect(() => {
+    if (!desktop || !proxyActive) return;
+    const timer = setInterval(() => {
+      networkHttpProxyStatusV1()
+        .then((wire) => {
+          setProxyStatus(wire);
+        })
+        .catch(() => {
+          // A failed poll keeps the last honest status; the next tick retries.
+        });
+    }, 1000);
+    return () => clearInterval(timer);
+  }, [desktop, proxyPhase, proxyActive]);
+
+  const runProxyStart = async () => {
+    const port = parseProxyPort(proxyPort);
+    const allowlist = parseProxyAllowlist(proxyAllowlist);
+    if (port === null || allowlist === null || !desktop) return;
+    setProxyBusy(true);
+    setProxyError(null);
+    try {
+      const wire = await networkHttpProxyStartV1(
+        port,
+        proxyRewriteHttps,
+        proxyStripHsts,
+        proxyStripCsp,
+        allowlist,
+        true,
+        wb.caseId,
+      );
+      setProxyStart(wire);
+      setProxyStatus(wire.status);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      if (message !== "cancelled") setProxyError(message);
+    } finally {
+      setProxyBusy(false);
+    }
+  };
+
+  const stopProxy = async () => {
+    setProxyBusy(true);
+    try {
+      const wire = await networkHttpProxyStopV1();
+      setProxyStatus(wire);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      if (message !== "cancelled") setProxyError(message);
+    } finally {
+      setProxyBusy(false);
+    }
+  };
+
+  const runProxyEvidenceSave = async () => {
+    if (proxySaved || proxyBusy || !desktop) return;
+    const caseId = wb.caseId;
+    const ticket = ++openSequence.current;
+    const isCurrent = () => currentCase.current === caseId && ticket === openSequence.current;
+    setProxyBusy(true);
+    setProxyError(null);
+    try {
+      const wire = await networkHttpProxyEvidenceSaveV1(caseId);
+      if (!isCurrent()) return;
+      setProxyReceipt(wire);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      if (isCurrent() && message !== "cancelled") setProxyError(message);
+    } finally {
+      if (isCurrent()) setProxyBusy(false);
+    }
+  };
+
+
+
+const DNS_SPOOF_ALLOWLIST_MAX_CHARS = 2048;
+
 
   // Wifi monitor lifecycle: enumerate interfaces + honest platform status on
   // mount, start → backend native dialog → poll honest counters (1s) while
@@ -1317,6 +1527,383 @@ export function NetworkLabView() {
         </section>
       )}
 
+      {mode === "dns_spoof" && (
+        <section aria-label="DNS spoof" className="flex min-h-0 flex-1 flex-col">
+          {dnsSpoofError ? <ErrorStrip>{dnsSpoofError}</ErrorStrip> : null}
+          <ModeCard
+            title="DNS spoof"
+            icon={Server}
+            state={dnsSpoofStatus ? dnsSpoofPhase : "not running"}
+            stateTone={
+              dnsSpoofPhase === "answering"
+                ? "orange"
+                : dnsSpoofPhase === "stopped"
+                  ? dnsSpoofStatus?.last_error
+                    ? "err"
+                    : "ok"
+                  : dnsSpoofPhase === "starting" || dnsSpoofPhase === "stopping"
+                    ? "orange"
+                    : "muted"
+            }
+            info="Authorized allowlist-gated DNS responder — answers only the allowlisted domains with the authorized address, forwards everything else upstream, native dialog on start, every answer logged."
+          >
+            <div className="grid gap-3 md:grid-cols-2">
+              <label className="block text-xs text-fg-dim">
+                <span className="mb-1 block font-medium text-fg-muted">
+                  Domain allowlist (comma or newline separated, max 16)
+                </span>
+                <TextArea
+                  value={dnsSpoofDomains}
+                  onChange={(value) => setDnsSpoofDomains(value.slice(0, DNS_SPOOF_ALLOWLIST_MAX_CHARS))}
+                  maxLength={DNS_SPOOF_ALLOWLIST_MAX_CHARS}
+                  ariaLabel="Authorized domain allowlist: exact domains or leading *. wildcards, at most 16 entries"
+                  placeholder="lab.cyberdeck.test, *.authorized.local"
+                  rows={4}
+                  className="h-24"
+                />
+              </label>
+              <div className="text-xs text-fg-dim">
+                <span className="mb-1 block font-medium text-fg-muted">Authorized answer + port</span>
+                <TextInput
+                  value={dnsSpoofAnswerIp}
+                  onChange={(text) => setDnsSpoofAnswerIp(text.replace(/[^0-9.]/g, "").slice(0, 15))}
+                  placeholder="answer IPv4 (e.g. 10.0.0.42)"
+                  ariaLabel="Authorized A-record answer address for allowlisted domains"
+                  className="h-8 w-44 sm:h-7"
+                />
+                <TextInput
+                  value={dnsSpoofPort}
+                  onChange={(text) => setDnsSpoofPort(text.replace(/[^0-9]/g, "").slice(0, 5))}
+                  placeholder="UDP port (default 53)"
+                  ariaLabel="UDP port to bind the DNS responder on (ports below 1024 need administrator privileges)"
+                  className="mt-2 h-8 w-44 sm:h-7"
+                />
+              </div>
+            </div>
+            <div className="flex flex-wrap items-center gap-3">
+              {dnsSpoofActive ? (
+                <ToolButton
+                  tone="danger"
+                  onClick={() => void stopDnsSpoof()}
+                  title="Stop the authorized responder: answering ends immediately, the final log flush completes and the query log stays readable — nothing is answered after stop"
+                >
+                  Stop responder
+                </ToolButton>
+              ) : (
+                <ToolButton
+                  tone="primary"
+                  onClick={() => void runDnsSpoofStart()}
+                  disabled={!desktop || dnsSpoofBusy || dnsSpoofBlock !== null}
+                  title="UDP only: binds a DNS responder on the configured port and answers A queries for the allowlisted domains with the authorized address (other record types get an empty answer so the real address never leaks); everything else is forwarded to the system resolver — a resolver, not a transparent interceptor, so only clients pointed at this machine are affected. A native Yes/No dialog names exactly what will be answered, answers are rate-limited and logged, and the run auto-stops at the 30-minute cap. Ports below 1024 need administrator privileges"
+                >
+                  {dnsSpoofBusy ? "starting…" : "Start responder"}
+                </ToolButton>
+              )}
+              {dnsSpoofBlock ? <Chip tone="muted">{dnsSpoofBlock}</Chip> : null}
+            </div>
+            {dnsSpoofStart ? (
+              <div className="space-y-2">
+                <p className="font-mono text-2xs text-fg-muted">
+                  port {dnsSpoofStart.port} · answers {dnsSpoofStart.answer_ip} · upstream{" "}
+                  {dnsSpoofStart.upstream} · rate cap {dnsSpoofStart.rate_limit_per_sec}/s · runtime cap{" "}
+                  {dnsSpoofStart.runtime_cap_minutes} min
+                </p>
+                <p className="font-mono text-2xs text-fg-muted">
+                  allowlist: {dnsSpoofStart.domains.join(", ") || "none"}
+                </p>
+                <div className="max-h-48 overflow-auto rounded-lg border border-line">
+                  <table className="data-table">
+                    <thead>
+                      <tr>
+                        <th className="w-24">Queries</th>
+                        <th className="w-24">Spoofed</th>
+                        <th className="w-24">Upstream</th>
+                        <th className="w-24">Refused</th>
+                        <th className="w-24">Clients</th>
+                        <th className="w-24">Elapsed</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <tr>
+                        <td>{dnsSpoofStatus?.queries_seen ?? 0}</td>
+                        <td>{dnsSpoofStatus?.spoofed_count ?? 0}</td>
+                        <td>{dnsSpoofStatus?.forwarded_count ?? 0}</td>
+                        <td>{dnsSpoofStatus?.refused_count ?? 0}</td>
+                        <td>{dnsSpoofStatus?.clients_seen ?? 0}</td>
+                        <td>
+                          {dnsSpoofStatus
+                            ? `${(dnsSpoofStatus.elapsed_ms / 1000).toFixed(1)} s`
+                            : "0.0 s"}
+                        </td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+                <div className="max-h-64 overflow-auto rounded-lg border border-line">
+                  <table className="data-table">
+                    <thead>
+                      <tr>
+                        <th className="w-28">Time</th>
+                        <th className="w-32">Client</th>
+                        <th>Queried name</th>
+                        <th className="w-28">Answered from</th>
+                        <th className="w-32">Answer IP</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {(dnsSpoofStatus?.log_entries ?? []).map((entry, index) => (
+                        <tr key={`${entry.timestamp_ms}-${entry.client}-${index}`}>
+                          <td className="font-mono text-2xs">{formatSeenMs(entry.timestamp_ms)}</td>
+                          <td className="font-mono text-2xs">{entry.client}</td>
+                          <td className="font-mono text-2xs">{entry.name}</td>
+                          <td>
+                            <Chip
+                              tone={
+                                entry.answered_from === "spoof"
+                                  ? "err"
+                                  : entry.answered_from === "upstream"
+                                    ? "ok"
+                                    : "muted"
+                              }
+                            >
+                              {entry.answered_from}
+                            </Chip>
+                          </td>
+                          <td className="font-mono text-2xs text-fg-dim">{entry.answer_ip ?? "—"}</td>
+                        </tr>
+                      ))}
+                      {(dnsSpoofStatus?.log_entries ?? []).length === 0 ? (
+                        <tr>
+                          <td colSpan={5} className="text-center text-fg-muted">
+                            no queries seen yet — the log fills as clients ask
+                          </td>
+                        </tr>
+                      ) : null}
+                    </tbody>
+                  </table>
+                </div>
+                {dnsSpoofStatus && dnsSpoofStatus.log_dropped > 0 ? (
+                  <p className="text-xs text-fg-muted">
+                    log ring capped at 512 — {dnsSpoofStatus.log_dropped} oldest entries dropped
+                  </p>
+                ) : null}
+                <div className="flex flex-wrap items-center gap-3">
+                  <ToolButton
+                    tone="primary"
+                    disabled={!desktop || dnsSpoofBusy || dnsSpoofSaved}
+                    title={
+                      dnsSpoofSaved
+                        ? "This responder session already saved its one bounded evidence finding — start a new session to capture more"
+                        : "Persist the session's request/answer log as ONE bounded case finding in the backend-selected saved case"
+                    }
+                    onClick={() => void runDnsSpoofEvidenceSave()}
+                  >
+                    {dnsSpoofReceipt ? "saved" : dnsSpoofBusy ? "saving…" : "Save to case"}
+                  </ToolButton>
+                  {dnsSpoofReceipt ? (
+                    <Chip tone={dnsSpoofReceipt.truncated ? "orange" : "ok"}>
+                      saved to {dnsSpoofReceipt.case_id} · {dnsSpoofReceipt.entry_count} entries ·{" "}
+                      {dnsSpoofReceipt.byte_len} bytes
+                      {dnsSpoofReceipt.truncated ? " · truncated at the 32 KiB bound" : ""}
+                    </Chip>
+                  ) : null}
+                  <InfoTip text="One bounded artifact per responder session: the backend renders the session header, honest counters and the query log (spoof vs upstream per answer) and persists them as ONE case finding; a second save refuses honestly instead of duplicating case evidence." />
+                </div>
+                {dnsSpoofPhase === "stopped" ? (
+                  <p className="text-xs text-fg-muted">
+                    {dnsSpoofStatus?.log_flushed
+                      ? "responder stopped — final log flushed, answering ended, no new answers leave this machine"
+                      : "responder stopped — final log flush pending"}
+                  </p>
+                ) : null}
+                {dnsSpoofStatus?.last_error ? (
+                  <p className="text-xs text-fg-muted">last error: {dnsSpoofStatus.last_error}</p>
+                ) : null}
+              </div>
+            ) : null}
+          </ModeCard>
+        </section>
+      )}
+      {mode === "http_proxy" && (
+        <section aria-label="HTTP proxy" className="flex min-h-0 flex-1 flex-col">
+          {proxyError ? <ErrorStrip>{proxyError}</ErrorStrip> : null}
+          <ModeCard
+            title="HTTP proxy"
+            icon={ArrowLeftRight}
+            state={proxyStatus ? proxyPhase : "not running"}
+            stateTone={
+              proxyPhase === "serving"
+                ? "orange"
+                : proxyPhase === "stopped"
+                  ? proxyStatus?.last_error
+                    ? "err"
+                    : "ok"
+                  : proxyPhase === "starting" || proxyPhase === "stopping"
+                    ? "orange"
+                    : "muted"
+            }
+            info="Gated plain-HTTP forward proxy — every request logged (headers + 4 KiB excerpt), rewrite rules off by default; CONNECT is refused (TLS interception lives in the Web studio)."
+          >
+            <div className="flex flex-wrap items-center gap-3">
+              <span className="font-medium uppercase tracking-wider text-fg-muted">HTTP proxy</span>
+              <TextInput
+                value={proxyPort}
+                onChange={(text) => setProxyPort(text.replace(/[^0-9]/g, "").slice(0, 5))}
+                placeholder="port (8080)"
+                ariaLabel="Proxy listen port (1024-65535, default 8080)"
+                className="h-8 w-24 sm:h-7"
+              />
+              <CheckBox checked={proxyRewriteHttps} onChange={setProxyRewriteHttps}>
+                <span>rewrite https:// links to http:// in HTML bodies (sslstrip-lite)</span>
+              </CheckBox>
+              <CheckBox checked={proxyStripHsts} onChange={setProxyStripHsts}>
+                <span>strip Strict-Transport-Security response headers</span>
+              </CheckBox>
+              <CheckBox checked={proxyStripCsp} onChange={setProxyStripCsp}>
+                <span>strip Content-Security-Policy response headers</span>
+              </CheckBox>
+              <TextInput
+                value={proxyAllowlist}
+                onChange={(text) => setProxyAllowlist(text.replace(/[^0-9.,\s]/g, "").slice(0, 200))}
+                placeholder="allowlist IPs (empty = any client)"
+                ariaLabel="Client allowlist: comma-separated IPs, at most 16; empty means any LAN client may use the proxy"
+                className="h-8 w-52 sm:h-7"
+              />
+              {proxyActive ? (
+                <ToolButton
+                  tone="danger"
+                  onClick={() => void stopProxy()}
+                  title="Stop the authorized proxy: the backend ends the accept loop within ~20 ms, bounded in-flight connections drain, and the final counters and request log stay readable"
+                >
+                  Stop proxy
+                </ToolButton>
+              ) : (
+                <ToolButton
+                  tone="primary"
+                  onClick={() => void runProxyStart()}
+                  disabled={
+                    !desktop ||
+                    parseProxyPort(proxyPort) === null ||
+                    parseProxyAllowlist(proxyAllowlist) === null ||
+                    proxyBusy
+                  }
+                  title="Starts on 0.0.0.0 after a native Yes/No dialog naming the port, the logging (full request and response headers + 4 KiB excerpt), the active rewrites and the allowlist disclosure; CONNECT is refused: TLS interception lives in the Web studio — this proxy is plain HTTP; hard 30-minute runtime cap"
+                >
+                  {proxyBusy ? "starting…" : "Start proxy"}
+                </ToolButton>
+              )}
+            </div>
+            {proxyStart ? (
+              <div className="space-y-2">
+                <p className="font-mono text-2xs text-fg-muted">
+                  port {proxyStart.port} · rules: {proxyStart.active_rules.join("; ") || "none — all OFF by default"} · allowlist {proxyStart.allowlist_count} · runtime cap {proxyStart.runtime_cap_minutes} min
+                </p>
+                <div className="max-h-40 overflow-auto rounded-lg border border-line">
+                  <table className="data-table">
+                    <thead>
+                      <tr>
+                        <th>Requests</th>
+                        <th>Connections</th>
+                        <th>CONNECT refusals</th>
+                        <th>Busy refusals</th>
+                        <th>Elapsed</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <tr>
+                        <td>{proxyStatus?.requests ?? 0}</td>
+                        <td>{proxyStatus?.connections ?? 0}</td>
+                        <td>{proxyStatus?.connect_refusals ?? 0}</td>
+                        <td>{proxyStatus?.refused_busy ?? 0}</td>
+                        <td>{proxyStatus ? `${(proxyStatus.elapsed_ms / 1000).toFixed(1)} s` : "0.0 s"}</td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+                <div className="max-h-64 overflow-auto rounded-lg border border-line">
+                  <table className="data-table">
+                    <thead>
+                      <tr>
+                        <th className="w-24">Time</th>
+                        <th className="w-24">Client</th>
+                        <th className="w-32">Host</th>
+                        <th>Path</th>
+                        <th className="w-16">Status</th>
+                        <th className="w-40">Rewrites</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {(proxyStatus?.log ?? []).map((entry, index) => (
+                        <tr key={`${entry.ts_ms}-${index}`}>
+                          <td className="font-mono text-2xs">{formatSeenMs(entry.ts_ms)}</td>
+                          <td
+                            className="font-mono text-2xs"
+                            title={`${entry.request_headers}\n---\n${entry.response_headers}`}
+                          >
+                            {entry.client}
+                          </td>
+                          <td className="font-mono text-2xs">{entry.host}</td>
+                          <td className="font-mono text-2xs text-fg-dim">{entry.path}</td>
+                          <td>{entry.status}</td>
+                          <td>
+                            <Chip
+                              tone={
+                                entry.rewrites_https_links +
+                                  entry.rewrites_hsts_stripped +
+                                  entry.rewrites_csp_stripped >
+                                0
+                                  ? "orange"
+                                  : "muted"
+                              }
+                            >
+                              {`h2h ${entry.rewrites_https_links} · hsts ${entry.rewrites_hsts_stripped} · csp ${entry.rewrites_csp_stripped}`}
+                            </Chip>
+                          </td>
+                        </tr>
+                      ))}
+                      {(proxyStatus?.log ?? []).length === 0 ? (
+                        <tr>
+                          <td colSpan={6} className="text-center text-fg-muted">
+                            no proxied requests yet — the bounded 512-entry log fills as clients use the proxy
+                          </td>
+                        </tr>
+                      ) : null}
+                    </tbody>
+                  </table>
+                </div>
+                {proxyStatus?.runtime_capped ? (
+                  <p className="text-xs text-fg-muted">run ended at the 30-minute runtime cap</p>
+                ) : null}
+                {proxyStatus?.last_error ? (
+                  <p className="text-xs text-fg-muted">last error: {proxyStatus.last_error}</p>
+                ) : null}
+                <div className="flex flex-wrap items-center gap-3">
+                  <ToolButton
+                    tone="primary"
+                    disabled={!desktop || proxyBusy || proxySaved}
+                    title={
+                      proxySaved
+                        ? "This proxy session already saved its one bounded evidence finding — start a new session to log more"
+                        : "Persist the session's request log as ONE bounded case finding in the backend-selected saved case"
+                    }
+                    onClick={() => void runProxyEvidenceSave()}
+                  >
+                    {proxyReceipt ? "saved" : proxyBusy ? "saving…" : "Save to case"}
+                  </ToolButton>
+                  {proxyReceipt ? (
+                    <Chip tone={proxyReceipt.truncated ? "orange" : "ok"}>
+                      saved to {proxyReceipt.case_id} · {proxyReceipt.entry_count} request
+                      {proxyReceipt.entry_count === 1 ? "" : "s"} · {proxyReceipt.byte_len} bytes
+                      {proxyReceipt.truncated ? " · truncated at the 32 KiB bound" : ""}
+                    </Chip>
+                  ) : null}
+                  <InfoTip text="One bounded artifact per proxy session: the backend renders a session header plus one line per logged request and persists it as ONE case finding under network.http_proxy; a second save refuses honestly instead of duplicating case evidence." />
+                </div>
+              </div>
+            ) : null}
+          </ModeCard>
+        </section>
+      )}
       {mode === "report" && (
         <section aria-label="Session report" className="flex min-h-0 flex-1 flex-col">
           {/* lab-report-ui.test.mjs pins the role="group" label, the muted
@@ -1610,6 +2197,63 @@ export function labEventKindLabel(kind: LabEventKindWire): string {
  * cap. Empty until a source has data — the toolbar chip carries the
  * "no timeline" state instead of a stray chip row.
  */
+/** Port parse for the lab HTTP proxy: integer 1024-65535, else null. */
+export function parseProxyPort(text: string): number | null {
+  const value = Number(text);
+  if (!Number.isInteger(value) || value < 1024 || value > 65535) return null;
+  return value;
+}
+
+/** Allowlist parse: comma/space separated IPv4 literals, at most 16, else null. */
+export function parseProxyAllowlist(text: string): string[] | null {
+  const tokens = text
+    .split(/[,\s]+/)
+    .map((t) => t.trim())
+    .filter((t) => t.length > 0);
+  if (tokens.length > 16) return null;
+  if (tokens.some((t) => !/^\d{1,3}(\.\d{1,3}){3}$/.test(t))) return null;
+  return tokens;
+}
+
+export function parseDnsSpoofPort(text: string): number | null {
+  const value = Number(text);
+  if (!Number.isInteger(value) || value < 1 || value > 65535) return null;
+  return value;
+}
+
+export function parseDnsSpoofDomains(text: string): string[] | null {
+  const entries = text
+    .split(/[,\n\r]+/)
+    .map((entry) => entry.trim().toLowerCase())
+    .filter((entry) => entry.length > 0);
+  if (entries.length === 0 || entries.length > 16) return null;
+  for (const entry of entries) {
+    const value = entry.startsWith("*.") ? entry.slice(2) : entry;
+    if (value.length === 0 || value.length > 253 || value.includes("*")) return null;
+    for (const label of value.split(".")) {
+      if (label.length === 0 || label.length > 63 || !/^[a-z0-9_-]+$/.test(label)) return null;
+    }
+  }
+  return entries;
+}
+
+export function isDnsSpoofAnswerIp(text: string): boolean {
+  return /^\\d{1,3}(\\.\\d{1,3}){3}$/.test(text.trim());
+}
+
+export function dnsSpoofBlockReason(port: string, domains: string, answerIp: string): string | null {
+  if (parseDnsSpoofPort(port) === null) {
+    return "Set a UDP port for the responder (1-65535; ports below 1024 need administrator privileges)";
+  }
+  if (parseDnsSpoofDomains(domains) === null) {
+    return "Set the domain allowlist — 1 to 16 exact domains or leading * wildcards; nothing is answered without one";
+  }
+  if (!isDnsSpoofAnswerIp(answerIp)) {
+    return "Set the authorized IPv4 answer address for the allowlisted domains";
+  }
+  return null;
+}
+
 export function timelineStatusItems(wire: LabEventsWire | null) {
   if (!wire) return [];
   return [
