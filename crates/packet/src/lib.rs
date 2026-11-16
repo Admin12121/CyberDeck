@@ -10,6 +10,8 @@ pub mod active_syn;
 pub mod active_syn6;
 pub mod application;
 pub mod arp_watch;
+// coordinator-insert (BLE scan slice): raw-HCI advertising scanner (Linux)
+pub mod ble;
 pub mod crypto;
 pub mod dns;
 pub mod dns_monitor;

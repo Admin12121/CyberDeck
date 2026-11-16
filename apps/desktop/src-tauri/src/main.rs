@@ -52,6 +52,10 @@ fn main() {
         .manage(std::sync::Arc::new(
             features::network::ipc::wifi_monitor::NetworkWifiCtx::default(),
         ))
+        // coordinator-insert (BLE scan slice): raw-HCI advertising scan state
+        .manage(std::sync::Arc::new(
+            features::network::ipc::ble::NetworkBleCtx::default(),
+        ))
         .manage(features::web::ipc::web::WebCtx {
             proxy_running: std::sync::atomic::AtomicBool::new(false),
             proxy_port: std::sync::atomic::AtomicU16::new(8080),
@@ -171,6 +175,11 @@ fn main() {
             features::network::ipc::wifi_monitor::network_wifi_inject_deauth_v1,
             features::network::ipc::wifi_monitor::network_wifi_inject_deauth_stop_v1,
             features::network::ipc::wifi_monitor::network_wifi_channel_hop_v1,
+            // coordinator-insert (BLE scan slice): advertising scan commands
+            features::network::ipc::ble::network_ble_status_v1,
+            features::network::ipc::ble::network_ble_scan_start_v1,
+            features::network::ipc::ble::network_ble_scan_stop_v1,
+            features::network::ipc::ble::network_ble_scan_results_v1,
             features::network::ipc::pcap_export::pcap_export_view_v1,
             features::network::ipc::pcap_export::pcap_export_view_ng_v1,
             features::network::ipc::os_hints_ipc::capture_os_hints_v1,

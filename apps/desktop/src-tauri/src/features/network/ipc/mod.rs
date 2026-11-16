@@ -1,4 +1,6 @@
 pub mod arp_discovery;
+// coordinator-insert (BLE scan slice): raw-HCI advertising scan IPC
+pub mod ble;
 pub mod capture;
 // coordinator-insert (DNS spoof slice): gated DNS responder IPC
 pub mod dns_spoof;
