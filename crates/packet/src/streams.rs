@@ -774,7 +774,11 @@ fn apply_tls12_keylog(
     // The ServerHello supplies the server random and negotiated suite; the
     // pre-scan sees it even when it sits in a direction walked later.
     if let Some(params) = &server_hello {
-        decryptor.set_server_hello(&params.server_random, params.cipher_suite);
+        decryptor.set_server_hello(
+            &params.server_random,
+            params.cipher_suite,
+            params.encrypt_then_mac,
+        );
     }
     let client_is_a = hello_dir == "A";
     let mut undecryptable_total = 0usize;
