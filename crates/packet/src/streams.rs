@@ -4,12 +4,17 @@
 //! TCP state machine: captures may begin midstream and overlapping conflicting
 //! payloads, multiple sessions on one tuple, and >2GiB seq spans are not solved.
 //!
-//! TLS 1.3 decryption is strictly opt-in: only `follow_stream_with_keylog`
+//! TLS decryption is strictly opt-in: only `follow_stream_with_keylog`
 //! attempts it, only with a user-supplied keylog whose ClientHello random
 //! matches the stream, and only per verified GCM tag. The plain
-//! `follow_stream` path never touches key material.
+//! `follow_stream` path never touches key material. TLS 1.3 sessions route
+//! to the TLS 1.3 decryptor exactly as before; TLS 1.2 sessions (negotiated
+//! version below 0x0304, decided from the ServerHello or the hello
+//! metadata) route to the sibling TLS 1.2 decryptor bound by the keylog's
+//! retained `CLIENT_RANDOM` master secret.
 
 use crate::crypto::keylog::KeylogStore;
+use crate::crypto::tls12;
 use crate::crypto::tls13;
 use crate::PacketMeta;
 use serde::Serialize;
@@ -506,7 +511,12 @@ pub fn apply_keylog_to_transcript(
         .find(|(dir, _)| *dir == "B")
         .map(|(_, bytes)| bytes)
         .unwrap_or(&empty);
-    apply_tls13_keylog(&mut result, a, b, store);
+    // TLS 1.3 streams take the unchanged path below; TLS 1.2 sessions
+    // (pre-0x0304 negotiated version, decided from hello metadata) route
+    // to the TLS 1.2 decryptor bound by the keylog's CLIENT_RANDOM entry.
+    if !apply_tls12_keylog(&mut result, a, b, store) {
+        apply_tls13_keylog(&mut result, a, b, store);
+    }
     result
 }
 
@@ -515,6 +525,60 @@ pub fn apply_keylog_to_transcript(
 /// direction the keylog cannot open.
 fn looks_like_tls_stream(data: &[u8]) -> bool {
     data.len() >= 5 && matches!(data[0], 20..=23) && data[1] == 3
+}
+
+/// The stream's ClientHello, found in whichever direction carries it (the
+/// capture's endpoint ordering decides). Returns the direction, the
+/// ClientHello random and the parsed hello metadata for version
+/// discrimination.
+fn find_client_hello(
+    a: &[u8],
+    b: &[u8],
+) -> Option<(&'static str, [u8; 32], crate::application::TlsHello)> {
+    for (dir, data) in [("A", a), ("B", b)] {
+        if let Some(hello) = crate::application::tls_hello(data) {
+            if hello.client {
+                if let Some(random) = tls13::client_hello_random(&hello.payload) {
+                    return Some((dir, random, hello));
+                }
+            }
+        }
+    }
+    None
+}
+
+/// True when the ClientHello carries any TLS 1.3 marker: the
+/// supported_versions extension selecting 0x0304 (`hello.version`) or any
+/// 0x13xx suite in the offered list (TLS 1.3-only suites can never appear
+/// in a TLS 1.2-only hello). A payload that does not parse conservatively
+/// answers true so the pre-existing TLS 1.3 path stays authoritative.
+fn client_hello_offers_tls13(hello: &crate::application::TlsHello) -> bool {
+    if hello.version == Some(0x0304) {
+        return true;
+    }
+    let payload = &hello.payload;
+    if payload.len() < 9 + 35 {
+        return true;
+    }
+    let handshake_len =
+        ((payload[6] as usize) << 16) | ((payload[7] as usize) << 8) | payload[8] as usize;
+    if payload[5] != 1 || 4 + handshake_len > payload.len() - 5 || handshake_len < 35 {
+        return true;
+    }
+    let body = &payload[9..9 + handshake_len];
+    let session_id_len = body[34] as usize;
+    let mut at = 35 + session_id_len;
+    if at + 2 > body.len() {
+        return true;
+    }
+    let suites_len = u16::from_be_bytes([body[at], body[at + 1]]) as usize;
+    at += 2;
+    if suites_len % 2 != 0 || at + suites_len > body.len() {
+        return true;
+    }
+    body[at..at + suites_len]
+        .chunks_exact(2)
+        .any(|suite| suite[0] == 0x13)
 }
 
 /// Apply a user-imported keylog to a reconstructed TCP transcript. Every
@@ -532,20 +596,7 @@ fn apply_tls13_keylog(result: &mut StreamTranscript, a: &[u8], b: &[u8], store: 
     // Bind the keylog entry through the stream's own ClientHello random:
     // the hello may sit in either direction depending on the capture's
     // endpoint ordering.
-    let mut hello_dir: Option<&str> = None;
-    let mut client_random: Option<[u8; 32]> = None;
-    for (dir, data) in [("A", a), ("B", b)] {
-        if let Some(hello) = crate::application::tls_hello(data) {
-            if hello.client {
-                if let Some(random) = tls13::client_hello_random(&hello.payload) {
-                    hello_dir = Some(dir);
-                    client_random = Some(random);
-                    break;
-                }
-            }
-        }
-    }
-    let (Some(hello_dir), Some(client_random)) = (hello_dir, client_random) else {
+    let Some((hello_dir, client_random, _)) = find_client_hello(a, b) else {
         note(
             result,
             "A",
@@ -653,6 +704,175 @@ fn apply_tls13_keylog(result: &mut StreamTranscript, a: &[u8], b: &[u8], store: 
             ),
         );
     }
+}
+
+/// Route one transcript through the TLS 1.2 decryptor when its negotiated
+/// version is below 0x0304. Returns true when the stream was handled here
+/// (the caller then skips the TLS 1.3 path); false means this is not a
+/// TLS 1.2 stream and the unchanged TLS 1.3 path applies. Version
+/// discrimination happens BEFORE any note is emitted, so TLS 1.3 streams
+/// reach their existing handler untouched.
+fn apply_tls12_keylog(
+    result: &mut StreamTranscript,
+    a: &[u8],
+    b: &[u8],
+    store: &KeylogStore,
+) -> bool {
+    let Some((hello_dir, client_random, hello)) = find_client_hello(a, b) else {
+        // No ClientHello to bind a keylog entry through; the TLS 1.3
+        // path's honest "no ClientHello found" note applies either way.
+        return false;
+    };
+    // The negotiated version lives in the ServerHello when one was
+    // captured; without it, the ClientHello's own markers decide.
+    let server_dir = if hello_dir == "A" { b } else { a };
+    let server_hello = tls12::find_server_hello(server_dir);
+    let is_tls12 = match server_hello.as_ref().map(|p| p.negotiated_version) {
+        Some(0x0304) => false,
+        Some(0x0300..=0x0303) => true,
+        Some(_) => false,
+        None => {
+            if !client_hello_offers_tls13(&hello) {
+                // A pre-1.3-only ClientHello: TLS 1.2 or below.
+                true
+            } else if store.secrets_for(&client_random).is_some() {
+                // A 1.3-capable hello with 1.3 traffic secrets: the
+                // unchanged TLS 1.3 path stays authoritative.
+                false
+            } else if store.master_secret_for(&client_random).is_some() {
+                // The keylog binds this stream only through a TLS 1.2
+                // master secret.
+                true
+            } else {
+                // Neither key family: the TLS 1.3 path's honest no-entry
+                // note applies.
+                false
+            }
+        }
+    };
+    if !is_tls12 {
+        return false;
+    }
+    if result.gaps > 0 || result.truncated {
+        note(
+            result,
+            "A",
+            "TLS 1.2 keylog attached: transcript has gaps or conflicts — decryption skipped",
+        );
+        return true;
+    }
+    // Bind the keylog's CLIENT_RANDOM master secret for this ClientHello
+    // random. No entry, no decryption, no attempt anywhere else.
+    let Some(mut decryptor) = tls12::Tls12Decryptor::new(store, &client_random) else {
+        note(
+            result,
+            hello_dir,
+            "TLS 1.2 keylog attached: no keylog entry matches this stream's ClientHello — ciphertext left as-is",
+        );
+        return true;
+    };
+    // The ServerHello supplies the server random and negotiated suite; the
+    // pre-scan sees it even when it sits in a direction walked later.
+    if let Some(params) = &server_hello {
+        decryptor.set_server_hello(&params.server_random, params.cipher_suite);
+    }
+    let client_is_a = hello_dir == "A";
+    let mut undecryptable_total = 0usize;
+    for (dir, data) in [("A", a), ("B", b)] {
+        let from_client = (dir == "A") == client_is_a;
+        let has_keys = decryptor.direction_has_keys(from_client);
+        let walk = tls12::walk_stream(&mut decryptor, from_client, data);
+        undecryptable_total += walk.undecryptable_records;
+        if walk.decrypted_records > 0 {
+            // The decrypted view replaces this direction's ciphertext data
+            // chunks; gap/notice chunks stay (they describe TCP events).
+            result
+                .chunks
+                .retain(|chunk| !(chunk.dir == dir && chunk.kind == "data"));
+            let mut summary = format!(
+                "side {dir}: decrypted (TLS 1.2, keylog): {} record(s), {} byte(s)",
+                walk.decrypted_records,
+                walk.plaintext.len(),
+            );
+            if walk.undecryptable_records > 0 {
+                summary.push_str(&format!(
+                    "; {} record(s) stayed ciphertext (tag mismatch)",
+                    walk.undecryptable_records
+                ));
+            }
+            if !walk.complete {
+                summary.push_str("; record walk stopped at a framing/limit bound");
+            }
+            if result.chunks.len() < crate::streams::MAX_STREAM_CHUNKS {
+                note(result, dir, summary);
+            } else {
+                result.truncated = true;
+            }
+            if result.chunks.len() < crate::streams::MAX_STREAM_CHUNKS {
+                result.chunks.push(StreamChunk {
+                    dir: dir.to_string(),
+                    text: display_bytes(&walk.plaintext),
+                    kind: "decrypted".into(),
+                    hex_data: Some(hex_bytes(&walk.plaintext)),
+                });
+            } else {
+                result.truncated = true;
+            }
+            // Decrypted application data feeds the same hint surface the
+            // plaintext and TLS 1.3 paths use.
+            for record in &walk.app_records {
+                if let Some(line) = crate::application::http_start_line(record) {
+                    result.application_hints.push(StreamApplicationHint {
+                        dir: dir.to_string(),
+                        protocol: "HTTP".into(),
+                        summary: format!("decrypted (TLS 1.2, keylog): {line}"),
+                    });
+                    break;
+                }
+                if let Some(hint) = http2_hint(record) {
+                    result.application_hints.push(StreamApplicationHint {
+                        dir: dir.to_string(),
+                        protocol: "HTTP/2".into(),
+                        summary: hint,
+                    });
+                    break;
+                }
+            }
+        } else if has_keys && walk.undecryptable_records > 0 {
+            note(
+                result,
+                dir,
+                format!(
+                    "side {dir}: {} TLS record(s) could not be decrypted — GCM verification failed (no active key state for these records or capture mismatch)",
+                    walk.undecryptable_records,
+                ),
+            );
+        }
+    }
+    if let Some(suite) = decryptor.unsupported_suite() {
+        note(
+            result,
+            hello_dir,
+            format!("TLS 1.2 cipher suite 0x{suite:04x} not supported for keylog decryption"),
+        );
+    } else if !decryptor.server_hello_seen() && undecryptable_total > 0 {
+        note(
+            result,
+            hello_dir,
+            "TLS 1.2 keylog attached: no ServerHello seen — write keys cannot be derived; ciphertext left as-is",
+        );
+    }
+    if decryptor.limit_reached() {
+        note(
+            result,
+            "A",
+            format!(
+                "TLS 1.2 decryption stopped at the {} record bound; remaining records left as ciphertext",
+                tls12::MAX_DECRYPTED_RECORDS,
+            ),
+        );
+    }
+    true
 }
 
 /// Bounded HTTP/2 hint over decrypted application data: the prior-knowledge
@@ -1397,5 +1617,352 @@ mod tests {
         assert!(hint.summary.contains("decrypted") || hint.summary.contains("preface"));
         assert!(hint.summary.contains("HEADERS(s1)"));
         assert!(hint.summary.contains(":method=GET"));
+    }
+
+    // ------------------------------------------------- TLS 1.2 keylog ----
+
+    use crate::crypto::tls12::KeyBlock;
+
+    const TLS12_MASTER: [u8; 48] = [0x21u8; 48];
+    const TLS12_SERVER_RANDOM: [u8; 32] = [0x5bu8; 32];
+    const TLS12_SUITE: u16 = 0xC02F; // ECDHE_RSA_AES_128_GCM_SHA256
+
+    /// Encrypt one TLS 1.2 AES-GCM record the way the wire carries it,
+    /// using the crate's own primitives (encrypt-then-decrypt
+    /// self-consistency through the real crypto path).
+    fn seal_tls12_record(
+        block: &KeyBlock,
+        from_client: bool,
+        seq: u64,
+        content: &[u8],
+        content_type: u8,
+    ) -> Vec<u8> {
+        let keys = if from_client {
+            &block.client
+        } else {
+            &block.server
+        };
+        let mut explicit = [0u8; 8];
+        explicit.copy_from_slice(&seq.to_be_bytes());
+        let mut nonce = [0u8; 12];
+        nonce[..4].copy_from_slice(&keys.salt);
+        nonce[4..].copy_from_slice(&explicit);
+        let body_len = (content.len() as u16 + 8 + 16).to_be_bytes();
+        let header = [content_type, 3, 3, body_len[0], body_len[1]];
+        let mut aad = [0u8; 13];
+        aad[..8].copy_from_slice(&seq.to_be_bytes());
+        aad[8..].copy_from_slice(&header);
+        let mut record = header.to_vec();
+        record.extend_from_slice(&explicit);
+        record.extend_from_slice(&gcm::seal(&keys.key, &nonce, &aad, content));
+        record
+    }
+
+    fn tls12_keylog_entry() -> String {
+        let mut hex = String::new();
+        for byte in TLS12_MASTER {
+            hex.push_str(&format!("{byte:02x}"));
+        }
+        let mut random = String::new();
+        for byte in KLOG_RANDOM {
+            random.push_str(&format!("{byte:02x}"));
+        }
+        format!("CLIENT_RANDOM {random} {hex}\n")
+    }
+
+    /// A TLS 1.2-only ClientHello: legacy version 0x0303, one TLS 1.2
+    /// suite, no supported_versions, no 1.3 suites.
+    fn fixture_tls12_client_hello() -> Vec<u8> {
+        fixture_tls12_client_hello_with(&KLOG_RANDOM, &[0xC0, 0x2F], false)
+    }
+
+    fn fixture_tls12_client_hello_with(
+        random: &[u8; 32],
+        suites: &[u8],
+        supported_versions_13: bool,
+    ) -> Vec<u8> {
+        let mut hello = vec![3, 3];
+        hello.extend_from_slice(random);
+        hello.push(0); // session id length
+        hello.extend_from_slice(&(suites.len() as u16).to_be_bytes());
+        hello.extend_from_slice(suites);
+        hello.extend_from_slice(&[1, 0]); // compressions
+        if supported_versions_13 {
+            // supported_versions: vector of [2, 0x0304, 0x0303].
+            hello.extend_from_slice(&[0, 7, 0, 43, 0, 3, 2, 3, 4]);
+        }
+        let mut message = vec![1, 0, 0, hello.len() as u8];
+        message.extend_from_slice(&hello);
+        let mut record = vec![22, 3, 3];
+        record.extend_from_slice(&(message.len() as u16).to_be_bytes());
+        record.extend(message);
+        record
+    }
+
+    fn fixture_tls12_server_hello(cipher_suite: u16) -> Vec<u8> {
+        let mut body = vec![3, 3];
+        body.extend_from_slice(&TLS12_SERVER_RANDOM);
+        body.push(0); // session id
+        body.extend_from_slice(&cipher_suite.to_be_bytes());
+        body.push(0); // compression
+        let mut message = vec![2, 0, 0, body.len() as u8];
+        message.extend_from_slice(&body);
+        let mut record = vec![22, 3, 3];
+        record.extend_from_slice(&(message.len() as u16).to_be_bytes());
+        record.extend(message);
+        record
+    }
+
+    /// A complete synthetic TLS 1.2 session: hello flight in the clear,
+    /// CCS per direction (sequence numbers reset there), encrypted Finished
+    /// and application records after it.
+    fn tls12_packets() -> Vec<PacketMeta> {
+        let block = tls12::key_block(
+            &TLS12_MASTER,
+            &TLS12_SERVER_RANDOM,
+            &KLOG_RANDOM,
+            TLS12_SUITE,
+        )
+        .unwrap();
+        let mut a_bytes = fixture_tls12_client_hello();
+        a_bytes.extend_from_slice(&[20, 3, 3, 0, 1, 1]);
+        a_bytes.extend_from_slice(&seal_tls12_record(&block, true, 0, b"\x14finished", 22));
+        a_bytes.extend_from_slice(&seal_tls12_record(
+            &block,
+            true,
+            1,
+            b"GET /b HTTP/1.1\r\n",
+            23,
+        ));
+        let mut b_bytes = fixture_tls12_server_hello(TLS12_SUITE);
+        b_bytes.extend_from_slice(&[20, 3, 3, 0, 1, 1]);
+        b_bytes.extend_from_slice(&seal_tls12_record(
+            &block,
+            false,
+            0,
+            b"HTTP/1.1 200 OK\r\n",
+            23,
+        ));
+        let mut packets = Vec::new();
+        let mut seq = 1000u32;
+        for chunk in a_bytes.chunks(24) {
+            packets.push(packet("A", seq, 0, chunk));
+            seq += chunk.len() as u32;
+        }
+        let mut seq = 5000u32;
+        for chunk in b_bytes.chunks(24) {
+            packets.push(packet("B", seq, 0, chunk));
+            seq += chunk.len() as u32;
+        }
+        packets
+    }
+
+    #[test]
+    fn keylog_decrypts_synthetic_tls12_stream_round_trip() {
+        let store = KeylogStore::parse(&tls12_keylog_entry()).unwrap();
+        assert_eq!(store.tls12_master_secret_count(), 1);
+        let packets = tls12_packets();
+        let out = follow_stream_with_keylog(&packets, ID, Some(&store)).unwrap();
+        let decrypted: Vec<&StreamChunk> = out
+            .chunks
+            .iter()
+            .filter(|c| c.kind == "decrypted")
+            .collect();
+        assert_eq!(decrypted.len(), 2);
+        let a_plain = decrypted.iter().find(|c| c.dir == "A").unwrap();
+        assert!(a_plain.text.contains("GET /b HTTP/1.1"));
+        assert!(a_plain
+            .hex_data
+            .as_deref()
+            .unwrap()
+            .contains("474554202f62"));
+        let b_plain = decrypted.iter().find(|c| c.dir == "B").unwrap();
+        assert!(b_plain.text.contains("HTTP/1.1 200 OK"));
+        // Honest per-direction labels, clearly marked as the TLS 1.2 path.
+        let notices = notice_texts(&out).join("\n");
+        assert!(notices.contains("side A: decrypted (TLS 1.2, keylog)"));
+        assert!(notices.contains("side B: decrypted (TLS 1.2, keylog)"));
+        // Ciphertext data chunks are gone.
+        assert!(out.chunks.iter().all(|c| c.kind != "data"));
+        // Decrypted application data feeds the existing hint surface.
+        assert!(out.application_hints.iter().any(|h| {
+            h.protocol == "HTTP" && h.summary.starts_with("decrypted (TLS 1.2, keylog): GET /b")
+        }));
+        // The plaintext path never claimed TLS 1.3 for this stream.
+        assert!(!notices.contains("TLS 1.3"));
+    }
+
+    #[test]
+    fn tls12_stream_without_serverhello_stays_ciphertext_with_honest_note() {
+        let store = KeylogStore::parse(&tls12_keylog_entry()).unwrap();
+        // Client flight only: the capture never saw the server's
+        // ServerHello, so both randoms are not available and no keys can
+        // be derived — everything stays ciphertext, labeled honestly.
+        let block = tls12::key_block(
+            &TLS12_MASTER,
+            &TLS12_SERVER_RANDOM,
+            &KLOG_RANDOM,
+            TLS12_SUITE,
+        )
+        .unwrap();
+        let mut a_bytes = fixture_tls12_client_hello();
+        a_bytes.extend_from_slice(&[20, 3, 3, 0, 1, 1]);
+        a_bytes.extend_from_slice(&seal_tls12_record(&block, true, 0, b"secret GET", 23));
+        let b_bytes = seal_tls12_record(&block, false, 0, b"secret response", 23);
+        let mut packets = Vec::new();
+        let mut seq = 1000u32;
+        for chunk in a_bytes.chunks(24) {
+            packets.push(packet("A", seq, 0, chunk));
+            seq += chunk.len() as u32;
+        }
+        let mut seq = 5000u32;
+        for chunk in b_bytes.chunks(24) {
+            packets.push(packet("B", seq, 0, chunk));
+            seq += chunk.len() as u32;
+        }
+        let out = follow_stream_with_keylog(&packets, ID, Some(&store)).unwrap();
+        assert!(out.chunks.iter().all(|c| c.kind != "decrypted"));
+        assert!(notice_texts(&out)
+            .iter()
+            .any(|t| t.contains("no ServerHello seen")));
+        assert!(out.chunks.iter().any(|c| c.dir == "A" && c.kind == "data"));
+    }
+
+    #[test]
+    fn tls12_unsupported_cipher_suite_is_refused_honestly() {
+        let store = KeylogStore::parse(&tls12_keylog_entry()).unwrap();
+        // Same session shape but the ServerHello negotiates a CBC suite
+        // this decryptor does not implement: refusal is explicit.
+        let block = tls12::key_block(
+            &TLS12_MASTER,
+            &TLS12_SERVER_RANDOM,
+            &KLOG_RANDOM,
+            TLS12_SUITE,
+        )
+        .unwrap();
+        let mut a_bytes = fixture_tls12_client_hello();
+        a_bytes.extend_from_slice(&[20, 3, 3, 0, 1, 1]);
+        a_bytes.extend_from_slice(&seal_tls12_record(
+            &block,
+            true,
+            0,
+            b"GET /c HTTP/1.1\r\n",
+            23,
+        ));
+        let mut b_bytes = fixture_tls12_server_hello(0x0035);
+        b_bytes.extend_from_slice(&[20, 3, 3, 0, 1, 1]);
+        b_bytes.extend_from_slice(&seal_tls12_record(
+            &block,
+            false,
+            0,
+            b"HTTP/1.1 200 OK\r\n",
+            23,
+        ));
+        let mut packets = Vec::new();
+        let mut seq = 1000u32;
+        for chunk in a_bytes.chunks(24) {
+            packets.push(packet("A", seq, 0, chunk));
+            seq += chunk.len() as u32;
+        }
+        let mut seq = 5000u32;
+        for chunk in b_bytes.chunks(24) {
+            packets.push(packet("B", seq, 0, chunk));
+            seq += chunk.len() as u32;
+        }
+        let out = follow_stream_with_keylog(&packets, ID, Some(&store)).unwrap();
+        assert!(out.chunks.iter().all(|c| c.kind != "decrypted"));
+        assert!(notice_texts(&out).iter().any(|t| {
+            t.contains("TLS 1.2 cipher suite 0x0035 not supported for keylog decryption")
+        }));
+    }
+
+    #[test]
+    fn tls12_stream_without_matching_client_random_stays_ciphertext() {
+        let store = KeylogStore::parse(&tls12_keylog_entry()).unwrap();
+        // The ClientHello random is not the one the keylog binds.
+        let other_random: [u8; 32] = [0x4bu8; 32];
+        let mut packets = Vec::new();
+        let hello = fixture_tls12_client_hello_with(&other_random, &[0xC0, 0x2F], false);
+        packets.push(packet("A", 1000, 0, &hello));
+        let out = follow_stream_with_keylog(&packets, ID, Some(&store)).unwrap();
+        assert!(out.chunks.iter().all(|c| c.kind != "decrypted"));
+        assert!(notice_texts(&out)
+            .iter()
+            .any(|t| { t.contains("no keylog entry matches this stream's ClientHello") }));
+    }
+
+    #[test]
+    fn server_hello_negotiating_tls12_routes_a_13_capable_hello_to_tls12() {
+        let store = KeylogStore::parse(&tls12_keylog_entry()).unwrap();
+        // The client offers both families (supported_versions 0x0304 and a
+        // 1.3 suite), but the captured ServerHello negotiated TLS 1.2:
+        // the negotiated version decides, and the TLS 1.2 decryptor opens
+        // the session.
+        let block = tls12::key_block(
+            &TLS12_MASTER,
+            &TLS12_SERVER_RANDOM,
+            &KLOG_RANDOM,
+            TLS12_SUITE,
+        )
+        .unwrap();
+        let mut a_bytes =
+            fixture_tls12_client_hello_with(&KLOG_RANDOM, &[0x13, 0x01, 0xC0, 0x2F], true);
+        a_bytes.extend_from_slice(&[20, 3, 3, 0, 1, 1]);
+        a_bytes.extend_from_slice(&seal_tls12_record(
+            &block,
+            true,
+            0,
+            b"GET /d HTTP/1.1\r\n",
+            23,
+        ));
+        let mut b_bytes = fixture_tls12_server_hello(TLS12_SUITE);
+        b_bytes.extend_from_slice(&[20, 3, 3, 0, 1, 1]);
+        b_bytes.extend_from_slice(&seal_tls12_record(
+            &block,
+            false,
+            0,
+            b"HTTP/1.1 200 OK\r\n",
+            23,
+        ));
+        let mut packets = Vec::new();
+        let mut seq = 1000u32;
+        for chunk in a_bytes.chunks(24) {
+            packets.push(packet("A", seq, 0, chunk));
+            seq += chunk.len() as u32;
+        }
+        let mut seq = 5000u32;
+        for chunk in b_bytes.chunks(24) {
+            packets.push(packet("B", seq, 0, chunk));
+            seq += chunk.len() as u32;
+        }
+        let out = follow_stream_with_keylog(&packets, ID, Some(&store)).unwrap();
+        assert!(out
+            .chunks
+            .iter()
+            .any(|c| c.kind == "decrypted" && c.text.contains("GET /d")));
+        assert!(notice_texts(&out)
+            .iter()
+            .any(|t| t.contains("side A: decrypted (TLS 1.2, keylog)")));
+    }
+
+    #[test]
+    fn tls12_gapped_stream_skips_decryption() {
+        let store = KeylogStore::parse(&tls12_keylog_entry()).unwrap();
+        let mut packets = tls12_packets();
+        // Introduce a sequence gap in A by shifting the later packets.
+        for p in packets
+            .iter_mut()
+            .skip(2)
+            .filter(|p| p.dissected.source == "10.0.0.1")
+        {
+            if let Some(tcp) = &mut p.dissected.tcp {
+                tcp.sequence = tcp.sequence.wrapping_add(64);
+            }
+        }
+        let out = follow_stream_with_keylog(&packets, ID, Some(&store)).unwrap();
+        assert!(out.chunks.iter().all(|c| c.kind != "decrypted"));
+        assert!(notice_texts(&out)
+            .iter()
+            .any(|t| t.contains("TLS 1.2 keylog attached: transcript has gaps or conflicts")));
     }
 }

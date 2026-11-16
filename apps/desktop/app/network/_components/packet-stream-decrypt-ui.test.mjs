@@ -65,3 +65,25 @@ test("stream transcripts re-fetch when the keylog attachment changes", () => {
     /chunk\.kind === "datagram" \|\| \(chunk\.kind as string\) === "decrypted"/,
   );
 });
+
+test("TLS 1.2 CLIENT_RANDOM master secrets ride the same keylog surface", () => {
+  const client = read("packet-stream-keylog-ipc.ts");
+  const studio = read("PacketStudioView.tsx");
+  // Since the TLS 1.2 slice, the Rust keylog parser retains CLIENT_RANDOM
+  // lines (the master secret) alongside the TLS 1.3 traffic secrets. Label
+  // acceptance lives entirely in that parser: the IPC layer filters and
+  // renames no labels, and no keylog bytes cross the wire.
+  assert.doesNotMatch(client, /CLIENT_RANDOM|CLIENT_EARLY|TRAFFIC_SECRET_0/);
+  // `entries` keeps counting TLS 1.3 traffic secrets only; the connection
+  // count covers every ClientHello random the keylog binds, TLS 1.2 and
+  // TLS 1.3 alike.
+  assert.match(client, /Accepted TLS 1\.3 traffic-secret entries/);
+  assert.match(client, /status\.connections}/);
+  // Backend-marked "decrypted" chunks render with no TLS-version gate in
+  // the UI layer — the same emission contract the TLS 1.2 path uses.
+  assert.match(studio, /\(chunk\.kind as string\) === "decrypted" \? "\[decrypted\] " : ""/);
+  assert.match(
+    studio,
+    /chunk\.kind === "datagram" \|\| \(chunk\.kind as string\) === "decrypted"/,
+  );
+});

@@ -7,12 +7,16 @@
 //! Accepted labels (TLS 1.3; the traffic secrets themselves):
 //! `CLIENT_EARLY_TRAFFIC_SECRET`, `CLIENT_HANDSHAKE_TRAFFIC_SECRET`,
 //! `SERVER_HANDSHAKE_TRAFFIC_SECRET`, `CLIENT_TRAFFIC_SECRET_0`,
-//! `SERVER_TRAFFIC_SECRET_0`. TLS 1.2-era labels (`RSA ...`, `EC ...,`,
-//! `CLIENT_RANDOM`) are recognized-but-ignored: they carry TLS 1.2 master
-//! secrets, which this passive TLS 1.3 record decryptor never consumes.
+//! `SERVER_TRAFFIC_SECRET_0`. `CLIENT_RANDOM` lines carry the TLS 1.2
+//! master secret and are RETAINED (random → 48-byte master secret lookup)
+//! for the passive TLS 1.2 record decryptor (`super::tls12`); other TLS
+//! 1.2-era labels (`RSA ...`, `EC ...`) remain recognized-but-ignored.
+//! Both counters stay separate: `entry_count` still counts only TLS 1.3
+//! traffic secrets.
 //!
-//! Bounds: at most 64 KiB of input and 1024 entries; duplicate
-//! (random, label) lines collapse (last value wins, counted).
+//! Bounds: at most 64 KiB of input and 1024 entries (TLS 1.3 and TLS 1.2
+//! entries share the bound); duplicate (random, label) lines collapse
+//! (last value wins, counted).
 
 use std::collections::HashMap;
 
@@ -22,6 +26,8 @@ pub const MAX_KEYLOG_BYTES: usize = 64 * 1024;
 pub const MAX_KEYLOG_ENTRIES: usize = 1024;
 /// One hex-encoded 32-byte value, as written by NSS keylogs.
 const HEX_32: usize = 64;
+/// One hex-encoded 48-byte value (the TLS 1.2 master secret).
+const HEX_48: usize = 96;
 /// Cap on a single line so a malformed file cannot force unbounded scans.
 const MAX_LINE_BYTES: usize = 4096;
 
@@ -35,11 +41,15 @@ pub struct KeylogSecrets {
     pub server_application: Option<[u8; 32]>,
 }
 
-/// Parsed keylog: lookup by ClientHello random (32 bytes).
+/// Parsed keylog: lookup by ClientHello random (32 bytes). TLS 1.3 traffic
+/// secrets and TLS 1.2 master secrets are stored separately; only the
+/// latter feed the TLS 1.2 decryptor, only the former the TLS 1.3 one.
 #[derive(Debug, Clone, Default)]
 pub struct KeylogStore {
     connections: HashMap<[u8; 32], KeylogSecrets>,
+    tls12: HashMap<[u8; 32], [u8; 48]>,
     entries: usize,
+    tls12_entries: usize,
     duplicates: usize,
     ignored_tls12_lines: usize,
 }
@@ -72,6 +82,33 @@ impl KeylogStore {
             let Some(label) = parts.next() else {
                 continue;
             };
+            // NSS TLS 1.2 CLIENT_RANDOM lines (`CLIENT_RANDOM <random>
+            // <master_secret>`) carry the 48-byte TLS 1.2 master secret and
+            // are retained for the TLS 1.2 decryptor. A CLIENT_RANDOM line
+            // that does not parse carries no usable master secret — it is
+            // counted and skipped whole (never partially interpreted), so
+            // nothing can be silently mis-decrypted later.
+            if label == "CLIENT_RANDOM" {
+                if let Some((random, secret)) = parse_client_random(&mut parts) {
+                    if store.entries + store.tls12_entries >= MAX_KEYLOG_ENTRIES {
+                        return Err(format!(
+                            "keylog exceeds the {MAX_KEYLOG_ENTRIES}-entry import bound at line {line_no}"
+                        ));
+                    }
+                    // Duplicate (random, label) lines collapse with the
+                    // last value winning, matching the TLS 1.3 dedupe
+                    // semantics.
+                    if store.tls12.insert(random, secret).is_some() {
+                        store.duplicates += 1;
+                    } else {
+                        store.tls12_entries += 1;
+                    }
+                }
+                // Counted among the non-TLS-1.3 lines whether retained or
+                // not — see `ignored_line_count`.
+                store.ignored_tls12_lines += 1;
+                continue;
+            }
             // Recognized TLS 1.3 labels are strictly `LABEL <random> <secret>`.
             // NSS TLS 1.2-era lines (e.g. `RSA <id> <random> <secret>`) carry
             // an extra middle field; they are never interpreted here, so any
@@ -157,14 +194,29 @@ impl KeylogStore {
     }
 
     /// The traffic secrets bound to one ClientHello random, if the keylog
-    /// covers this connection.
+    /// covers this connection. TLS 1.3 labels only — a TLS 1.2
+    /// `CLIENT_RANDOM` entry alone does not appear here (see
+    /// [`KeylogStore::master_secret_for`]).
     pub fn secrets_for(&self, client_random: &[u8; 32]) -> Option<&KeylogSecrets> {
         self.connections.get(client_random)
     }
 
-    /// Distinct connections (ClientHello randoms) covered by this keylog.
+    /// The TLS 1.2 master secret bound to one ClientHello random via a
+    /// retained `CLIENT_RANDOM` line, if the keylog covers this connection.
+    pub fn master_secret_for(&self, client_random: &[u8; 32]) -> Option<&[u8; 48]> {
+        self.tls12.get(client_random)
+    }
+
+    /// Distinct connections (ClientHello randoms) covered by this keylog —
+    /// TLS 1.3 traffic-secret entries and retained TLS 1.2 master secrets
+    /// share the same ClientHello-random key space and are counted once.
     pub fn connection_count(&self) -> usize {
         self.connections.len()
+            + self
+                .tls12
+                .keys()
+                .filter(|random| !self.connections.contains_key(*random))
+                .count()
     }
 
     /// Accepted TLS 1.3 traffic-secret entries.
@@ -172,19 +224,30 @@ impl KeylogStore {
         self.entries
     }
 
+    /// Retained TLS 1.2 `CLIENT_RANDOM` master secrets (TLS 1.3 entries are
+    /// counted by [`KeylogStore::entry_count`]).
+    pub fn tls12_master_secret_count(&self) -> usize {
+        self.tls12_entries
+    }
+
     /// Collapsed duplicate (random, label) lines.
     pub fn duplicate_count(&self) -> usize {
         self.duplicates
     }
 
-    /// Recognized-but-ignored lines (TLS 1.2-era labels and other labels).
+    /// Lines outside the TLS 1.3 traffic-secret labels. TLS 1.2
+    /// `CLIENT_RANDOM` lines are counted here (they are not TLS 1.3
+    /// traffic secrets) while also being retained for the TLS 1.2
+    /// decryptor — see [`KeylogStore::tls12_master_secret_count`]; other
+    /// TLS 1.2-era and unknown labels are counted and skipped whole.
     pub fn ignored_line_count(&self) -> usize {
         self.ignored_tls12_lines
     }
 
-    /// True when nothing usable was imported.
+    /// True when nothing usable was imported — no TLS 1.3 traffic secrets
+    /// and no retained TLS 1.2 master secrets.
     pub fn is_empty(&self) -> bool {
-        self.entries == 0
+        self.entries == 0 && self.tls12_entries == 0
     }
 }
 
@@ -201,6 +264,37 @@ fn decode_32(hex: &str) -> Option<[u8; 32]> {
         out[i] = (hi << 4) | lo;
     }
     Some(out)
+}
+
+/// Decode exactly 96 lowercase-or-uppercase hex characters into the 48-byte
+/// TLS 1.2 master secret (`CLIENT_RANDOM` lines). Same refusal rules as
+/// [`decode_32`].
+fn decode_48(hex: &str) -> Option<[u8; 48]> {
+    if hex.len() != HEX_48 || !hex.bytes().all(|c| c.is_ascii_hexdigit()) {
+        return None;
+    }
+    let mut out = [0u8; 48];
+    for (i, pair) in hex.as_bytes().chunks_exact(2).enumerate() {
+        let hi = (pair[0] as char).to_digit(16)? as u8;
+        let lo = (pair[1] as char).to_digit(16)? as u8;
+        out[i] = (hi << 4) | lo;
+    }
+    Some(out)
+}
+
+/// Parse the fields of a `CLIENT_RANDOM` line: exactly
+/// `<32-byte hex random> <48-byte hex master secret>`. Anything else —
+/// wrong lengths, non-hex, extra fields — is None and the whole line is
+/// skipped by the caller.
+fn parse_client_random(
+    parts: &mut std::str::SplitAsciiWhitespace<'_>,
+) -> Option<([u8; 32], [u8; 48])> {
+    let random = decode_32(parts.next()?)?;
+    let secret = decode_48(parts.next()?)?;
+    if parts.next().is_some() {
+        return None;
+    }
+    Some((random, secret))
 }
 
 #[cfg(test)]
@@ -340,5 +434,109 @@ mod tests {
             .is_some());
         // An unknown random is not matched — never guessed.
         assert!(store.secrets_for(&[7u8; 32]).is_none());
+    }
+
+    // ------------------- TLS 1.2 CLIENT_RANDOM retention (additive) ----
+
+    const MASTER: &str = concat!(
+        "71717171717171717171717171717171", // 16 bytes
+        "72727272727272727272727272727272", // 16 bytes
+        "73737373737373737373737373737373", // 16 bytes
+    );
+
+    #[test]
+    fn client_random_entries_are_retained_for_tls12_lookup() {
+        let input = format!("CLIENT_RANDOM {RANDOM} {MASTER}\n");
+        let store = KeylogStore::parse(&input).unwrap();
+        // Retained master secret, with the TLS 1.3 counters untouched.
+        assert_eq!(store.tls12_master_secret_count(), 1);
+        assert_eq!(store.entry_count(), 0);
+        assert_eq!(store.duplicate_count(), 0);
+        assert_eq!(store.connection_count(), 1);
+        assert!(!store.is_empty());
+        assert_eq!(
+            store
+                .master_secret_for(&decode_32(RANDOM).unwrap())
+                .unwrap(),
+            &decode_48(MASTER).unwrap()
+        );
+        // Still counted among the non-TLS-1.3 lines, as before this slice.
+        assert_eq!(store.ignored_line_count(), 1);
+        // The TLS 1.3 lookup never sees a TLS 1.2-only entry.
+        assert!(store.secrets_for(&decode_32(RANDOM).unwrap()).is_none());
+        // An unknown random is not matched — never guessed.
+        assert!(store.master_secret_for(&[7u8; 32]).is_none());
+        // A 1.3-only keylog still reports no master secrets.
+        let only13 = KeylogStore::parse(&line("CLIENT_TRAFFIC_SECRET_0")).unwrap();
+        assert_eq!(only13.tls12_master_secret_count(), 0);
+        assert!(only13
+            .master_secret_for(&decode_32(RANDOM).unwrap())
+            .is_none());
+    }
+
+    #[test]
+    fn client_random_duplicates_collapse_and_malformed_lines_are_skipped() {
+        let input = format!("CLIENT_RANDOM {RANDOM} {MASTER}\nCLIENT_RANDOM {RANDOM} {MASTER}\n");
+        let store = KeylogStore::parse(&input).unwrap();
+        assert_eq!(store.tls12_master_secret_count(), 1);
+        assert_eq!(store.duplicate_count(), 1);
+        assert_eq!(store.connection_count(), 1);
+        // Last value wins: rewrite the master with a distinct value.
+        let rewritten = format!(
+            "CLIENT_RANDOM {RANDOM} {MASTER}\nCLIENT_RANDOM {RANDOM} {}\n",
+            "3".repeat(96)
+        );
+        let store = KeylogStore::parse(&rewritten).unwrap();
+        assert_eq!(
+            store
+                .master_secret_for(&decode_32(RANDOM).unwrap())
+                .unwrap()[0],
+            0x33
+        );
+        // Malformed CLIENT_RANDOM lines carry no usable master secret: they
+        // are counted and skipped whole, exactly like other TLS 1.2-era
+        // labels — never partially interpreted, never guessed around.
+        for bad in [
+            format!("CLIENT_RANDOM {RANDOM} {}", &MASTER[..90]), // short secret
+            format!("CLIENT_RANDOM {} {MASTER}", &RANDOM[..60]), // short random
+            format!("CLIENT_RANDOM {RANDOM} {}{MASTER}", "z"),   // non-hex secret
+            "CLIENT_RANDOM".to_string(),                         // missing fields
+            format!("CLIENT_RANDOM {RANDOM}"),                   // missing secret
+            format!("CLIENT_RANDOM {RANDOM} {MASTER} extra"),    // trailing
+        ] {
+            let store = KeylogStore::parse(&bad).unwrap();
+            assert_eq!(store.tls12_master_secret_count(), 0, "{bad}");
+            assert_eq!(store.ignored_line_count(), 1, "{bad}");
+            assert_eq!(store.duplicate_count(), 0, "{bad}");
+        }
+    }
+
+    #[test]
+    fn tls12_and_tls13_entries_share_the_entry_bound_and_connection_count() {
+        // One connection covered by both a TLS 1.3 secret and a TLS 1.2
+        // master secret counts once.
+        let mixed = format!(
+            "{}\nCLIENT_RANDOM {RANDOM} {MASTER}\n",
+            line("CLIENT_HANDSHAKE_TRAFFIC_SECRET")
+        );
+        let store = KeylogStore::parse(&mixed).unwrap();
+        assert_eq!(store.connection_count(), 1);
+        assert_eq!(store.entry_count(), 1);
+        assert_eq!(store.tls12_master_secret_count(), 1);
+        // Two distinct randoms across the two label families count twice.
+        let other_random = format!("{:064x}", 0xfeedu64);
+        let distinct = format!("{mixed}CLIENT_RANDOM {other_random} {MASTER}\n");
+        let store = KeylogStore::parse(&distinct).unwrap();
+        assert_eq!(store.connection_count(), 2);
+        // The 1024-entry bound spans both label families (defense in depth;
+        // the 64 KiB byte bound still fires first for any real file).
+        let mut many = String::new();
+        for i in 0..(MAX_KEYLOG_ENTRIES + 1) {
+            let random = format!("{i:064x}");
+            many.push_str(&format!("CLIENT_RANDOM {random} {MASTER}\n"));
+        }
+        let err = KeylogStore::parse(&many).unwrap_err();
+        assert!(err.contains("64 KiB"), "{err}");
+        assert!(err.contains("entry") || err.contains("bound"), "{err}");
     }
 }

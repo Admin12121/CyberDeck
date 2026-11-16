@@ -16,6 +16,10 @@ pub mod sha256;
 pub mod keylog;
 pub mod tls13;
 
+// --- coordinator-insert (TLS 1.2 keylog slice): the TLS 1.2 record
+// --- decryptor over the same keylog store; purely additive.
+pub mod tls12;
+
 /// RFC 9001 §5.2: the salt for version 1
 /// (`0x38762cf7f55934b34d179ae6a4c80cadccbb7f0a`).
 pub const INITIAL_SALT_V1: [u8; 20] = [
