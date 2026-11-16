@@ -5,6 +5,7 @@ mod link;
 mod network;
 pub mod protocol;
 mod quic;
+mod smb;
 mod tcp_options;
 mod tls_depth;
 mod transport;
