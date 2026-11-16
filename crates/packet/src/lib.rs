@@ -28,6 +28,8 @@ pub mod scan_packets;
 pub mod scan_replies;
 pub mod service_checks;
 pub mod streams;
+// coordinator-insert: wifi monitor-mode layer (netlink/radiotap/802.11/EAPOL-22000)
+pub mod wifi;
 
 pub use application::capture::parse_capture;
 pub use domain::dissection::dissect;

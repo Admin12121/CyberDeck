@@ -820,7 +820,7 @@ function TlsKeylogCard({ onApplied }: { onApplied: () => void }) {
           onClick={() => void attach()}
           disabled={!desktop || busy}
           title={desktop
-            ? "Import an NSS keylog file (TLS 1.3) to decrypt stream transcripts passively"
+            ? "Import an NSS keylog file (TLS 1.2/1.3) to decrypt stream transcripts passively"
             : "Keylog import requires the desktop runtime"} />
         {status?.attached ? (
           <IconButton
@@ -831,7 +831,7 @@ function TlsKeylogCard({ onApplied }: { onApplied: () => void }) {
             title="Remove the imported keylog; transcripts fall back to ciphertext" />
         ) : null}
         <span className="font-mono text-2xs text-fg-muted">{keylogCardLine(status)}</span>
-        <InfoTip text="Passive TLS 1.3 decryption for stream transcripts: records are decrypted only when the imported keylog carries the traffic secrets for a stream's own ClientHello random, and only when the GCM tag verifies. The keylog stays in memory for this case session, is never persisted, and streams without a matching entry stay ciphertext." />
+        <InfoTip text="Passive TLS 1.2/1.3 decryption for stream transcripts: records are decrypted only when the imported keylog carries the secrets for a stream's own ClientHello random, and only when the authentication tag verifies. The keylog stays in memory for this case session, is never persisted, and streams without a matching entry stay ciphertext." />
       </div>
       {error ? (
         <p role="alert" className="w-full truncate text-center font-mono text-3xs text-err">{error}</p>
