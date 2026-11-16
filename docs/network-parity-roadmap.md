@@ -40,12 +40,12 @@ Landed work stays in the list with ✅ so progress stays countable.
 
 ## Tier 1 — next wave (in progress, high real-capture frequency)
 
-- [ ] **Wifi monitor crate layer (Linux)** — hand-rolled nl80211/netlink client,
+✅ **Wifi monitor crate layer (Linux)** — hand-rolled nl80211/netlink client,
   radiotap, 802.11 MAC dissection (beacon/probe/data/auth/deauth), EAPOL 4-way capture
-  → hashcat 22000 lines (PMKID + EAPOL), verified against our own CPU verifier
-  (`windows_auth.rs`) — in flight
-- [ ] **TLS 1.2 decryption via keylog CLIENT_RANDOM** — RFC 5246 key block, AES-GCM
-  suites first, CBC as stretch — in flight
+  → hashcat 22000 lines (PMKID + EAPOL), cross-crate e2e verified through our own
+  WPA verifier (`windows_auth::verify_wpa_eapol`) (6cca540)
+✅ **TLS 1.2 decryption via keylog CLIENT_RANDOM** — RFC 5246 key block, AES-128-GCM
+  suites (a5d4307); CBC + AES-256-GCM/SHA-384-PRF deferred to Tier 1 tail
 - [ ] Wifi IPC + Network Lab "Wifi" mode end-to-end (interfaces, channel list,
   start/stop, beacons/clients tables, handshake-captured → case evidence)
 - [ ] Windows: Npcap presence detection + adapter status surfacing (no bundling)
