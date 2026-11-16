@@ -58,8 +58,11 @@ Landed work stays in the list with ✅ so progress stays countable.
 
 ## Tier 2 — MITM completion (Bettercap/Ettercap arc)
 
-- [ ] DNS spoofer (gated: scope-locked zones, restoration on stop)
-- [ ] HTTP proxy with intercept queue + match/replace (web-studio parity reuse)
+✅ DNS spoofer — gated responder: allowlist-spoof (≤16 domains) + honest upstream
+  forwarding, query log, one bounded case finding per session (525cfda)
+✅ HTTP proxy — gated plain-HTTP forward proxy with sslstrip-lite rewrites
+  (individually toggled, all OFF by default, counted), CONNECT refused to the Web
+  studio, full header+excerpt logging, one bounded case finding per session (525cfda)
 - [ ] SSL-strip module (gated, honest about HSTS limits)
 - [ ] NSE-lite growth: UDP probe plumbing (mDNS/SSDP/NTP families are TCP-only today),
   registry toward ~60 checks
