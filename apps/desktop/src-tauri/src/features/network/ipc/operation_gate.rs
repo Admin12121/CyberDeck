@@ -12,6 +12,8 @@ pub enum ActiveOperation {
     RawSyn = 3,
     LinkNeighbor = 4,
     IcmpEcho = 5,
+    // coordinator-insert (Wifi injection slice): gated wifi deauth runs
+    WifiInject = 6,
 }
 
 #[derive(Default)]
@@ -68,6 +70,7 @@ mod tests {
             ActiveOperation::RawSyn,
             ActiveOperation::LinkNeighbor,
             ActiveOperation::IcmpEcho,
+            ActiveOperation::WifiInject,
         ] {
             assert!(gate.acquire(mode).is_err());
         }

@@ -162,6 +162,10 @@ fn main() {
             features::network::ipc::wifi_monitor::network_wifi_monitor_stop_v1,
             features::network::ipc::wifi_monitor::network_wifi_monitor_status_v1,
             features::network::ipc::wifi_monitor::network_wifi_evidence_save_v1,
+            // coordinator-insert (Wifi injection slice): gated deauth + channel-hop commands
+            features::network::ipc::wifi_monitor::network_wifi_inject_deauth_v1,
+            features::network::ipc::wifi_monitor::network_wifi_inject_deauth_stop_v1,
+            features::network::ipc::wifi_monitor::network_wifi_channel_hop_v1,
             features::network::ipc::pcap_export::pcap_export_view_v1,
             features::network::ipc::pcap_export::pcap_export_view_ng_v1,
             features::network::ipc::os_hints_ipc::capture_os_hints_v1,

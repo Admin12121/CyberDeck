@@ -29,14 +29,29 @@
 //! ≤ 16 authorized capture frequencies, AP table ≤ 64, client table ≤ 256,
 //! frames ≤ 4352 bytes (crate radiotap + 802.11 bounds), snapshot publishes
 //! bounded at 128-frame cadence, one bounded evidence finding per session.
+//!
+//! Injection slice (additive, Bettercap `wifi.deauth` + hopping parity):
+//! `network_wifi_inject_deauth_v1` is ACTIVE interference and is gated like
+//! the lab ARP spoof — saved case, LIVE monitor session (the ONLY target
+//! source is the current session's observed AP table: no blind targets),
+//! `ActiveOperation::WifiInject` gate lease, native Yes/No dialog naming
+//! every target BSSID and the exact frame counts, Linux-only worker over the
+//! crate's `inject` core (≤ 4 targets, ≤ 4 bursts, ≤ 32 frames/burst, ≥ 20 ms
+//! frame pacing, ≤ 10 s hard runtime cap, stop never refused).
+//! `network_wifi_channel_hop_v1` is passive radio control over the running
+//! capture (≤ 16 in-band frequencies, 250 ms–2 s interval, pause/resume with
+//! capture, full ≤ 256-entry hop log); it takes no gate lease but refuses to
+//! start or run next to injection or another active operation. Both report
+//! honest counters through additive `WifiStatusWire` fields.
 use crate::features::forensics::ipc::evidence::EvidenceCtx;
 use crate::features::shared::session::{CaseSessionCtx, CaseSessionWire};
 use cyberdeck_packet::wifi::frame::{self, FrameKind};
+use cyberdeck_packet::wifi::inject;
 use cyberdeck_packet::wifi::radiotap;
-use cyberdeck_packet::wifi::{MonitorCapture, monitor_mode_supported};
+use cyberdeck_packet::wifi::{ChannelHopScheduler, MonitorCapture, monitor_mode_supported};
 use cyberdeck_storage::NewFinding;
 use serde::Serialize;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 #[cfg(target_os = "linux")]
@@ -73,6 +88,18 @@ const SCOPE_CHECK_EVERY_ITERATIONS: u64 = 512;
 /// Honest Unsupported message wherever the radio door does not exist.
 const UNSUPPORTED_MESSAGE: &str =
     "wifi monitor mode uses the Linux nl80211 control door and currently requires Linux";
+/// Honest Unsupported message for the injection door off Linux (the deauth
+/// transmit path is Linux AF_PACKET + CAP_NET_RAW only).
+const INJECTION_UNSUPPORTED_MESSAGE: &str =
+    "wifi injection uses the Linux AF_PACKET transmit door and currently requires Linux";
+/// Honest Unsupported message for the channel-hop door off Linux.
+const HOP_UNSUPPORTED_MESSAGE: &str =
+    "wifi channel hopping uses the Linux nl80211 control door and currently requires Linux";
+/// Deauth target cap per run (mirrors the crate's `MAX_DEAUTH_TARGETS`).
+const MAX_INJECT_TARGETS: usize = inject::MAX_DEAUTH_TARGETS;
+/// The worker polls the hop scheduler and applies pause/resume at this
+/// cadence (stop latency ~25 ms; one short critical section per tick).
+const HOP_POLL_SLICE_MS: u64 = 25;
 
 // ---------------------------------------------------------------------------
 // Channel parsing: the UI hands over channel numbers (2.4/5 GHz bands) or
@@ -301,7 +328,17 @@ struct WifiSnapshot {
     clients: Vec<String>,
 }
 
+/// Shared channel-hop scheduler slot: the hop worker applies ticks/pauses to
+/// it in short critical sections; the status command reads honest state from
+/// it (the log persists after the run ends until the next start resets it).
+#[derive(Default)]
+struct HopShared {
+    scheduler: Option<ChannelHopScheduler>,
+}
+
 /// Managed per-process monitor registry, mirroring `NetworkLabSpoofCtx`.
+/// The injection/hop fields are the additive slice: deauth is gate-leased
+/// ACTIVE interference; hopping is passive radio control over the capture.
 #[derive(Default)]
 pub struct NetworkWifiCtx {
     running: AtomicBool,
@@ -319,6 +356,22 @@ pub struct NetworkWifiCtx {
     snapshot: Mutex<WifiSnapshot>,
     /// ONE bounded evidence finding per capture session.
     evidence_saved: AtomicBool,
+    // --- injection (deauth), additive: gate-leased, bounded, stop-aware ---
+    deauth_running: AtomicBool,
+    deauth_stop: AtomicBool,
+    deauth_frames_sent: AtomicU64,
+    deauth_bursts_done: AtomicUsize,
+    deauth_targets: AtomicUsize,
+    deauth_note: Mutex<Option<String>>,
+    injection_last_error: Mutex<Option<String>>,
+    // --- channel hop, additive: passive radio control over the capture ---
+    hop_running: AtomicBool,
+    hop_stop: AtomicBool,
+    /// Pause/resume REQUESTS from IPC; the worker applies them to the shared
+    /// scheduler on its own clock (the scheduler's time base stays exact).
+    hop_pause_request: AtomicBool,
+    hop: Mutex<HopShared>,
+    hop_last_error: Mutex<Option<String>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -344,9 +397,13 @@ impl WifiPhase {
 
 impl NetworkWifiCtx {
     /// Immediate case-change hook; the worker's session closure stays
-    /// authoritative even when a caller cannot invoke this.
+    /// authoritative even when a caller cannot invoke this. Arms every stop
+    /// flag in the registry: the capture pump, a deauth run and a hop run
+    /// all end on case revocation.
     pub fn on_case_changed(&self) {
         self.stop.store(true, Ordering::Release);
+        self.deauth_stop.store(true, Ordering::Release);
+        self.hop_stop.store(true, Ordering::Release);
     }
 
     fn set_phase(&self, phase: WifiPhase) {
@@ -397,6 +454,25 @@ impl NetworkWifiCtx {
             .lock()
             .map(|guard| guard.clone())
             .unwrap_or_default();
+        // Injection counters: the state word is derived from the live flags,
+        // never invented by the UI.
+        let deauth_running = self.deauth_running.load(Ordering::Acquire);
+        let deauth_frames = self.deauth_frames_sent.load(Ordering::Acquire);
+        let deauth_state = if deauth_running {
+            if self.deauth_stop.load(Ordering::Acquire) {
+                "stopping"
+            } else {
+                "injecting"
+            }
+        } else if deauth_frames > 0 {
+            "stopped"
+        } else {
+            "idle"
+        };
+        // Channel hop: the scheduler is the truth for current frequency,
+        // pause state and the full bounded log (which persists after stop).
+        let hop = self.hop_view().unwrap_or_default();
+        let hop_running = self.hop_running.load(Ordering::Acquire);
         WifiStatusWire {
             state: self.phase().as_str().to_string(),
             interface: self.interface.lock().map(|g| g.clone()).unwrap_or_default(),
@@ -411,8 +487,60 @@ impl NetworkWifiCtx {
             clients: snapshot.clients,
             elapsed_ms: elapsed,
             last_error: self.last_error.lock().ok().and_then(|g| g.clone()),
+            deauth_state: deauth_state.to_string(),
+            deauth_frames_sent: deauth_frames,
+            deauth_bursts_done: self.deauth_bursts_done.load(Ordering::Acquire),
+            deauth_targets: self.deauth_targets.load(Ordering::Acquire),
+            deauth_note: self.deauth_note.lock().ok().and_then(|g| g.clone()),
+            injection_last_error: self
+                .injection_last_error
+                .lock()
+                .ok()
+                .and_then(|g| g.clone()),
+            hop_running,
+            hop_paused: hop.paused,
+            hop_channel_mhz: if hop_running { hop.current_mhz } else { 0 },
+            hop_channels: hop.channels,
+            hop_interval_ms: hop.interval_ms,
+            hop_count: hop.hop_count,
+            hop_log: hop.log,
+            hop_last_error: self.hop_last_error.lock().ok().and_then(|g| g.clone()),
         }
     }
+
+    /// The scheduler-derived hop view (current frequency, pause state, full
+    /// bounded log); None when no hop plan exists in the registry.
+    fn hop_view(&self) -> Option<HopView> {
+        let guard = self.hop.lock().ok()?;
+        let scheduler = guard.scheduler.as_ref()?;
+        Some(HopView {
+            paused: scheduler.is_paused(),
+            current_mhz: scheduler.current(),
+            channels: scheduler.channels().to_vec(),
+            interval_ms: scheduler.interval_ms() as u32,
+            hop_count: scheduler.hops(),
+            log: scheduler
+                .hop_log()
+                .iter()
+                .map(|entry| WifiHopEntryWire {
+                    at_ms: entry.at_ms,
+                    from_mhz: entry.from_mhz,
+                    to_mhz: entry.to_mhz,
+                })
+                .collect(),
+        })
+    }
+}
+
+/// Backend-rendered hop view for the status wire and the hop command receipt.
+#[derive(Debug, Clone, Default)]
+struct HopView {
+    paused: bool,
+    current_mhz: u32,
+    channels: Vec<u32>,
+    interval_ms: u32,
+    hop_count: u64,
+    log: Vec<WifiHopEntryWire>,
 }
 
 /// Runs for the whole worker lifetime; clears the running flag and publishes
@@ -454,6 +582,70 @@ pub struct WifiStatusWire {
     /// Elapsed wall-clock milliseconds.
     pub elapsed_ms: u64,
     pub last_error: Option<String>,
+    // --- injection (deauth), additive fields ---
+    /// idle | injecting | stopping | stopped (derived from the live flags).
+    pub deauth_state: String,
+    /// Deauth frames the current/last run actually transmitted.
+    pub deauth_frames_sent: u64,
+    /// Bursts the last run completed.
+    pub deauth_bursts_done: usize,
+    /// Target BSSIDs of the last run.
+    pub deauth_targets: usize,
+    /// Backend-rendered end-of-run note (frames, bursts, honest end reason).
+    pub deauth_note: Option<String>,
+    pub injection_last_error: Option<String>,
+    // --- channel hop, additive fields ---
+    pub hop_running: bool,
+    /// True while the hop scheduler is paused (the capture keeps running).
+    pub hop_paused: bool,
+    /// The frequency the hop scheduler currently drives (0 when not hopping).
+    pub hop_channel_mhz: u32,
+    /// The authorized hop frequencies, MHz.
+    pub hop_channels: Vec<u32>,
+    pub hop_interval_ms: u32,
+    /// Total hops applied this hop run.
+    pub hop_count: u64,
+    /// The full bounded hop log (≤ 256 entries; persists after stop).
+    pub hop_log: Vec<WifiHopEntryWire>,
+    pub hop_last_error: Option<String>,
+}
+
+/// One recorded channel hop: when (ms since the hop run started) and the
+/// frequency transition the worker drove over nl80211.
+#[derive(Debug, Clone, Serialize)]
+pub struct WifiHopEntryWire {
+    pub at_ms: u64,
+    pub from_mhz: u32,
+    pub to_mhz: u32,
+}
+
+/// Start receipt for `network_wifi_inject_deauth_v1`: the exact backend-
+/// authorized targets and bounds (the UI never widens or re-derives them).
+#[derive(Debug, Clone, Serialize)]
+pub struct WifiInjectStartWire {
+    pub targets: Vec<String>,
+    pub bursts: u32,
+    pub frames_per_target: u32,
+    /// Frames per burst across ALL targets (≤ 32, crate-enforced).
+    pub frames_per_burst: u32,
+    /// Total frames the whole run may transmit (per_burst × bursts).
+    pub total_frames: u32,
+    pub status: WifiStatusWire,
+}
+
+/// Receipt for `network_wifi_channel_hop_v1`: the applied action plus the
+/// scheduler's honest state after it.
+#[derive(Debug, Clone, Serialize)]
+pub struct WifiHopWire {
+    /// start | pause | resume | stop.
+    pub action: String,
+    pub running: bool,
+    pub paused: bool,
+    pub current_mhz: u32,
+    pub channels: Vec<u32>,
+    pub interval_ms: u32,
+    pub hop_count: u64,
+    pub status: WifiStatusWire,
 }
 
 /// Start receipt: the exact interface and frequencies the backend pinned.
@@ -487,6 +679,89 @@ fn selected_saved_case(session: &CaseSessionCtx) -> Result<(CaseSessionWire, Str
         return Err("wifi monitor capture requires a saved, backend-selected case".into());
     }
     Ok((scope, case_id))
+}
+
+// ---------------------------------------------------------------------------
+// Injection helpers: the ONLY deauth target source is the CURRENT monitor
+// session's observed AP table — no blind targets, ever.
+// ---------------------------------------------------------------------------
+
+/// Parse one strict `aa:bb:cc:dd:ee:ff` MAC address (case-insensitive hex
+/// pairs, colon-separated).
+fn parse_bssid(text: &str) -> Option<[u8; 6]> {
+    let value = text.trim().to_lowercase();
+    let parts: Vec<&str> = value.split(':').collect();
+    if parts.len() != 6 {
+        return None;
+    }
+    let mut mac = [0u8; 6];
+    for (slot, part) in mac.iter_mut().zip(&parts) {
+        if part.len() != 2 || !part.chars().all(|c| c.is_ascii_hexdigit()) {
+            return None;
+        }
+        *slot = u8::from_str_radix(part, 16).ok()?;
+    }
+    Some(mac)
+}
+
+/// Resolve the requested deauth targets against the CURRENT monitor
+/// session's observed AP table: 1..=4 strict MACs, deduplicated, every one a
+/// BSSID this session has actually seen in a beacon/probe response. A BSSID
+/// the session never observed is refused — no blind targets.
+fn resolve_observed_targets(
+    requested: &[String],
+    observed: &[WifiApWire],
+) -> Result<Vec<[u8; 6]>, String> {
+    if requested.is_empty() || requested.len() > MAX_INJECT_TARGETS {
+        return Err(format!(
+            "deauth supports 1..={MAX_INJECT_TARGETS} target BSSIDs per run"
+        ));
+    }
+    let mut out: Vec<[u8; 6]> = Vec::new();
+    for text in requested {
+        let bssid =
+            parse_bssid(text).ok_or_else(|| format!("deauth target '{text}' is not a aa:bb:cc:dd:ee:ff MAC address"))?;
+        let bssid_text = format_mac(&bssid);
+        if !observed.iter().any(|ap| ap.bssid == bssid_text) {
+            return Err(format!(
+                "deauth target {bssid_text} was not observed by the current monitor session — \
+                 targets are limited to BSSIDs this capture has seen (no blind targets)"
+            ));
+        }
+        if out.contains(&bssid) {
+            return Err(format!("duplicate deauth target {bssid_text}"));
+        }
+        out.push(bssid);
+    }
+    Ok(out)
+}
+
+/// Injection rides a LIVE monitor session: the radio must already be in
+/// monitor mode and the observed-AP table must belong to the current run.
+fn require_live_monitor(wifi: &NetworkWifiCtx) -> Result<(), String> {
+    if !wifi.running.load(Ordering::Acquire) || wifi.phase() != WifiPhase::Monitoring {
+        return Err(
+            "start the monitor capture first — injection targets only BSSIDs observed by the \
+             CURRENT monitor session"
+                .into(),
+        );
+    }
+    Ok(())
+}
+
+/// Build the hop command's receipt from the registry's scheduler view.
+fn hop_wire(action: &str, wifi: &NetworkWifiCtx) -> WifiHopWire {
+    let view = wifi.hop_view().unwrap_or_default();
+    WifiHopWire {
+        action: action.to_string(),
+        running: wifi.hop_running.load(Ordering::Acquire),
+        paused: view.paused,
+        current_mhz: view.current_mhz,
+        channels: view.channels,
+        interval_ms: view.interval_ms,
+        hop_count: view.hop_count,
+        status: wifi.status_wire(),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -937,6 +1212,28 @@ pub async fn network_wifi_monitor_start_v1(
             return Err("wifi monitor state registry unavailable".into());
         }
         wifi.evidence_saved.store(false, Ordering::Release);
+        // A new capture session starts the injection/hop state clean too
+        // (both ride the live session; nothing can be running here).
+        wifi.deauth_running.store(false, Ordering::Release);
+        wifi.deauth_stop.store(false, Ordering::Release);
+        wifi.deauth_frames_sent.store(0, Ordering::Release);
+        wifi.deauth_bursts_done.store(0, Ordering::Release);
+        wifi.deauth_targets.store(0, Ordering::Release);
+        if let Ok(mut slot) = wifi.deauth_note.lock() {
+            *slot = None;
+        }
+        if let Ok(mut slot) = wifi.injection_last_error.lock() {
+            *slot = None;
+        }
+        wifi.hop_running.store(false, Ordering::Release);
+        wifi.hop_stop.store(false, Ordering::Release);
+        wifi.hop_pause_request.store(false, Ordering::Release);
+        if let Ok(mut slot) = wifi.hop.lock() {
+            *slot = HopShared::default();
+        }
+        if let Ok(mut slot) = wifi.hop_last_error.lock() {
+            *slot = None;
+        }
         wifi.set_phase(WifiPhase::Starting);
 
         let worker_app = app.clone();
@@ -1024,12 +1321,470 @@ pub fn network_wifi_monitor_stop_v1(
 }
 
 /// Poll the capture's live state: honest counters, the bounded AP/client
-/// tables and the hashcat 22000 lines captured this session.
+/// tables and the hashcat 22000 lines captured this session. The wire also
+/// carries the additive injection/hop fields.
 #[tauri::command]
 pub fn network_wifi_monitor_status_v1(
     wifi: State<'_, Arc<NetworkWifiCtx>>,
 ) -> Result<WifiStatusWire, String> {
     Ok(wifi.status_wire())
+}
+
+// ---------------------------------------------------------------------------
+// Injection (deauth) commands: ACTIVE interference, gated end-to-end like
+// the lab ARP spoof. The bounded core lives in the crate (`wifi::inject`);
+// this layer owns the gates, the dialog and the worker lifecycle only.
+// ---------------------------------------------------------------------------
+
+/// Start a bounded, gate-leased deauth run against BSSIDs the CURRENT monitor
+/// session observed. Refuses without explicit authorization, a saved case, a
+/// live monitor session, in-session targets, a free gate or an accepted
+/// native confirmation. Linux-only; other platforms get the honest
+/// Unsupported refusal. Hard bounds (crate-enforced): ≤ 4 targets, ≤ 4
+/// bursts, ≤ 32 frames per burst across all targets, ≥ 20 ms frame pacing,
+/// ≤ 10 s total, stop never refused.
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub async fn network_wifi_inject_deauth_v1(
+    interface_name: String,
+    targets: Vec<String>,
+    bursts: u32,
+    frames_per_target: u32,
+    authorized: bool,
+    case_id: String,
+    app: AppHandle,
+    session: State<'_, CaseSessionCtx>,
+    evidence: State<'_, EvidenceCtx>,
+    gate: State<'_, Arc<super::operation_gate::NetworkOperationGate>>,
+    wifi: State<'_, Arc<NetworkWifiCtx>>,
+) -> Result<WifiInjectStartWire, String> {
+    if !authorized {
+        return Err("explicit wifi injection authorization required".into());
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (
+            interface_name,
+            targets,
+            bursts,
+            frames_per_target,
+            case_id,
+            app,
+            session,
+            evidence,
+            gate,
+            wifi,
+        );
+        return Err(INJECTION_UNSUPPORTED_MESSAGE.to_string());
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let (scope, verified_case) = selected_saved_case(&session)?;
+        if case_id != verified_case {
+            return Err("request case id does not match the backend-selected case".into());
+        }
+        // Injection rides a LIVE monitor session; the observed AP table of
+        // that session is the ONLY target source.
+        require_live_monitor(&wifi)?;
+        let observed = wifi
+            .snapshot
+            .lock()
+            .map_err(|_| "wifi monitor state registry unavailable")?
+            .access_points
+            .clone();
+        let target_macs = resolve_observed_targets(&targets, &observed)?;
+        let bursts_usize = bursts as usize;
+        let frames_usize = frames_per_target as usize;
+        inject::validate_deauth_plan(&target_macs, bursts_usize, frames_usize)
+            .map_err(wifi_err)?;
+        // Hopping and injection both drive the radio's channel: one at a time.
+        if wifi.hop_running.load(Ordering::Acquire) {
+            return Err(
+                "stop channel hopping before injecting — both drive the radio's channel".into(),
+            );
+        }
+        if gate.is_active() {
+            return Err("stop other active network operations before injecting deauth frames".into());
+        }
+        {
+            let store = evidence
+                .store
+                .lock()
+                .map_err(|_| "case store unavailable")?;
+            if !store.case_exists(&verified_case)? {
+                return Err("selected case does not exist".into());
+            }
+        }
+
+        // Backend confirmation is independent of the frontend checkbox: it
+        // names EXACTLY what will be transmitted before the first frame.
+        let target_list: Vec<String> = target_macs.iter().map(|m| format_mac(m)).collect();
+        let per_burst = frames_usize.saturating_mul(target_macs.len());
+        let total = per_burst.saturating_mul(bursts_usize);
+        let question = format!(
+            "Authorize Wi-Fi deauth injection on Linux interface '{}' in saved case '{}'? \
+             This is ACTIVE interference: {} deauthentication frame(s) per burst directed at \
+             the BSSID(s) {} ({} frame(s) per target per burst, {} burst(s), {} frames total), \
+             reason code 7, transmitted with this machine's real MAC on the interface's \
+             CURRENT channel — keep the monitor pinned to the target AP's channel. Targets \
+             are limited to BSSIDs the current monitor session observed. Hard bounds: at \
+             most 32 frames per burst, 4 bursts, 10 seconds total; frames are rate-limited \
+             and the run stops immediately on operator stop. Requires CAP_NET_RAW and \
+             permission to test this network.",
+            interface_name,
+            verified_case,
+            per_burst,
+            target_list.join(", "),
+            frames_usize,
+            bursts_usize,
+            total,
+        );
+        let dialog_app = app.clone();
+        let agreed = tokio::task::spawn_blocking(move || {
+            dialog_app
+                .dialog()
+                .message(question)
+                .title("Authorize wifi deauth injection")
+                .buttons(MessageDialogButtons::YesNo)
+                .blocking_show()
+        })
+        .await
+        .map_err(|_| "wifi deauth injection confirmation unavailable")?;
+        if !agreed {
+            return Err("wifi deauth injection cancelled by operator".into());
+        }
+        session.ensure(&scope)?;
+        if gate.is_active() {
+            return Err(
+                "another network operation became active while confirming the deauth injection"
+                    .into(),
+            );
+        }
+        if wifi.hop_running.load(Ordering::Acquire) {
+            return Err(
+                "channel hopping started while confirming the deauth injection — stop it first"
+                    .into(),
+            );
+        }
+        require_live_monitor(&wifi)?;
+        let permit = gate.acquire(super::operation_gate::ActiveOperation::WifiInject)?;
+        if wifi.deauth_running.swap(true, Ordering::AcqRel) {
+            return Err("a wifi deauth run is already active".into());
+        }
+        wifi.deauth_stop.store(false, Ordering::Release);
+        wifi.deauth_frames_sent.store(0, Ordering::Release);
+        wifi.deauth_bursts_done.store(0, Ordering::Release);
+        wifi.deauth_targets
+            .store(target_macs.len(), Ordering::Release);
+        if let Ok(mut slot) = wifi.deauth_note.lock() {
+            *slot = None;
+        }
+        if let Ok(mut slot) = wifi.injection_last_error.lock() {
+            *slot = None;
+        }
+
+        let worker_app = app.clone();
+        let worker_scope = scope.clone();
+        let worker_ctx = Arc::clone(&*wifi);
+        let worker_interface = interface_name.clone();
+        let worker_targets = target_macs.clone();
+        tokio::task::spawn_blocking(move || {
+            // The gate lease lives for the whole worker lifetime.
+            let _permit = permit;
+            let scope_active = || {
+                worker_app
+                    .state::<CaseSessionCtx>()
+                    .ensure(&worker_scope)
+                    .is_ok()
+            };
+            let outcome = inject::run_wifi_deauth(
+                &worker_interface,
+                &worker_targets,
+                bursts_usize,
+                frames_usize,
+                &worker_ctx.deauth_stop,
+                &scope_active,
+                &worker_ctx.deauth_frames_sent,
+            );
+            match outcome {
+                Ok(outcome) => {
+                    worker_ctx
+                        .deauth_bursts_done
+                        .store(outcome.bursts_completed, Ordering::Release);
+                    let note = format!(
+                        "deauth run ended: {} frame(s) across {} burst(s) over {} target(s) — {:?}",
+                        outcome.frames_sent,
+                        outcome.bursts_completed,
+                        worker_targets.len(),
+                        outcome.end_reason,
+                    );
+                    if let Ok(mut slot) = worker_ctx.deauth_note.lock() {
+                        *slot = Some(note);
+                    }
+                    if let Some(err) = outcome.error {
+                        if let Ok(mut slot) = worker_ctx.injection_last_error.lock() {
+                            *slot = Some(format!("{:?}: {}", err.code, err.message));
+                        }
+                    }
+                }
+                Err(err) => {
+                    if let Ok(mut slot) = worker_ctx.injection_last_error.lock() {
+                        *slot = Some(format!("{:?}: {}", err.code, err.message));
+                    }
+                }
+            }
+        });
+        Ok(WifiInjectStartWire {
+            targets: target_list,
+            bursts,
+            frames_per_target,
+            frames_per_burst: per_burst as u32,
+            total_frames: total as u32,
+            status: wifi.status_wire(),
+        })
+    }
+}
+
+/// Stop the running deauth run. Cancellation is NEVER refused (hard stop):
+/// the flag is set regardless of the selected case revision and the paced
+/// loop exits before its next frame. Returns true when a run existed.
+#[tauri::command]
+pub fn network_wifi_inject_deauth_stop_v1(
+    wifi: State<'_, Arc<NetworkWifiCtx>>,
+) -> Result<bool, String> {
+    if !wifi.deauth_running.load(Ordering::Acquire) {
+        return Ok(false);
+    }
+    wifi.deauth_stop.store(true, Ordering::Release);
+    Ok(true)
+}
+
+/// Start / pause / resume / stop the bounded channel-hop scheduler over the
+/// LIVE monitor interface. The capture keeps running across hops; every
+/// applied hop is driven over nl80211 SET_CHANNEL by the worker and recorded
+/// in the ≤ 256-entry hop log. Passive radio control — it takes no gate
+/// lease, but it refuses to start while a deauth run or another active
+/// operation holds the radio, and injection refuses while hopping runs.
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub async fn network_wifi_channel_hop_v1(
+    interface_name: String,
+    channels: String,
+    interval_ms: u32,
+    action: String,
+    authorized: bool,
+    app: AppHandle,
+    session: State<'_, CaseSessionCtx>,
+    gate: State<'_, Arc<super::operation_gate::NetworkOperationGate>>,
+    wifi: State<'_, Arc<NetworkWifiCtx>>,
+) -> Result<WifiHopWire, String> {
+    if !authorized {
+        return Err("explicit wifi channel-hop authorization required".into());
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (
+            interface_name,
+            channels,
+            interval_ms,
+            action,
+            app,
+            session,
+            gate,
+            wifi,
+        );
+        return Err(HOP_UNSUPPORTED_MESSAGE.to_string());
+    }
+    #[cfg(target_os = "linux")]
+    {
+        match action.as_str() {
+        // Pause/resume/stop never re-check the case revision: they only ever
+        // make the radio LESS active, like the monitor stop command.
+        "pause" | "resume" | "stop" => {
+            if !wifi.hop_running.load(Ordering::Acquire) {
+                return Err("channel hopping is not running".into());
+            }
+            match action.as_str() {
+                "pause" => {
+                    wifi.hop_pause_request.store(true, Ordering::Release);
+                }
+                "resume" => {
+                    wifi.hop_pause_request.store(false, Ordering::Release);
+                }
+                _ => {
+                    // The worker owns the transition; the run guard publishes
+                    // the honest stopped state when it exits.
+                    wifi.hop_stop.store(true, Ordering::Release);
+                }
+            }
+            Ok(hop_wire(&action, &wifi))
+        }
+        "start" => {
+            let (scope, _verified_case) = selected_saved_case(&session)?;
+            require_live_monitor(&wifi)?;
+            // The hop plan rides the session's authorized capture channels.
+            let channel_list = parse_channels(&channels)?;
+            if !(inject::MIN_HOP_INTERVAL_MS..=inject::MAX_HOP_INTERVAL_MS)
+                .contains(&u64::from(interval_ms))
+            {
+                return Err(format!(
+                    "hop interval must be {}..={} ms",
+                    inject::MIN_HOP_INTERVAL_MS,
+                    inject::MAX_HOP_INTERVAL_MS
+                ));
+            }
+            if wifi.deauth_running.load(Ordering::Acquire) {
+                return Err(
+                    "a deauth run is active — wait for it to end before channel hopping".into(),
+                );
+            }
+            if gate.is_active() {
+                return Err(
+                    "stop other active network operations before channel hopping".into(),
+                );
+            }
+            if wifi.hop_running.swap(true, Ordering::AcqRel) {
+                return Err("channel hopping is already active".into());
+            }
+            wifi.hop_stop.store(false, Ordering::Release);
+            wifi.hop_pause_request.store(false, Ordering::Release);
+            if let Ok(mut slot) = wifi.hop_last_error.lock() {
+                *slot = None;
+            }
+            // Validated + stored before the worker spawns; the worker takes
+            // the scheduler from this slot and drives it on its own clock.
+            let scheduler = ChannelHopScheduler::new(channel_list.clone(), u64::from(interval_ms))
+                .map_err(wifi_err)?;
+            if let Ok(mut slot) = wifi.hop.lock() {
+                // A fresh run replaces the previous run's log (mirrors the
+                // snapshot reset on monitor start).
+                *slot = HopShared {
+                    scheduler: Some(scheduler),
+                };
+            } else {
+                wifi.hop_running.store(false, Ordering::Release);
+                return Err("wifi hop state registry unavailable".into());
+            }
+            let ifindex = i32::try_from(
+                cyberdeck_packet::live::select_interface(
+                    &cyberdeck_packet::live::discover_interfaces().map_err(|e| e.message)?,
+                    &interface_name,
+                )
+                .map_err(|e| format!("select wifi interface: {}", e.message))?
+                .index,
+            )
+            .map_err(|_| "interface index exceeds the native range".to_string())?;
+
+            let worker_app = app.clone();
+            let worker_scope = scope.clone();
+            let worker_ctx = Arc::clone(&*wifi);
+            let worker_ifindex = ifindex;
+            tokio::task::spawn_blocking(move || {
+                let _guard = HopRunGuard(Arc::clone(&worker_ctx));
+                if worker_ctx.hop_stop.load(Ordering::Acquire) {
+                    return;
+                }
+                let mut nl = match cyberdeck_packet::wifi::netlink::Nl80211Socket::open() {
+                    Ok(nl) => nl,
+                    Err(err) => {
+                        if let Ok(mut slot) = worker_ctx.hop_last_error.lock() {
+                            *slot = Some(wifi_err(err));
+                        }
+                        return;
+                    }
+                };
+                let family = match nl.resolve_family() {
+                    Ok(family) => family,
+                    Err(err) => {
+                        if let Ok(mut slot) = worker_ctx.hop_last_error.lock() {
+                            *slot = Some(wifi_err(err));
+                        }
+                        return;
+                    }
+                };
+                // The kernel must see the interface as a wireless device.
+                if let Err(err) = nl.get_interface(family, worker_ifindex) {
+                    if let Ok(mut slot) = worker_ctx.hop_last_error.lock() {
+                        *slot = Some(wifi_err(err));
+                    }
+                    return;
+                }
+                let started = Instant::now();
+                let scope_active = || {
+                    worker_app
+                        .state::<CaseSessionCtx>()
+                        .ensure(&worker_scope)
+                        .is_ok()
+                };
+                loop {
+                    if worker_ctx.hop_stop.load(Ordering::Acquire) {
+                        return;
+                    }
+                    if !scope_active() {
+                        if let Ok(mut slot) = worker_ctx.hop_last_error.lock() {
+                            *slot = Some(
+                                "the case session was revoked — channel hopping stopped".into(),
+                            );
+                        }
+                        return;
+                    }
+                    let now_ms = started.elapsed().as_millis().min(u64::MAX as u128) as u64;
+                    // One short critical section: apply the pause/resume
+                    // request, then take at most one due hop.
+                    let due = {
+                        let mut guard = match worker_ctx.hop.lock() {
+                            Ok(guard) => guard,
+                            Err(_) => {
+                                if let Ok(mut slot) = worker_ctx.hop_last_error.lock() {
+                                    *slot = Some("wifi hop state registry unavailable".into());
+                                }
+                                return;
+                            }
+                        };
+                        let Some(scheduler) = guard.scheduler.as_mut() else {
+                            return; // the plan was replaced/cleared: run over
+                        };
+                        let pause_requested = worker_ctx.hop_pause_request.load(Ordering::Acquire);
+                        if pause_requested && !scheduler.is_paused() {
+                            scheduler.pause();
+                        } else if !pause_requested && scheduler.is_paused() {
+                            scheduler.resume(now_ms);
+                        }
+                        scheduler.tick(now_ms)
+                    };
+                    if let Some(to_mhz) = due {
+                        if let Err(err) = nl.set_channel(
+                            family,
+                            worker_ifindex,
+                            to_mhz,
+                            ChanWidth::NoHt,
+                            0,
+                        ) {
+                            if let Ok(mut slot) = worker_ctx.hop_last_error.lock() {
+                                *slot = Some(wifi_err(err));
+                            }
+                            return;
+                        }
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(HOP_POLL_SLICE_MS));
+                }
+            });
+            Ok(hop_wire(&action, &wifi))
+        }
+        _ => Err("hop action must be start, pause, resume or stop".into()),
+        }
+    }
+}
+
+/// Runs for the whole hop worker lifetime; clears the running flag and the
+/// pause request even when the worker panicked or the runtime dropped it.
+/// The scheduler (and its full hop log) stays in the registry after the run.
+struct HopRunGuard(Arc<NetworkWifiCtx>);
+impl Drop for HopRunGuard {
+    fn drop(&mut self) {
+        self.0.hop_running.store(false, Ordering::Release);
+        self.0.hop_pause_request.store(false, Ordering::Release);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1589,5 +2344,184 @@ mod tests {
         assert!(refuse(Some("scratchpad")));
         assert!(refuse(Some("  ")));
         assert!(!refuse(Some("case-9")));
+    }
+
+    // ---- injection / channel hop (additive slice) --------------------------
+
+    #[test]
+    fn bssid_parsing_accepts_colon_hex_and_refuses_garbage() {
+        assert_eq!(parse_bssid("a4:B1:c1:D2:e3:F0"), Some(AP));
+        assert_eq!(parse_bssid("  a4:b1:c1:d2:e3:f0  "), Some(AP));
+        assert_eq!(parse_bssid("a4-b1-c1-d2-e3-f0"), None);
+        assert_eq!(parse_bssid("a4:b1:c1:d2:e3"), None);
+        assert_eq!(parse_bssid("a4:b1:c1:d2:e3:f0:11"), None);
+        assert_eq!(parse_bssid("zz:b1:c1:d2:e3:f0"), None);
+        assert_eq!(parse_bssid("a4:b1:c1:d2:e3:f"), None);
+        assert_eq!(parse_bssid(""), None);
+    }
+
+    #[test]
+    fn injection_targets_are_limited_to_the_current_sessions_observed_aps() {
+        let observed = vec![WifiApWire {
+            bssid: format_mac(&AP),
+            essid: "lab-net".into(),
+        }];
+        let ok = resolve_observed_targets(&[format_mac(&AP)], &observed).expect("observed target");
+        assert_eq!(ok, vec![AP]);
+        // Uppercase input normalizes onto the observed (lowercase) table.
+        assert!(resolve_observed_targets(&["A4:B1:C1:D2:E3:F0".into()], &observed).is_ok());
+        // A BSSID the session never observed is refused — no blind targets.
+        let blind = resolve_observed_targets(&["02:00:00:00:00:09".into()], &observed)
+            .unwrap_err();
+        assert!(blind.contains("not observed by the current monitor session"), "{blind}");
+        assert!(blind.contains("no blind targets"), "{blind}");
+        // Count, malformed and duplicate refusals.
+        assert!(resolve_observed_targets(&[], &observed).is_err());
+        let oversized: Vec<String> = (0..=MAX_INJECT_TARGETS)
+            .map(|_| format_mac(&AP))
+            .collect();
+        assert!(resolve_observed_targets(&oversized, &observed).is_err());
+        let dupe = resolve_observed_targets(&[format_mac(&AP), format_mac(&AP)], &observed)
+            .unwrap_err();
+        assert!(dupe.contains("duplicate"), "{dupe}");
+        let garbage = resolve_observed_targets(&["not-a-mac".into()], &observed).unwrap_err();
+        assert!(garbage.contains("aa:bb:cc:dd:ee:ff"), "{garbage}");
+    }
+
+    #[test]
+    fn deauth_bounds_mirror_the_crate_plan_validation() {
+        // The command delegates to the crate's own bounded plan validation.
+        assert!(inject::validate_deauth_plan(&[AP], 2, 8).is_ok());
+        assert!(inject::validate_deauth_plan(&[], 1, 1).is_err());
+        assert!(inject::validate_deauth_plan(&[AP], 5, 1).is_err(), "≤ 4 bursts");
+        assert!(inject::validate_deauth_plan(&[AP], 1, 33).is_err());
+        // The 32-frame per-burst cap spans all targets: 4 x 9 refuses.
+        let four: Vec<[u8; 6]> = (0..4u8).map(|i| [0x02, 0, 0, 0, 0, i]).collect();
+        assert!(inject::validate_deauth_plan(&four, 1, 9).is_err());
+        assert!(inject::validate_deauth_plan(&four, 1, 8).is_ok());
+    }
+
+    #[test]
+    fn injection_requires_a_live_monitor_session() {
+        let ctx = NetworkWifiCtx::default();
+        // Idle: refused with the session-observed honesty line.
+        let err = require_live_monitor(&ctx).unwrap_err();
+        assert!(err.contains("CURRENT monitor session"), "{err}");
+        // A stopped session is not a live one.
+        ctx.set_phase(WifiPhase::Stopped);
+        assert!(require_live_monitor(&ctx).is_err());
+        ctx.running.store(true, Ordering::Release);
+        ctx.set_phase(WifiPhase::Monitoring);
+        assert!(require_live_monitor(&ctx).is_ok());
+    }
+
+    #[test]
+    fn status_wire_carries_additive_injection_and_hop_fields_honestly() {
+        let ctx = NetworkWifiCtx::default();
+        let wire = ctx.status_wire();
+        assert_eq!(wire.deauth_state, "idle");
+        assert_eq!(wire.deauth_frames_sent, 0);
+        assert_eq!(wire.deauth_bursts_done, 0);
+        assert_eq!(wire.deauth_targets, 0);
+        assert!(wire.deauth_note.is_none());
+        assert!(wire.injection_last_error.is_none());
+        assert!(!wire.hop_running);
+        assert!(!wire.hop_paused);
+        assert_eq!(wire.hop_channel_mhz, 0);
+        assert!(wire.hop_channels.is_empty());
+        assert_eq!(wire.hop_count, 0);
+        assert!(wire.hop_log.is_empty());
+        assert!(wire.hop_last_error.is_none());
+        // An ended run keeps its counters and note readable; a stopped run
+        // reports "stopped", not "idle".
+        ctx.deauth_frames_sent.store(16, Ordering::Release);
+        ctx.deauth_bursts_done.store(2, Ordering::Release);
+        ctx.deauth_targets.store(4, Ordering::Release);
+        if let Ok(mut slot) = ctx.deauth_note.lock() {
+            *slot = Some("deauth run ended: 16 frame(s) across 2 burst(s)".into());
+        }
+        ctx.set_phase(WifiPhase::Stopped);
+        let wire = ctx.status_wire();
+        assert_eq!(wire.deauth_state, "stopped");
+        assert_eq!(wire.deauth_frames_sent, 16);
+        assert_eq!(wire.deauth_bursts_done, 2);
+        assert!(wire.deauth_note.unwrap().contains("ended"));
+        // The injecting/stopping states derive from the live flags.
+        ctx.deauth_running.store(true, Ordering::Release);
+        assert_eq!(ctx.status_wire().deauth_state, "injecting");
+        ctx.deauth_stop.store(true, Ordering::Release);
+        assert_eq!(ctx.status_wire().deauth_state, "stopping");
+    }
+
+    #[test]
+    fn case_change_arms_the_injection_and_hop_stop_flags() {
+        let ctx = NetworkWifiCtx::default();
+        ctx.on_case_changed();
+        assert!(ctx.stop.load(Ordering::Acquire));
+        assert!(ctx.deauth_stop.load(Ordering::Acquire));
+        assert!(ctx.hop_stop.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn hop_scheduler_wiring_pauses_resumes_and_logs_through_the_ctx_slot() {
+        let ctx = NetworkWifiCtx::default();
+        let scheduler = ChannelHopScheduler::new(vec![2412, 2437, 2462], 250)
+            .expect("valid hop plan");
+        if let Ok(mut slot) = ctx.hop.lock() {
+            *slot = HopShared {
+                scheduler: Some(scheduler),
+            };
+        }
+        // The pause request is a REQUEST; applying it to the shared scheduler
+        // is the worker's job (its clock stays the exact time base).
+        ctx.hop_pause_request.store(true, Ordering::Release);
+        if let Ok(mut slot) = ctx.hop.lock() {
+            if let Some(s) = slot.scheduler.as_mut() {
+                s.pause();
+                assert_eq!(s.tick(10_000), None, "no hop fires while paused");
+            }
+        }
+        let view = ctx.hop_view().expect("scheduler present");
+        assert!(view.paused);
+        assert_eq!(view.current_mhz, 2412);
+        // Resume re-arms from NOW: the first hop is a full interval later.
+        ctx.hop_pause_request.store(false, Ordering::Release);
+        if let Ok(mut slot) = ctx.hop.lock() {
+            if let Some(s) = slot.scheduler.as_mut() {
+                s.resume(10_000);
+                assert_eq!(s.tick(10_249), None);
+                assert_eq!(s.tick(10_250), Some(2437));
+            }
+        }
+        let view = ctx.hop_view().expect("scheduler present");
+        assert!(!view.paused);
+        assert_eq!(view.current_mhz, 2437);
+        assert_eq!(view.hop_count, 1);
+        assert_eq!(view.log.len(), 1);
+        assert_eq!(view.log[0].at_ms, 10_250);
+        assert_eq!(view.log[0].from_mhz, 2412);
+        assert_eq!(view.log[0].to_mhz, 2437);
+        // A fresh run replaces the previous run's plan and log (the start
+        // command resets the slot).
+        if let Ok(mut slot) = ctx.hop.lock() {
+            *slot = HopShared::default();
+        }
+        assert!(ctx.hop_view().is_none());
+    }
+
+    #[test]
+    fn injection_and_hop_report_unsupported_off_linux_honestly() {
+        assert_eq!(inject::injection_supported(), cfg!(target_os = "linux"));
+        assert!(INJECTION_UNSUPPORTED_MESSAGE.contains("requires Linux"));
+        assert!(INJECTION_UNSUPPORTED_MESSAGE.contains("AF_PACKET"));
+        assert!(HOP_UNSUPPORTED_MESSAGE.contains("requires Linux"));
+        assert!(HOP_UNSUPPORTED_MESSAGE.contains("nl80211"));
+        // The bounds the dialog names are the crate's constants.
+        assert_eq!(MAX_INJECT_TARGETS, inject::MAX_DEAUTH_TARGETS);
+        assert_eq!(inject::MAX_DEAUTH_BURSTS, 4);
+        assert_eq!(inject::MAX_FRAMES_PER_BURST, 32);
+        assert_eq!(inject::MAX_DEAUTH_RUN_MS, 10_000);
+        assert_eq!(inject::MAX_HOP_CHANNELS, 16);
+        assert_eq!(inject::MAX_HOP_LOG, 256);
     }
 }

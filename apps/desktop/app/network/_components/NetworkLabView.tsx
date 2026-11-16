@@ -89,7 +89,10 @@ import {
   type SpoofStatusWire,
 } from "@lib/ipc";
 import {
+  networkWifiChannelHopV1,
   networkWifiEvidenceSaveV1,
+  networkWifiInjectDeauthStopV1,
+  networkWifiInjectDeauthV1,
   networkWifiInterfacesV1,
   networkWifiMonitorStartV1,
   networkWifiMonitorStatusV1,
@@ -220,6 +223,19 @@ export function NetworkLabView() {
   const [wifiStatus, setWifiStatus] = useState<WifiStatusWire | null>(null);
   const [wifiReceipt, setWifiReceipt] = useState<WifiEvidenceReceiptWire | null>(null);
   const [wifiError, setWifiError] = useState<string | null>(null);
+  // Deauth injection state (additive, ACTIVE interference): the target list
+  // is picked ONLY from the current session's observed APs, the backend's
+  // native dialog names them, and the run is hard-bounded (≤ 4 targets,
+  // ≤ 32 frames per burst, ≤ 4 bursts, ≤ 10 s). Linux-only like the capture.
+  const [wifiDeauthTargets, setWifiDeauthTargets] = useState("");
+  const [wifiDeauthFrames, setWifiDeauthFrames] = useState("4");
+  const [wifiDeauthBursts, setWifiDeauthBursts] = useState("2");
+  const [wifiDeauthBusy, setWifiDeauthBusy] = useState(false);
+  // Channel-hop state (additive, passive radio control over the live
+  // capture): bounded to the session's authorized channels, 250-2000 ms,
+  // pause/resume never stops the capture, full hop log visible.
+  const [wifiHopInterval, setWifiHopInterval] = useState("1000");
+  const [wifiHopBusy, setWifiHopBusy] = useState(false);
   const currentCase = useRef(wb.caseId);
   currentCase.current = wb.caseId;
   const openSequence = useRef(0);
@@ -288,11 +304,15 @@ export function NetworkLabView() {
     setProxyError(null);
     // The wifi monitor's capture session is case-owned on the backend (the
     // pump stops honestly on revocation), so per-run wifi state never
-    // survives into the new revision either.
+    // survives into the new revision either. The injection/hop controls ride
+    // that same live session, so their per-run state dies with it too.
     setWifiBusy(false);
     setWifiStatus(null);
     setWifiReceipt(null);
     setWifiError(null);
+    setWifiDeauthBusy(false);
+    setWifiDeauthTargets("");
+    setWifiHopBusy(false);
   }, [wb.caseId]);
 
   // Live subscription poll: every ~2s while enabled. A self-rescheduling
@@ -959,6 +979,15 @@ const DNS_SPOOF_ALLOWLIST_MAX_CHARS = 2048;
     wifiPhase === "starting" || wifiPhase === "monitoring" || wifiPhase === "stopping";
   const wifiBlock = wifiPlatformBlock(wifiInterfaces);
   const wifiSaved = wifiReceipt !== null;
+  // Injection/hop state comes straight from the backend wire — the view only
+  // ever repeats honest status, never derives capabilities.
+  const wifiDeauthState = wifiStatus?.deauth_state ?? "idle";
+  const wifiDeauthActive = wifiDeauthState === "injecting" || wifiDeauthState === "stopping";
+  const wifiDeauthBlock = wifiDeauthBlockReason(wifiStatus);
+  const wifiHopRunning = wifiStatus?.hop_running ?? false;
+  const wifiHopPaused = wifiStatus?.hop_paused ?? false;
+  // The ONLY target source: BSSIDs the CURRENT monitor session observed.
+  const wifiObservedBssids = wifiStatus?.access_points.map((ap) => ap.bssid) ?? [];
 
   useEffect(() => {
     if (!desktop || !wifiActive) return;
@@ -1016,6 +1045,57 @@ const DNS_SPOOF_ALLOWLIST_MAX_CHARS = 2048;
       if (isCurrent() && message !== "cancelled") setWifiError(message);
     } finally {
       if (isCurrent()) setWifiBusy(false);
+    }
+  };
+
+  // Deauth injection: the backend resolves nothing — it VALIDATES that every
+  // BSSID is one the current session observed, then dialog-names them. The
+  // view cannot inject a blind target even by typing one.
+  const runWifiDeauth = async () => {
+    const targets = parseWifiDeauthTargets(wifiDeauthTargets, wifiObservedBssids);
+    const frames = parseWifiDeauthFrames(wifiDeauthFrames);
+    const bursts = parseWifiDeauthBursts(wifiDeauthBursts);
+    if (targets === null || frames === null || bursts === null || !wifiInterface) return;
+    setWifiDeauthBusy(true);
+    setWifiError(null);
+    try {
+      const wire = await networkWifiInjectDeauthV1(wifiInterface, targets, bursts, frames, true, wb.caseId);
+      setWifiStatus(wire.status);
+    } catch (err) {
+      setWifiError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setWifiDeauthBusy(false);
+    }
+  };
+
+  const stopWifiDeauth = async () => {
+    try {
+      await networkWifiInjectDeauthStopV1();
+    } catch (err) {
+      setWifiError(err instanceof Error ? err.message : String(err));
+    }
+  };
+
+  // Channel hop: start/pause/resume/stop over the live capture; the hop list
+  // is the session's authorized capture channels, re-validated backend-side.
+  const controlWifiHop = async (action: "start" | "pause" | "resume" | "stop") => {
+    const interval = parseWifiHopIntervalMs(wifiHopInterval);
+    if (action === "start" && (interval === null || !wifiInterface)) return;
+    setWifiHopBusy(true);
+    setWifiError(null);
+    try {
+      const wire = await networkWifiChannelHopV1(
+        wifiInterface,
+        wifiChannels,
+        action === "start" ? (interval ?? 0) : 0,
+        action,
+        true,
+      );
+      setWifiStatus(wire.status);
+    } catch (err) {
+      setWifiError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setWifiHopBusy(false);
     }
   };
 
@@ -1426,8 +1506,8 @@ const DNS_SPOOF_ALLOWLIST_MAX_CHARS = 2048;
                 <p className="font-mono text-2xs text-fg-muted">
                   interface {wifiStatus.interface || "unknown"} · pinned{" "}
                   {wifiStatus.channel_mhz || "—"} MHz of{" "}
-                  {wifiStatus.channels.join(", ") || "none"} · no channel hopping is automated in
-                  this arc
+                  {wifiStatus.channels.join(", ") || "none"} · capture start pins the first
+                  listed channel; hopping runs only through the Channel hop controls below
                 </p>
                 <div className="max-h-64 overflow-auto rounded-lg border border-line">
                   <table className="data-table">
@@ -1481,6 +1561,196 @@ const DNS_SPOOF_ALLOWLIST_MAX_CHARS = 2048;
                     </table>
                   </div>
                 ) : null}
+                {/* Deauth injection (additive slice): ACTIVE interference,
+                    gated end-to-end like the spoof mode — the only target
+                    source is this session's observed AP table, the backend's
+                    native dialog names every BSSID and the exact counts, and
+                    the run is hard-bounded (≤ 32 frames/burst, ≤ 4 bursts,
+                    ≤ 10 s, stop never refused). Linux-only, like the capture. */}
+                <div className="space-y-2 rounded-lg border border-line p-3">
+                  <div className="flex flex-wrap items-center gap-3">
+                    <span className="font-medium uppercase tracking-wider text-fg-muted">Deauth injection</span>
+                    <Chip tone="orange">active interference</Chip>
+                    <Chip tone="muted">Linux only</Chip>
+                  </div>
+                  <div className="flex flex-wrap items-center gap-3">
+                    <Select
+                      value=""
+                      onChange={(bssid) => {
+                        if (!bssid) return;
+                        const updated = addWifiDeauthTarget(wifiDeauthTargets, bssid);
+                        if (updated === null) {
+                          setWifiError("at most 4 deauth targets, deduplicated — remove one first");
+                        } else {
+                          setWifiDeauthTargets(updated);
+                          setWifiError(null);
+                        }
+                      }}
+                      options={[
+                        { value: "", label: "Add target (observed APs)" },
+                        ...wifiObservedBssids.map((bssid) => ({ value: bssid, label: bssid })),
+                      ]}
+                      ariaLabel="Deauth target picker: access points observed by this monitor session"
+                      className="w-64"
+                    />
+                    <TextInput
+                      value={wifiDeauthTargets}
+                      onChange={(text) => setWifiDeauthTargets(text.toLowerCase().replace(/[^0-9a-f:,]/g, "").slice(0, 71))}
+                      placeholder="targets"
+                      ariaLabel="Deauth target BSSIDs: comma separated, at most 4, every one must be an AP observed by this monitor session"
+                      className="h-8 w-56 sm:h-7"
+                    />
+                    <TextInput
+                      value={wifiDeauthFrames}
+                      onChange={(text) => setWifiDeauthFrames(text.replace(/[^0-9]/g, "").slice(0, 2))}
+                      placeholder="frames/target"
+                      ariaLabel="Deauth frames per target per burst (1-32; a burst carries at most 32 frames across all targets)"
+                      className="h-8 w-28 sm:h-7"
+                    />
+                    <TextInput
+                      value={wifiDeauthBursts}
+                      onChange={(text) => setWifiDeauthBursts(text.replace(/[^0-9]/g, "").slice(0, 1))}
+                      placeholder="bursts"
+                      ariaLabel="Deauth bursts per run (1-4, hard stop available, 10-second total cap)"
+                      className="h-8 w-20 sm:h-7"
+                    />
+                    {wifiDeauthActive ? (
+                      <ToolButton
+                        tone="danger"
+                        onClick={() => void stopWifiDeauth()}
+                        title="Stop the deauth run immediately: the backend sets the stop flag and the paced loop exits before its next frame — cancellation is never refused"
+                      >
+                        Stop injection
+                      </ToolButton>
+                    ) : (
+                      <ToolButton
+                        tone="primary"
+                        onClick={() => void runWifiDeauth()}
+                        disabled={
+                          !desktop ||
+                          wifiDeauthBlock !== null ||
+                          wifiHopRunning ||
+                          parseWifiDeauthTargets(wifiDeauthTargets, wifiObservedBssids) === null ||
+                          parseWifiDeauthFrames(wifiDeauthFrames) === null ||
+                          parseWifiDeauthBursts(wifiDeauthBursts) === null ||
+                          wifiDeauthBusy
+                        }
+                        title="Linux only — ACTIVE interference: sends bounded BSSID-directed deauthentication frames (reason 7) on the interface's current channel; a native Yes/No dialog names every target BSSID and the exact frame counts; targets must be access points observed by this monitor session (no blind targets), at most 32 frames per burst, 4 bursts, 10 seconds total"
+                      >
+                        {wifiDeauthBusy ? "starting…" : "Inject deauth"}
+                      </ToolButton>
+                    )}
+                  </div>
+                  {wifiDeauthBlock ? <Chip tone="muted">{wifiDeauthBlock}</Chip> : null}
+                  {wifiStatus.deauth_targets > 0 || wifiStatus.deauth_frames_sent > 0 ? (
+                    <p className="font-mono text-2xs text-fg-muted">
+                      last run: {wifiStatus.deauth_frames_sent} frame(s) across{" "}
+                      {wifiStatus.deauth_bursts_done} burst(s) · {wifiStatus.deauth_targets}{" "}
+                      target(s)
+                      {wifiStatus.deauth_note ? ` · ${wifiStatus.deauth_note}` : ""}
+                    </p>
+                  ) : null}
+                  {wifiStatus.injection_last_error ? (
+                    <p className="text-xs text-fg-muted">last error: {wifiStatus.injection_last_error}</p>
+                  ) : null}
+                </div>
+                {/* Channel hop (additive slice): passive radio control over the
+                    running capture — bounded to the session's authorized
+                    frequencies, one hop every 250-2000 ms, pause/resume keeps
+                    the capture up, every hop lands in the ≤ 256-entry log. */}
+                <div className="space-y-2 rounded-lg border border-line p-3">
+                  <div className="flex flex-wrap items-center gap-3">
+                    <span className="font-medium uppercase tracking-wider text-fg-muted">Channel hop</span>
+                    <Chip tone="muted">capture keeps running</Chip>
+                  </div>
+                  <div className="flex flex-wrap items-center gap-3">
+                    <TextInput
+                      value={wifiHopInterval}
+                      onChange={(text) => setWifiHopInterval(text.replace(/[^0-9]/g, "").slice(0, 4))}
+                      placeholder="hop ms"
+                      ariaLabel="Channel hop interval in milliseconds (250-2000)"
+                      className="h-8 w-28 sm:h-7"
+                    />
+                    {wifiHopRunning ? (
+                      <>
+                        <ToolButton
+                          onClick={() => void controlWifiHop(wifiHopPaused ? "resume" : "pause")}
+                          disabled={wifiHopBusy}
+                          title={
+                            wifiHopPaused
+                              ? "Resume hopping from the current channel — the next hop is scheduled a full interval from now, never a catch-up burst"
+                              : "Pause hopping: the radio stays on the current channel and the capture keeps running"
+                          }
+                        >
+                          {wifiHopPaused ? "Resume hop" : "Pause hop"}
+                        </ToolButton>
+                        <ToolButton
+                          tone="danger"
+                          onClick={() => void controlWifiHop("stop")}
+                          disabled={wifiHopBusy}
+                          title="Stop hopping: the radio stays on its current channel; the full hop log stays visible below"
+                        >
+                          Stop hop
+                        </ToolButton>
+                      </>
+                    ) : (
+                      <ToolButton
+                        tone="primary"
+                        onClick={() => void controlWifiHop("start")}
+                        disabled={
+                          !desktop ||
+                          wifiDeauthBlock !== null ||
+                          wifiDeauthActive ||
+                          parseWifiChannels(wifiChannels) === null ||
+                          parseWifiHopIntervalMs(wifiHopInterval) === null ||
+                          wifiHopBusy
+                        }
+                        title="Linux only: hops the monitor interface across this session's authorized capture frequencies (at most 16, in-band), one hop every 250-2000 ms; pause/resume keeps the capture running and every hop is logged (at most 256 entries); refuses while a deauth run or another active operation holds the radio"
+                      >
+                        {wifiHopBusy ? "starting…" : "Start hop"}
+                      </ToolButton>
+                    )}
+                  </div>
+                  {wifiStatus.hop_running ? (
+                    <p className="font-mono text-2xs text-fg-muted">
+                      hopping {wifiStatus.hop_channel_mhz || "—"} MHz every{" "}
+                      {wifiStatus.hop_interval_ms} ms across{" "}
+                      {wifiStatus.hop_channels.join(", ") || "none"}
+                      {wifiStatus.hop_paused ? " · paused" : ""}
+                    </p>
+                  ) : null}
+                  {wifiStatus.hop_log.length > 0 ? (
+                    <div className="space-y-1">
+                      <p className="text-2xs font-semibold text-fg-muted">
+                        Hop log ({wifiStatus.hop_count} hop{wifiStatus.hop_count === 1 ? "" : "s"},{" "}
+                        last {wifiStatus.hop_log.length} shown, bounded at 256)
+                      </p>
+                      <div className="max-h-40 overflow-auto rounded-lg border border-line">
+                        <table className="data-table">
+                          <thead>
+                            <tr>
+                              <th className="w-24">t (ms)</th>
+                              <th className="w-28">From</th>
+                              <th className="w-28">To</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {wifiStatus.hop_log.map((entry, index) => (
+                              <tr key={`${index}-${entry.at_ms}-${entry.to_mhz}`}>
+                                <td className="font-mono">{entry.at_ms}</td>
+                                <td className="font-mono">{entry.from_mhz} MHz</td>
+                                <td className="font-mono">{entry.to_mhz} MHz</td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+                  ) : null}
+                  {wifiStatus.hop_last_error ? (
+                    <p className="text-xs text-fg-muted">last error: {wifiStatus.hop_last_error}</p>
+                  ) : null}
+                </div>
                 {wifiStatus.hashcat_22000_lines.length > 0 ? (
                   <div className="space-y-1">
                     <p className="text-2xs font-semibold text-fg-muted">
@@ -2176,6 +2446,91 @@ export function wifiPlatformNote(wire: WifiInterfacesWire | null): string {
     return "Wifi platform status unknown — the backend interface probe has not answered yet.";
   }
   return wire.platform_status;
+}
+
+/**
+ * Validate one strict aa:bb:cc:dd:ee:ff MAC token; null = not a MAC. Lowercase
+ * normalization matches the backend's `format_mac` output so targets compare
+ * against the session's observed AP table exactly.
+ */
+export function parseWifiBssidToken(text: string): string | null {
+  const value = text.trim().toLowerCase();
+  if (!/^([0-9a-f]{2}:){5}[0-9a-f]{2}$/.test(value)) return null;
+  return value;
+}
+
+/**
+ * Append a BSSID to the bounded target list: at most 4, deduplicated. Null =
+ * refused (full list or not a MAC); the current string is returned unchanged
+ * for duplicates. Final membership checks happen against the observed table
+ * at parse time and again on the backend.
+ */
+export function addWifiDeauthTarget(current: string, bssid: string): string | null {
+  const mac = parseWifiBssidToken(bssid);
+  if (mac === null) return null;
+  const tokens = current
+    .split(/[,\s]+/)
+    .map((token) => token.trim())
+    .filter((token) => token.length > 0);
+  if (tokens.length >= 4) return null;
+  if (tokens.includes(mac)) return current;
+  return tokens.length === 0 ? mac : `${tokens.join(",")},${mac}`;
+}
+
+/**
+ * Parse the bounded deauth target list: 1-4 strict MACs, deduplicated, every
+ * one an AP the CURRENT monitor session observed. Null = unusable — the
+ * backend independently refuses blind targets either way.
+ */
+export function parseWifiDeauthTargets(text: string, observed: string[]): string[] | null {
+  const tokens = text
+    .split(/[,\s]+/)
+    .map((token) => token.trim())
+    .filter((token) => token.length > 0);
+  if (tokens.length === 0 || tokens.length > 4) return null;
+  const targets: string[] = [];
+  for (const token of tokens) {
+    const mac = parseWifiBssidToken(token);
+    if (mac === null || !observed.includes(mac) || targets.includes(mac)) return null;
+    targets.push(mac);
+  }
+  return targets;
+}
+
+/** Parse the frames-per-target input; null = not usable (1-32). */
+export function parseWifiDeauthFrames(text: string): number | null {
+  const value = Number(text);
+  if (!Number.isInteger(value) || value < 1 || value > 32) return null;
+  return value;
+}
+
+/** Parse the burst-count input; null = not usable (1-4). */
+export function parseWifiDeauthBursts(text: string): number | null {
+  const value = Number(text);
+  if (!Number.isInteger(value) || value < 1 || value > 4) return null;
+  return value;
+}
+
+/** Parse the hop interval input; null = not usable (250-2000 ms). */
+export function parseWifiHopIntervalMs(text: string): number | null {
+  const value = Number(text);
+  if (!Number.isInteger(value) || value < 250 || value > 2000) return null;
+  return value;
+}
+
+/**
+ * Pure UI gate mirroring the backend: injection is ACTIVE interference that
+ * rides a LIVE monitor session (its observed AP table is the only target
+ * source), so no session means no injection.
+ */
+export function wifiDeauthBlockReason(status: WifiStatusWire | null): string | null {
+  if (!status) {
+    return "Start the monitor capture first — injection targets only BSSIDs the current monitor session observed";
+  }
+  if (status.state !== "monitoring") {
+    return "The monitor capture is not running — injection targets only BSSIDs the current monitor session observed";
+  }
+  return null;
 }
 
 /** One-line label per timeline event kind; pure so node tests cover it. */

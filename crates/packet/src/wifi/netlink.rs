@@ -692,7 +692,7 @@ mod linux_client {
     /// One AF_NETLINK socket bound to NETLINK_GENERIC with an increasing
     /// sequence counter. Every receive is bounded in size (64 KiB datagram),
     /// in time (2 s deadline) and by sequence match.
-    pub(super) struct Nl80211Socket {
+    pub struct Nl80211Socket {
         fd: Fd,
         seq: u32,
     }
@@ -741,7 +741,7 @@ mod linux_client {
         fn recv_reply(
             &mut self,
             seq: u32,
-            decode: fn(&[u8]) -> Result<Vec<NlReply>, WifiError>,
+            decode: impl Fn(&[u8]) -> Result<Vec<NlReply>, WifiError>,
         ) -> Result<NlReply, WifiError> {
             let mut frame = [0u8; MAX_NETLINK_MESSAGE];
             let started = Instant::now();

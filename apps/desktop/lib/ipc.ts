@@ -1407,6 +1407,20 @@ export interface WifiStatusWire {
   clients: string[];
   elapsed_ms: number;
   last_error: string | null;
+  deauth_state: string;
+  deauth_frames_sent: number;
+  deauth_bursts_done: number;
+  deauth_targets: number;
+  deauth_note: string | null;
+  injection_last_error: string | null;
+  hop_running: boolean;
+  hop_paused: boolean;
+  hop_channel_mhz: number;
+  hop_channels: number[];
+  hop_interval_ms: number;
+  hop_count: number;
+  hop_log: WifiHopEntryWire[];
+  hop_last_error: string | null;
 }
 
 export interface WifiStartWire {
@@ -1461,6 +1475,77 @@ export async function networkWifiMonitorStatusV1(): Promise<WifiStatusWire> {
 export async function networkWifiEvidenceSaveV1(caseId: string): Promise<WifiEvidenceReceiptWire> {
   if (!inTauri) throw new Error("Wifi evidence save requires the desktop runtime");
   return invoke<WifiEvidenceReceiptWire>("network_wifi_evidence_save_v1", { caseId });
+}
+
+/** Hop-log entry for the bounded channel hop. */
+export interface WifiHopEntryWire {
+  at_ms: number;
+  from_mhz: number;
+  to_mhz: number;
+}
+
+export interface WifiInjectStartWire {
+  targets: string[];
+  bursts: number;
+  frames_per_target: number;
+  frames_per_burst: number;
+  total_frames: number;
+  status: WifiStatusWire;
+}
+
+export interface WifiHopWire {
+  action: string;
+  running: boolean;
+  paused: boolean;
+  current_mhz: number;
+  channels: number[];
+  interval_ms: number;
+  hop_count: number;
+  status: WifiStatusWire;
+}
+
+/** Start a gated, dialog-confirmed deauth run against session-observed APs (Linux only). */
+export async function networkWifiInjectDeauthV1(
+  interfaceName: string,
+  targets: string[],
+  bursts: number,
+  framesPerTarget: number,
+  authorized: boolean,
+  caseId: string,
+): Promise<WifiInjectStartWire> {
+  if (!inTauri) throw new Error("Wifi injection requires the desktop runtime");
+  return invoke<WifiInjectStartWire>("network_wifi_inject_deauth_v1", {
+    interfaceName,
+    targets,
+    bursts,
+    framesPerTarget,
+    authorized,
+    caseId,
+  });
+}
+
+/** Hard-stop the running deauth burst run; cancellation is never refused. */
+export async function networkWifiInjectDeauthStopV1(): Promise<boolean> {
+  if (!inTauri) throw new Error("Wifi injection requires the desktop runtime");
+  return invoke<boolean>("network_wifi_inject_deauth_stop_v1", {});
+}
+
+/** Start/pause/resume/stop the bounded channel hop over the live capture. */
+export async function networkWifiChannelHopV1(
+  interfaceName: string,
+  channels: string,
+  intervalMs: number,
+  action: "start" | "pause" | "resume" | "stop",
+  authorized: boolean,
+): Promise<WifiHopWire> {
+  if (!inTauri) throw new Error("Wifi channel hopping requires the desktop runtime");
+  return invoke<WifiHopWire>("network_wifi_channel_hop_v1", {
+    interfaceName,
+    channels,
+    intervalMs,
+    action,
+    authorized,
+  });
 }
 
 // --- Network Lab DNS spoof (gated responder, dns.spoof parity) ----------------

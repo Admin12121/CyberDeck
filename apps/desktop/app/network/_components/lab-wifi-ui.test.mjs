@@ -11,6 +11,14 @@
 // the command layer beyond the AF_PACKET pump), the 16-channel bound, the
 // honest Unsupported refusal off Linux, the phase machine and the
 // one-bounded-finding-per-session evidence save.
+//
+// Injection slice (additive pins): deauth is ACTIVE interference gated
+// end-to-end like the spoof mode — targets bounded to the CURRENT session's
+// observed APs, native dialog naming every BSSID and the exact counts, gate
+// lease, hard bounds (≤ 32 frames/burst, ≤ 4 bursts, ≤ 10 s), stop never
+// refused, Linux-only honesty; channel hopping is passive radio control over
+// the live capture (250-2000 ms, ≤ 16 in-band channels, pause/resume keeps
+// the capture, full ≤ 256-entry hop log visible in the UI).
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
@@ -245,4 +253,162 @@ test("Rust unit tests cover the promised contracts in the command file", () => {
   ]) {
     assert.match(backendSource, new RegExp(test_name.replace(/_/g, "_")));
   }
+});
+
+// ------------------------------------------------- injection slice pins ---
+
+const crateInjectSource = read("../../../../../crates/packet/src/wifi/inject.rs");
+
+test("deauth injection is an explicitly gated active-interference cluster in the wifi block", () => {
+  const injectButton =
+    /<ToolButton\s+tone="primary"\s+onClick=\{\(\) => void runWifiDeauth\(\)\}[\s\S]*?Inject deauth/.exec(
+      viewSource,
+    );
+  assert.ok(injectButton, "Inject deauth button missing");
+  // The gated Start mirrors the spoof discipline: platform, live-session and
+  // bounded-input gates, never an on-screen authorization checkbox.
+  assert.match(injectButton[0], /!desktop/);
+  assert.match(injectButton[0], /wifiDeauthBlock !== null/);
+  assert.match(injectButton[0], /wifiHopRunning/);
+  assert.match(injectButton[0], /parseWifiDeauthTargets\(wifiDeauthTargets, wifiObservedBssids\) === null/);
+  assert.match(injectButton[0], /parseWifiDeauthFrames\(wifiDeauthFrames\) === null/);
+  assert.match(injectButton[0], /parseWifiDeauthBursts\(wifiDeauthBursts\) === null/);
+  assert.doesNotMatch(injectButton[0], /checkbox/i);
+  // Honest copy: interference, platform, target provenance, hard bounds.
+  assert.match(injectButton[0], /ACTIVE interference/);
+  assert.match(injectButton[0], /Linux only/);
+  assert.match(injectButton[0], /observed by this monitor session/);
+  assert.match(injectButton[0], /no blind targets/);
+  assert.match(injectButton[0], /native Yes\/No dialog/);
+  assert.match(injectButton[0], /at most 32 frames per burst, 4 bursts, 10 seconds total/);
+  // The cluster labels the interference before any control.
+  assert.match(viewSource, /<Chip tone="orange">active interference<\/Chip>/);
+  assert.match(viewSource, /<Chip tone="muted">Linux only<\/Chip>/);
+});
+
+test("deauth start is dialog-named backend-side and leases the shared active-operation gate", () => {
+  assert.match(backendSource, /pub async fn network_wifi_inject_deauth_v1/);
+  assert.match(backendSource, /Authorize wifi deauth injection/);
+  assert.match(backendSource, /MessageDialogButtons::YesNo/);
+  assert.match(backendSource, /wifi deauth injection cancelled by operator/);
+  assert.match(backendSource, /This is ACTIVE interference/);
+  assert.match(backendSource, /gate\.acquire\(super::operation_gate::ActiveOperation::WifiInject\)/);
+  assert.match(backendSource, /let _permit = permit/);
+});
+
+test("deauth targets are bounded to BSSIDs the CURRENT monitor session observed", () => {
+  // UI: the picker only offers observed APs and the parser refuses blind ones.
+  assert.match(
+    viewSource,
+    /ariaLabel="Deauth target picker: access points observed by this monitor session"/,
+  );
+  const targets = /export function parseWifiDeauthTargets\([\s\S]*?\n\}/.exec(viewSource);
+  assert.ok(targets, "parseWifiDeauthTargets helper missing");
+  assert.match(targets[0], /tokens\.length === 0 \|\| tokens\.length > 4/);
+  assert.match(targets[0], /!observed\.includes\(mac\)/);
+  const add = /export function addWifiDeauthTarget\([\s\S]*?\n\}/.exec(viewSource);
+  assert.ok(add, "addWifiDeauthTarget helper missing");
+  assert.match(add[0], /tokens\.length >= 4/);
+  // Backend: the observed AP table is the only target source.
+  const resolve =
+    /fn resolve_observed_targets\([\s\S]*?\n\}/.exec(backendSource);
+  assert.ok(resolve, "resolve_observed_targets missing");
+  assert.match(resolve[0], /not observed by the current monitor session/);
+  assert.match(backendSource, /no blind targets/);
+  assert.match(backendSource, /MAX_INJECT_TARGETS: usize = inject::MAX_DEAUTH_TARGETS/);
+  assert.match(backendSource, /require_live_monitor\(&wifi\)\?/);
+});
+
+test("deauth stop is never refused and the run is hard-bounded in the crate core", () => {
+  const stopCommand =
+    /pub fn network_wifi_inject_deauth_stop_v1\([\s\S]*?\n\}/.exec(backendSource);
+  assert.ok(stopCommand, "deauth stop command missing");
+  assert.match(stopCommand[0], /deauth_stop\.store\(true, Ordering::Release\)/);
+  assert.match(viewSource, /await networkWifiInjectDeauthStopV1\(\)/);
+  // The crate core carries the hard bounds and the paced loop.
+  assert.match(crateInjectSource, /pub const MAX_DEAUTH_TARGETS: usize = 4/);
+  assert.match(crateInjectSource, /pub const MAX_DEAUTH_BURSTS: usize = 4/);
+  assert.match(crateInjectSource, /pub const MAX_FRAMES_PER_BURST: usize = 32/);
+  assert.match(crateInjectSource, /pub const MAX_DEAUTH_RUN_MS: u64 = 10_000/);
+  assert.match(crateInjectSource, /pub const MIN_FRAME_INTERVAL_MS: u64 = 20/);
+  assert.match(crateInjectSource, /pub fn run_wifi_deauth/);
+});
+
+test("the deauth frame is byte-pinned and round-trips through the landed parser", () => {
+  assert.match(crateInjectSource, /fn deauth_frame_matches_the_hand_built_fixture_byte_for_byte/);
+  assert.match(crateInjectSource, /f\[0\] = 0xC0/);
+  assert.match(
+    crateInjectSource,
+    /fn the_built_deauth_round_trips_through_the_landed_frame_parser/,
+  );
+  assert.match(crateInjectSource, /DEAUTH_REASON_CLASS_3_FROM_NONASSOCIATED: u16 = 7/);
+  assert.match(crateInjectSource, /pub const INJECT_FRAME_LEN: usize = TX_RADIOTAP_LEN \+ DEAUTH_FRAME_LEN/);
+});
+
+test("channel hop is bounded, keeps the capture running and logs every hop in the UI", () => {
+  const hopButton =
+    /<ToolButton\s+tone="primary"\s+onClick=\{\(\) => void controlWifiHop\("start"\)\}[\s\S]*?Start hop/.exec(
+      viewSource,
+    );
+  assert.ok(hopButton, "Start hop button missing");
+  assert.match(hopButton[0], /parseWifiHopIntervalMs\(wifiHopInterval\) === null/);
+  assert.match(hopButton[0], /parseWifiChannels\(wifiChannels\) === null/);
+  assert.match(hopButton[0], /wifiDeauthActive/);
+  assert.match(hopButton[0], /at most 16, in-band/);
+  assert.match(hopButton[0], /every 250-2000 ms/);
+  assert.match(hopButton[0], /every hop is logged \(at most 256 entries\)/);
+  // Pause/resume keeps the capture; stop never re-authorizes.
+  assert.match(viewSource, /void controlWifiHop\(wifiHopPaused \? "resume" : "pause"\)/);
+  assert.match(viewSource, /<Chip tone="muted">capture keeps running<\/Chip>/);
+  assert.match(viewSource, /await networkWifiChannelHopV1\(/);
+  // The full hop log is visible with its bound named.
+  assert.match(viewSource, /wifiStatus\.hop_log\.map/);
+  assert.match(viewSource, /bounded at 256/);
+  // Backend + crate bounds.
+  assert.match(backendSource, /pub async fn network_wifi_channel_hop_v1/);
+  assert.match(backendSource, /HOP_UNSUPPORTED_MESSAGE\.contains\("requires Linux"\)|"wifi channel hopping uses the Linux nl80211 control door and currently requires Linux"/);
+  assert.match(crateInjectSource, /pub const MAX_HOP_CHANNELS: usize = 16/);
+  assert.match(crateInjectSource, /pub const MIN_HOP_INTERVAL_MS: u64 = 250/);
+  assert.match(crateInjectSource, /pub const MAX_HOP_INTERVAL_MS: u64 = 2_000/);
+  assert.match(crateInjectSource, /pub const MAX_HOP_LOG: usize = 256/);
+  assert.match(crateInjectSource, /fn hop_pause_freezes_and_resume_rearms_without_a_catchup_burst/);
+});
+
+test("injection and hop status stay additive snake_case fields the view reads verbatim", () => {
+  for (const field of [
+    "pub deauth_state: String",
+    "pub deauth_frames_sent: u64",
+    "pub deauth_bursts_done: usize",
+    "pub deauth_targets: usize",
+    "pub deauth_note: Option<String>",
+    "pub injection_last_error: Option<String>",
+    "pub hop_running: bool",
+    "pub hop_paused: bool",
+    "pub hop_channel_mhz: u32",
+    "pub hop_channels: Vec<u32>",
+    "pub hop_interval_ms: u32",
+    "pub hop_count: u64",
+    "pub hop_log: Vec<WifiHopEntryWire>",
+    "pub hop_last_error: Option<String>",
+  ]) {
+    assert.match(backendSource, new RegExp(field.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+  }
+  // The command file's own tests cover the additive slice.
+  for (const test_name of [
+    "fn bssid_parsing_accepts_colon_hex_and_refuses_garbage",
+    "fn injection_targets_are_limited_to_the_current_sessions_observed_aps",
+    "fn deauth_bounds_mirror_the_crate_plan_validation",
+    "fn injection_requires_a_live_monitor_session",
+    "fn status_wire_carries_additive_injection_and_hop_fields_honestly",
+    "fn case_change_arms_the_injection_and_hop_stop_flags",
+    "fn hop_scheduler_wiring_pauses_resumes_and_logs_through_the_ctx_slot",
+    "fn injection_and_hop_report_unsupported_off_linux_honestly",
+  ]) {
+    assert.match(backendSource, new RegExp(test_name.replace(/_/g, "_")));
+  }
+  // Injection honestly reports Unsupported off Linux; the status word set
+  // extends the monitor phase machine rather than replacing it.
+  assert.match(backendSource, /INJECTION_UNSUPPORTED_MESSAGE: &str =[\s\S]*?requires Linux/);
+  assert.match(backendSource, /idle \| injecting \| stopping \| stopped/);
+  assert.match(backendSource, /idle \| starting \| monitoring \| stopping \| stopped/);
 });

@@ -18,13 +18,21 @@
 //! ≤ 64 interfaces per dump, EAPOL frames ≤ 512 bytes, and ≤ 64-entry LRU
 //! stores for handshakes and tracked ESSIDs. Malformed input is refused with
 //! a coded error, never unwrapped, never panicking.
+//!
+//! Authorized injection (`inject`, Bettercap `wifi.deauth` parity) adds its
+//! own hard bounds: ≤ 4 session-observed target BSSIDs, ≤ 4 bursts, ≤ 32
+//! deauth frames per burst, ≥ 20 ms frame pacing, ≤ 10 s per run; channel
+//! hops are bounded to ≤ 16 in-band frequencies at 250 ms–2 s with a
+//! ≤ 256-entry hop log. The transmit door is Linux AF_PACKET only.
 pub mod eapol;
 pub mod frame;
+pub mod inject;
 pub mod netlink;
 pub mod radiotap;
 
 pub use eapol::{HandshakeCollector, HandshakeEvent, WpaHandshake};
 pub use frame::ParsedFrame;
+pub use inject::{ChannelHopScheduler, DeauthEndReason, DeauthOutcome, HopEntry};
 pub use radiotap::Radiotap;
 
 /// Honest error taxonomy for the whole wifi layer (the `ArpErrorCode`
