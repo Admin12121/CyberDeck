@@ -46,10 +46,13 @@ Landed work stays in the list with ✅ so progress stays countable.
   WPA verifier (`windows_auth::verify_wpa_eapol`) (6cca540)
 ✅ **TLS 1.2 decryption via keylog CLIENT_RANDOM** — RFC 5246 key block, AES-128-GCM
   suites (a5d4307); CBC + AES-256-GCM/SHA-384-PRF deferred to Tier 1 tail
-- [ ] Wifi IPC + Network Lab "Wifi" mode end-to-end (interfaces, channel list,
-  start/stop, beacons/clients tables, handshake-captured → case evidence)
-- [ ] Windows: Npcap presence detection + adapter status surfacing (no bundling)
-- [ ] SMB bounded dissector (Windows-network captures)
+✅ Wifi IPC + Network Lab "Wifi" mode end-to-end (interfaces, pinned channel list,
+  start/stop, beacons/clients tables, handshake-captured → ONE bounded case finding)
+  (71fbbd8)
+✅ Windows: Npcap presence detection (registry probe, surfaced as adapter status;
+  detection ≠ support — monitor control stays Linux-only) (71fbbd8)
+✅ SMB bounded dissector — SMB1+SMB2 commands/status/NTLMSSP/share names, dispatch
+  after TLS/HTTP claims, 1800-case truncation fuzz clean (32febae)
 - [ ] TLS 1.2 CBC suites (HMAC-SHA1/SHA-256 path)
 - [ ] EAPOL/PMKID capture → case finding → Recipes/cracking pipeline button-through
 
