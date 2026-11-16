@@ -396,7 +396,13 @@ pub fn verify_wpa_pmkid(encoded: &str, candidate: &str) -> Result<bool, String> 
     let ap = hex::decode(fields[3]).map_err(|_| "invalid AP MAC")?;
     let sta = hex::decode(fields[4]).map_err(|_| "invalid client MAC")?;
     let essid = hex::decode(fields[5]).map_err(|_| "invalid ESSID")?;
-    if pmkid_hex.len() != 40 || ap.len() != 6 || sta.len() != 6 || essid.len() > 32 {
+    // hashcat 22000 carries the 128-bit truncated PMKID (32 hex); the full
+    // HMAC-SHA1 digest is 20 bytes (40 hex). Both verify.
+    if pmkid_hex.len() != 32 && pmkid_hex.len() != 40
+        || ap.len() != 6
+        || sta.len() != 6
+        || essid.len() > 32
+    {
         return Err("invalid PMKID field lengths".into());
     }
     let expected = hex::decode(pmkid_hex).map_err(|_| "invalid PMKID")?;
@@ -406,7 +412,129 @@ pub fn verify_wpa_pmkid(encoded: &str, candidate: &str) -> Result<bool, String> 
     mac.update(b"PMK Name");
     mac.update(&ap);
     mac.update(&sta);
-    Ok(mac.finalize().into_bytes().as_slice() == expected.as_slice())
+    let digest = mac.finalize().into_bytes();
+    Ok(digest.as_slice()[..expected.len()] == *expected.as_slice())
+}
+
+/// WPA-EAPOL (hashcat 22000 type 02): PMK = pbkdf2-hmac-sha1(pass, essid, 4096, 32);
+/// KCK = PRF-512 first block = HMAC-SHA1(PMK, "Pairwise key expansion\0" ||
+/// minMAC || maxMAC || minNonce || maxNonce || 0x00)[..16];
+/// MIC = HMAC-MD5 / HMAC-SHA1 / AES-CMAC(KCK, eapol) for keyver 1/2/3.
+/// Wire form: WPA*02*keymic*ap_mac*sta_mac*essid_hex*anonce*eapol_hex*message_pair,
+/// with the 16-byte MIC field zeroed at eapol[81..97] (hashcat hashes it as-is).
+pub fn verify_wpa_eapol(encoded: &str, candidate: &str) -> Result<bool, String> {
+    let fields: Vec<&str> = encoded.split('*').collect();
+    if fields.len() < 9 || fields[0] != "WPA" || fields[1] != "02" {
+        return Err("not a WPA*02* EAPOL target".into());
+    }
+    let ap = hex::decode(fields[3]).map_err(|_| "invalid AP MAC")?;
+    let sta = hex::decode(fields[4]).map_err(|_| "invalid client MAC")?;
+    let essid = hex::decode(fields[5]).map_err(|_| "invalid ESSID")?;
+    let anonce = hex::decode(fields[6]).map_err(|_| "invalid ANonce")?;
+    let eapol = hex::decode(fields[7]).map_err(|_| "invalid EAPOL")?;
+    if fields[2].len() != 32
+        || ap.len() != 6
+        || sta.len() != 6
+        || essid.is_empty()
+        || essid.len() > 32
+        || anonce.len() != 32
+        || eapol.len() < 99
+        || eapol.len() > 256
+    {
+        return Err("invalid EAPOL field lengths".into());
+    }
+    if !eapol[81..97].iter().all(|b| *b == 0) {
+        return Err("EAPOL MIC field must be zeroed (hashcat hashes the bytes as-is)".into());
+    }
+    let expected = hex::decode(fields[2]).map_err(|_| "invalid MIC")?;
+    let mut pmk = [0u8; 32];
+    pbkdf2::pbkdf2_hmac::<Sha1>(candidate.as_bytes(), &essid, 4096, &mut pmk);
+    let keyver = u16::from_be_bytes([eapol[5], eapol[6]]) & 3;
+    if keyver == 0 {
+        return Err("invalid key version".into());
+    }
+    let snonce = &eapol[17..49];
+    let mut pke = b"Pairwise key expansion\0".to_vec();
+    if ap < sta {
+        pke.extend_from_slice(&ap);
+        pke.extend_from_slice(&sta);
+    } else {
+        pke.extend_from_slice(&sta);
+        pke.extend_from_slice(&ap);
+    }
+    if anonce.as_slice() < snonce {
+        pke.extend_from_slice(&anonce);
+        pke.extend_from_slice(snonce);
+    } else {
+        pke.extend_from_slice(snonce);
+        pke.extend_from_slice(&anonce);
+    }
+    pke.push(0);
+    let prf = <Hmac<Sha1> as Mac>::new_from_slice(&pmk)
+        .map_err(|e| e.to_string())?
+        .chain_update(&pke)
+        .finalize()
+        .into_bytes();
+    let computed = match keyver {
+        1 => <Hmac<Md5> as Mac>::new_from_slice(&prf[..16])
+            .map_err(|e| e.to_string())?
+            .chain_update(&eapol)
+            .finalize()
+            .into_bytes()
+            .to_vec(),
+        2 => <Hmac<Sha1> as Mac>::new_from_slice(&prf[..16])
+            .map_err(|e| e.to_string())?
+            .chain_update(&eapol)
+            .finalize()
+            .into_bytes()[..16]
+            .to_vec(),
+        _ => aes_cmac(&prf[..16], &eapol),
+    };
+    Ok(computed.as_slice() == expected.as_slice())
+}
+
+/// RFC 4493 AES-CMAC over the crate's `aes` dependency (keyver 3 MIC).
+fn aes_cmac(key: &[u8], message: &[u8]) -> Vec<u8> {
+    use aes::cipher::generic_array::GenericArray;
+    use aes::cipher::{BlockEncrypt, KeyInit};
+    let cipher = aes::Aes128::new(GenericArray::from_slice(key));
+    let enc = |b: &mut [u8; 16]| cipher.encrypt_block(GenericArray::from_mut_slice(b));
+    let dbl = |v: &[u8; 16]| {
+        let (mut out, mut carry) = ([0u8; 16], 0u8);
+        for i in (0..16).rev() {
+            out[i] = (v[i] << 1) | carry;
+            carry = v[i] >> 7;
+        }
+        if carry != 0 {
+            out[15] ^= 0x87;
+        }
+        out
+    };
+    let mut l = [0u8; 16];
+    enc(&mut l);
+    let (k1, k2) = (dbl(&l), dbl(&dbl(&l)));
+    let (mut acc, mut off, mut last) = ([0u8; 16], 0usize, [0u8; 16]);
+    while message.len() - off > 16 {
+        for i in 0..16 {
+            acc[i] ^= message[off + i];
+        }
+        enc(&mut acc);
+        off += 16;
+    }
+    let tail = &message[off..];
+    last[..tail.len()].copy_from_slice(tail);
+    if tail.len() == 16 {
+        for i in 0..16 {
+            acc[i] ^= last[i] ^ k1[i];
+        }
+    } else {
+        last[tail.len()] = 0x80;
+        for i in 0..16 {
+            acc[i] ^= last[i] ^ k2[i];
+        }
+    }
+    enc(&mut acc);
+    acc.to_vec()
 }
 
 /// HMAC keyed digests (hashcat modes 50/60): key = password, message = salt.

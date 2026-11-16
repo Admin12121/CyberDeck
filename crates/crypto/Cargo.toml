@@ -11,6 +11,7 @@ gpu = ["dep:libloading"]
 
 [dev-dependencies]
 cyberdeck-storage = { path = "../storage" }
+cyberdeck-packet = { path = "../packet" }
 
 [dependencies]
 aes-gcm = "0.10.3"

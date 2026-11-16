@@ -403,3 +403,106 @@ fn simd_batch_verifiers_match_the_scalar_reference() {
         "avx2-8-lane" | "sse4.1-4-lane" | "scalar"
     ));
 }
+
+/// Cross-crate round trip: the packet crate's wifi monitor pipeline turns a
+/// synthetic authorized testbench 4-way handshake (synthetic testbench MACs,
+/// crypto cross-checked against the Python stdlib) into a hashcat 22000
+/// EAPOL line, and THIS crate's own verifier accepts the password and
+/// rejects a case-mutation. PMKID line recomputes from the PMK derivation.
+#[test]
+fn wifi_monitor_capture_produces_a_verifying_wpa_eapol_22000_line() {
+    use cyberdeck_packet::wifi::MonitorCapture;
+    use hmac::{Hmac, Mac};
+    use sha1::Sha1;
+    const AP: [u8; 6] = [0xa4, 0xb1, 0xc1, 0xd2, 0xe3, 0xf0];
+    const STA: [u8; 6] = [0x0a, 0x1b, 0x2c, 0x3d, 0x4e, 0x5f];
+    const ESSID: &str = "cyberdeck-e2e";
+    const M1_HEX: &str = "0203007502008a0010000102030405060711223344556677881122334455667788112233445566778811223344556677880000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000016dd14000fac048066ad9635ac9def6b250b58866e22b7";
+    const M2_HEX: &str = "0203005f02010a00100001020304050607aabbccddeeff0011aabbccddeeff0011aabbccddeeff0011aabbccddeeff00110000000000000000000000000000000000000000000000000000000000000000fda6fc92f7148868985fca1b39cc05ad0000";
+    let hex = |h: &str| {
+        (0..h.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&h[i..i + 2], 16).unwrap())
+            .collect::<Vec<u8>>()
+    };
+    let frame = |mgmt_beacon: bool, to_ds: bool, body: &[u8]| {
+        let mut f = vec![0u8, 0u8];
+        let radio_len: u16 = if mgmt_beacon { 8 } else { 9 };
+        f.extend_from_slice(&radio_len.to_le_bytes());
+        let radio_fields: u32 = if mgmt_beacon { 0 } else { 2 };
+        f.extend_from_slice(&radio_fields.to_le_bytes());
+        if !mgmt_beacon {
+            f.push(0x10); // radiotap FLAGS: FCS present at end
+        }
+        let data_bits: u16 = if mgmt_beacon { 8 << 4 } else { (2u16 << 2) | (8 << 4) };
+        let dir_bits: u16 = if mgmt_beacon { 0 } else if to_ds { 0x0100 } else { 0x0200 };
+        let fc: u16 = data_bits | dir_bits;
+        f.extend_from_slice(&fc.to_le_bytes());
+        f.extend_from_slice(&[0, 0]); // sequence control
+        let (a1, a2, a3) = if mgmt_beacon {
+            ([0xff; 6], AP, AP)
+        } else if to_ds {
+            (AP, STA, AP)
+        } else {
+            (STA, AP, AP)
+        };
+        for a in [a1, a2, a3] {
+            f.extend_from_slice(&a);
+        }
+        f.extend_from_slice(&[0x10, 0x00]); // fixed: addr4 absent, seq already set
+        if !mgmt_beacon {
+            f.extend_from_slice(&[0, 0]); // QoS control
+        }
+        if mgmt_beacon {
+            f.extend_from_slice(&[0u8; 8]); // timestamp
+            f.extend_from_slice(&100u16.to_be_bytes()); // interval
+            f.extend_from_slice(&0x0411u16.to_le_bytes()); // capability
+            f.push(0x00);
+            f.push(ESSID.len() as u8);
+            f.extend_from_slice(ESSID.as_bytes());
+        } else {
+            f.extend_from_slice(&[0xaa, 0xaa, 0x03, 0, 0, 0, 0x88, 0x8e]); // LLC/SNAP EAPOL
+        }
+        f.extend_from_slice(body);
+        if !mgmt_beacon {
+            f.extend_from_slice(&[0xde, 0xad, 0xbe, 0xef]); // FCS placeholder
+        }
+        f
+    };
+    let mut capture = MonitorCapture::new();
+    capture.process_frame(&frame(true, false, &[])).unwrap();
+    capture.process_frame(&frame(false, false, &hex(M1_HEX))).unwrap();
+    let lines = capture.process_frame(&frame(false, true, &hex(M2_HEX))).unwrap();
+    let line = lines
+        .iter()
+        .find(|l| l.starts_with("WPA*02*"))
+        .expect("EAPOL 22000 line")
+        .clone();
+    assert!(
+        windows_auth::verify_wpa_eapol(&line, "cyberdeck-e2e-42").unwrap(),
+        "our own verifier must accept the produced EAPOL line"
+    );
+    assert!(
+        !windows_auth::verify_wpa_eapol(&line, "Cyberdeck-E2e-42").unwrap(),
+        "a case-mutated password must not verify"
+    );
+    let pmkid_line = capture
+        .hashcat_22000_lines()
+        .iter()
+        .find(|l| l.starts_with("WPA*01*"))
+        .expect("PMKID 22000 line")
+        .clone();
+    let mut pmk = [0u8; 32];
+    pbkdf2::pbkdf2_hmac::<sha1::Sha1>(b"cyberdeck-e2e-42", ESSID.as_bytes(), 4096, &mut pmk);
+    let pmkid = <Hmac<Sha1> as Mac>::new_from_slice(&pmk)
+        .unwrap()
+        .chain_update(b"PMK Name")
+        .chain_update(AP)
+        .chain_update(STA)
+        .finalize()
+        .into_bytes();
+    assert_eq!(
+        hex::encode(&pmkid[..16]),
+        pmkid_line.split('*').nth(2).unwrap()
+    );
+}
