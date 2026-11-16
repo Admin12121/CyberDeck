@@ -30,7 +30,7 @@ const crateSource = read("../../../../../crates/packet/src/wifi/mod.rs");
 test("Wifi mode exists on the rail and renders as its own centered control card", () => {
   assert.match(
     viewSource,
-    /type LabMode = "scope" \| "arp" \| "live" \| "dns" \| "wifi" \| "spoof" \| "report";/,
+    /type LabMode = "scope" \| "arp" \| "live" \| "dns" \| "wifi" \| "spoof" \| "dns_spoof" \| "http_proxy" \| "report";/,
   );
   assert.match(viewSource, /\{ id: "wifi", label: "Wifi", icon: Wifi, badge: wifiHandshakeBadge \}/);
   assert.match(viewSource, /<ModeCard\s+title="Wifi monitor"\s+icon=\{Wifi\}/);
@@ -149,7 +149,7 @@ test("windows Npcap status is surfaced without pretending it is support", () => 
 
 test("gates render only errors and the shared gate cluster is not repeated", () => {
   const wifiSection =
-    /\{mode === "wifi" && \(([\s\S]*?)\n      \)\}\n\n      \{mode === "report" && \(/.exec(viewSource);
+    /\{mode === "wifi" && \(([\s\S]*?)\n      \)\}\n\n      \{mode === "/.exec(viewSource);
   assert.ok(wifiSection, "wifi mode section missing");
   assert.match(wifiSection[1], /<ErrorStrip>\{wifiError\}<\/ErrorStrip>/);
   assert.doesNotMatch(wifiSection[1], /pointer|case management/i);

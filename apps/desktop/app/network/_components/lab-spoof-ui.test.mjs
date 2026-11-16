@@ -28,7 +28,7 @@ const coreSource = read(
 // --------------------------------------------------------------- UI contract ---
 
 test("Spoof mode exists on the rail and renders as its own centered control card", () => {
-  assert.match(viewSource, /type LabMode = "scope" \| "arp" \| "live" \| "dns" \| "wifi" \| "spoof" \| "report";/);
+  assert.match(viewSource, /type LabMode = "scope" \| "arp" \| "live" \| "dns" \| "wifi" \| "spoof" \| "dns_spoof" \| "http_proxy" \| "report";/);
   assert.match(viewSource, /\{ id: "spoof", label: "Spoof", icon: Syringe \}/);
   assert.match(viewSource, /<ModeCard\s+title="ARP spoof"\s+icon=\{Syringe\}/);
   // ONE-line card description + InfoTip: the ModeCard info prop is the tip.
