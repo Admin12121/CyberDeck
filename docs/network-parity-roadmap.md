@@ -1,0 +1,81 @@
+# Network Parity Roadmap
+
+The explicit, tiered checklist for completing Wireshark / Nmap / Ettercap / Bettercap
+capability in CyberDeck. Each item is a vertical slice: native Rust engine → typed IPC →
+UI (coss card pattern) → source-contract tests → honest runtime gates. Nothing is
+advertised before it proves itself (KAT gates, tag-verified decryption, on-scope checks).
+
+This file is the measure of "how close to done" — every completed wave checks items off.
+Landed work stays in the list with ✅ so progress stays countable.
+
+## Ground rules
+
+- Native Rust reimplementation; upstream sources in `reference/` are behavior
+  documentation only. Bundling happens only where a license permits and engine speed
+  demands it (hashcat MIT vendored; john GPLv2 sidecar) — the network category is
+  100% own code.
+- Platform policy (user decision 2026-11-16): wifi monitor mode — own Rust nl80211 on
+  Linux, optional detected Npcap on Windows (never bundled), honest `Unsupported` on
+  macOS. BLE — own raw HCI on Linux, `Unsupported` elsewhere.
+- Every slice degrades honestly: unknown protocols show structure + hex, never guessed
+  fields; decryption only with verified tags; scanning refuses anything off-scope.
+
+## Tier 0 — Landed (the foundation)
+
+- ✅ Packet engine: PCAP/PCAPNG, Ethernet/ARP/IPv4/IPv6/TCP/UDP/ICMP, fragments,
+  TCP stream reassembly + follow-stream (directional, gap-honest)
+- ✅ Application dissectors: DNS/mDNS/LLMNR, DHCP, NTP, STUN, HTTP/1.x, HTTP/2+HPACK,
+  TLS 1.0–1.3 hello depth, QUIC v1
+- ✅ Display filters + BPF capture filters (own implementations)
+- ✅ Export on click: payload → Recipes, payload → derived case evidence, lab session
+  report → case finding, PCAP export
+- ✅ Scanning: TCP connect + SYN (Linux raw), ICMP echo, ARP sweep, profiles, depth,
+  OS hints, NSE-lite 32 checks (grew from 13)
+- ✅ QUIC decryption chain: Initial (stateless) + Handshake/1-RTT (keylog), hand-rolled
+  SHA-256/HKDF/AES-128-GCM, RFC 9000 pn reconstruction
+- ✅ TLS 1.3 stream decryption via NSS keylog
+- ✅ Ettercap/Bettercap LAN core: live monitor, ARP-conflict watch, DNS monitor,
+  gated full-duplex ARP spoofer (native dialog, restoration ledger), session reports
+- ✅ Zero-dependency crypto module in the packet crate (SHA-256/HKDF/AES/GCM/HMAC)
+
+## Tier 1 — next wave (in progress, high real-capture frequency)
+
+- [ ] **Wifi monitor crate layer (Linux)** — hand-rolled nl80211/netlink client,
+  radiotap, 802.11 MAC dissection (beacon/probe/data/auth/deauth), EAPOL 4-way capture
+  → hashcat 22000 lines (PMKID + EAPOL), verified against our own CPU verifier
+  (`windows_auth.rs`) — in flight
+- [ ] **TLS 1.2 decryption via keylog CLIENT_RANDOM** — RFC 5246 key block, AES-GCM
+  suites first, CBC as stretch — in flight
+- [ ] Wifi IPC + Network Lab "Wifi" mode end-to-end (interfaces, channel list,
+  start/stop, beacons/clients tables, handshake-captured → case evidence)
+- [ ] Windows: Npcap presence detection + adapter status surfacing (no bundling)
+- [ ] SMB bounded dissector (Windows-network captures)
+- [ ] TLS 1.2 CBC suites (HMAC-SHA1/SHA-256 path)
+- [ ] EAPOL/PMKID capture → case finding → Recipes/cracking pipeline button-through
+
+## Tier 2 — MITM completion (Bettercap/Ettercap arc)
+
+- [ ] DNS spoofer (gated: scope-locked zones, restoration on stop)
+- [ ] HTTP proxy with intercept queue + match/replace (web-studio parity reuse)
+- [ ] SSL-strip module (gated, honest about HSTS limits)
+- [ ] NSE-lite growth: UDP probe plumbing (mDNS/SSDP/NTP families are TCP-only today),
+  registry toward ~60 checks
+- [ ] Filter-language depth: protocol/field expression grammar beyond the current
+  subset (Wireshark filter parity for the fields we dissect)
+
+## Tier 3 — radio + long tail (demand-driven)
+
+- [ ] Wifi injection (deauth/disassociation, gated like the spoofer)
+- [ ] Channel-hop scheduler + regulatory-domain awareness
+- [ ] BLE: Linux raw HCI (advertising + GATT walk), `Unsupported` elsewhere
+- [ ] WPA-enterprise (EAP) handshake handling beyond PSK
+- [ ] More dissectors per demand: RDP, MQTT, SOCKS, QUIC v2, DHCPv6
+- [ ] IO graph + endpoint statistics depth
+
+## Explicitly out of scope (with reason)
+
+- Bundling Wireshark/Nmap/Ettercap/Bettercap engines — license + product shape
+- macOS/Windows wifi monitor mode via own kernel drivers — OS vendor refusal
+  (Apple: no public API, locked kexts; Microsoft: driver-signing cost, ecosystem
+  gates via Npcap instead)
+- NSE scripting engine (arbitrary Lua) — fixed honest registry replaces it
