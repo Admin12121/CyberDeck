@@ -8,5 +8,8 @@ pub struct CachedCapture {
     pub linktype: u32,
     #[allow(dead_code)]
     pub first_ts: u64,
+    /// Timestamp subsecond scale of the source file (ns vs µs). Capture-wide
+    /// statistics need the exact scale for honest time bucketing.
+    pub nanosecond: bool,
     pub packets: Vec<PacketMeta>,
 }

@@ -2,8 +2,9 @@
 //! The verified reader reopens the immutable same-handle SHA-256-checked source
 //! for each bounded request; no independent cached-case authority is created.
 use super::{
-    capture_service, hex_format, pcap_wire::reassembly_summary, pcap_wire::wire_packet,
-    PcapOpenWire,
+    capture_service, hex_format,
+    pcap_wire::{endpoints_of, io_graph_of, reassembly_summary, wire_packet},
+    EndpointsWire, IoGraphWire, PcapOpenWire,
 };
 use crate::features::cases::infrastructure::authorized_transfer::{
     with_verified_artifact, EvidenceConsumer,
@@ -109,6 +110,53 @@ pub(super) fn follow_stream(
     )
 }
 
+/// Case-scoped capture-wide IO graph through the verified reader, mirroring
+/// `follow_stream`: reopen the immutable same-handle artifact per request,
+/// strict format validation, bounded bucket projection. No cached-case
+/// authority is created.
+pub(super) fn io_graph(
+    evidence: &EvidenceCtx,
+    selected: &CaseSessionCtx,
+    artifact_id: &str,
+    keylog: Option<&KeylogStore>,
+) -> Result<IoGraphWire, String> {
+    with_verified_artifact(
+        evidence,
+        selected,
+        artifact_id,
+        EvidenceConsumer::PacketAnalysis,
+        |_, bytes| {
+            let parsed = capture_service::import_bytes(bytes.to_vec(), keylog)?;
+            if parsed.malformed_tail {
+                return Err("saved original capture is malformed".into());
+            }
+            Ok(io_graph_of(&parsed.cache.packets, parsed.nanosecond))
+        },
+    )
+}
+
+/// Case-scoped endpoint statistics through the verified reader.
+pub(super) fn endpoints(
+    evidence: &EvidenceCtx,
+    selected: &CaseSessionCtx,
+    artifact_id: &str,
+    keylog: Option<&KeylogStore>,
+) -> Result<EndpointsWire, String> {
+    with_verified_artifact(
+        evidence,
+        selected,
+        artifact_id,
+        EvidenceConsumer::PacketAnalysis,
+        |_, bytes| {
+            let parsed = capture_service::import_bytes(bytes.to_vec(), keylog)?;
+            if parsed.malformed_tail {
+                return Err("saved original capture is malformed".into());
+            }
+            Ok(endpoints_of(&parsed.cache.packets))
+        },
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -169,5 +217,73 @@ mod tests {
             .unwrap();
         assert!(open(&evidence, &selected, &record.id, None).is_err());
         assert!(packet_bytes(&evidence, &selected, &record.id, 0, 0, 16, None).is_err());
+    }
+
+    #[test]
+    fn case_statistics_reopen_the_verified_capture_and_deny_case_switch() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut bytes = vec![0xd4, 0xc3, 0xb2, 0xa1, 2, 0, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        bytes.extend_from_slice(&65535u32.to_le_bytes());
+        bytes.extend_from_slice(&1u32.to_le_bytes());
+        let mut frame = vec![0xff; 6];
+        frame.extend_from_slice(&[2, 0, 0, 0, 0, 1]);
+        frame.extend_from_slice(&0x0806u16.to_be_bytes());
+        frame.extend_from_slice(&[0u8; 28]);
+        bytes.extend_from_slice(&1u32.to_le_bytes());
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        bytes.extend_from_slice(&(frame.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(&(frame.len() as u32).to_le_bytes());
+        let offset = bytes.len();
+        bytes.extend_from_slice(&frame);
+
+        let store = ArtifactStore::open(&temp.path().join("cases.db")).unwrap();
+        let a = store.create_case("A", "").unwrap();
+        let b = store.create_case("B", "").unwrap();
+        let root = temp.path().join("artifacts");
+        let record = store
+            .import_original_network_capture(
+                &root,
+                &a.id,
+                &NetworkCaptureSource {
+                    session_id: 7,
+                    interface: "fixture0",
+                    frame_offsets: &[offset],
+                    bytes: &bytes,
+                },
+            )
+            .unwrap();
+        let evidence = EvidenceCtx {
+            store: Mutex::new(store),
+            artifacts_dir: root,
+        };
+        let selected = CaseSessionCtx::default();
+        selected
+            .select(&evidence.store.lock().unwrap(), &a.id)
+            .unwrap();
+        let io = io_graph(&evidence, &selected, &record.id, None).unwrap();
+        assert_eq!(io.packet_count, 1);
+        assert_eq!(io.total_bytes, frame.len() as u64);
+        assert_eq!(io.bucket_count, 1);
+        assert_eq!(io.buckets[0].other_packets, 1);
+        let stats = endpoints(&evidence, &selected, &record.id, None).unwrap();
+        assert_eq!(stats.packet_count, 1);
+        // Two Ethernet MACs plus the zeroed ARP sender/target IPv4 pair,
+        // which collapses into one 0.0.0.0 endpoint carrying both the talker
+        // and receiver sides of the single frame.
+        assert_eq!(stats.endpoint_count, 3);
+        let zeroed = stats
+            .rows
+            .iter()
+            .find(|row| row.address == "0.0.0.0")
+            .unwrap();
+        assert_eq!(zeroed.packets, 2);
+        assert_eq!(zeroed.bytes, 2 * frame.len() as u64);
+        assert_eq!(zeroed.bytes_out, frame.len() as u64);
+        assert_eq!(zeroed.bytes_in, frame.len() as u64);
+        selected
+            .select(&evidence.store.lock().unwrap(), &b.id)
+            .unwrap();
+        assert!(io_graph(&evidence, &selected, &record.id, None).is_err());
+        assert!(endpoints(&evidence, &selected, &record.id, None).is_err());
     }
 }

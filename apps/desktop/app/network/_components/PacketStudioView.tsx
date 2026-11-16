@@ -56,6 +56,14 @@ import {
   type HierarchyNode,
   type IoBucket,
 } from "./model";
+import {
+  networkCaptureEndpointsV1,
+  networkCaptureIoGraphV1,
+  pcapCaseEndpointsV1,
+  pcapCaseIoGraphV1,
+  type EndpointsWire,
+  type IoGraphWire,
+} from "./packet-stats-ipc";
 
 type DisplayPacket = PcapPacketWire & { sample?: boolean };
 
@@ -100,6 +108,11 @@ function ImportedCaptureView() {
   // reset on case switch like every other capture-derived view state.
   const [osHints, setOsHints] = useState<OsHintsWire | null>(null);
   const [osHintsLoading, setOsHintsLoading] = useState(false);
+  // Wireshark-parity capture-wide statistics from the native cache (full
+  // ≤200k packet set): IO graph buckets and top-talker endpoints. null while
+  // loading or unavailable; sample captures have no backend cache.
+  const [captureIo, setCaptureIo] = useState<IoGraphWire | null>(null);
+  const [captureEndpoints, setCaptureEndpoints] = useState<EndpointsWire | null>(null);
   const [packetBytes, setPacketBytes] = useState<{ frameIndex: number; data: HexResponseWire } | null>(null);
   // null: details and bytes share the row evenly; dragging pins px.
   const [detailsWidth, setDetailsWidth] = useState<number | null>(null);
@@ -223,6 +236,21 @@ function ImportedCaptureView() {
   // Open-time fragment reassembly summary (additive wire field; null when the
   // capture held no fragment evidence worth surfacing).
   const reassembly = useMemo(() => (capture ? reassemblyOf(capture) : null), [capture]);
+  // Capture-wide statistics refresh with the opened capture and case: two
+  // bounded backend passes over the full cache, one per view. Failures keep
+  // the per-view tables authoritative; sections render an unavailable line.
+  useEffect(() => {
+    setCaptureIo(null);
+    setCaptureEndpoints(null);
+    if (!capture) return;
+    let cancelled = false;
+    const caseId = wb.caseId;
+    const io = savedArtifactId ? pcapCaseIoGraphV1(savedArtifactId) : networkCaptureIoGraphV1();
+    const eps = savedArtifactId ? pcapCaseEndpointsV1(savedArtifactId) : networkCaptureEndpointsV1();
+    io.then((wire) => { if (!cancelled && currentCase.current === caseId) setCaptureIo(wire); }).catch(() => {});
+    eps.then((wire) => { if (!cancelled && currentCase.current === caseId) setCaptureEndpoints(wire); }).catch(() => {});
+    return () => { cancelled = true; };
+  }, [capture, savedArtifactId, wb.caseId]);
 
   const current = filtered.find((p) => p.index === selected) ?? filtered[0];
   // A bounded virtual window keeps large PCAPs responsive without dropping rows.
@@ -406,7 +434,8 @@ function ImportedCaptureView() {
                 </tbody>
               </table>
             ) : tab === "endpoints" ? (
-              <table className="data-table">
+              <>
+                <table className="data-table">
                 <thead>
                   <tr>
                     <th>Address</th>
@@ -442,6 +471,8 @@ function ImportedCaptureView() {
                   ) : null}
                 </tbody>
               </table>
+                <CaptureEndpointsTable wire={captureEndpoints} hasCapture={Boolean(capture)} />
+              </>
             ) : tab === "hierarchy" ? (
               <div className="p-1">
                 <table className="data-table">
@@ -464,7 +495,10 @@ function ImportedCaptureView() {
                 </table>
               </div>
             ) : tab === "io" ? (
-              <IoGraphView buckets={ioBuckets} />
+              <>
+                <IoGraphView buckets={ioBuckets} />
+                <CaptureIoGraph wire={captureIo} hasCapture={Boolean(capture)} />
+              </>
             ) : tab === "statistics" ? (
               <table className="data-table">
                 <thead>
@@ -715,6 +749,101 @@ function IoGraphView({ buckets }: { buckets: IoBucket[] }) {
         <span>+{(buckets[0].fromMs / 1000).toFixed(3)} s</span>
         <span>+{((buckets[buckets.length - 1].fromMs + span / buckets.length) / 1000).toFixed(3)} s</span>
       </div>
+    </div>
+  );
+}
+
+// ------------------------------------------------- capture-wide statistics ---
+
+/**
+ * Whole-capture IO graph from the native cache (all ≤200k packet metas, not
+ * the 20k shown window): bounded ≤120 time buckets as a compact bar row,
+ * bar height by bytes, TCP/UDP/other packet split in each tooltip.
+ */
+function CaptureIoGraph({ wire, hasCapture }: { wire: IoGraphWire | null; hasCapture: boolean }) {
+  if (!hasCapture) return null;
+  const maxBytes = wire ? Math.max(...wire.buckets.map((b) => b.bytes), 1) : 1;
+  return (
+    <div className="shrink-0 border-t border-line px-2 py-2">
+      <div className="mb-1 flex items-center gap-1">
+        <span className="font-mono text-3xs uppercase tracking-wide text-fg-muted">
+          IO graph — whole capture ({wire ? wire.packet_count.toLocaleString() : "…"} packets)
+        </span>
+        <InfoTip text="Whole-capture IO graph over the full native cache, not the 20 000 shown frames: bounded ≤120 time buckets (span/120, min 1 ms), bar height by bytes, and the TCP/UDP/other packet split per bucket." />
+      </div>
+      {wire && wire.buckets.length > 0 ? (
+        <>
+          <p className="mb-1 font-mono text-3xs text-fg-muted">
+            {(wire.bucket_width_ms / 1000).toFixed(3)} s buckets · {wire.bucket_count} · total{" "}
+            {wire.total_bytes.toLocaleString()} bytes
+          </p>
+          <div className="flex h-16 items-end gap-px" role="img" aria-label="Bytes per time bucket across the whole capture">
+            {wire.buckets.map((bucket, i) => (
+              <div key={i}
+                className="min-w-[2px] flex-1 bg-orange/50 hover:bg-orange"
+                style={{ height: `${Math.max((bucket.bytes / maxBytes) * 100, bucket.bytes > 0 ? 3 : 0)}%` }}
+                title={`t=+${(bucket.from_ms / 1000).toFixed(3)} s · ${bucket.packets} packets · ${bucket.bytes} bytes · tcp ${bucket.tcp_packets} / udp ${bucket.udp_packets} / other ${bucket.other_packets}`} />
+            ))}
+          </div>
+        </>
+      ) : (
+        <p className="font-mono text-3xs text-fg-muted">
+          {wire ? "no packets to graph in this capture" : "capture-wide IO graph unavailable"}
+        </p>
+      )}
+    </div>
+  );
+}
+
+/**
+ * Whole-capture top talkers (IPv4/IPv6/MAC) from the native cache: top 64
+ * rows by bytes. Tx bytes are frames where the address is the source
+ * (Wireshark talker convention); Rx bytes are frames where it is the target.
+ */
+function CaptureEndpointsTable({ wire, hasCapture }: { wire: EndpointsWire | null; hasCapture: boolean }) {
+  if (!hasCapture) return null;
+  return (
+    <div className="border-t border-line px-2 py-2">
+      <div className="mb-1 flex items-center gap-1">
+        <span className="font-mono text-3xs uppercase tracking-wide text-fg-muted">
+          Endpoints — whole capture (top {wire ? wire.rows.length : "…"} of{" "}
+          {wire ? wire.endpoint_count.toLocaleString() : "…"} by bytes)
+        </span>
+        <InfoTip text="Top talkers over the full capture cache, ranked by bytes and capped at 64 rows; Tx bytes are frames where the address is the source, Rx bytes where it is the destination (Wireshark talker convention)." />
+      </div>
+      {wire && wire.rows.length > 0 ? (
+        <table className="data-table">
+          <thead>
+            <tr>
+              <th>Address</th>
+              <th className="w-20">Family</th>
+              <th className="w-16">Packets</th>
+              <th className="w-24">Bytes</th>
+              <th className="w-24">Tx bytes</th>
+              <th className="w-24">Rx bytes</th>
+            </tr>
+          </thead>
+          <tbody>
+            {wire.rows.map((row) => (
+              <tr key={`${row.family}:${row.address}`}>
+                <td className="font-mono text-2xs">{row.address}</td>
+                <td className="text-fg-muted">{row.family === "ip4" ? "IPv4" : row.family === "ip6" ? "IPv6" : "Ethernet"}</td>
+                <td>{row.packets}</td>
+                <td>{row.bytes}</td>
+                <td>{row.bytes_out}</td>
+                <td>{row.bytes_in}</td>
+              </tr>
+            ))}
+            {wire.truncated ? (
+              <tr><td colSpan={6} className="text-center text-fg-muted">showing the top {wire.rows.length} of {wire.endpoint_count} endpoints by bytes</td></tr>
+            ) : null}
+          </tbody>
+        </table>
+      ) : (
+        <p className="font-mono text-3xs text-fg-muted">
+          {wire ? "no endpoints in this capture" : "capture-wide endpoints unavailable"}
+        </p>
+      )}
     </div>
   );
 }

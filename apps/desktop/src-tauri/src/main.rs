@@ -142,6 +142,11 @@ fn main() {
             features::network::ipc::pcap::pcap_open_case_v1,
             features::network::ipc::pcap::pcap_case_packet_bytes_v1,
             features::network::ipc::pcap::pcap_case_follow_stream_v1,
+            // coordinator-insert (capture statistics slice): Wireshark-parity IO graph + endpoints
+            features::network::ipc::pcap::network_capture_io_graph_v1,
+            features::network::ipc::pcap::network_capture_endpoints_v1,
+            features::network::ipc::pcap::pcap_case_io_graph_v1,
+            features::network::ipc::pcap::pcap_case_endpoints_v1,
             features::network::ipc::pcap::pcap_follow_stream,
             // coordinator-insert (TLS 1.3 keylog slice): keylog attach/status/clear
             features::network::ipc::pcap::packet_stream_keylog_attach_v1,

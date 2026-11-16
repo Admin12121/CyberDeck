@@ -365,6 +365,7 @@ mod tests {
             bytes,
             linktype: 1,
             first_ts: 0,
+            nanosecond: false,
             packets,
         }
     }

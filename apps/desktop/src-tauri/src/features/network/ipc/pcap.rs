@@ -30,7 +30,7 @@ pub use capture_cache::CachedCapture;
 use pcap_wire::wire_packet;
 #[cfg(test)]
 pub use pcap_wire::LayerWire;
-pub use pcap_wire::{PcapOpenWire, PcapPacketWire};
+pub use pcap_wire::{EndpointsWire, IoGraphWire, PcapOpenWire, PcapPacketWire};
 
 pub struct PcapCtx {
     pub current: Mutex<Option<CachedCapture>>,
@@ -144,6 +144,68 @@ pub fn pcap_case_follow_stream_v1(
     let transcript =
         saved_capture::follow_stream(&evidence, &session, &artifact_id, &stream_id, store.as_ref())?;
     Ok(apply_session_keylog(&keylog, &session, transcript))
+}
+
+// -------------------------------------------------- capture statistics ----
+//
+// Wireshark-parity capture-wide statistics: an IO graph (bounded ≤120 time
+// buckets over the FULL cache, with a TCP/UDP/other packet split) and an
+// endpoints top-talkers table (IPv4/IPv6/MAC, ≤64 rows by bytes, with
+// Wireshark talker-convention in/out columns). Both are pure bounded passes
+// over already-parsed packet metadata — no packet bytes cross the wire.
+
+/// Capture-wide IO graph over the full open capture cache.
+#[tauri::command]
+pub fn network_capture_io_graph_v1(ctx: State<'_, PcapCtx>) -> Result<IoGraphWire, String> {
+    let guard = ctx
+        .current
+        .lock()
+        .map_err(|_| "capture cache unavailable".to_string())?;
+    let capture = guard.as_ref().ok_or("no capture is open")?;
+    Ok(pcap_wire::io_graph_of(&capture.packets, capture.nanosecond))
+}
+
+/// Capture-wide endpoint statistics over the full open capture cache.
+#[tauri::command]
+pub fn network_capture_endpoints_v1(ctx: State<'_, PcapCtx>) -> Result<EndpointsWire, String> {
+    let guard = ctx
+        .current
+        .lock()
+        .map_err(|_| "capture cache unavailable".to_string())?;
+    let capture = guard.as_ref().ok_or("no capture is open")?;
+    Ok(pcap_wire::endpoints_of(&capture.packets))
+}
+
+/// Case-authorized verified IO graph over a saved original capture.
+#[tauri::command]
+pub fn pcap_case_io_graph_v1(
+    artifact_id: String,
+    evidence: State<'_, EvidenceCtx>,
+    session: State<'_, CaseSessionCtx>,
+    keylog: State<'_, KeylogCtx>,
+) -> Result<IoGraphWire, String> {
+    saved_capture::io_graph(
+        &evidence,
+        &session,
+        &artifact_id,
+        keylog.capture_store_for(&session).as_ref(),
+    )
+}
+
+/// Case-authorized verified endpoint statistics over a saved original capture.
+#[tauri::command]
+pub fn pcap_case_endpoints_v1(
+    artifact_id: String,
+    evidence: State<'_, EvidenceCtx>,
+    session: State<'_, CaseSessionCtx>,
+    keylog: State<'_, KeylogCtx>,
+) -> Result<EndpointsWire, String> {
+    saved_capture::endpoints(
+        &evidence,
+        &session,
+        &artifact_id,
+        keylog.capture_store_for(&session).as_ref(),
+    )
 }
 
 // ------------------------------------------------------------- TLS 1.3 ----
