@@ -17,15 +17,24 @@ export function createCaseTransitionController(
 ) {
   let generation = 0;
   let queue: Promise<void> = Promise.resolve();
+  // The backend bumps its session revision on every select/clear — even
+  // redundant ones. StrictMode/hot-reload effect re-runs must not re-select
+  // the same case: a phantom revision bump re-labels the active scope and
+  // orphans in-flight native work (stuck "cancelling", lost scope-bound
+  // selections). Track the settled selection and skip no-op transitions.
+  let applied: { caseId: string; native: boolean } | null = null;
 
   const change = (caseId: string, nativeAvailable: boolean) => {
     const version = ++generation;
     if (!nativeAvailable) {
+      applied = null;
       publish({ phase: "unavailable", caseId: null, revision: null, error: null });
       return;
     }
+    if (applied?.native && applied.caseId === caseId) return;
 
     const scratchpad = caseId === "scratchpad";
+    applied = null;
     publish({ phase: scratchpad ? "idle" : "selecting", caseId: null, revision: null, error: null });
     const run = async () => {
       if (version !== generation) return;
@@ -35,6 +44,7 @@ export function createCaseTransitionController(
         if (response.case_id !== (scratchpad ? null : caseId)) {
           throw new Error("Native case selection returned a different case");
         }
+        applied = { caseId, native: true };
         publish({
           phase: scratchpad ? "idle" : "ready",
           caseId: response.case_id, revision: response.revision, error: null,

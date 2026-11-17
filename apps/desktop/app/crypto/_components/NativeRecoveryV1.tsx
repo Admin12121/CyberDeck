@@ -1094,7 +1094,9 @@ export function NativeRecoveryResults() {
           <Phosphor intensity={1} play theme="dark" label="Recovery activity"
             className="h-20 w-20 shrink-0" />
           <div className="min-w-0 space-y-1">
-            <div className="text-2xs font-semibold text-fg">Processing wordlist</div>
+            <div className="truncate text-2xs font-semibold text-fg">
+              {r.status?.wordlist ?? "Processing wordlist"}
+            </div>
             <p className="text-2xs leading-relaxed text-fg-muted">{view.detail}</p>
           </div>
         </div>

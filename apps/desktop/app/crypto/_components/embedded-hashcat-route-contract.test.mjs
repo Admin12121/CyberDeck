@@ -121,8 +121,15 @@ test("Hashcat readiness requires a bounded private known-answer per mode, not a 
   assert.ok(supervisor.includes("PUBLIC_KATS"));
   assert.ok(supervisor.includes("self_test_mode(root, mode, word, digest)"));
   assert.ok(supervisor.includes("XDG_DATA_HOME"), "private self-test must never write profile data into the operator's account");
-  assert.ok(controller.includes("embedded_hashcat::verified_modes(&runtime)"));
-  assert.ok(controller.includes("embedded_hashcat::verified_modes(&verification_root)"));
+  // Every controller gate reads the fingerprint-pinned disk cache first:
+  // job starts and the autopilot plan must never re-run the multi-minute
+  // sweep synchronously on a fresh process (that made Start and Stop hang).
+  assert.ok(controller.includes("embedded_hashcat::verified_modes_cached(&runtime"),
+    "autopilot gate must read the persisted readiness cache");
+  assert.ok(controller.includes("embedded_hashcat::verified_modes_cached(&verification_root"),
+    "job-start gate must read the persisted readiness cache");
+  assert.ok(!controller.includes("embedded_hashcat::verified_modes(&"),
+    "no controller call site may bypass the persisted readiness cache");
   assert.ok(controller.includes("modes.contains(&item.mode)"),
     "unverified bundled modes must not be offered in the engine selector");
   assert.ok(controller.includes("available: false"));

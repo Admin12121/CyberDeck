@@ -70,3 +70,29 @@ test("scratchpad clears backend selection and browser fallback never calls nativ
   assert.equal(published.at(-1).phase, "unavailable");
   assert.deepEqual(visited, [null]);
 });
+
+test("redundant same-case transitions never re-select the backend", async () => {
+  const visited = [], published = [];
+  const coordinator = createCaseTransitionController(async (id) => {
+    visited.push(id);
+    return { case_id: id, revision: visited.length };
+  }, (value) => published.push(value));
+
+  coordinator.change("scratchpad", true);
+  await coordinator.settled();
+  // StrictMode/hot-reload effect re-runs: same case must skip the backend
+  // entirely — a phantom revision bump would orphan in-flight native work.
+  coordinator.change("scratchpad", true);
+  coordinator.change("scratchpad", true);
+  await coordinator.settled();
+  assert.deepEqual(visited, [null]);
+  // A real case switch still selects.
+  coordinator.change("case-b", true);
+  await coordinator.settled();
+  assert.deepEqual(visited, [null, "case-b"]);
+  assert.equal(published.at(-1).phase, "ready");
+  // Returning to the already-settled case skips again.
+  coordinator.change("case-b", true);
+  await coordinator.settled();
+  assert.deepEqual(visited, [null, "case-b"]);
+});

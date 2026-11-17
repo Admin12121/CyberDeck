@@ -32,7 +32,11 @@ export function recoveryDisplay(
     return {
       kind: "running",
       title: status.phase === "cancelling" ? "Cancelling recovery" : "Recovery running",
-      detail: status.phase === "cancelling" ? "Waiting for the native worker to stop." : "Native wordlist scan is active.",
+      detail: status.phase === "cancelling"
+        ? "Waiting for the native worker to stop."
+        : status.wordlist
+          ? "Scanning " + status.wordlist + " through the native engine."
+          : "Native wordlist scan is active.",
     };
   }
   if (status.phase === "cancelled") {

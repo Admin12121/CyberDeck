@@ -537,16 +537,37 @@ fn self_test_mode(root: &Path, mode: u32, word: &str, digest: &str) -> Result<()
     Ok(())
 }
 
+/// Serializes full KAT sweeps: concurrent callers (capabilities query, job
+/// start, background refresh) must never run overlapping GPU sweeps. Each
+/// extra concurrent session both slows the device and can trip the transient
+/// session failures the deferred retry pass exists to absorb — and a second
+/// caller waiting behind the first publishes from the in-process cache
+/// instead of repeating minutes of device work.
+static SWEEP_GATE: Mutex<()> = Mutex::new(());
+
 /// Only actually executed modes may be enabled in the desktop UI. A loader
 /// check or enumerated GPU is insufficient. Cache exact runtime-path findings
 /// for one process lifetime; after changing drivers, restart the application.
 /// Real hardware/type mapping remains a separate acceptance requirement.
 pub fn verified_modes(root: &Path) -> Readiness {
     let cache = READINESS_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    // Fast path without the sweep gate: a completed sweep — or a disk-cache
+    // publish from the capabilities query — is already stored.
+    if let Ok(guard) = cache.try_lock() {
+        if let Some(stored) = guard.get(root) {
+            return stored.clone();
+        }
+    }
+    let _gate = match SWEEP_GATE.lock() {
+        Ok(lock) => lock,
+        Err(_) => return Err("Hashcat readiness sweep gate unavailable".into()),
+    };
     let mut guard = match cache.lock() {
         Ok(lock) => lock,
         Err(_) => return Err("Hashcat readiness cache unavailable".into()),
     };
+    // A concurrent caller's sweep may have finished while this one waited on
+    // the gate; publish from its result instead of sweeping again.
     if let Some(stored) = guard.get(root) {
         return stored.clone();
     }
@@ -621,6 +642,9 @@ struct PersistedReadiness {
 }
 
 const READINESS_CACHE_FILE_LIMIT: u64 = 64 * 1024;
+/// How long persisted findings trust themselves before the background KAT
+/// refresh re-validates them against the current device/driver state.
+const READINESS_REFRESH_WINDOW_MS: u64 = 24 * 60 * 60 * 1000;
 static READINESS_REFRESH_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
 
 /// SHA-256 over the runtime's source-manifest.json bytes bound with the file
@@ -653,7 +677,7 @@ fn runtime_fingerprint(root: &Path) -> Option<String> {
 /// mode list is not a non-empty subset of PUBLIC_KATS. An empty verified set
 /// is written only after an observed failed sweep (see write_readiness_cache)
 /// and therefore never validates.
-fn read_readiness_cache(root: &Path, cache_path: &Path) -> Option<Vec<u32>> {
+fn read_readiness_cache(root: &Path, cache_path: &Path) -> Option<(Vec<u32>, u64)> {
     if fs::metadata(cache_path).ok()?.len() > READINESS_CACHE_FILE_LIMIT {
         return None;
     }
@@ -680,7 +704,7 @@ fn read_readiness_cache(root: &Path, cache_path: &Path) -> Option<Vec<u32>> {
         .collect();
     verified.sort_unstable();
     verified.dedup();
-    Some(verified)
+    Some((verified, persisted.verified_at_epoch_ms))
 }
 
 /// Best-effort cache persistence; every error is silently ignored by design.
@@ -723,7 +747,13 @@ fn spawn_readiness_refresh(root: PathBuf, cache_path: PathBuf) {
         return;
     }
     thread::spawn(move || {
-        let result = catch_unwind(AssertUnwindSafe(|| run_readiness_sweep(&root)));
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            // The refresh shares the foreground sweep gate: a background
+            // re-validation must never overlap a caller's synchronous sweep.
+            // A poisoned gate keeps the last-known-good cache file.
+            let _gate = SWEEP_GATE.lock().map_err(|_| "sweep gate poisoned")?;
+            run_readiness_sweep(&root)
+        }));
         // A panicked refresh preserves the last-known-good cache file.
         if let Ok(readiness) = result {
             write_readiness_cache(&root, &cache_path, &readiness);
@@ -741,7 +771,7 @@ pub fn verified_modes_cached(root: &Path, cache_path: Option<&Path>) -> Readines
     let Some(cache_path) = cache_path else {
         return verified_modes(root);
     };
-    if let Some(verified) = read_readiness_cache(root, cache_path) {
+    if let Some((verified, verified_at)) = read_readiness_cache(root, cache_path) {
         // Publish the persisted findings into the process-lifetime cache so
         // the other verified_modes gates (job start, autopilot) do not repeat
         // the multi-minute sweep after the capabilities query already ran.
@@ -756,7 +786,22 @@ pub fn verified_modes_cached(root: &Path, cache_path: Option<&Path>) -> Readines
                 .entry(root.to_path_buf())
                 .or_insert_with(|| Ok(verified.clone()));
         }
-        spawn_readiness_refresh(root.to_path_buf(), cache_path.to_path_buf());
+        // Fresh findings skip the background re-validation: the fingerprint
+        // already pins the runtime binaries, so a same-window sweep observed
+        // the same device. Re-sweeping on every launch would pin the GPU to
+        // KAT sessions for minutes and contend with any recovery run started
+        // during that window.
+        let fresh = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .ok()
+            .and_then(|now| {
+                let now_ms = now.as_millis() as u64;
+                Some(now_ms < verified_at.saturating_add(READINESS_REFRESH_WINDOW_MS))
+            })
+            .unwrap_or(false);
+        if !fresh {
+            spawn_readiness_refresh(root.to_path_buf(), cache_path.to_path_buf());
+        }
         return Ok(verified);
     }
     let result = verified_modes(root);
@@ -1676,11 +1721,14 @@ mod tests {
         std::fs::write(root.join(worker_name()), b"worker-bytes-v2").unwrap();
         assert!(read_readiness_cache(root, &cache).is_none());
         // A valid cache for this exact runtime is accepted, sorted and
-        // deduplicated.
+        // deduplicated; the observed timestamp rides along for the
+        // freshness window.
         std::fs::write(root.join(worker_name()), b"worker-bytes").unwrap();
         let good = persisted_cache(&fingerprint, &[1000, 0, 1000]);
         std::fs::write(&cache, serde_json::to_vec(&good).unwrap()).unwrap();
-        assert_eq!(read_readiness_cache(root, &cache).unwrap(), vec![0, 1000]);
+        let (modes, verified_at) = read_readiness_cache(root, &cache).unwrap();
+        assert_eq!(modes, vec![0, 1000]);
+        assert_eq!(verified_at, 1);
         // Corrupt cache content is rejected.
         std::fs::write(&cache, b"not-json").unwrap();
         assert!(read_readiness_cache(root, &cache).is_none());

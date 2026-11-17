@@ -74,6 +74,11 @@ pub struct RecoveryJobStatus {
     pub summary: Option<RecoverySummaryWire>,
     pub error: Option<String>,
     pub reveal_available: bool,
+    /// Display name of the wordlist the job attacks; None for mask runs.
+    /// Lives on the job (not the panel selection) so an operator reloading
+    /// mid-run still sees exactly what the running job is processing.
+    #[serde(default)]
+    pub wordlist: Option<String>,
 }
 
 #[derive(Clone, Serialize)]
@@ -646,6 +651,7 @@ impl Registry {
                     summary: None,
                     error: None,
                     reveal_available: false,
+                    wordlist: None,
                 },
                 expires_at: None,
                 finished_at: None,
@@ -840,11 +846,19 @@ fn start_recovery_with_wordlist_engine(
         return Err("recovery engine and backend selection do not match".into());
     }
     let scope = RecoveryCtx::scope_from_session(session)?;
+    let wordlist_name = wordlist
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(|name| name.to_owned());
     let (job_id, token) = state.with_active(session, |registry, verified| {
         if *verified != scope {
             return Err("recovery case changed".into());
         }
-        registry.reserve_job()
+        let reserved = registry.reserve_job()?;
+        if let Some(job) = registry.jobs.get_mut(&reserved.0) {
+            job.status.wordlist = wordlist_name;
+        }
+        Ok(reserved)
     })?;
     let registry = state.registry.clone();
     emit(RecoveryEvent::Started { job_id });
@@ -966,7 +980,21 @@ fn spawn_recovery_worker<F>(
                 return;
             };
             if lock.current.as_ref() != Some(&scope) {
-                return; // Case switches invalidate old workers and output.
+                // Case switches invalidate old workers and output: no
+                // confidential retention and no event for the stale scope.
+                // The job row must still reach a terminal phase — otherwise a
+                // cancel requested before the switch leaves a permanently
+                // "cancelling" row the operator can never clear.
+                if let Some(job) = lock.jobs.get_mut(&job_id) {
+                    if matches!(
+                        job.status.phase,
+                        RecoveryPhase::Running | RecoveryPhase::Cancelling
+                    ) {
+                        job.status.phase = RecoveryPhase::Cancelled;
+                        job.finished_at = Some(Instant::now());
+                    }
+                }
+                return;
             }
             match result {
                 Ok(Ok(run)) => {
@@ -1512,8 +1540,12 @@ pub async fn recovery_start_hashcat_v1(
     let runtime = hashcat_resource_root(&app)?;
     let mode = embedded_hashcat::validate_embedded_request(&request)?;
     let verification_root = runtime.clone();
+    // Disk-cache first: a fresh process must never re-run the multi-minute
+    // KAT sweep synchronously inside a job start (it also made Stop look
+    // hung, because the sweep ignores the cancel token).
+    let cache_path = hashcat_readiness_cache_path(&app);
     let verified = tauri::async_runtime::spawn_blocking(move || {
-        embedded_hashcat::verified_modes(&verification_root)
+        embedded_hashcat::verified_modes_cached(&verification_root, cache_path.as_deref())
     })
     .await
     .map_err(|_| "native Hashcat readiness check failed")??;
@@ -1691,8 +1723,11 @@ async fn autopilot_plan(
     // memory-hard KDFs — stays on the multi-core CPU.
     let gpu_algorithms: Vec<String> = match hashcat_resource_root(app) {
         Ok(runtime) => {
+            // Disk-cache first: the autopilot plan must not re-sweep the GPU
+            // inside a job start on a fresh process (see verify_embedded_mode).
+            let cache_path = hashcat_readiness_cache_path(app);
             let verified = tauri::async_runtime::spawn_blocking(move || {
-                embedded_hashcat::verified_modes(&runtime)
+                embedded_hashcat::verified_modes_cached(&runtime, cache_path.as_deref())
             })
             .await
             .map_err(|_| "native Hashcat readiness check failed".to_string())
@@ -2456,12 +2491,15 @@ fn reserve_resume_job(
 }
 
 /// Re-verify the requested embedded mode passed its private known-answer test.
+/// Disk-cache first (see the wordlist start command): job starts must not
+/// re-run the multi-minute KAT sweep on a fresh process.
 async fn verify_embedded_mode(app: &AppHandle, request: &RecoveryRequest) -> Result<(), String> {
     let runtime = hashcat_resource_root(app)?;
     embedded_hashcat::validate_embedded_request(request)?;
     let verification_root = runtime.clone();
+    let cache_path = hashcat_readiness_cache_path(app);
     let verified = tauri::async_runtime::spawn_blocking(move || {
-        embedded_hashcat::verified_modes(&verification_root)
+        embedded_hashcat::verified_modes_cached(&verification_root, cache_path.as_deref())
     })
     .await
     .map_err(|_| "native Hashcat readiness check failed")??;
@@ -3216,6 +3254,7 @@ mod tests {
                         summary: None,
                         error: None,
                         reveal_available: false,
+                        wordlist: None,
                     },
                     expires_at: None,
                     finished_at: None,
@@ -3347,6 +3386,7 @@ mod tests {
                     summary: None,
                     error: None,
                     reveal_available: true,
+                    wordlist: None,
                 },
                 expires_at: Some(Instant::now() + Duration::from_millis(2)),
                 finished_at: Some(Instant::now()),

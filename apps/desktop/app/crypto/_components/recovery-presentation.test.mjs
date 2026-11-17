@@ -2,14 +2,14 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { hasCurrentRecoveryScope, isSha256WordlistTarget, recoveryDisplay } from "./recovery-presentation.ts";
 
-const makeStatus = (phase, matches = [], reveal_available = false) => ({
+const makeStatus = (phase, matches = [], reveal_available = false, wordlist = null) => ({
   job_id: 3, phase, progress: null,
   summary: phase === "completed" ? {
     algorithm: "sha256", backend: { backend: "cpu" },
     engine: "native", tried: 42, cancelled: false,
     limit_reached: false, duration_ms: 10, matches,
   } : null,
-  error: phase === "failed" ? "native failure" : null, reveal_available,
+  error: phase === "failed" ? "native failure" : null, reveal_available, wordlist,
 });
 
 test("Recovery V1 accepts only 64 hex character targets", () => {
@@ -27,6 +27,15 @@ test("Results have distinct idle, case required, running and cancelling presenta
   assert.equal(recoveryDisplay("case:1", 3, null, null).kind, "loading");
   assert.equal(recoveryDisplay("case:1", 3, makeStatus("running"), null).kind, "running");
   assert.equal(recoveryDisplay("case:1", 3, makeStatus("cancelling"), null).title, "Cancelling recovery");
+  // The running card names the wordlist the job is actually processing.
+  assert.equal(
+    recoveryDisplay("case:1", 3, makeStatus("running", [], false, "rockyou.txt"), null).detail,
+    "Scanning rockyou.txt through the native engine.",
+  );
+  assert.equal(
+    recoveryDisplay("case:1", 3, makeStatus("running"), null).detail,
+    "Native wordlist scan is active.",
+  );
 });
 
 test("Completed results stay masked and expired results are distinct", () => {

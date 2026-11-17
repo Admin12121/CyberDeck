@@ -177,6 +177,8 @@ export interface RecoveryJobStatusV1 {
   summary: RecoverySummaryV1 | null;
   error: string | null;
   reveal_available: boolean;
+  /** Display name of the wordlist the job attacks; null for mask runs. */
+  wordlist: string | null;
 }
 export type RecoveryEventV1 =
   | { type: "started"; job_id: number }
