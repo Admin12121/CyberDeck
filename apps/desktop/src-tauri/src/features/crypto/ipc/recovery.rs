@@ -768,10 +768,15 @@ impl RecoveryCtx {
         session: &CaseSessionCtx,
         operation: impl FnOnce(&mut Registry, &VerifiedScope) -> Result<T, String>,
     ) -> Result<T, String> {
-        let snapshot = session.selected()?;
+        // Recovery runs in BOTH modes: a linked case (the scope must match the
+        // registered one) and the Temporary workspace (case_id None — an
+        // ephemeral scratchpad scope; results stay memory-only in the UI
+        // session). ensure() still aborts on any mid-run case switch.
+        let snapshot = session.recovery_scope()?;
+        let case_id = snapshot.case_id.as_deref().unwrap_or("scratchpad");
         let scope = VerifiedScope::from_backend(
             "local-desktop",
-            snapshot.case_id.as_deref().ok_or("no selected case")?,
+            case_id,
             snapshot.revision,
         )?;
         let mut registry = self
@@ -780,7 +785,9 @@ impl RecoveryCtx {
             .map_err(|_| "recovery jobs unavailable")?;
         registry.prune_expired();
         session.ensure(&snapshot)?;
-        if registry.current.as_ref() != Some(&scope) {
+        let scope_matches = registry.current.as_ref() == Some(&scope);
+        let fresh_scratchpad = case_id == "scratchpad" && registry.current.is_none();
+        if !scope_matches && !fresh_scratchpad {
             return Err("recovery scope has changed; select the case again".into());
         }
         let result = operation(&mut registry, &scope)?;
