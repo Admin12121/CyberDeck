@@ -40,7 +40,7 @@ test("Recovery V1 real route uses existing typed native calls and authorized rev
   // Recovery scopes derive from the shared case-readiness hook; the revision
   // stays pinned into the scope so secrets never cross a case boundary.
   assert.match(ui, /useCaseReady\(\)/);
-  assert.match(ui, /const scope = caseReady \? caseId \+ ":" \+ String\(caseRevision\) : null/);
+  assert.match(ui, /const scope = caseReady\s*\?\s*caseId \+ ":" \+ String\(caseRevision\)\s*:\s*scratchpadScope;/);
   assert.match(ui, /status\?\.reveal_available/);
   assert.match(ui, /window\.setTimeout\(clearReveal, 30000\)/);
   assert.match(ui, /currentJob.*scope/);

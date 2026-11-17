@@ -724,8 +724,11 @@ impl RecoveryCtx {
     }
 
     fn scope_from_session(session: &CaseSessionCtx) -> Result<VerifiedScope, String> {
-        let current = session.selected()?;
-        let case = current.case_id.as_deref().ok_or("no selected case")?;
+        let current = session.recovery_scope()?;
+        // Scratchpad (case_id None) gets an ephemeral identity: the run is
+        // memory-only, nothing is written to the case store, and ensure()
+        // still aborts if the session switches mid-run.
+        let case = current.case_id.as_deref().unwrap_or("scratchpad");
         VerifiedScope::from_backend("local-desktop", case, current.revision)
     }
 
@@ -1024,7 +1027,7 @@ pub async fn recovery_select_wordlist_v1(
     state: State<'_, RecoveryCtx>,
     session: State<'_, CaseSessionCtx>,
 ) -> Result<RecoveryWordlistInfo, String> {
-    let before = session.selected()?;
+    let before = session.recovery_scope()?;
     // Releasing the UI dispatcher while the OS file picker is visible is
     // essential on Windows. Recheck the authoritative case revision AFTER
     // the user closes the dialog; never attach a file to a different case.
@@ -1497,7 +1500,7 @@ pub async fn recovery_start_hashcat_v1(
     }
     // Authorize and snapshot the original case before asynchronous KAT.
     // Never apply a stale request to a different selected investigation.
-    let before = session.selected()?;
+    let before = session.recovery_scope()?;
     state.with_active(&session, |_, _| Ok(()))?;
     let runtime = hashcat_resource_root(&app)?;
     let mode = embedded_hashcat::validate_embedded_request(&request)?;
@@ -2486,7 +2489,7 @@ pub async fn recovery_run_resume_v1(
     state: State<'_, RecoveryCtx>,
     session: State<'_, CaseSessionCtx>,
 ) -> Result<u64, String> {
-    let before = session.selected()?;
+    let before = session.recovery_scope()?;
     state.with_active(&session, |_, _| Ok(()))?;
     let scope = RecoveryCtx::scope_from_session(&session)?;
     let row = {
@@ -2811,7 +2814,7 @@ pub async fn recovery_select_hash_file_v1(
     state: State<'_, RecoveryCtx>,
     session: State<'_, CaseSessionCtx>,
 ) -> Result<RecoveryHashInputStatus, String> {
-    let before = session.selected()?;
+    let before = session.recovery_scope()?;
     state.with_active(&session, |_, _| Ok(()))?;
     let (path, name) = tauri::async_runtime::spawn_blocking(move || {
         crate::features::crypto::ipc::crack::resolved_wordlist(&app, None)

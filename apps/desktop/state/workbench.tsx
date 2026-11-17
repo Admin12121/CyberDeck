@@ -116,6 +116,9 @@ export interface CaseReadiness {
   isScratchpad: boolean;
   /** True only when a saved case is selected AND backend-linked. */
   caseReady: boolean;
+  /** Stable scope identity while the Temporary workspace is active; null
+   * otherwise. Recovery runs caseless bind to this (memory-only results). */
+  scratchpadScope: string | null;
 }
 
 export function useCaseReady(): CaseReadiness {
@@ -124,7 +127,13 @@ export function useCaseReady(): CaseReadiness {
     const isScratchpad = caseId === "scratchpad";
     const caseReady = !isScratchpad &&
       caseSession.phase === "ready" && caseSession.caseId === caseId;
-    return { caseId, caseRevision: caseSession.revision, isScratchpad, caseReady };
+    // The Temporary workspace gets its own stable scope identity: recovery
+    // runs caseless there (backend scratchpad-ephemeral scope, results
+    // memory-only), and the identity changes on every real case switch.
+    const scratchpadScope = isScratchpad && caseSession.phase === "idle"
+      ? "scratchpad:" + String(caseSession.revision ?? 0)
+      : null;
+    return { caseId, caseRevision: caseSession.revision, isScratchpad, caseReady, scratchpadScope };
   }, [caseId, caseSession]);
 }
 

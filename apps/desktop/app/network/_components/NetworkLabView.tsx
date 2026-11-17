@@ -194,11 +194,6 @@ export function NetworkLabView() {
   const [dnsSpoofStatus, setDnsSpoofStatus] = useState<DnsSpoofStatusWire | null>(null);
   const [dnsSpoofReceipt, setDnsSpoofReceipt] = useState<DnsSpoofEvidenceReceiptWire | null>(null);
   const [dnsSpoofError, setDnsSpoofError] = useState<string | null>(null);
-    setDnsSpoofBusy(false);
-    setDnsSpoofStart(null);
-    setDnsSpoofStatus(null);
-    setDnsSpoofReceipt(null);
-    setDnsSpoofError(null);
 
   const [proxyPort, setProxyPort] = useState("8080");
   const [proxyRewriteHttps, setProxyRewriteHttps] = useState(false);

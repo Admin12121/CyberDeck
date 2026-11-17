@@ -101,10 +101,15 @@ let currentJob: { scope: string; id: number } | null = null;
 
 function useRecoveryController(targetHash: string, onCaseCreated?: (caseId: string) => void) {
   const { caseId, caseSession } = useWorkbenchCase();
-  const { caseReady, caseRevision } = useCaseReady();
+  const { caseReady, caseRevision, scratchpadScope } = useCaseReady();
   const [desktop, setDesktop] = useState(false);
   useEffect(() => setDesktop(isDesktop()), []);
-  const scope = caseReady ? caseId + ":" + String(caseRevision) : null;
+  // Recovery runs in BOTH modes: a linked case binds to caseId:revision; the
+  // Temporary workspace binds to its own stable identity (backend scratchpad-
+  // ephemeral scope — results stay memory-only and expire with the session).
+  const scope = caseReady
+    ? caseId + ":" + String(caseRevision)
+    : scratchpadScope;
   const scopeRef = useRef(scope);
   scopeRef.current = scope;
   const [backend, setBackend] = useState("auto");
@@ -543,8 +548,7 @@ function useRecoveryController(targetHash: string, onCaseCreated?: (caseId: stri
   };
 
   const disabledReason = !desktop ? "Requires the native desktop runtime"
-    : !scope ? (caseId === "scratchpad" ? "Select a saved case to authorize recovery"
-      : caseSession.error ?? "Waiting for native case selection")
+    : !scope ? (caseSession.error ?? "Waiting for native case selection")
     : !validHash ? (isKdfHash ? "This modular hash is not a supported KDF format"
       : "Enter a " + hashcatMode.label + " digest (" + hashcatMode.digits + " hexadecimal characters)")
     : attackMode === "mask" ? (maskText.trim() ? null : "Enter a mask pattern first")
@@ -558,8 +562,7 @@ function useRecoveryController(targetHash: string, onCaseCreated?: (caseId: stri
       ? "Selected Hashcat mode has not passed its native known-answer recovery test"
     : engineChoice === "rust" && !deviceAvailable ? "Selected OpenCL device unavailable" : null;
   const autoDisabledReason = !desktop ? "Requires the native desktop runtime"
-    : !scope ? (caseId === "scratchpad" ? "Select a saved case to authorize recovery"
-      : caseSession.error ?? "Waiting for native case selection")
+    : !scope ? (caseSession.error ?? "Waiting for native case selection")
     : !validHash ? "Enter a supported digest or modular KDF hash first"
     : libraryEntries !== null && !libraryEntries.some((entry) => entry.present)
       ? "Download a wordlist in the library first" : null;
@@ -1059,13 +1062,14 @@ function printableRevealedCandidate(hex: string): string | null {
 
 export function NativeRecoveryResults() {
   const r = useRecovery();
+  const [visibleMatches, setVisibleMatches] = useState(16);
+  useEffect(() => { setVisibleMatches(16); }, [r.scope, r.jobId]);
   // Before a hash or a job exists there is nothing to show.
+  // Hooks above must run on every render — no early return may precede them.
   if (!r.hash && r.jobId === null) return null;
   const view = recoveryDisplay(r.scope, r.jobId, r.status, r.error, r.discarded);
   const matches = r.status?.summary?.matches ?? [];
   const revealedText = r.secretHex === null ? null : printableRevealedCandidate(r.secretHex);
-  const [visibleMatches, setVisibleMatches] = useState(16);
-  useEffect(() => { setVisibleMatches(16); }, [r.scope, r.jobId]);
   const isActive = view.kind === "running";
   return (
     <div className="h-full min-h-0 space-y-3 overflow-y-auto p-3"

@@ -71,6 +71,9 @@ export function detectHashFormats(input: string): HashFormatCandidate[] {
   if (/^\$krb5pa\$/.test(value) || /^\$krb5i?\$/.test(value)) {
     candidates.push({ format: "Kerberos AS-REP / TGS-REP", confidence: "high", note: "Kerberos etype hash", gpuCapable: true });
   }
+  if (/^\$pkzip\d?\$/.test(value)) {
+    candidates.push({ format: "PKZIP legacy ZipCrypto (Recovery V1)", confidence: "high", note: "$pkzip$ wire; native CPU verification, GPU 17200/17210 in Recovery V1", gpuCapable: true });
+  }
   if (/^[A-Za-z0-9+/]{20,}={0,2}$/.test(value) && value.length >= 40 && !HEX_RE.test(value)) {
     candidates.push({ format: "unknown (base64-like)", confidence: "low", note: "not a recognized digest shape; inspect manually or via recipes", gpuCapable: false });
   }

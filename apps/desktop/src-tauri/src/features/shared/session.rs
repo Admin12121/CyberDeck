@@ -164,6 +164,15 @@ impl CaseSessionCtx {
         }
         Ok(())
     }
+
+    /// The session snapshot for recovery commands, valid in BOTH modes:
+    /// a linked case (case_id = Some) and the Temporary workspace
+    /// (case_id = None). Recovery runs caseless stay memory-only — results
+    /// live in the calling UI session and are never persisted to the case
+    /// store — while ensure() still aborts on any mid-run case switch.
+    pub fn recovery_scope(&self) -> Result<CaseSessionWire, String> {
+        self.snapshot()
+    }
 }
 
 #[tauri::command]
