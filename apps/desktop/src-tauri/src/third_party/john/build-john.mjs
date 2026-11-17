@@ -253,7 +253,10 @@ const childEnv = {
 };
 const toMsys = (p) => {
   if (!/^[A-Za-z]:[\\/]/.test(p)) throw new Error("not a drive path for MSYS2 conversion: " + p);
-  return "/" + p[0].toLowerCase() + p.slice(2).split("\\").join("/").split("/").filter(Boolean).join("/");
+  // "/c/" + the filtered segment path: filter(Boolean) strips the leading
+  // separator, so the drive letter and the first segment need an explicit
+  // slash between them (a missing one produced /cDev/... and broke cd).
+  return "/" + p[0].toLowerCase() + "/" + p.slice(2).split("\\").join("/").split("/").filter(Boolean).join("/");
 };
 function checked(script, label, timeout = 600_000) {
   const z = spawnSync(bashExe, ["-lc", script], {
