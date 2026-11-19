@@ -1951,10 +1951,13 @@ fn resolve_john_sidecar(app: &AppHandle) -> Option<PathBuf> {
 
 /// Resolve the recovery sidecar engine. The supervised john DLL worker is
 /// the primary engine when the full bundle is present (worker helper,
-/// john.dll and john.exe side by side in the engines resource directory —
-/// john.exe provides argv[0] and john.conf for the DLL sessions); otherwise
-/// the john.exe CLI spawn stays the fallback, including PATH-only installs
-/// where no bundled DLL exists.
+/// The bundled DLL runtime: john.dll + the supervised worker helper in the
+/// engines resource directory. The worker frame's item 0 carries the
+/// john.dll path itself — john dispatches on argv[0]'s basename ("john.dll"
+/// matches no special name, so it falls through to john_init) and resolves
+/// $JOHN from that directory, where john.conf/rules are staged. A bundled
+/// john.exe is NOT required (the install removes it); without the DLL the
+/// john.exe CLI spawn stays the fallback, including PATH-only installs.
 fn resolve_john_sidecar_engine(
     app: &AppHandle,
 ) -> Option<engines_support::sidecar::JohnSidecarEngine> {
@@ -1971,9 +1974,8 @@ fn resolve_john_sidecar_engine(
         };
         let worker = engines.join(&worker_name);
         let dll = engines.join("john.dll");
-        let exe = engines.join(if cfg!(windows) { "john.exe" } else { "john" });
-        if worker.is_file() && dll.is_file() && exe.is_file() {
-            return Some(JohnSidecarEngine::Dll { worker, john_exe: exe });
+        if worker.is_file() && dll.is_file() {
+            return Some(JohnSidecarEngine::Dll { worker, john_dll: dll });
         }
     }
     resolve_john_sidecar(app).map(JohnSidecarEngine::Exe)

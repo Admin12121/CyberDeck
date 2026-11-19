@@ -35,15 +35,15 @@ pub const JOHN_WORKER_BINARY: &str = "cyberdeck-john-worker";
 
 /// Versioned worker frame (`john_worker.rs`, `CDJW0001`): 8-byte magic +
 /// u16 item count + per item (u16 byte length + UTF-8 bytes). Item 0 is the
-/// bundled john.exe path. Bounds mirror the worker's own validation; paths
+/// bundled john library path. Bounds mirror the worker's own validation; paths
 /// travel as UTF-8 (john jumbo's internal encoding), not ANSI command-line
 /// recoding, so non-ASCII scratch paths behave consistently.
-fn worker_frame(john_exe: &Path, args: &[String]) -> Result<Vec<u8>, String> {
+fn worker_frame(john_dll: &Path, args: &[String]) -> Result<Vec<u8>, String> {
     const MAX_ITEMS: usize = 64;
     const MAX_ITEM_BYTES: usize = 4096;
-    let program = john_exe
+    let program = john_dll
         .to_str()
-        .ok_or("the john.exe path is not valid UTF-8")?;
+        .ok_or("the john library path is not valid UTF-8")?;
     let items = std::iter::once(program).chain(args.iter().map(String::as_str));
     let count = 1 + args.len();
     if count > MAX_ITEMS {
@@ -72,11 +72,12 @@ pub enum JohnSidecarEngine {
     /// exists because john's `exit()` inside `cd_john_main` terminates the
     /// CALLING process (C:\Dev\john-build\probe\probe-bi.c contract): it
     /// kills only the helper, never the app — the same isolation model as
-    /// the hashcat recovery worker. `john_exe` is the bundled john.exe whose
-    /// absolute path becomes the frame's item 0 so john dispatches on its
-    /// basename (john.c:2002-2034) and resolves $JOHN/john.conf exactly as
-    /// the exe spawn does (path.c:118-134).
-    Dll { worker: PathBuf, john_exe: PathBuf },
+    /// the hashcat recovery worker. `john_dll` is the bundled john.dll whose
+    /// absolute path becomes the frame's item 0: john dispatches on argv[0]'s
+    /// basename ("john.dll" matches no special name, so it falls through to
+    /// john_init — john.c:2051-2070) and resolves $JOHN from the path's
+    /// directory, where john.conf/rules are staged (path.c:116-134).
+    Dll { worker: PathBuf, john_dll: PathBuf },
 }
 
 /// Spawn one sidecar session: the exe branch is a plain john.exe CLI spawn,
@@ -97,8 +98,8 @@ fn spawn_sidecar(engine: &JohnSidecarEngine, args: &[String]) -> Result<Child, S
                 .spawn()
                 .map_err(|e| format!("cannot start john sidecar: {e}"))
         }
-        JohnSidecarEngine::Dll { worker, john_exe } => {
-            let frame = worker_frame(john_exe, args)?;
+        JohnSidecarEngine::Dll { worker, john_dll } => {
+            let frame = worker_frame(john_dll, args)?;
             let mut command = Command::new(worker);
             command
                 .stdout(Stdio::piped())
@@ -136,8 +137,8 @@ fn john_show_run(
             let (status, stdout, _) = run_with_timeout(command, SHOW_TIMEOUT)?;
             Ok((status, stdout))
         }
-        JohnSidecarEngine::Dll { worker, john_exe } => {
-            let frame = worker_frame(john_exe, args)?;
+        JohnSidecarEngine::Dll { worker, john_dll } => {
+            let frame = worker_frame(john_dll, args)?;
             let mut command = Command::new(worker);
             command
                 .stdout(Stdio::piped())
@@ -820,14 +821,7 @@ mod tests {
             return;
         };
         let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        let john_exe = manifest
-            .join("resources")
-            .join("engines")
-            .join(if cfg!(windows) { "john.exe" } else { "john" });
-        if !john_exe.is_file() {
-            eprintln!("skipping: bundled john.exe is not staged for this run");
-            return;
-        }
+        let _ = manifest;
         let temp = tempfile::tempdir().unwrap();
         let worker_name = if cfg!(windows) {
             format!("{JOHN_WORKER_BINARY}.exe")
@@ -884,7 +878,7 @@ mod tests {
         let session = temp.path().join("dll-session");
         let mut statuses = Vec::new();
         let run = john_recovery(
-            &JohnSidecarEngine::Dll { worker, john_exe },
+            &JohnSidecarEngine::Dll { worker, john_dll: dll.clone() },
             // The registered sidecar format is "crypt"; this build lacks it
             // entirely (exe and DLL alike), so the route mechanics are proven
             // with a format the build does carry.

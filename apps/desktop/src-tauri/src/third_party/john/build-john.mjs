@@ -265,12 +265,15 @@ function checked(script, label, timeout = 600_000) {
     stdio: "pipe",
     timeout,
     env: childEnv,
+    // The import-table dump of a 25MB DLL overflows the 1MB default.
+    maxBuffer: 64 * 1024 * 1024,
   });
   if (z.error || z.status !== 0) {
     const tail = ((z.stderr || "") + "\n" + (z.stdout || "")).slice(-8000);
     throw new Error("john build step failed (" + label + "): " + (z.error || "exit " + z.status) + "\n" + tail);
   }
   console.log("john build step accepted: " + label);
+  return z.stdout || "";
 }
 const msysCompat = toMsys(stageCompat);
 // The UCRT64 toolchain identity is load-bearing: an MSYS gcc would answer
@@ -301,9 +304,16 @@ checked("cd '" + toMsys(stageSrc) + "' && ./configure", "./configure", 900_000);
 // ac_cv_search_crypt=-lcrypt, ac_cv_header_crypt_h=yes, ARCH_WORD=long).
 // Each fix states the raw configure emission and the exact proven final line;
 // the patched file is asserted line-for-line against the proven bytes.
+// `corrected` (optional): a bare, comment-free emission that is already
+// semantically equal to the fix — a fresh configure run may detect correctly
+// where the proven sandbox run misdetect (first full scripted run, 2026-11-18,
+// saw ARCH_WORD=long long and HAVE___MINGW_ALIGNED_MALLOC=1 emitted directly).
+// Such lines are normalized to the proven final bytes so the downstream
+// byte-for-byte assertion and the documentation comment stay authoritative.
 const AUTOCONFIG_FIXES = [
   {
     raw: "#define ARCH_WORD long",
+    corrected: "#define ARCH_WORD long long",
     final: "#define ARCH_WORD long long /* jtr mingw: win64 is LLP64 (sizeof(long)==4); configure emitted 'long' which breaks 64-bit DES_bs layout math (xkeys/pxkeys overflow). arch.h's non-AC_BUILT path uses long long for _WIN64 too. */",
     why: "LLP64: sizeof(long)==4 shrank the DES_bs layout so set_key's write formula overflowed xkeys into pxkeys, segfaulting descrypt/bsdicrypt and corrupting LM (proven with gdb)",
   },
@@ -314,6 +324,7 @@ const AUTOCONFIG_FIXES = [
   },
   {
     raw: "/* #undef HAVE___MINGW_ALIGNED_MALLOC */",
+    corrected: "#define HAVE___MINGW_ALIGNED_MALLOC 1",
     final: "#define HAVE___MINGW_ALIGNED_MALLOC 1 /* jtr mingw: mingwex exports __mingw_aligned_malloc/free; memory.h macro branch pairs alloc+free */",
     why: "mingwex exports __mingw_aligned_malloc/free with a matching memory.h macro branch",
   },
@@ -344,10 +355,12 @@ for (const fix of AUTOCONFIG_FIXES) {
   const macro = (fix.raw.match(/^#define (\w+)/) || fix.raw.match(/^\/\* #undef (\w+) \*\//))[1];
   const lines = autoconfig.split("\n");
   // Match the macro's line in either its raw configure-emitted form, its
-  // proven fixed form (idempotent re-run over a reused build tree), or its
-  // bare template-undef form.
+  // proven fixed form (idempotent re-run over a reused build tree), its
+  // bare template-undef form, or an already-correct bare emission
+  // (`corrected` — normalized to the proven bytes below).
   const hits = lines.map((line, i) => ({ line, i })).filter(({ line }) =>
-    line === fix.raw || line === fix.final || line === "/* #undef " + macro + " */");
+    line === fix.raw || line === fix.final || line === fix.corrected
+    || line === "/* #undef " + macro + " */");
   if (hits.length !== 1) {
     throw new Error("autoconfig.h fix for " + macro + ": expected exactly 1 matching line, found " + hits.length +
       (hits.length ? ": " + hits.map((h) => JSON.stringify(h.line)).join("; ") : " — configure output drifted from the proven recipe"));
@@ -365,12 +378,29 @@ for (const fix of AUTOCONFIG_FIXES) {
 }
 console.log("autoconfig.h: 7 proven misdetection fixes applied (LLP64 ARCH_WORD, aligned malloc, crypt, libdl, mmap)");
 
+// make's autoconfig-stamp-h-in rule lists m4/*.m4 as a prerequisite, and the
+// vendored staging tree does not ship the m4 directory (a full git checkout
+// has it; the 1137-file vendor manifest does not — the sandbox build never
+// hit this because its tree kept m4/). Configure never creates this stamp;
+// make's own recipe does, and running it would need the absent m4 files.
+// Write the stamp the recipe would have produced so the non-maintainer
+// branch treats autoconfig.h.in as current and never attempts autoreconf.
+const stampHIn = join(stageSrc, "autoconfig-stamp-h-in");
+if (!existsSync(stampHIn)) writeFileSync(stampHIn, "timestamp from Makefile\n");
+
 // The generated Makefile gets the three proven flag insertions (the sandbox
 // Makefile differs from the plain configure emission exactly here; proven
 // bytes embedded, with the compat -I path substituted for this staging).
-const PROVEN_CPPFLAGS = "CPPFLAGS = -D_GNU_SOURCE -D__CYGWIN32__  -DCL_SILENCE_DEPRECATION";
+// ONE deliberate deviation from the proven bytes: -D__CYGWIN32__ is stripped.
+// The sandbox carried it because configure ran under the msys bash and john's
+// host detection emitted a cygwin define — but a UCRT64 mingw binary must
+// take its __MINGW32__ branches, not cygwin ones. With the define, jumbo.c
+// compiles its cygwin fseeko64/ftello64 fallbacks and ucrt64's own exports
+// (HAVE_FSEEKO64=1 detected) collide at link time ("multiple definition" in
+// libmsvcrt.a). mingw-honest flags; upstream supports mingw officially.
+const PROVEN_CPPFLAGS = "CPPFLAGS = -D_GNU_SOURCE -DCL_SILENCE_DEPRECATION";
 const PROVEN_CFLAGS_MAIN_TAIL = "-DJOHN_AVX2 -c -g -O2 -DARCH_LITTLE_ENDIAN=1 -DJOHN_SYSTEMWIDE -DJOHN_SYSTEMWIDE_EXEC='\"/ucrt64/bin\"' -DJOHN_SYSTEMWIDE_HOME='\"/ucrt64/share/john\"' -DPREFER_FLOCK -DAC_BUILT  -Wall -std=gnu99 -Wno-stringop-truncation -Wno-format-overflow -Wno-format-truncation -fno-omit-frame-pointer -Wno-deprecated-declarations -Wunused-but-set-variable -Wdate-time -D__USE_MINGW_ANSI_STDIO  -fopenmp   -MMD -MP -MF $(DEPDIR)/$(notdir $*).d $(CPPFLAGS)";
-const CFLAGS_MAIN_PREFIX = "-include memmem_shim.h -I" + msysCompat + " -I. -D_GNU_SOURCE -D__CYGWIN32__ ";
+const CFLAGS_MAIN_PREFIX = "-include memmem_shim.h -I" + msysCompat + " -I. -D_GNU_SOURCE ";
 const PROVEN_LDFLAGS = "LDFLAGS = -g $(LIBS) ../compat/stpcpy.o";
 const makefilePath = join(stageSrc, "Makefile");
 let makefile = readFileSync(makefilePath, "utf8");
@@ -389,10 +419,12 @@ const forceLine = (name, prefixMatch, buildExpected) => {
     throw new Error("Makefile " + name + " does not match the proven line byte-for-byte: " + expected);
   }
 };
-forceLine("CPPFLAGS", "CPPFLAGS = ", (raw) =>
-  raw.startsWith("CPPFLAGS = -D_GNU_SOURCE")
-    ? raw
-    : "CPPFLAGS = -D_GNU_SOURCE -D__CYGWIN32__ " + raw.slice("CPPFLAGS = ".length));
+forceLine("CPPFLAGS", "CPPFLAGS = ", (raw) => {
+  // Strip the sandbox's spurious cygwin host define (see the note above).
+  let value = raw.slice("CPPFLAGS = ".length).replace(/-D__CYGWIN32__\s*/g, "").replace(/\s{2,}/g, " ").trim();
+  if (!value.startsWith("-D_GNU_SOURCE")) value = "-D_GNU_SOURCE " + value;
+  return "CPPFLAGS = " + value;
+});
 forceLine("CFLAGS_MAIN", "CFLAGS_MAIN = ", (raw) => {
   if (raw.startsWith("CFLAGS_MAIN = -include memmem_shim.h")) return raw;
   const value = raw.slice("CFLAGS_MAIN = ".length);
@@ -402,6 +434,26 @@ forceLine("CFLAGS_MAIN", "CFLAGS_MAIN = ", (raw) => {
   return "CFLAGS_MAIN = " + CFLAGS_MAIN_PREFIX + value;
 });
 forceLine("LDFLAGS", "LDFLAGS = ", () => PROVEN_LDFLAGS);
+// Fourth proven edit: the autoconfig-stamp-h-in rule lists M4_INCLUDES
+// (m4/*.m4) as a prerequisite in BOTH maintainer and normal branches, and a
+// zero-match wildcard prerequisite is fatal in GNU make even when the stamp
+// already exists. m4/ is deliberately excluded from the vendor pin (configure
+// is pre-generated; CONFIG_MAINT stays off, so autoheader never runs) — the
+// vendored tree has no m4/, so make dies on "No rule to make target
+// 'm4/*.m4'" before compiling anything. Neutralize the variable: the rule
+// then only tracks configure.ac, exactly what the pinned build needs.
+{
+  const lines = makefile.split("\n");
+  const idx = lines.findIndex((line) => line.startsWith("M4_INCLUDES"));
+  if (idx < 0) throw new Error("generated Makefile has no M4_INCLUDES line — configure output drifted");
+  if (lines[idx] !== "M4_INCLUDES=") {
+    if (!/^M4_INCLUDES\s*=\s*m4\/\*\.m4\s*$/.test(lines[idx])) {
+      throw new Error("generated M4_INCLUDES drifted from the proven 'm4/*.m4' emission: " + JSON.stringify(lines[idx]));
+    }
+    lines[idx] = "M4_INCLUDES=";
+    makefile = lines.join("\n");
+  }
+}
 writeFileSync(makefilePath, makefile);
 // Proven-state guards on the toolchain resolution inside the generated Makefile.
 for (const needle of ["CC = gcc", "prefix = /ucrt64", "-DJOHN_SYSTEMWIDE", "-DJOHN_AVX2"]) {
@@ -445,10 +497,21 @@ checked("cd '" + toMsys(stageSrc) + "' && gcc -c -I" + msysCompat + " -I. -DAC_B
 if (!existsSync(join(stageSrc, "cd_john_shim.o"))) throw new Error("shim object missing after compile");
 const linkCommand = "cd '" + toMsys(stageSrc) + "' && gcc -shared -static-libgcc cd_john_shim.o " +
   PROVEN_OBJECTS.join(" ") +
-  " -g -lws2_32 -lwsock32 -lkernel32 -lssl -lcrypto -fopenmp -lm" +
+  // -lgmp -lz -lbz2 are REQUIRED: the jumbo formats reference BZ2_*,
+  // inflate* and __gmpz_* (7z, blockchain, clipperz, ssh...), and the
+  // john.exe make link carries them. An earlier DLL link omitted them
+  // ("on evidence") — the first full scripted run proved that wrong.
+  " -g -lws2_32 -lwsock32 -lkernel32 -lssl -lcrypto -fopenmp -lgmp -lz -lbz2 -lm" +
   " mbedtls/aes.a secp256k1/secp256k1.a ed25519-donna/ed25519-donna.a poly1305-donna/poly1305-donna.a" +
   " -o john.dll -Wl,--out-implib,john.dll.a";
-checked(linkCommand, "link john.dll", 900_000);
+// Stage the link command into a file and run that. The command is ~9KB
+// (489 objects); delivered as a single `bash -c` string it arrives CORRUPTED
+// — truncated mid-token with the tail duplicated (ld reports "cannot find
+// mem"/"mi") — while the same bytes from a file link cleanly. The outer
+// `bash -lc` login shell still owns PATH; the inner bash inherits it.
+const linkScriptPath = join(output, "link-john-dll.sh");
+writeFileSync(linkScriptPath, linkCommand + "\n");
+checked("bash '" + toMsys(linkScriptPath) + "'", "link john.dll", 900_000);
 const dllPath = join(stageSrc, "john.dll");
 if (!existsSync(dllPath) || statSync(dllPath).size < 1_000_000) {
   throw new Error("john.dll missing or implausibly small after the proven link");
@@ -456,10 +519,30 @@ if (!existsSync(dllPath) || statSync(dllPath).size < 1_000_000) {
 
 // ── runtime assembly ──────────────────────────────────────────────────────
 // Proven dev-runtime layout beside the app: john.dll (+ import library for
-// the FFI track), the msys-2.0.dll runtime copy (provenance C:\msys64\usr\bin,
-// byte-verified), the pinned john.conf + rules, and the license + manifest.
+// the FFI track), its mingw runtime dependency DLLs, the pinned john.conf +
+// rules, and the license + manifest.
 copyFileSync(dllPath, join(runtime, "john.dll"));
 copyFileSync(join(stageSrc, "john.dll.a"), join(runtime, "john.dll.a"));
+// john.dll's non-system import-table dependencies must sit beside it or a
+// worker helper's LoadLibrary fails silently (the first scripted install
+// shipped none of them — libbz2/libcrypto/libgmp/libgomp/zlib were all
+// missing and the DLL branch died with an empty error). Enumerate the
+// import table and copy each non-system DLL from the ucrt64 runtime.
+const objdumpExe = join(msys2Root, "ucrt64", "bin", "objdump.exe");
+if (!existsSync(objdumpExe)) throw new Error("ucrt64 objdump not found at " + objdumpExe);
+const importDump = checked("cd '" + toMsys(stageSrc) + "' && '" + toMsys(objdumpExe) + "' -p john.dll", "read john.dll import table", 120_000) || "";
+const SYSTEM_DLLS = /^(api-ms-win-|ntdll\.dll|kernel32\.dll|user32\.dll|advapi32\.dll|rpcrt4\.dll|ws2_32\.dll|gdi32\.dll|shell32\.dll|ole32\.dll|oleaut32\.dll|shlwapi\.dll)/i;
+const copiedDeps = [];
+for (const match of importDump.matchAll(/DLL Name: (\S+)/g)) {
+  const name = match[1];
+  if (SYSTEM_DLLS.test(name)) continue;
+  const source = join(msys2Root, "ucrt64", "bin", name);
+  if (!existsSync(source)) throw new Error("john.dll dependency " + name + " not found under ucrt64/bin");
+  copyFileSync(source, join(runtime, name));
+  copiedDeps.push(name);
+}
+if (!copiedDeps.length) throw new Error("no runtime dependencies discovered for john.dll — import-table parse failed");
+console.log("john.dll runtime dependencies staged: " + copiedDeps.join(", "));
 const msysDll = join(msys2Root, "usr", "bin", "msys-2.0.dll");
 if (!existsSync(msysDll)) throw new Error("msys-2.0.dll not found at " + msysDll);
 copyFileSync(msysDll, join(runtime, "msys-2.0.dll"));
@@ -472,7 +555,7 @@ mkdirSync(join(runtime, "licenses"), { recursive: true });
 copyFileSync(join(build, "LICENSE"), join(runtime, "licenses", "JOHN-GPLv2.txt"));
 copyFileSync(manifestPath, join(runtime, "source-manifest.json"));
 const runtimeChecks = ["john.dll", "john.dll.a", "msys-2.0.dll", "john.conf", "rules",
-  "licenses/JOHN-GPLv2.txt", "source-manifest.json"];
+  "licenses/JOHN-GPLv2.txt", "source-manifest.json", ...copiedDeps];
 for (const name of runtimeChecks) {
   if (!statSync(join(runtime, name)).isFile() && !statSync(join(runtime, name)).isDirectory()) {
     throw new Error("package missing " + name);

@@ -111,6 +111,16 @@ const JTR_PATH_PATCHES = [
   },
 ];
 
+// NOTE on memmem/strcasestr: john is self-sufficient when ucrt64 configure
+// leaves HAVE_MEMMEM/HAVE_STRCASESTR undefined — jumbo.h renames memmem to
+// jtr_memmem and declares both, and jumbo.c provides the definitions. The
+// first scripted build tried to shadow both with macros in memmem_shim.h
+// (the sandbox had needed that ONLY because its configure ran under the msys
+// cygwin gcc, which detected both as present while the build used mingw —
+// the shim papered over that hybrid). Under a mingw-honest configure the
+// macros collide with jumbo.c's own definitions, so memmem_shim.h now ships
+// only the getopt declarations.
+
 // Raw blob extractor over one `git cat-file --batch` process: request every
 // needed path as "<pin>:<path>", parse the "<oid> blob <size>" framing and
 // collect the exact committed bytes. Function declaration: hoisted for the
